@@ -16,6 +16,7 @@ const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const { resolveEngineConfigForJob } = require('./matchingEngineService');
 const cityService = require('./cityService');
+const { syncCandidateTagDetailsFromPayload } = require('./candidateTagService');
 const { normalizeOriginalTextHistory } = require('../utils/parsedTextHistory');
 const {
   LIST_IDENTITY_PARTITION_SQL,
@@ -866,18 +867,27 @@ const mapCandidateWithTags = (candidate, options = {}) => {
   if (!candidate) return null;
   const payload = candidate.toJSON ? candidate.toJSON() : { ...candidate };
   const candidateTags = payload.candidateTags || [];
-  const seenTagKeys = new Set();
+  const seenIds = new Set();
   const uniqueCandidateTags = [];
   for (const ct of candidateTags) {
-    const key = String(ct.tag?.tagKey || ct.tag?.displayNameHe || ct.tagId || ct.id || '')
-      .trim()
-      .toLowerCase();
-    if (!key || seenTagKeys.has(key)) continue;
-    seenTagKeys.add(key);
+    const rowId = String(ct.id || '').trim();
+    if (!rowId || seenIds.has(rowId)) continue;
+    seenIds.add(rowId);
     uniqueCandidateTags.push(ct);
   }
   const tags = uniqueCandidateTags
-    .map((ct) => ct.tag?.tagKey || ct.tag?.displayNameHe)
+    .map((ct) => {
+      const rawType = String(resolveRawType(ct) || '').toLowerCase();
+      const tagKey = ct.tag?.tagKey || '';
+      const label = ct.tag?.displayNameHe || ct.tag?.displayNameEn || tagKey;
+      const duplicateKey = uniqueCandidateTags.filter(
+        (other) => (other.tag?.tagKey || '') === tagKey,
+      ).length > 1;
+      if (duplicateKey && tagKey && rawType) {
+        return `${label}::${rawType}`;
+      }
+      return tagKey || label;
+    })
     .filter(Boolean);
   payload.tags = tags;
   payload.tagDetails = uniqueCandidateTags.map((ct) => ({
@@ -899,6 +909,7 @@ const mapCandidateWithTags = (candidate, options = {}) => {
     rawTypeReason: ct.raw_type_reason,
     tagReason: ct.tag_reason,
     quote: ct.quote || null,
+    mode: ct.mode || 'normal',
     // Mirror `quote` into the legacy `evidence` field so existing UI tooltip code
     // (CandidateProfile.normalizeTagDetail → SmartTagTooltipPanel.cvQuote) keeps working.
     evidence: ct.quote || null,
@@ -2421,7 +2432,7 @@ const findByEmail = async (email) => {
   });
 };
 
-/** Match envelope sender after `email` was updated from the CV (e.g. gilad@) — set on email-ingest create. */
+/** Envelope sender stored on email-ingest create (audit); not used to route multiple applicants from one recruiter. */
 const findByInboundFromEmail = async (email) => {
   if (!email) return null;
   const n = String(email).trim().toLowerCase();
@@ -2443,6 +2454,55 @@ const getByUserId = async (userId) =>
   mapCandidateWithTags(
     await Candidate.findOne({ where: { userId, isDeleted: false }, include: includeCandidateTags }),
   );
+
+/** Primary + staff duplicates (canonicalCandidateId) and portal profiles for a candidate row. */
+const listProfileVersionsForCandidate = async (candidateId) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) return [];
+
+  const self = await Candidate.findOne({
+    where: { id: cid, isDeleted: false },
+    attributes: ['id', 'userId'],
+    raw: true,
+  });
+  if (!self) return [];
+
+  const primaryId = await resolvePrimaryCandidateIdDeep(cid);
+  const orConditions = [{ id: primaryId }, { canonicalCandidateId: primaryId }];
+
+  const uid = self.userId ? String(self.userId).trim() : '';
+  if (uid) {
+    orConditions.push({ userId: uid });
+    const primaries = await Candidate.findAll({
+      where: { userId: uid, isDeleted: false },
+      attributes: ['id'],
+      raw: true,
+    });
+    const primaryIds = primaries.map((r) => r.id);
+    if (primaryIds.length) {
+      orConditions.push({ canonicalCandidateId: { [Op.in]: primaryIds } });
+    }
+  }
+
+  const rows = await Candidate.findAll({
+    where: {
+      isDeleted: false,
+      [Op.or]: orConditions,
+    },
+    include: includeCandidateTags,
+    order: [['createdAt', 'ASC']],
+  });
+
+  const seen = new Set();
+  const unique = [];
+  for (const row of rows) {
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    unique.push(row);
+  }
+  return unique.map((r) => mapCandidateWithTags(r));
+};
 
 /** All portal profiles for a user: primary rows and linked versions (canonicalCandidateId). */
 const listByUserId = async (userId) => {
@@ -2588,6 +2648,15 @@ const prepareCreatePayload = async (payload) => {
   delete cleanPayload.sendWelcomeEmail;
   delete cleanPayload.skipIdentityLink;
   delete cleanPayload.allowProfileVersion;
+  if (cleanPayload.profileName != null && String(cleanPayload.profileName).trim()) {
+    if (!cleanPayload.title || !String(cleanPayload.title).trim()) {
+      cleanPayload.title = String(cleanPayload.profileName).trim();
+    }
+    if (!cleanPayload.fullName || !String(cleanPayload.fullName).trim()) {
+      cleanPayload.fullName = String(cleanPayload.profileName).trim();
+    }
+  }
+  delete cleanPayload.profileName;
 
   if (cleanPayload.email) {
     const norm = normalizeEmail(cleanPayload.email);
@@ -2605,8 +2674,12 @@ const prepareCreatePayload = async (payload) => {
   return cleanPayload;
 };
 
-/** Soft-delete a duplicate ingest row after its data was merged into the primary candidate. */
-const mergeIfDuplicateIdentity = async (candidateId, identity = {}) => {
+/**
+ * Soft-delete a duplicate ingest row after its data was merged into the primary candidate.
+ * When `linkAsProfileVersion` is true, keep the ingest row as a linked profile version
+ * (canonicalCandidateId → primary) instead of overwriting the primary row.
+ */
+const mergeIfDuplicateIdentity = async (candidateId, identity = {}, options = {}) => {
   const dupId = String(candidateId || '').trim();
   if (!dupId) return { candidateId: dupId, merged: false };
 
@@ -2621,6 +2694,40 @@ const mergeIfDuplicateIdentity = async (candidateId, identity = {}) => {
     excludeId: dupId,
   });
   if (!existing) return { candidateId: dupId, merged: false };
+
+  const primaryId = String(resolvePrimaryCandidateId(existing));
+  if (primaryId === dupId) return { candidateId: dupId, merged: false };
+
+  if (options.linkAsProfileVersion === true) {
+    const linkFields = { canonicalCandidateId: primaryId };
+    if (existing.userId) {
+      linkFields.userId = existing.userId;
+      linkFields.portalAccessToken = null;
+      linkFields.portalAccessTokenExpiresAt = null;
+    }
+    const prevCanon =
+      dupPlain.canonicalCandidateId != null ? String(dupPlain.canonicalCandidateId).trim() : null;
+    await Candidate.update(linkFields, { where: { id: dupId } });
+    await cacheDel(dupId);
+    if (prevCanon !== primaryId) {
+      try {
+        await recordCanonicalCandidateLinkChange(null, dupId, {
+          previousCanonicalId: prevCanon,
+          nextCanonicalId: primaryId,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[candidateService] canonical link journal failed', err?.message || err);
+      }
+    }
+    return {
+      candidateId: dupId,
+      merged: true,
+      linked: true,
+      linkedToId: primaryId,
+      _identityLinked: true,
+    };
+  }
 
   const plan = buildMergePlan(dupPlain, existing, identity);
   if (!plan.merged) return { candidateId: dupId, merged: false };
@@ -2813,6 +2920,146 @@ const sanitizeEmbedding = (emb) => {
   return undefined;
 };
 
+const profileLabelFromRow = (row) =>
+  String(row?.profileName || '').trim() ||
+  String(row?.title || '').trim() ||
+  String(row?.fullName || '').trim() ||
+  [row?.firstName, row?.lastName].filter(Boolean).join(' ').trim() ||
+  'מועמד';
+
+/** Recruiter-managed fields shared across all profile versions of the same candidate. */
+const CANONICAL_SHARED_FIELDS = [
+  'status',
+  'statusExplanation',
+  'internalNotes',
+  'distributionEmail',
+  'distributionSms',
+  'distributionWhatsapp',
+];
+
+const fetchCanonicalSiblingRows = async (candidateId, extraAttributes = []) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) return [];
+
+  const self = await Candidate.findOne({
+    where: { id: cid, isDeleted: false },
+    attributes: ['id', 'userId'],
+    raw: true,
+  });
+  if (!self) return [];
+
+  const primaryId = await resolvePrimaryCandidateIdDeep(cid);
+  const orConditions = [{ id: primaryId }, { canonicalCandidateId: primaryId }];
+
+  const uid = self.userId ? String(self.userId).trim() : '';
+  if (uid) {
+    orConditions.push({ userId: uid });
+    const primaries = await Candidate.findAll({
+      where: { userId: uid, isDeleted: false },
+      attributes: ['id'],
+      raw: true,
+    });
+    const primaryIds = primaries.map((r) => r.id);
+    if (primaryIds.length) {
+      orConditions.push({ canonicalCandidateId: { [Op.in]: primaryIds } });
+    }
+  }
+
+  const baseAttrs = ['id', 'fullName', 'firstName', 'lastName', 'title', 'events'];
+  const attributes = [...new Set([...baseAttrs, ...extraAttributes])];
+
+  const rows = await Candidate.findAll({
+    where: { isDeleted: false, [Op.or]: orConditions },
+    attributes,
+    order: [['createdAt', 'ASC']],
+    raw: true,
+  });
+
+  const seen = new Set();
+  return rows.filter((row) => {
+    const id = String(row.id);
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+};
+
+const pickCanonicalSharedPatch = (payload) => {
+  const patch = {};
+  for (const key of CANONICAL_SHARED_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) {
+      patch[key] = payload[key];
+    }
+  }
+  return patch;
+};
+
+const mergeCanonicalEventsFromRows = (rows) => {
+  const byEventId = new Map();
+  for (const row of rows) {
+    const profileId = String(row.id);
+    const profileLabel = profileLabelFromRow(row);
+    const events = Array.isArray(row.events) ? row.events : [];
+    for (const ev of events) {
+      if (!ev || ev.id == null) continue;
+      const id = String(ev.id);
+      const enriched = {
+        ...ev,
+        sourceProfileId:
+          ev.sourceProfileId != null && String(ev.sourceProfileId).trim() !== ''
+            ? String(ev.sourceProfileId)
+            : profileId,
+        sourceProfileName:
+          ev.sourceProfileName != null && String(ev.sourceProfileName).trim() !== ''
+            ? String(ev.sourceProfileName)
+            : profileLabel,
+      };
+      if (!byEventId.has(id)) byEventId.set(id, enriched);
+    }
+  }
+  return [...byEventId.values()].sort(
+    (a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime(),
+  );
+};
+
+const propagateCanonicalSharedFields = async (sourceId, payload, options = {}) => {
+  if (options.skipCanonicalSync) return [];
+  const sharedPatch = pickCanonicalSharedPatch(payload);
+  if (!Object.keys(sharedPatch).length) return [];
+
+  const siblings = await fetchCanonicalSiblingRows(sourceId);
+  const siblingIds = siblings.map((row) => String(row.id)).filter((id) => id !== String(sourceId));
+  if (!siblingIds.length) return [];
+
+  await Candidate.update(sharedPatch, { where: { id: { [Op.in]: siblingIds } } });
+  await Promise.all(siblingIds.map((id) => cacheDel(id)));
+  return siblingIds;
+};
+
+const syncCanonicalEventsAcrossSiblings = async (sourceId, payloadEvents, options = {}) => {
+  if (options.skipCanonicalSync) return [];
+
+  const siblings = await fetchCanonicalSiblingRows(sourceId);
+  if (siblings.length <= 1) return [];
+
+  const rowsForMerge = siblings.map((row) =>
+    String(row.id) === String(sourceId)
+      ? { ...row, events: Array.isArray(payloadEvents) ? payloadEvents : [] }
+      : row,
+  );
+  const merged = mergeCanonicalEventsFromRows(rowsForMerge);
+  const siblingIds = siblings.map((row) => String(row.id));
+
+  await Candidate.update({ events: merged }, { where: { id: { [Op.in]: siblingIds } } });
+  await Promise.all(siblingIds.map((id) => cacheDel(id)));
+  return merged;
+};
+
+const listMergedEventsForCandidate = async (candidateId) => {
+  const siblings = await fetchCanonicalSiblingRows(candidateId);
+  return mergeCanonicalEventsFromRows(siblings);
+};
+
 const update = async (id, payload, options = {}) => {
   const candidate = await fetchInstanceById(id);
   const cleanPayload = { ...payload };
@@ -2832,6 +3079,8 @@ const update = async (id, payload, options = {}) => {
     if (parsed && parsed.length > 0) cleanPayload.embedding = parsed;
     else delete cleanPayload.embedding; // avoid invalid/empty vector writes
   }
+  const incomingTagDetails = Array.isArray(payload.tagDetails) ? payload.tagDetails : null;
+
   delete cleanPayload.tags;
   delete cleanPayload.sendWelcomeEmail;
   delete cleanPayload.tagDetails;
@@ -2929,12 +3178,18 @@ const update = async (id, payload, options = {}) => {
   await applyCandidateCityFromCatalog(cleanPayload);
 
   if (rawCityInput && !String(cleanPayload.address ?? cleanPayload.location ?? '').trim()) {
-    const err = new Error('העיר לא נמצאה ברשימת הערים. יש לבחור עיר מהרשימה.');
-    err.status = 400;
-    throw err;
+    // City was present in input but could not be mapped to the catalog — save other fields without city.
+    // eslint-disable-next-line no-console
+    console.warn('[candidateService] unresolved city skipped (non-fatal):', rawCityInput);
+    cleanPayload.address = null;
+    cleanPayload.location = null;
   }
 
   syncCandidateNameForUpdate(cleanPayload, candidate);
+
+  if (incomingTagDetails?.length) {
+    await syncCandidateTagDetailsFromPayload(id, incomingTagDetails);
+  }
 
   try {
     await candidate.update(cleanPayload);
@@ -2944,6 +3199,12 @@ const update = async (id, payload, options = {}) => {
     cleanPayload.location = null;
     await candidate.update(cleanPayload);
   }
+
+  await propagateCanonicalSharedFields(id, cleanPayload, options);
+  if (Object.prototype.hasOwnProperty.call(cleanPayload, 'events')) {
+    await syncCanonicalEventsAcrossSiblings(id, cleanPayload.events, options);
+  }
+
   const updated = mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),
   );
@@ -3010,9 +3271,38 @@ const saveParsedTextVersion = async (id, text) => {
   // CV text changed → embedding will be rebuilt → old scores are stale everywhere
   invalidateCandidateOpportunities(id).catch(() => {});
   invalidateCandidateInAllJobMatches(id).catch(() => {});
-  return mapCandidateWithTags(
+  await cacheDel(id);
+  const mapped = mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),
   );
+  await cacheSet(mapped);
+  return mapped;
+};
+
+/** Remove one entry from parsed CV history (originalText). Current searchText is never removed here. */
+const deleteParsedTextHistoryVersion = async (id, index) => {
+  const candidate = await fetchInstanceById(id);
+  const history = normalizeOriginalTextHistory(candidate.originalText);
+  const idx = Number(index);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= history.length) {
+    const err = new Error('גרסה לא נמצאה');
+    err.status = 404;
+    throw err;
+  }
+  const current = String(candidate.searchText || '').trim();
+  if (!current && history.length === 1) {
+    const err = new Error('לא ניתן למחוק את הטקסט המפורסר הראשוני');
+    err.status = 400;
+    throw err;
+  }
+  history.splice(idx, 1);
+  await candidate.update({ originalText: history });
+  await cacheDel(id);
+  const mapped = mapCandidateWithTags(
+    await Candidate.findByPk(id, { include: includeCandidateTags }),
+  );
+  await cacheSet(mapped);
+  return mapped;
 };
 
 const remove = async (id) => {
@@ -3074,12 +3364,7 @@ const searchFree = async ({ query, limit = 50, pipelineId, stageIds, includeUnas
   return mappedRows;
 };
 
-const buildRelatedCandidateLabel = (row) =>
-  String(row?.profileName || '').trim() ||
-  String(row?.title || '').trim() ||
-  String(row?.fullName || '').trim() ||
-  [row?.firstName, row?.lastName].filter(Boolean).join(' ').trim() ||
-  'מועמד';
+const buildRelatedCandidateLabel = (row) => profileLabelFromRow(row);
 
 /** Portal profiles + canonical identity links for aggregating jobs across related rows. */
 const listRelatedCandidates = async (candidateId) => {
@@ -3088,7 +3373,7 @@ const listRelatedCandidates = async (candidateId) => {
 
   const self = await Candidate.findOne({
     where: { id: cid, isDeleted: false },
-    attributes: ['id', 'userId', 'fullName', 'firstName', 'lastName', 'profileName', 'title'],
+    attributes: ['id', 'userId', 'fullName', 'firstName', 'lastName', 'title'],
     raw: true,
   });
   if (!self) return [];
@@ -3109,7 +3394,7 @@ const listRelatedCandidates = async (candidateId) => {
       isDeleted: false,
       [Op.or]: [{ id: primaryId }, { canonicalCandidateId: primaryId }],
     },
-    attributes: ['id', 'fullName', 'firstName', 'lastName', 'profileName', 'title'],
+    attributes: ['id', 'fullName', 'firstName', 'lastName', 'title'],
     raw: true,
   });
   identityRows.forEach(push);
@@ -3128,7 +3413,7 @@ const listRelatedCandidates = async (candidateId) => {
           isDeleted: false,
           [Op.or]: [{ userId: uid }, { canonicalCandidateId: { [Op.in]: primaryIds } }],
         },
-        attributes: ['id', 'fullName', 'firstName', 'lastName', 'profileName', 'title'],
+        attributes: ['id', 'fullName', 'firstName', 'lastName', 'title'],
         raw: true,
       });
       userRows.forEach(push);
@@ -3144,10 +3429,14 @@ module.exports = {
   getById,
   getByUserId,
   listByUserId,
+  listProfileVersionsForCandidate,
+  listMergedEventsForCandidate,
+  fetchCanonicalSiblingRows,
   listRelatedCandidates,
   create,
   update,
   saveParsedTextVersion,
+  deleteParsedTextHistoryVersion,
   remove,
   searchFree,
   listPaginated,

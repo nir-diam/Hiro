@@ -2,4 +2,7 @@ node_modules
 .env
 npm-debug.log*
 package-lock.json
+jwt-private.pem
+jwt-public.pem
+jwt-keys.json
 

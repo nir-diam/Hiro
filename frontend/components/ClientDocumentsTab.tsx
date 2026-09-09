@@ -6,9 +6,16 @@ import { authHeaders } from '../utils/authHeaders';
 interface ClientDocumentsTabProps {
   clientId: string;
   clientName: string;
+  /** When set, only documents for this organization are listed and new uploads are tagged. */
+  organizationId?: string;
 }
 
-type BackendDoc = Omit<Document, 'id'> & { id: string; key?: string; url?: string };
+type BackendDoc = Omit<Document, 'id'> & {
+  id: string;
+  key?: string;
+  url?: string;
+  organizationId?: string | null;
+};
 
 const normalizeDoc = (row: any): BackendDoc => ({
   id: String(row.id),
@@ -20,6 +27,7 @@ const normalizeDoc = (row: any): BackendDoc => ({
   fileSize: Number(row.fileSize ?? 0),
   key: row.key,
   url: row.url,
+  organizationId: row.organizationId != null ? String(row.organizationId) : null,
 });
 
 const documentTypeStyles: { [key in DocumentType]: { bg: string; text: string; } } = {
@@ -55,7 +63,11 @@ const formatFileSize = (kilobytes: number) => {
     }
 }
 
-const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clientName }) => {
+const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({
+  clientId,
+  clientName,
+  organizationId,
+}) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [documents, setDocuments] = useState<BackendDoc[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -152,6 +164,7 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
                 key,
                 url: publicUrl,
                 uploadDate: new Date().toISOString(),
+                ...(organizationId ? { organizationId } : {}),
             }),
         });
         if (attachRes.ok) {
@@ -177,7 +190,10 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
         let active = true;
         setIsLoading(true);
         setError(null);
-        fetch(`${apiBase}/api/clients/${clientId}/documents`, { headers: authHeaders(true) })
+        const qs = organizationId
+            ? `?organizationId=${encodeURIComponent(organizationId)}`
+            : '';
+        fetch(`${apiBase}/api/clients/${clientId}/documents${qs}`, { headers: authHeaders(true) })
             .then((r) => {
                 if (!r.ok) throw new Error('Failed to load documents');
                 return r.json();
@@ -196,13 +212,21 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
                 if (active) setIsLoading(false);
             });
         return () => { active = false; };
-    }, [apiBase, clientId]);
+    }, [apiBase, clientId, organizationId]);
 
     const filteredDocuments = useMemo(() => {
-        return documents
+        const orgScoped = organizationId
+            ? documents.filter((doc) => String(doc.organizationId || '') === organizationId)
+            : documents;
+        return orgScoped
             .filter(doc => filterType === 'הכול' || doc.type === filterType)
             .filter(doc => doc.name.toLowerCase().includes(searchTerm.toLowerCase()));
-    }, [documents, searchTerm, filterType]);
+    }, [documents, searchTerm, filterType, organizationId]);
+
+    const hasUntaggedClientDocuments = useMemo(() => {
+        if (!organizationId) return false;
+        return documents.some((doc) => !String(doc.organizationId || '').trim());
+    }, [documents, organizationId]);
 
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-4 sm:p-6 border border-border-default">
@@ -335,7 +359,17 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
                 <div className="text-center py-16 flex flex-col items-center">
                     <FolderIcon className="w-16 h-16 text-text-subtle mb-4"/>
                     <h3 className="text-xl font-bold text-text-default">אין מסמכים שמורים</h3>
-                    <p className="mt-2 text-text-muted">אין מסמכים שמורים עבור לקוח זה.</p>
+                    <p className="mt-2 text-text-muted">
+                        {organizationId
+                            ? `אין מסמכים שמורים עבור ${clientName}.`
+                            : 'אין מסמכים שמורים עבור לקוח זה.'}
+                    </p>
+                    {organizationId && hasUntaggedClientDocuments ? (
+                        <p className="mt-3 text-xs text-text-subtle max-w-md">
+                            קיימים מסמכים ישנים ברמת הלקוח ללא שיוך לארגון — הם אינם מוצגים בפרופיל ארגון ספציפי.
+                            העלה מחדש מכאן כדי לשייך לארגון זה.
+                        </p>
+                    ) : null}
                     <button onClick={handleCreateDoc} className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-5 rounded-lg hover:bg-primary-600 transition shadow-md mt-4">
                         <PlusIcon className="w-5 h-5"/>
                         <span>העלה מסמך</span>

@@ -7,6 +7,15 @@ function norm(s) {
   return String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
 }
 
+/** Align with frontend jobTagMatchCategories (required/exclusion aliases). */
+function normalizeJobSkillMode(modeRaw) {
+  const mode = norm(modeRaw || 'normal');
+  if (mode === 'required') return 'mandatory';
+  if (mode === 'exclusion') return 'negative';
+  if (mode === 'mandatory' || mode === 'negative' || mode === 'normal') return mode;
+  return 'normal';
+}
+
 /** Treat UI placeholders as empty (—, -, לא רלוונטי, etc.). */
 function isPlaceholderValue(s) {
   const x = norm(s);
@@ -488,42 +497,166 @@ function salaryMatches(job, candidate) {
   return cMin <= jMax;
 }
 
-function collectCandidateSkillKeys(candidate) {
-  const keys = new Set();
-  const sk = candidate.skills;
-  if (!sk || typeof sk !== 'object') return keys;
-  for (const bucket of ['technical', 'soft']) {
-    const arr = sk[bucket];
-    if (!Array.isArray(arr)) continue;
-    for (const item of arr) {
-      if (typeof item === 'string') keys.add(norm(item));
-      else if (item && typeof item === 'object') {
-        if (item.key) keys.add(norm(item.key));
-        if (item.name) keys.add(norm(item.name));
-        if (item.tag_key) keys.add(norm(item.tag_key));
+/** Flat tag-key pool for scoring (includes CV skills blobs). */
+function collectCandidateSkillKeys(candidate, aliasIndex = null) {
+  const { buildCandidateTagMap } = require('./matchingScoreService');
+  const { flat } = buildCandidateTagMap(candidate, aliasIndex);
+  return flat;
+}
+
+/**
+ * Tag keys used for mandatory/negative hard filters — structured profile tags only.
+ * Excludes free-text skills.soft / skills.technical strings (CV parsing) so Sonar
+ * matches what recruiters see on the candidate profile.
+ */
+function collectCandidateHardFilterSkillKeys(candidate, aliasIndex = null) {
+  const { resolveCanonicalTagKey } = require('./tagAliasIndexService');
+  const flat = new Set();
+  const addKey = (raw) => {
+    const k = norm(raw);
+    if (!k) return;
+    flat.add(k);
+    if (aliasIndex?.size) {
+      const canonical = resolveCanonicalTagKey(k, aliasIndex);
+      if (canonical && canonical !== k) flat.add(canonical);
+    }
+  };
+
+  for (const td of candidate.tagDetails || []) {
+    if (!td || typeof td !== 'object') continue;
+    addKey(td.tagKey);
+    addKey(td.displayNameHe);
+    addKey(td.displayNameEn);
+    addKey(td.name);
+  }
+
+  for (const t of candidate.tags || []) {
+    if (typeof t !== 'string') continue;
+    const keyPart = t.includes('::') ? t.split('::')[0] : t;
+    addKey(keyPart);
+  }
+
+  const maTags = candidate.matchAnalysis?.tags;
+  if (Array.isArray(maTags)) {
+    for (const t of maTags) {
+      if (t && typeof t === 'object') addKey(t.key || t.tag_key || t.name);
+    }
+  }
+
+  return flat;
+}
+
+function candidateHasJobSkill(candidate, jobSkill, aliasIndex = null) {
+  if (!jobSkill || typeof jobSkill !== 'object') return false;
+  const jobKeys = [jobSkill.key, jobSkill.tagKey, jobSkill.name]
+    .map((x) => norm(x))
+    .filter(Boolean);
+  if (!jobKeys.length) return false;
+  const keys = collectCandidateHardFilterSkillKeys(candidate, aliasIndex);
+  const { tagKeysEquivalent } = require('./tagAliasIndexService');
+  for (const jobKey of jobKeys) {
+    if (keys.has(jobKey)) return true;
+    for (const candKey of keys) {
+      if (tagKeysEquivalent(jobKey, candKey, aliasIndex)) return true;
+    }
+  }
+  return false;
+}
+
+/** Candidate profile tags marked mandatory/negative (green/red borders in UI). */
+function collectCandidateFilterTags(candidate) {
+  const mandatory = [];
+  const negative = [];
+  for (const td of candidate.tagDetails || []) {
+    if (!td || typeof td !== 'object') continue;
+    const mode = norm(td.mode);
+    if (mode !== 'mandatory' && mode !== 'negative') continue;
+    const keys = [td.tagKey, td.displayNameHe, td.displayNameEn]
+      .map((x) => (x != null ? String(x).trim() : ''))
+      .filter(Boolean);
+    if (!keys.length) continue;
+    const entry = { keys };
+    if (mode === 'mandatory') mandatory.push(entry);
+    else negative.push(entry);
+  }
+  return { mandatory, negative };
+}
+
+function candidateHasTagFilters(candidate) {
+  const { mandatory, negative } = collectCandidateFilterTags(candidate);
+  return mandatory.length > 0 || negative.length > 0;
+}
+
+function jobHasFilterTag(job, filterEntry, aliasIndex = null) {
+  const skills = Array.isArray(job.skills) ? job.skills : [];
+  const { tagKeysEquivalent } = require('./tagAliasIndexService');
+  for (const s of skills) {
+    if (!s || typeof s !== 'object') continue;
+    const jobKeys = [s.key, s.tagKey, s.name]
+      .map((x) => (x != null ? norm(String(x)) : ''))
+      .filter(Boolean);
+    for (const jk of jobKeys) {
+      for (const ck of filterEntry.keys) {
+        const candKey = norm(String(ck));
+        if (!candKey) continue;
+        if (jk === candKey) return true;
+        if (tagKeysEquivalent(jk, candKey, aliasIndex)) return true;
       }
     }
   }
-  const tags = Array.isArray(candidate.tags) ? candidate.tags : [];
-  for (const t of tags) {
-    if (typeof t === 'string') keys.add(norm(t));
+  return false;
+}
+
+/** Hard filter driven by candidate tag modes: green → job must have tag; red → job must not. */
+function candidateTagFiltersMatch(job, candidate, aliasIndex = null) {
+  const { mandatory, negative } = collectCandidateFilterTags(candidate);
+  const reasons = [];
+  for (const entry of mandatory) {
+    if (!jobHasFilterTag(job, entry, aliasIndex)) {
+      reasons.push('candidate_mandatory_tag');
+      break;
+    }
   }
-  return keys;
+  for (const entry of negative) {
+    if (jobHasFilterTag(job, entry, aliasIndex)) {
+      reasons.push('candidate_negative_tag');
+      break;
+    }
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+function jobSkillMode(s) {
+  return s && typeof s === 'object' ? normalizeJobSkillMode(s.mode) : 'normal';
 }
 
 function jobHasMandatorySkills(job) {
   const skills = Array.isArray(job.skills) ? job.skills : [];
-  return skills.some((s) => s && typeof s === 'object' && norm(s.mode) === 'mandatory');
+  return skills.some((s) => jobSkillMode(s) === 'mandatory');
 }
 
-function mandatorySkillsMatch(job, candidate) {
-  const keys = collectCandidateSkillKeys(candidate);
+function jobHasNegativeSkills(job) {
+  const skills = Array.isArray(job.skills) ? job.skills : [];
+  return skills.some((s) => jobSkillMode(s) === 'negative');
+}
+
+function mandatorySkillsMatch(job, candidate, aliasIndex = null) {
   const skills = Array.isArray(job.skills) ? job.skills : [];
   for (const s of skills) {
     if (!s || typeof s !== 'object') continue;
-    if (norm(s.mode) !== 'mandatory') continue;
-    const key = norm(s.key || s.name || '');
-    if (key && !keys.has(key)) return false;
+    if (jobSkillMode(s) !== 'mandatory') continue;
+    if (!candidateHasJobSkill(candidate, s, aliasIndex)) return false;
+  }
+  return true;
+}
+
+/** Hard filter: candidate must not have any job skill marked negative (red). */
+function negativeSkillsMatch(job, candidate, aliasIndex = null) {
+  const skills = Array.isArray(job.skills) ? job.skills : [];
+  for (const s of skills) {
+    if (!s || typeof s !== 'object') continue;
+    if (jobSkillMode(s) !== 'negative') continue;
+    if (candidateHasJobSkill(candidate, s, aliasIndex)) return false;
   }
   return true;
 }
@@ -568,7 +701,7 @@ function dimStatus(required, hasCandidateInfo, matchesFn) {
 /**
  * Parameter match map for client UI: green = match, red = gap/mismatch, gray = job N/A.
  */
-function computeParameterMatches(candidate, job) {
+function computeParameterMatches(candidate, job, aliasIndex = null) {
   const cg = candidate.gender ? String(candidate.gender).trim() : '';
   const jg = job.gender ? String(job.gender).trim() : '';
 
@@ -619,8 +752,13 @@ function computeParameterMatches(candidate, job) {
     ),
     mandatory_skill: dimStatus(
       jobHasMandatorySkills(job),
-      collectCandidateSkillKeys(candidate).size > 0,
-      () => mandatorySkillsMatch(job, candidate),
+      collectCandidateHardFilterSkillKeys(candidate, aliasIndex).size > 0,
+      () => mandatorySkillsMatch(job, candidate, aliasIndex),
+    ),
+    negative_skill: dimStatus(
+      jobHasNegativeSkills(job),
+      collectCandidateHardFilterSkillKeys(candidate, aliasIndex).size > 0,
+      () => negativeSkillsMatch(job, candidate, aliasIndex),
     ),
     mandatory_language: dimStatus(
       jobHasMandatoryLanguages(job),
@@ -754,6 +892,7 @@ function enrichBreakdownForApi(breakdown) {
 module.exports = {
   DEFAULT_PENALTY_POLICIES,
   PENALTY_LABELS,
+  normalizeJobSkillMode,
   normalizePenaltyPolicies,
   computeGeneralPenalties,
   computeParameterMatches,
@@ -777,4 +916,14 @@ module.exports = {
   candidateMeetsJobAvailabilityTier,
   normalizeGenderBucket,
   gendersMatch,
+  collectCandidateSkillKeys,
+  collectCandidateHardFilterSkillKeys,
+  candidateHasJobSkill,
+  jobHasMandatorySkills,
+  jobHasNegativeSkills,
+  mandatorySkillsMatch,
+  negativeSkillsMatch,
+  collectCandidateFilterTags,
+  candidateHasTagFilters,
+  candidateTagFiltersMatch,
 };

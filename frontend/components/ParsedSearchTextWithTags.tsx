@@ -9,6 +9,11 @@ import {
 } from '../utils/parsedSearchTextSpans';
 import { clampCenteredPopoverX, popoverTopBelowAnchor } from '../utils/clampPopoverPosition';
 import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
+import {
+    htmlToPlainText,
+    isRichHtmlContent,
+    sanitizeRichHtml,
+} from '../utils/parsedSearchTextHtml';
 
 const TAG_TOOLTIP_WIDTH = 300;
 const TAG_TOOLTIP_EST_HEIGHT = 280;
@@ -180,7 +185,11 @@ export const ParsedSearchTextWithTags: React.FC<{
         setExportBusy(kind);
         void Promise.resolve(fn()).finally(() => setExportBusy(null));
     };
-    const plain = normalizeSearchTextLineBreaks(searchText);
+    const rawSearchText = String(searchText ?? '');
+    const hasRichHtml = isRichHtmlContent(rawSearchText);
+    const plain = hasRichHtml
+        ? normalizeSearchTextLineBreaks(htmlToPlainText(rawSearchText))
+        : normalizeSearchTextLineBreaks(rawSearchText);
     const spans = useMemo(() => {
         const tagSpans = collectSearchTextHighlightSpans(plain, tagDetails);
         const kwSpans = collectKeywordHighlightSpans(plain, highlightKeywords);
@@ -194,7 +203,15 @@ export const ParsedSearchTextWithTags: React.FC<{
     }, [plain, tagDetails, highlightKeywords]);
 
     const body = useMemo(() => {
-        if (!plain) return null;
+        if (!plain && !hasRichHtml) return null;
+        if (hasRichHtml) {
+            return (
+                <div
+                    className="leading-[2.5] text-[15px] parsed-search-rich-text break-words [&_p]:mb-4 [&_p:last-child]:mb-0"
+                    dangerouslySetInnerHTML={{ __html: sanitizeRichHtml(rawSearchText) }}
+                />
+            );
+        }
         if (!spans.length) {
             return (
                 <div className="leading-[2.5] text-[15px] whitespace-pre-wrap break-words">{plain}</div>
@@ -215,7 +232,7 @@ export const ParsedSearchTextWithTags: React.FC<{
             nodes.push(<span key="tail">{plain.slice(cursor)}</span>);
         }
         return <div className="leading-[2.5] text-[15px]">{nodes}</div>;
-    }, [plain, spans]);
+    }, [plain, spans, hasRichHtml, rawSearchText]);
 
     if (!plain) {
         return (

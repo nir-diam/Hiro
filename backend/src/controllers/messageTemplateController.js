@@ -31,11 +31,20 @@ const listForCompose = async (req, res) => {
     if (!user) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
+    const recipientType = req.query?.recipientType
+      ? String(req.query.recipientType).trim()
+      : null;
     if (user.clientId) {
-      const rows = await messageTemplateService.listByClient(user.clientId);
+      const rows = messageTemplateService.filterTemplatesForRecipient(
+        await messageTemplateService.listByClient(user.clientId),
+        recipientType,
+      );
       return res.json({ scope: 'client', templates: rows });
     }
-    const rows = await messageTemplateService.listAdmin();
+    const rows = messageTemplateService.filterTemplatesForRecipient(
+      await messageTemplateService.listAdmin(),
+      recipientType,
+    );
     return res.json({ scope: 'admin', templates: rows });
   } catch (err) {
     return res.status(err.status || 500).json({ message: err.message || 'Failed to list templates' });

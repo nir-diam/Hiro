@@ -15,6 +15,7 @@ const TRACKED_PROMPT_IDS = new Set([
   'organization_ai_enriched',
   'experience_ai',
   'candidate_ai_agent',
+  'candidate_profile_chat',
 ]);
 
 const truncate = (value, max = 12000) => {

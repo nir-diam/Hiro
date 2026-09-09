@@ -1,9 +1,25 @@
 /** Staff-created duplicate copies (צור העתק) — hidden from candidate portal switcher only. */
 export const isStaffDuplicateProfile = (profile: Record<string, unknown> | null | undefined): boolean => {
     if (!profile) return false;
+    if (profile.staffProfileCopy === true) return true;
     const label = String(profile.profileName || profile.fullName || profile.title || '').trim();
     return /_duplicate\d*$/i.test(label);
 };
+
+/** Linked profile version row (shadow / portal) — not the primary candidate row. */
+export const isLinkedCandidateProfileVersion = (
+    profile: Record<string, unknown> | null | undefined,
+): boolean => {
+    if (!profile) return false;
+    const id = String(profile.backendId || profile.id || '').trim();
+    const canonicalId = String(profile.canonicalCandidateId || '').trim();
+    return Boolean(id && canonicalId && id !== canonicalId);
+};
+
+/** Staff shadow copy or any linked version row — save in-place without primary confirm dialog. */
+export const shouldSaveCandidateProfileDirectly = (
+    profile: Record<string, unknown> | null | undefined,
+): boolean => isStaffDuplicateProfile(profile) || isLinkedCandidateProfileVersion(profile);
 
 const ensureArray = (value: unknown): unknown[] => {
     if (Array.isArray(value)) return value;
@@ -123,6 +139,7 @@ export const buildProfileDuplicatePayload = (
     if (primaryCandidateId) {
         clone.canonicalCandidateId = primaryCandidateId;
     }
+    clone.staffProfileCopy = true;
     return clone;
 };
 

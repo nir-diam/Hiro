@@ -516,13 +516,8 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
       setCandidateError(null);
       setFullCandidate(null);
       try {
-        const token = localStorage.getItem('token');
-        const res = await fetch(`${apiBase}/api/candidates/${apiId}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-          cache: 'no-store',
-        });
-        if (!res.ok) throw new Error(`Failed to load candidate (${res.status})`);
-        const data = await res.json();
+        const { fetchStaffCandidateById } = await import('../utils/staffCandidateApi');
+        const data = await fetchStaffCandidateById(apiId);
         if (isMounted) setFullCandidate(normalizeFetchedCandidate(data));
       } catch (e: any) {
         if (isMounted) setCandidateError(e?.message || 'Failed to load candidate');
@@ -694,6 +689,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
     if (candidate && onOpenMessageModal) {
         onOpenMessageModal({
             mode,
+            recipientType: 'candidate',
             candidateName: resumeData.name || candidate.name,
             candidatePhone: displayPhone || candidate.phone,
             candidateEmail: displayEmail || undefined,
@@ -808,15 +804,18 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
 
               <div className="space-y-4">
                 <h3 className="text-xl font-bold text-text-default">קורות חיים</h3>
-                <ResumeViewer
-                  resumeData={candidateResumeData}
-                  fullData={mergedCandidate}
-                  resumeFileUrl={resumeUrl}
-                  className="min-h-[720px] h-[min(85vh,900px)]"
-                  onDownloadResume={handleDownloadResume}
-                  onUploadResume={handleUploadResume}
-                  candidateId={mergedCandidate.id || mergedCandidate.backendId}
-                />
+                            <ResumeViewer
+                                resumeData={candidateResumeData}
+                                fullData={mergedCandidate}
+                                resumeFileUrl={resumeUrl}
+                                className="min-h-[720px] h-[min(85vh,900px)]"
+                                onDownloadResume={handleDownloadResume}
+                                onUploadResume={handleUploadResume}
+                                onResumeUploaded={(updated) => {
+                                    setFullCandidate(normalizeFetchedCandidate(updated));
+                                }}
+                                candidateId={mergedCandidate.id || mergedCandidate.backendId}
+                            />
                 
               </div>
             </div>

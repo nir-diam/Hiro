@@ -26,7 +26,7 @@ function maxBodyHeightPx(extraReservePx = 0): number {
     return Math.floor((maxPx - extraReservePx) * 0.96);
 }
 
-function measureTitleBlockHeightPx(candidateName?: string): number {
+function measureTitleBlockHeightPx(options?: ParsedSearchTextExportOptions): number {
     const host = createPdfCaptureHost();
     const shell = document.createElement('div');
     shell.dir = 'rtl';
@@ -35,7 +35,7 @@ function measureTitleBlockHeightPx(candidateName?: string): number {
     shell.style.padding = `${PDF_PADDING_PX}px`;
     shell.style.fontFamily = PDF_FONT;
     shell.style.background = '#ffffff';
-    shell.innerHTML = buildParsedCvTitleHtml(candidateName);
+    shell.innerHTML = buildParsedCvTitleHtml(options);
     host.appendChild(shell);
     document.body.appendChild(host);
     const height = shell.offsetHeight;
@@ -123,7 +123,7 @@ function paginateTextLines(text: string, pdfOptions?: ParsedSearchTextPdfOptions
     const lines = String(text || '').split('\n');
     if (!lines.length) return [];
 
-    const titleHeightPx = measureTitleBlockHeightPx(pdfOptions?.candidateName);
+    const titleHeightPx = measureTitleBlockHeightPx(pdfOptions);
     const firstPageBodyMaxPx = Math.max(120, maxBodyHeightPx(titleHeightPx));
     const otherPageBodyMaxPx = maxBodyHeightPx();
 
@@ -257,7 +257,7 @@ export async function downloadParsedSearchTextAsPdf(
     const usableW = pageW - PDF_MARGIN_MM * 2;
     const usableH = pageH - PDF_MARGIN_MM * 2;
 
-    const titleHtml = buildParsedCvTitleHtml(options?.candidateName);
+    const titleHtml = buildParsedCvTitleHtml(options);
 
     for (let i = 0; i < pageLineGroups.length; i += 1) {
         if (i > 0) pdf.addPage();

@@ -11,6 +11,8 @@ const ENTITY_TYPE_FROM_KEY = {
   candidate: 'Candidate',
   job: 'Job',
   client: 'Client',
+  'tag-ai-decision': 'TagAiDecision',
+  'organization-ai-decision': 'OrganizationAiDecision',
 };
 
 const resolveEntityType = (raw) => {
@@ -18,7 +20,7 @@ const resolveEntityType = (raw) => {
   if (!s) return null;
   const lower = s.toLowerCase();
   if (ENTITY_TYPE_FROM_KEY[lower]) return ENTITY_TYPE_FROM_KEY[lower];
-  if (['Candidate', 'Job', 'Client'].includes(s)) return s;
+  if (['Candidate', 'Job', 'Client', 'TagAiDecision', 'OrganizationAiDecision'].includes(s)) return s;
   return null;
 };
 
@@ -157,7 +159,7 @@ const remove = async (id) => {
 const listByEntity = async (typeKey, entityId, query = {}) => {
   const entityType = resolveEntityType(typeKey);
   if (!entityType) {
-    const err = new Error('Invalid type: use candidate, job, or client');
+    const err = new Error('Invalid type: use candidate, job, client, tag-ai-decision, or organization-ai-decision');
     err.status = 400;
     throw err;
   }

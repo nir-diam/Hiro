@@ -56,7 +56,7 @@ export interface AuditLogStats {
 }
 
 /** Path: GET /api/audit-logs/by-entity/:type/:entityId */
-export type AuditEntityKind = 'client' | 'candidate' | 'job';
+export type AuditEntityKind = 'client' | 'candidate' | 'job' | 'tag-ai-decision' | 'organization-ai-decision';
 
 export interface AuditLogsByEntityResponse extends AuditLogListResponse {
   type: string;

@@ -505,12 +505,58 @@ export const enrichProfileSuggestions = (
             }
 
             if (suggestion.field === 'workExperience') {
-                const newItems = filterNewWorkExperienceSuggestions(suggestion.value, contextData);
-                if (!newItems.length) return null;
+                const existing = Array.isArray(contextData?.workExperience) ? contextData.workExperience : [];
+                const incoming = normalizeWorkExperienceIncoming(suggestion.value);
+                if (!incoming.length) return null;
+
+                if (suggestion.replaceExisting) {
+                    return {
+                        ...suggestion,
+                        value: incoming,
+                        reason: suggestion.reason || 'שכתוב ניסיון תעסוקתי לפי קורות החיים',
+                    };
+                }
+
+                const merged: WorkExperienceEntry[] = [];
+                const seenKeys = new Set<string>();
+
+                for (const entry of incoming) {
+                    const entryId = String(entry.id || '').trim();
+                    if (entryId) {
+                        const match = existing.find((row: any) => String(row?.id || '').trim() === entryId);
+                        if (match) {
+                            const key = `id:${entryId}`;
+                            if (!seenKeys.has(key)) {
+                                seenKeys.add(key);
+                                merged.push({ ...match, ...entry, id: match.id });
+                            }
+                            continue;
+                        }
+                    }
+
+                    const dupIdx = existing.findIndex((row: any) => isDuplicateWorkExperience(entry, [row]));
+                    if (dupIdx >= 0) {
+                        const match = existing[dupIdx];
+                        const key = `dup:${match.id || `${match.company}-${match.title}`}`;
+                        if (!seenKeys.has(key)) {
+                            seenKeys.add(key);
+                            merged.push({ ...match, ...entry, id: match.id || entry.id });
+                        }
+                        continue;
+                    }
+
+                    const newKey = `new:${entry.company}-${entry.title}-${entry.startDate}`;
+                    if (!seenKeys.has(newKey)) {
+                        seenKeys.add(newKey);
+                        merged.push(entry);
+                    }
+                }
+
+                if (!merged.length) return null;
                 return {
                     ...suggestion,
-                    value: newItems.length === 1 ? newItems[0] : newItems,
-                    reason: suggestion.reason || 'הוספת ניסיון תעסוקתי חדש לפרופיל',
+                    value: merged.length === 1 ? merged[0] : merged,
+                    reason: suggestion.reason || 'עדכון/הוספת ניסיון תעסוקתי לפרופיל',
                 };
             }
 
@@ -600,16 +646,21 @@ export const buildProfileSuggestionPrompt = (
         .map((row: any) => {
             const title = String(row?.title || '').trim();
             const company = String(row?.company || '').trim();
-            return [title, company].filter(Boolean).join(' @ ');
+            const id = String(row?.id || '').trim();
+            const label = [title, company].filter(Boolean).join(' @ ');
+            return id ? `${label} [id:${id}]` : label;
         })
         .filter(Boolean)
         .join('; ');
+    const originalCvSnippet = String(contextData?.originalCvText || '').trim().slice(0, 4000);
+    const generatedCvSnippet = String(contextData?.generatedCvText || contextData?.searchText || '').trim().slice(0, 4000);
 
     const sharedRules = `
 חובה: החזר אך ורק JSON תקין (מערך), ללא Markdown.
 לשדה tags – הצע רק תגיות חדשות (דלתא) שלא קיימות כבר בפרופיל, ובחר אך ורק מתוך תגיות מאושרות.
 לשדה desiredRoles – הצע רק תפקידים חדשים (דלתא) שלא קיימים כבר בפרופיל, ובחר אך ורק מתוך תחומי המשרה המנוהלים.
-לשדה workExperience – הצע רק משרות חדשות שלא קיימות כבר בפרופיל. אל תחזור על משרות קיימות. value יכול להיות אובייקט יחיד או מערך של אובייקטים: {title, company, description, startDate, endDate}.
+לשדה workExperience – ניתן: (א) להוסיף משרות חדשות, (ב) לעדכן/לשכתב תיאור של משרה קיימת (העבר id מהפרופיל או אותה חברה+תפקיד), (ג) replaceExisting:true עם מערך מלא לשכתוב כל הניסיון. value: {title, company, description, startDate, endDate, id?} או מערך.
+השתמש ב-originalCvText (קורות חיים מקוריים) וב-generatedCvText/searchText (קורות חיים מפורסים/מג'ונרטים) כמקור לעובדות.
 לכל תגית/תפקיד/משרה בנפרד חובה reason קצר (עד 140 תווים) המסביר למה ההצעה רלוונטית.
 מבנה tags:
 { "field": "tags", "value": [{ "name": "שם תגית מאושרת", "reason": "למה" }], "reason": "סיכום קצר" }
@@ -619,7 +670,9 @@ export const buildProfileSuggestionPrompt = (
 { "field": "workExperience", "value": { "title": "...", "company": "...", "description": "...", "startDate": "2023", "endDate": "2024" }, "reason": "סיכום קצר" }
 תגיות קיימות בפרופיל (אל תחזור עליהן): ${existingTags || 'אין'}
 תפקידים מבוקשים קיימים (אל תחזור עליהם): ${existingRoles || 'אין'}
-ניסיון תעסוקתי קיים (אל תחזור עליו): ${existingWorkLines || 'אין'}
+ניסיון תעסוקתי קיים (ניתן לעדכן/לשכתב): ${existingWorkLines || 'אין'}
+קורות חיים מקוריים (קטע): ${originalCvSnippet || 'אין'}
+קורות חיים מג'ונרטים/מפורסים (קטע): ${generatedCvSnippet || 'אין'}
 תגיות מאושרות (דוגמאות): ${tagSamples || 'אין'}
 תחומי משרה מנוהלים (דוגמאות):
 ${roleSamples || 'אין'}

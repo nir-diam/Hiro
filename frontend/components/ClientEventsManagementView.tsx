@@ -121,8 +121,6 @@ const ClientEventsManagementView: React.FC = () => {
   }, [isPlatformAdmin, clients, tenantClientId, linkedOrganizations]);
 
   const defaultClientId = isPlatformAdmin ? clients[0]?.id || null : tenantClientId;
-  const defaultOrganizationId = tenantClientId ? linkedOrganizations[0]?.organizationId || null : null;
-  const defaultOrganizationName = tenantClientId ? linkedOrganizations[0]?.name || null : null;
 
   if (!authReady) {
     return <div className="text-center py-16 text-text-muted">טוען...</div>;
@@ -135,16 +133,13 @@ const ClientEventsManagementView: React.FC = () => {
           {error}
         </div>
       ) : null}
-      {loading && clientOptions.length === 0 ? (
+      {loading ? (
         <div className="text-center py-16 text-text-muted">טוען...</div>
       ) : (
         <ClientsEventsJournalTab
           clientOptions={clientOptions}
           defaultClientId={defaultClientId}
-          defaultOrganizationId={defaultOrganizationId}
-          defaultOrganizationName={defaultOrganizationName}
-          scopeOrganizationId={defaultOrganizationId}
-          scopeOrganizationName={defaultOrganizationName}
+          crossClientJournal={isPlatformAdmin}
         />
       )}
     </div>

@@ -16,6 +16,12 @@ async function parseErr(res: Response): Promise<string> {
     }
 }
 
+export type SendNotificationEmailAttachment = {
+    filename: string;
+    content: string;
+    contentType?: string;
+};
+
 export type SendNotificationEmailBody = {
     toEmail: string;
     subject: string;
@@ -24,6 +30,7 @@ export type SendNotificationEmailBody = {
     isTask?: boolean;
     messageType?: 'message' | 'task';
     taskPayload?: Record<string, unknown>;
+    attachments?: SendNotificationEmailAttachment[];
 };
 
 export type SendNotificationEmailResult = {
@@ -49,6 +56,7 @@ export async function sendNotificationEmail(body: SendNotificationEmailBody): Pr
             isTask: body.isTask ?? false,
             messageType: body.messageType ?? 'message',
             taskPayload: body.taskPayload ?? {},
+            attachments: body.attachments?.length ? body.attachments : undefined,
         }),
     });
     if (!res.ok) throw new Error(await parseErr(res));

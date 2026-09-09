@@ -10,6 +10,7 @@ export type ClientAttachment = {
     fileSize: number;
     key?: string;
     url?: string;
+    organizationId?: string | null;
 };
 
 const apiBase = () => (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
@@ -24,23 +25,32 @@ const normalize = (row: Record<string, unknown>): ClientAttachment => ({
     fileSize: Number(row.fileSize ?? 0),
     key: row.key ? String(row.key) : undefined,
     url: row.url ? String(row.url) : undefined,
+    organizationId: row.organizationId != null ? String(row.organizationId) : null,
 });
 
-export async function fetchClientAttachments(clientId: string): Promise<ClientAttachment[]> {
-    const res = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(clientId)}/documents`, {
+export async function fetchClientAttachments(
+    clientId: string,
+    organizationId?: string,
+): Promise<ClientAttachment[]> {
+    const qs = organizationId
+        ? `?organizationId=${encodeURIComponent(organizationId)}`
+        : '';
+    const res = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(clientId)}/documents${qs}`, {
         headers: authHeaders(true),
         cache: 'no-store',
     });
     if (!res.ok) throw new Error('טעינת צרופות נכשלה');
     const data = await res.json();
     const list = Array.isArray(data) ? data : [];
-    return list.map((row) => normalize(row as Record<string, unknown>));
+    const rows = list.map((row) => normalize(row as Record<string, unknown>));
+    if (!organizationId) return rows;
+    return rows.filter((row) => String(row.organizationId || '') === organizationId);
 }
 
 export async function uploadClientAttachment(
     clientId: string,
     file: File,
-    opts?: { name?: string; uploadedBy?: string; type?: string; notes?: string },
+    opts?: { name?: string; uploadedBy?: string; type?: string; notes?: string; organizationId?: string },
 ): Promise<ClientAttachment> {
     const uploadRes = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(clientId)}/documents/upload-url`, {
         method: 'POST',
@@ -73,6 +83,7 @@ export async function uploadClientAttachment(
             key,
             url: publicUrl,
             uploadDate: new Date().toISOString(),
+            ...(opts?.organizationId ? { organizationId: opts.organizationId } : {}),
         }),
     });
     if (!attachRes.ok) throw new Error('שמירת הצרופה נכשלה');

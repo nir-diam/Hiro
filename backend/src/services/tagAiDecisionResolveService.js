@@ -4,6 +4,16 @@ const { sequelize } = require('../config/db');
 const Tag = require('../models/Tag');
 const TagAiDecision = require('../models/TagAiDecision');
 const tagHybridSearchService = require('./tagHybridSearchService');
+const aiDecisionAuditService = require('./aiDecisionAuditService');
+
+const snapshotDecision = (decision) => {
+  if (!decision) return null;
+  return decision.get ? decision.get({ plain: true }) : { ...decision };
+};
+
+const logDecisionChange = async (req, before, decision, metadata = {}) => {
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision, { metadata });
+};
 
 const normalizeTagKey = (value) =>
   String(value || '')
@@ -288,7 +298,7 @@ const mapReviewerAction = async (action, decisionRow, targetTagId, pendingTagTyp
   throw err;
 };
 
-const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, aliasPriority = 3 }, resolvePendingFn) => {
+const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, aliasPriority = 3, req = null }, resolvePendingFn) => {
   if (!Array.isArray(decisionIds) || !decisionIds.length) {
     const err = new Error('No decision IDs provided');
     err.status = 400;
@@ -301,6 +311,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       where: { id: decisionIds, reviewerAction: 'blacklist' },
     });
     for (const decision of decisions) {
+      const before = snapshotDecision(decision);
       const pendingTag = await Tag.findByPk(decision.pendingTagId);
       if (pendingTag && String(pendingTag.status).toLowerCase() === 'deprecated') {
         pendingTag.status = 'pending';
@@ -310,6 +321,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       decision.reviewerAction = null;
       decision.resolvedAt = null;
       await decision.save();
+      await logDecisionChange(req, before, decision, { resolveAction: action });
     }
     return { success: true, resolvedIds: decisions.map((d) => d.id) };
   }
@@ -320,10 +332,12 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       where: { id: decisionIds, reviewStatus: 'manual_queue' },
     });
     for (const decision of decisions) {
+      const before = snapshotDecision(decision);
       decision.reviewStatus = 'pending_review';
       decision.reviewerAction = null;
       decision.resolvedAt = null;
       await decision.save();
+      await logDecisionChange(req, before, decision, { resolveAction: action });
     }
     return { success: true, resolvedIds: decisions.map((d) => d.id) };
   }
@@ -334,10 +348,12 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       where: { id: decisionIds, reviewStatus: 'pending_review' },
     });
     for (const decision of decisions) {
+      const before = snapshotDecision(decision);
       decision.reviewStatus = 'manual_queue';
       decision.reviewerAction = 'manual';
       decision.resolvedAt = new Date();
       await decision.save();
+      await logDecisionChange(req, before, decision, { resolveAction: action });
     }
     return { success: true, resolvedIds: decisions.map((d) => d.id) };
   }
@@ -354,6 +370,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
 
   const results = [];
   for (const decision of decisions) {
+    const before = snapshotDecision(decision);
     const plain = decision.get ? decision.get({ plain: true }) : decision;
     const pendingTag = plain.pendingTagId ? await Tag.findByPk(plain.pendingTagId) : null;
     const pendingStatus = pendingTag ? String(pendingTag.status).toLowerCase() : null;
@@ -368,6 +385,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       decision.reviewerAction = 'blacklist';
       decision.resolvedAt = new Date();
       await decision.save();
+      await logDecisionChange(req, before, decision, { resolveAction: action });
       results.push(decision.id);
       continue;
     }
@@ -383,6 +401,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
         decision.pendingTagId = createdTag.id;
       }
       await decision.save();
+      await logDecisionChange(req, before, decision, { resolveAction: action });
       results.push(decision.id);
       continue;
     }
@@ -416,6 +435,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       decision.reviewerAction = action;
       decision.resolvedAt = new Date();
       await decision.save();
+      await logDecisionChange(req, before, decision, { resolveAction: action });
       results.push(decision.id);
       continue;
     }
@@ -435,6 +455,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       decision.resolvedTargetTagId = mapped.targetTagId;
     }
     await decision.save();
+    await logDecisionChange(req, before, decision, { resolveAction: action });
     results.push(decision.id);
   }
 

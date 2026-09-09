@@ -140,6 +140,7 @@ const emit = async (req, options = {}) => {
       params = {},
       level,
       action,
+      skipPipelineDispatch = false,
     } = options || {};
 
     if (!triggerName || !eventName) return null;
@@ -170,6 +171,7 @@ const emit = async (req, options = {}) => {
         params,
       },
     }).then(async (logResult) => {
+      if (skipPipelineDispatch) return logResult;
       try {
         const pipelineOutcomeService = require('../services/pipelineOutcomeService');
         await pipelineOutcomeService.dispatchFromSystemEvent(req, {

@@ -9,7 +9,14 @@ const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
 const list = async (req, res) => {
   const client = await clientService.getById(req.params.id);
-  res.json(Array.isArray(client.documents) ? client.documents : []);
+  let docs = Array.isArray(client.documents) ? client.documents : [];
+  const organizationId = req.query?.organizationId
+    ? String(req.query.organizationId).trim()
+    : null;
+  if (organizationId) {
+    docs = docs.filter((d) => String(d?.organizationId || '') === organizationId);
+  }
+  res.json(docs);
 };
 
 // Presigned URL flow (frontend uploads directly to S3)
@@ -51,6 +58,9 @@ const attach = async (req, res) => {
       fileSize: payload.fileSize || 0,
       key: payload.key,
       url: payload.url,
+      organizationId: payload.organizationId != null
+        ? (String(payload.organizationId).trim() || null)
+        : null,
     };
 
     const next = [doc, ...prev];

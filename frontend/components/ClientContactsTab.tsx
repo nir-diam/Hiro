@@ -6,73 +6,36 @@ import {
     TableCellsIcon, Squares2X2Icon, PhoneIcon, EnvelopeIcon, WhatsappIcon, 
     ChatBubbleBottomCenterTextIcon, FolderIcon, XMarkIcon, CheckIcon, FunnelIcon 
 } from './Icons';
-import Drawer from './Drawer';
+import ContactFormModal from './ContactFormModal';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import { authHeaders } from '../utils/authHeaders';
-
-// --- TYPES ---
-interface Contact {
-  id: string;
-  name: string;
-  phone: string;
-  mobilePhone: string;
-  email: string;
-  role: string;
-  linkedin: string;
-  username: string;
-  isActive: boolean;
-  notes: string;
-  hasSystemAccess?: boolean;
-  isInvited?: boolean;
-  groupId?: string | null;
-}
+import {
+  contactFromApi,
+  contactToApiPayload,
+  emptyContactForm,
+  primaryEmail,
+  primaryPhone,
+  type ContactFormState,
+} from '../utils/contactFormModel';
 
 interface ContactGroup {
     id: string;
     name: string;
 }
 
-const normalizeContact = (row: any): Contact => ({
-    id: String(row.id),
-    name: row.name || '',
-    phone: row.phone || '',
-    mobilePhone: row.mobilePhone || '',
-    email: row.email || '',
-    role: row.role || '',
-    linkedin: row.linkedin || '',
-    username: row.username || '',
-    isActive: Boolean(row.isActive ?? true),
-    notes: row.notes || '',
-    hasSystemAccess: Boolean(row.hasSystemAccess ?? false),
-    isInvited: Boolean(row.isInvited ?? false),
-    groupId: row.groupId ? String(row.groupId) : null,
-});
+const normalizeContact = (row: any): ContactFormState => contactFromApi(row);
 
 const defaultVisibleColumns = ['name', 'role', 'actions', 'phone', 'email', 'isActive', 'system_access'];
 
-// --- Sub-components ---
-const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; }> = ({ label, name, value, onChange }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <input type="text" name={name} value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5" />
-    </div>
-);
-const FormTextArea: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void; }> = ({ label, name, value, onChange }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <textarea name={name} value={value} onChange={onChange} rows={4} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"></textarea>
-    </div>
-);
-
 const ContactCard: React.FC<{ 
-    contact: Contact; 
-    onEdit: (c: Contact) => void; 
-    onDelete: (c: Contact) => void; 
-    onViewProfile: (c: Contact) => void;
-    onOpenDrawer: (c: Contact) => void;
-    onActionClick: (mode: 'email' | 'sms' | 'whatsapp', contact: Contact) => void;
+    contact: ContactFormState; 
+    onEdit: (c: ContactFormState) => void; 
+    onDelete: (c: ContactFormState) => void; 
+    onViewProfile: (c: ContactFormState) => void;
+    onOpenDrawer: (c: ContactFormState) => void;
+    onActionClick: (mode: 'email' | 'sms' | 'whatsapp', contact: ContactFormState) => void;
     isSelected: boolean;
     onSelect: () => void;
 }> = ({ contact, onEdit, onDelete, onViewProfile, onOpenDrawer, onActionClick, isSelected, onSelect }) => (
@@ -105,13 +68,13 @@ const ContactCard: React.FC<{
             <p className="text-sm text-text-muted">{contact.role}</p>
         </div>
         <div className="mt-4 text-xs text-text-subtle space-y-1">
-            <p><strong>טלפון:</strong> {contact.phone}</p>
-            <p><strong>נייד:</strong> {contact.mobilePhone}</p>
-            <p><strong>דוא"ל:</strong> {contact.email}</p>
+            <p><strong>טלפון:</strong> {primaryPhone(contact, 'office') || '—'}</p>
+            <p><strong>נייד:</strong> {primaryPhone(contact, 'mobile') || '—'}</p>
+            <p><strong>דוא"ל:</strong> {primaryEmail(contact) || '—'}</p>
         </div>
         <div className="flex justify-between items-center mt-3 pt-3 border-t border-border-subtle" onClick={e => e.stopPropagation()}>
             <div className="flex items-center gap-1">
-                <a href={`tel:${contact.mobilePhone || contact.phone}`} title="חייג" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><PhoneIcon className="w-5 h-5"/></a>
+                <a href={`tel:${primaryPhone(contact, 'mobile') || primaryPhone(contact, 'office')}`} title="חייג" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><PhoneIcon className="w-5 h-5"/></a>
                 <button onClick={() => onActionClick('email', contact)} title="שלח מייל" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><EnvelopeIcon className="w-5 h-5"/></button>
                 <button onClick={() => onActionClick('sms', contact)} title="שלח SMS" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><ChatBubbleBottomCenterTextIcon className="w-5 h-5"/></button>
                 <button onClick={() => onActionClick('whatsapp', contact)} title="שלח WhatsApp" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><WhatsappIcon className="w-5 h-5"/></button>
@@ -128,22 +91,30 @@ interface ClientContactsTabProps {
     clientId: string;
     /** When set, list/create contacts for this organization only (tenant org profile). */
     organizationId?: string;
+    /** Pending linked organization (before admin approval). */
+    organizationTmpId?: string;
     onOpenMessageModal: (config: MessageModalConfig) => void;
 }
 
 
-const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organizationId, onOpenMessageModal }) => {
+const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
+    clientId,
+    organizationId,
+    organizationTmpId,
+    onOpenMessageModal,
+}) => {
     const { t } = useLanguage();
     const navigate = useNavigate();
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [contacts, setContacts] = useState<Contact[]>([]);
+    const [contacts, setContacts] = useState<ContactFormState[]>([]);
     const [groups, setGroups] = useState<ContactGroup[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-    const [editingContact, setEditingContact] = useState<Contact | null>(null);
-    const [contactToDelete, setContactToDelete] = useState<Contact | null>(null);
-    const [formData, setFormData] = useState<Contact | null>(null);
+    const [editingContact, setEditingContact] = useState<ContactFormState | null>(null);
+    const [contactToDelete, setContactToDelete] = useState<ContactFormState | null>(null);
+    const [formData, setFormData] = useState<ContactFormState | null>(null);
+    const [isSaving, setIsSaving] = useState(false);
 
     const allColumnIds = useMemo(
         () => ['select', 'name', 'role', 'actions', 'phone', 'mobilePhone', 'email', 'isActive', 'system_access'],
@@ -225,7 +196,9 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
         setError(null);
         const orgQs = organizationId
             ? `?organizationId=${encodeURIComponent(organizationId)}`
-            : '';
+            : organizationTmpId
+              ? `?organizationTmpId=${encodeURIComponent(organizationTmpId)}`
+              : '';
         Promise.all([
             fetch(`${apiBase}/api/clients/${clientId}/contacts${orgQs}`, { headers: authHeaders(true) }).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load contacts'))),
             fetch(`${apiBase}/api/clients/${clientId}/contact-groups`, { headers: authHeaders(true) }).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load groups'))),
@@ -247,7 +220,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
                 if (active) setIsLoading(false);
             });
         return () => { active = false; };
-    }, [apiBase, clientId, organizationId]);
+    }, [apiBase, clientId, organizationId, organizationTmpId]);
 
     // Filter Logic
     const filteredContacts = useMemo(() => {
@@ -288,85 +261,82 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
     };
     const handleDragEnd = () => { dragItemIndex.current = null; setDraggingColumn(null); };
 
-    useEffect(() => { if (editingContact) { setFormData(editingContact); } }, [editingContact]);
     const handleAdd = () => {
         setError(null);
-        setEditingContact({
-            id: 'tmp-new',
-            name: '',
-            phone: '',
-            mobilePhone: '',
-            email: '',
-            role: '',
-            linkedin: '',
-            username: '',
-            isActive: true,
-            notes: '',
-            groupId: null,
-            isInvited: false,
-            hasSystemAccess: false,
-        });
+        const blank = emptyContactForm({ id: 'tmp-new' });
+        setEditingContact(blank);
+        setFormData(blank);
         setIsDrawerOpen(true);
     };
-    const handleEdit = (contact: Contact) => { setError(null); setEditingContact(contact); setIsDrawerOpen(true); };
+    const handleEdit = (contact: ContactFormState) => {
+        setError(null);
+        setEditingContact(contact);
+        setFormData({ ...contact });
+        setIsDrawerOpen(true);
+    };
 
-    const navigateToContactProfile = (contact: Contact) => {
+    const navigateToContactProfile = (contact: ContactFormState) => {
         if (!clientId || !contact.id || String(contact.id).startsWith('tmp-')) return;
         navigate(`/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contact.id)}`);
     };
     const handleSave = async () => {
         if (!formData) return;
         if (!apiBase || !clientId) return;
-        if (!formData.name.trim()) {
-            setError('נא למלא שם');
+        if (!formData.firstName.trim() && !formData.lastName.trim()) {
+            setError('נא למלא לפחות שם פרטי');
             return;
         }
         setError(null);
+        setIsSaving(true);
 
         const payload: Record<string, unknown> = {
-            name: formData.name.trim(),
-            phone: formData.phone,
-            mobilePhone: formData.mobilePhone,
-            email: formData.email,
-            role: formData.role,
-            linkedin: formData.linkedin,
-            username: formData.username,
-            isActive: formData.isActive,
-            notes: formData.notes,
+            ...contactToApiPayload(formData),
+            groupId: formData.groupId || null,
             hasSystemAccess: Boolean(formData.hasSystemAccess),
             isInvited: Boolean(formData.isInvited),
-            groupId: formData.groupId || null,
         };
         if (organizationId) {
             payload.organizationId = organizationId;
+        } else if (organizationTmpId) {
+            payload.organizationTmpId = organizationTmpId;
         }
 
-        if (String(formData.id).startsWith('tmp-')) {
-            const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts`, {
-                method: 'POST',
-                headers: authHeaders(true),
-                body: JSON.stringify(payload),
-            });
-            if (res.ok) {
+        try {
+            if (String(formData.id).startsWith('tmp-')) {
+                const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts`, {
+                    method: 'POST',
+                    headers: authHeaders(true),
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body?.message || 'יצירה נכשלה');
+                }
                 const created = await res.json();
                 setContacts([...contacts, normalizeContact(created)]);
-            }
-        } else {
-            const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts/${formData.id}`, {
-                method: 'PUT',
-                headers: authHeaders(true),
-                body: JSON.stringify(payload),
-            });
-            if (res.ok) {
+            } else {
+                const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts/${formData.id}`, {
+                    method: 'PUT',
+                    headers: authHeaders(true),
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body?.message || 'שמירה נכשלה');
+                }
                 const updated = await res.json();
                 const normalized = normalizeContact(updated);
                 setContacts(contacts.map(c => c.id === normalized.id ? normalized : c));
             }
+            closeDrawer();
+        } catch (e: any) {
+            setError(e?.message || 'שמירה נכשלה');
+        } finally {
+            setIsSaving(false);
         }
-        closeDrawer();
     };
     const closeDrawer = () => { setIsDrawerOpen(false); setEditingContact(null); setFormData(null); setError(null); };
-    const handleDelete = (contact: Contact) => { setContactToDelete(contact); };
+    const handleDelete = (contact: ContactFormState) => { setContactToDelete(contact); };
     const confirmDelete = async () => {
         if (!contactToDelete) return;
         const id = contactToDelete.id;
@@ -388,12 +358,13 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
         }).catch(() => null);
     };
 
-    const handleActionClick = (mode: 'email' | 'sms' | 'whatsapp', contact: Contact) => {
+    const handleActionClick = (mode: 'email' | 'sms' | 'whatsapp', contact: ContactFormState) => {
         onOpenMessageModal({
             mode,
+            recipientType: 'client_contact',
             candidateName: contact.name,
-            candidatePhone: contact.mobilePhone || contact.phone,
-            candidateEmail: contact.email || undefined,
+            candidatePhone: primaryPhone(contact, 'mobile') || primaryPhone(contact, 'office'),
+            candidateEmail: primaryEmail(contact) || undefined,
         });
     };
     
@@ -483,7 +454,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
         alert('קישור לאיפוס סיסמה נשלח לאיש הקשר');
     };
 
-    const renderCell = (contact: Contact, columnId: string) => {
+    const renderCell = (contact: ContactFormState, columnId: string) => {
         switch(columnId) {
             case 'select': return (
                 <div onClick={e => e.stopPropagation()}>
@@ -521,13 +492,18 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
             );
             case 'actions': return (
                 <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-                    <a href={`tel:${contact.mobilePhone || contact.phone}`} title="חייג" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><PhoneIcon className="w-5 h-5"/></a>
+                    <a href={`tel:${primaryPhone(contact, 'mobile') || primaryPhone(contact, 'office')}`} title="חייג" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><PhoneIcon className="w-5 h-5"/></a>
                     <button onClick={() => handleActionClick('email', contact)} title="שלח מייל" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><EnvelopeIcon className="w-5 h-5"/></button>
                     <button onClick={() => handleActionClick('sms', contact)} title="שלח SMS" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><ChatBubbleBottomCenterTextIcon className="w-5 h-5"/></button>
                     <button onClick={() => handleActionClick('whatsapp', contact)} title="שלח WhatsApp" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><WhatsappIcon className="w-5 h-5"/></button>
                 </div>
             );
-            default: return (contact as any)[columnId];
+            default: {
+                if (columnId === 'phone') return primaryPhone(contact, 'office') || '—';
+                if (columnId === 'mobilePhone') return primaryPhone(contact, 'mobile') || '—';
+                if (columnId === 'email') return primaryEmail(contact) || '—';
+                return (contact as any)[columnId];
+            }
         }
     };
     
@@ -724,22 +700,16 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
             )}
 
             {isDrawerOpen && editingContact && formData && (
-                <Drawer isOpen={isDrawerOpen} onClose={closeDrawer} title={editingContact.id === 0 ? 'איש קשר חדש' : 'עריכת איש קשר'}
-                    footer={<><button onClick={closeDrawer} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover">ביטול</button><button onClick={handleSave} className="bg-primary-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-primary-700">שמור</button></>}>
-                    <div className="space-y-4">
-                        {error && (
-                            <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{error}</div>
-                        )}
-                        <FormInput label="שם*" name="name" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} />
-                        <FormInput label="תפקיד" name="role" value={formData.role} onChange={(e) => setFormData({...formData, role: e.target.value})} />
-                        <FormInput label="טלפון" name="phone" value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} />
-                        <FormInput label="טלפון נייד" name="mobilePhone" value={formData.mobilePhone} onChange={(e) => setFormData({...formData, mobilePhone: e.target.value})} />
-                        <FormInput label="דוא״ל" name="email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} />
-                        <FormInput label="לינקדאין" name="linkedin" value={formData.linkedin} onChange={(e) => setFormData({...formData, linkedin: e.target.value})} />
-                        <FormInput label="שם משתמש" name="username" value={formData.username} onChange={(e) => setFormData({...formData, username: e.target.value})} />
-                        <FormTextArea label="הערה פנימית" name="notes" value={formData.notes} onChange={(e) => setFormData({...formData, notes: e.target.value})} />
-                    </div>
-                </Drawer>
+                <ContactFormModal
+                    isOpen={isDrawerOpen}
+                    onClose={closeDrawer}
+                    title={String(editingContact.id).startsWith('tmp-') ? 'איש קשר חדש' : 'עריכת איש קשר'}
+                    formData={formData}
+                    onChange={setFormData}
+                    onSave={handleSave}
+                    isSaving={isSaving}
+                    error={error}
+                />
             )}
 
             {contactToDelete && (

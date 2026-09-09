@@ -1526,8 +1526,8 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
                 chatType="job-publishing"
+                promptId="job_publishing_chat"
                 allowTagCreation={false}
-                systemPrompt={`You are Hiro AI, a marketing expert helping optimize the public landing page for the job "${publicJobTitle}".`}
                 contextData={{
                     job: {
                         title: publicJobTitle,

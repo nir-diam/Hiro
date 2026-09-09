@@ -332,7 +332,8 @@ async function computeTagScore(candidate, job, tagWeights, _sourceWeights = [], 
   const byCategory = {};
   for (const skill of jobSkills) {
     if (!skill || typeof skill !== 'object') continue;
-    if (norm(skill.mode) === 'negative') continue;
+    const skillMode = norm(skill.mode);
+    if (skillMode === 'negative' || skillMode === 'mandatory') continue;
     const category = normalizeTagCategory(
       skill.tagType || skill.type || skill.tag_type || skill.category || 'skill',
     );

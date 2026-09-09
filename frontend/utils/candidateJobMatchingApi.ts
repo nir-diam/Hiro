@@ -179,14 +179,10 @@ export async function assignCandidateToJob(
   return handleResponse<{ ok: boolean }>(res);
 }
 
-/** Fetch a single candidate's full record (for TagMatchPanel enrichment). */
+/** Fetch a single candidate's full record (shared cache — see staffCandidateApi). */
 export async function fetchCandidate(candidateId: string): Promise<Record<string, unknown>> {
-  const base = apiBase();
-  const res = await fetch(`${base}/api/candidates/${encodeURIComponent(candidateId)}`, {
-    headers: authHeaders(),
-    cache: 'no-store',
-  });
-  return handleResponse<Record<string, unknown>>(res);
+  const { fetchStaffCandidateById } = await import('./staffCandidateApi');
+  return fetchStaffCandidateById(candidateId);
 }
 
 /** Generate a Markdown deep-insight analysis (backend Gemini call). */

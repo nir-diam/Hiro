@@ -57,6 +57,7 @@ export function resolveClientLogoUrl(data: Record<string, unknown>): string | nu
   return preferred ?? candidates[0];
 }
 
+/** Company settings editor: read only persisted `clients.logoUrl` / `primaryColor` (no org fallback). */
 export async function fetchClientBranding(clientId: string): Promise<ClientBranding> {
   const res = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(clientId)}`, {
     headers: authHeaders(),
@@ -64,8 +65,8 @@ export async function fetchClientBranding(clientId: string): Promise<ClientBrand
   if (!res.ok) throw new Error('Failed to load client branding');
   const data = await res.json();
   return {
-    logoUrl: resolveClientLogoUrl(data),
-    primaryColor: trimLogo(data.primaryColor),
+    logoUrl: trimLogo(data.logoUrl),
+    primaryColor: trimLogo(data.primaryColor) || '#1e293b',
   };
 }
 
@@ -84,8 +85,8 @@ export async function saveClientBranding(
   if (!res.ok) throw new Error('Failed to save client branding');
   const data = await res.json();
   return {
-    logoUrl: resolveClientLogoUrl(data),
-    primaryColor: trimLogo(data.primaryColor),
+    logoUrl: trimLogo(data.logoUrl),
+    primaryColor: trimLogo(data.primaryColor) || '#1e293b',
   };
 }
 

@@ -23,6 +23,9 @@ router.put('/ai-decisions/bulk-resolve', organizationAiDecisionController.bulkRe
 router.put('/ai-decisions/:id/resolve', organizationAiDecisionController.resolve);
 router.patch('/ai-decisions/:id/approve', organizationAiDecisionController.approve);
 router.patch('/ai-decisions/:id/comments', organizationAiDecisionController.updateComments);
+router.patch('/ai-decisions/:id/fields', organizationAiDecisionController.updateDecisionFields);
+
+router.post('/merge', ...orgWrite, organizationController.mergeOrganizations);
 
 router.get('/:id/history', organizationController.getHistory);
 router.get('/:id/primary-client', organizationController.getPrimaryClient);

@@ -17,6 +17,10 @@ import { MessageMode } from '../hooks/useUIState';
 import CVUploadModal from './CVUploadModal';
 import { useLanguage } from '../context/LanguageContext';
 import { generateExperienceSummaryForCandidate } from '../services/experienceSummaryService';
+import {
+    waitForCandidateEnrichment,
+    isCandidateEnrichmentPending,
+} from '../utils/candidateIngestPoll';
 
 type CreationMode = 'choice' | 'ai_input' | 'ai_result' | 'manual';
 
@@ -78,31 +82,6 @@ const loadingMessages = [
     'ממפה פרופיל תעשייתי...',
     'בונה את הפרופיל הסופי...'
 ];
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Wait until background CV enrichment clears ingestPending (AI upload returns 202). */
-async function waitForCandidateEnrichment(
-    apiBase: string,
-    candidateId: string,
-    authHeaders: () => Record<string, string>,
-    maxAttempts = 150,
-): Promise<Record<string, unknown>> {
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        const res = await fetch(`${apiBase}/api/candidates/${candidateId}`, {
-            headers: { ...authHeaders() },
-        });
-        const row = await res.json();
-        if (!res.ok) {
-            throw new Error(row?.message || 'שגיאה בטעינת פרופיל מועמד.');
-        }
-        if (!row?.ingestPending) {
-            return row;
-        }
-        await sleep(2000);
-    }
-    throw new Error('עיבוד קורות החיים נמשך זמן רב מדי. נסה לרענן את העמוד.');
-}
 
 /** Fields returned by GET / candidates / createFromAi that must sync into the form without refresh. */
 const CANDIDATE_API_PASSTHROUGH_KEYS = [
@@ -285,8 +264,12 @@ const NewCandidateViewV2: React.FC = () => {
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
                 body: JSON.stringify({ key, type: 'resume', fileName: file.name }),
             });
-            if (!attachRes.ok) throw new Error('Failed to attach media');
-            const updated = await attachRes.json();
+            const attachBody = await attachRes.json().catch(() => ({}));
+            if (!attachRes.ok && attachRes.status !== 202) throw new Error('Failed to attach media');
+            let updated = attachBody;
+            if (isCandidateEnrichmentPending(attachRes.status, attachBody) && id) {
+                updated = await waitForCandidateEnrichment(apiBase, String(id), getAuthHeaders);
+            }
             handleResumeUploaded(updated);
         } catch (err: any) {
             console.error('Resume upload failed', err);

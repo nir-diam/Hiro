@@ -603,7 +603,7 @@ const update = async (req, res) => {
       console.error('[jobController.update] job save audit failed', auditErr);
     }
 
-    res.json(job);
+    res.json(jobService.toApiJob(job));
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
   }
@@ -625,10 +625,15 @@ const getCandidates = async (req, res) => {
     const candidates = await jobCandidateService.listForJob(jobId);
     const returnMonths = await clientUsageSettingService.resolveReturnMonthsForJobRequest(job, req);
 
+    let candidateMap = new Map();
+    let jobPlain = null;
+    let screeningSettings = null;
+
     // Enrich each candidate's matchScore with the full multi-dimensional engine
     try {
       if (job && candidates.length) {
-        const jobPlain = jobService.toPlainJobForMatchScore(job);
+        jobPlain = jobService.toPlainJobForMatchScore(job);
+        screeningSettings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
         const engineConfig = await resolveEngineConfigForJob(jobPlain);
         const jobEmb = await getJobEmbedding(jobPlain);
 
@@ -636,15 +641,13 @@ const getCandidates = async (req, res) => {
         const candidateIds = candidates.map((c) => c.id).filter(Boolean);
         const candidateService = require('../services/candidateService');
         const [fullCandidateRows, jcRows] = await Promise.all([
-          Promise.all(
-            candidateIds.map((id) => candidateService.findByPkWithTagsForMatchScore(id)),
-          ),
+          candidateService.findManyWithTagsForMatchScore(candidateIds),
           JobCandidate.findAll({
             where: { jobId, candidateId: candidateIds },
             attributes: ['id', 'candidateId', 'status', 'source'],
           }),
         ]);
-        const candidateMap = new Map(
+        candidateMap = new Map(
           fullCandidateRows
             .filter(Boolean)
             .map((row) => {
@@ -659,6 +662,17 @@ const getCandidates = async (req, res) => {
           const candPlain = candidateMap.get(String(cView.id));
           if (!candPlain) continue;
           const cid = String(cView.id);
+          // Tag-matching payload for job-candidates gap UI (same pools as Sonar).
+          cView.tagDetails = candPlain.tagDetails;
+          cView.tags = candPlain.tags;
+          cView.skills = candPlain.skills;
+          cView.matchAnalysis = candPlain.matchAnalysis;
+          cView.workExperience = candPlain.workExperience;
+          cView.experience = candPlain.experience;
+          cView.languages = candPlain.languages;
+          cView.field = candPlain.field;
+          cView.industry = candPlain.industry;
+          cView.professionalSummary = candPlain.professionalSummary;
           const jcData = jcMap.get(cid) || null;
           const linkedInfo = buildLinkedInfoFromJobCandidate(jcData);
           const intentOpts = intentByCandidate.get(cid) || {};
@@ -683,9 +697,29 @@ const getCandidates = async (req, res) => {
       console.warn('[getCandidates] live scoring skipped:', e.message || e);
     }
 
+    const visibleCandidates = [];
+    for (const cView of candidates) {
+      const candPlain = candidateMap.get(String(cView.id));
+      if (candPlain && jobPlain && screeningSettings) {
+        const hard = screeningInclusionService.checkHardRequirements(
+          candPlain,
+          jobPlain,
+          screeningSettings,
+        );
+        cView.requirementsMet = hard.ok;
+        cView.hardRequirementReasons = hard.reasons;
+        if (hard.reasons.includes('negative_skill')) {
+          continue;
+        }
+      }
+      visibleCandidates.push(cView);
+    }
+
+    const jobForApi = jobService.toApiJob(job);
+
     res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.set('Pragma', 'no-cache');
-    res.json({ job, candidates, returnMonths });
+    res.json({ job: jobForApi, candidates: visibleCandidates, returnMonths });
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
   }
@@ -701,66 +735,14 @@ const getReferralClientContacts = async (req, res) => {
     if (!job) {
       return res.status(404).json({ message: 'Job not found' });
     }
-    const label = String(job.client || '').trim().toLowerCase();
-    const emailRe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-
-    let clientRow = null;
-    if (label) {
-      const clientCandidates = await Client.findAll({
-        where: { isActive: true },
-        attributes: ['id', 'name', 'displayName'],
-      });
-      clientRow =
-        clientCandidates.find((c) => String(c.name || '').trim().toLowerCase() === label) ||
-        clientCandidates.find((c) => String(c.displayName || '').trim().toLowerCase() === label);
-    }
-
-    const out = [];
-    if (clientRow) {
-      const rows = await ClientContact.findAll({
-        where: { clientId: clientRow.id, isActive: true },
-        attributes: ['id', 'name', 'email', 'role'],
-        order: [['createdAt', 'ASC']],
-      });
-      for (const r of rows) {
-        const c = r.get({ plain: true });
-        const email = String(c.email || '').trim();
-        if (!emailRe.test(email)) continue;
-        out.push({
-          id: String(c.id),
-          name: String(c.name || '').trim(),
-          email,
-          role: String(c.role || '').trim(),
-          source: 'client',
-        });
-      }
-    }
-
-    const plainJob = job.get({ plain: true });
-    const jobJsonContacts = Array.isArray(plainJob.contacts) ? plainJob.contacts : [];
-    const seen = new Set(out.map((c) => c.email.toLowerCase()));
-    jobJsonContacts.forEach((c, i) => {
-      const email = String(c?.email || '').trim();
-      if (!emailRe.test(email)) return;
-      const key = email.toLowerCase();
-      if (seen.has(key)) return;
-      seen.add(key);
-      out.push({
-        id: `job:${req.params.id}:${i}`,
-        name: String(c?.name || '').trim(),
-        email,
-        role: String(c?.role || '').trim(),
-        source: 'job',
-      });
-    });
+    const clientIdHint =
+      req.query?.clientId != null && String(req.query.clientId).trim()
+        ? String(req.query.clientId).trim()
+        : null;
+    const payload = await jobService.resolveReferralContactsForJob(job, { clientIdHint });
 
     res.set('Cache-Control', 'private, no-store');
-    return res.json({
-      clientId: clientRow ? String(clientRow.id) : null,
-      clientResolvedName: clientRow ? String(clientRow.displayName || clientRow.name || '') : '',
-      jobClientLabel: String(job.client || ''),
-      contacts: out,
-    });
+    return res.json(payload);
   } catch (err) {
     console.error('[jobController.getReferralClientContacts]', err);
     return res.status(500).json({ message: err.message || 'Failed to load contacts' });

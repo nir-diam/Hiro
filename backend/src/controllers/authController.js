@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const { Op } = require('sequelize');
 const authService = require('../services/authService');
+const { loadExportLogoForUser } = require('../services/clientExportLogoService');
 const candidatePortalAccessService = require('../services/candidatePortalAccessService');
 const {
   publicAppOrigin,
@@ -157,6 +158,25 @@ const me = async (req, res) => {
   } catch (err) {
     const status = err?.status || 400;
     return res.status(status).json({ message: err.message || 'Failed to load user' });
+  }
+};
+
+/** Logo bytes for CV export — same auth as /me, no attachDbUser required. */
+const clientExportLogo = async (req, res) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return res.status(401).json({ message: 'Invalid token' });
+    const user = await User.findByPk(userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const payload = await loadExportLogoForUser(user);
+    if (!payload) {
+      return res.status(404).json({ message: 'No logo configured' });
+    }
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(payload);
+  } catch (err) {
+    const status = err?.status || 500;
+    return res.status(status).json({ message: err.message || 'Failed to load logo' });
   }
 };
 
@@ -340,6 +360,7 @@ module.exports = {
   signup,
   forgotPassword,
   me,
+  clientExportLogo,
   getActivationCheck,
   postActivationComplete,
   redeemCandidatePortalMagic,

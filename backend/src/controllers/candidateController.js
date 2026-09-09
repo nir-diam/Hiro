@@ -30,6 +30,7 @@ const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
 const { mergeProfileApprovalEvent, recordProfileApprovalClientJournal, recordProfileApprovalJobLinkJournals } = require('../utils/candidateProfileApprovalEvent');
+const { recordDuplicateResumeHashIngest } = require('../utils/candidateCanonicalLinkEvent');
 const pipelineOutcomeService = require('../services/pipelineOutcomeService');
 const candidatePipelineService = require('../services/candidatePipelineService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
@@ -161,6 +162,8 @@ const candidateTagService = require('../services/candidateTagService');
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const mammoth = require('mammoth');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
+const { extractWithPdftotextVariants } = require('../utils/pdftotextExtract');
+const { pickBestResumeTextExtract } = require('../utils/pdfTextQuality');
 const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 
@@ -716,19 +719,6 @@ const getStaffClientIdFromRequest = async (req) => {
   }
 };
 
-const extractTextFromImageBuffer = async (buffer) => {
-  const worker = await createWorker('eng+heb');
-  try {
-    const { data } = await worker.recognize(buffer);
-    return normalizeResumeSearchText(data?.text || '');
-  } catch (err) {
-    console.error('[embed-ocr-error]', err.message || err);
-    return '';
-  } finally {
-    await worker.terminate();
-  }
-};
-
 const PDF_OCR_MAX_PAGES = 5;
 const PDF_OCR_RENDER_SCALE = 2.0;
 const PDF_OCR_MAX_EDGE_PX = 2400;
@@ -738,6 +728,52 @@ const PDF_OCR_MAX_EDGE_PX = 2400;
  */
 const PDF_TEXT_MIN_TO_SKIP_OCR = 800;
 const MIN_JPEG_OCR_BYTES = 2000;
+
+/** Tesseract rejects via worker message; without errorHandler it throws synchronously and can crash Node. */
+const createSafeOcrWorker = async (langs) =>
+  createWorker(langs, 1, {
+    errorHandler: (err) => {
+      console.warn('[ocr-worker-error]', err?.message || err);
+    },
+  });
+
+const isLikelyValidPngBuffer = (buf) => {
+  if (!buf || buf.length < 100) return false;
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  return buf.subarray(0, 8).equals(sig);
+};
+
+const isLikelyValidJpegBuffer = (buf) => {
+  if (!buf || buf.length < MIN_JPEG_OCR_BYTES) return false;
+  if (buf[0] !== 0xff || buf[1] !== 0xd8 || buf[2] !== 0xff) return false;
+  return buf[buf.length - 2] === 0xff && buf[buf.length - 1] === 0xd9;
+};
+
+const filterOcrImageBuffers = (buffers) =>
+  (buffers || []).filter((buf) => {
+    if (!buf || !buf.length) return false;
+    if (isLikelyValidPngBuffer(buf) || isLikelyValidJpegBuffer(buf)) return true;
+    console.warn('[ocr] skipping buffer with unsupported or corrupt image header', { bytes: buf.length });
+    return false;
+  });
+
+const extractTextFromImageBuffer = async (buffer) => {
+  if (!buffer || !buffer.length) return '';
+  if (!isLikelyValidPngBuffer(buffer) && !isLikelyValidJpegBuffer(buffer)) {
+    console.warn('[embed-ocr-error] skipping non-image or corrupt buffer', { bytes: buffer.length });
+    return '';
+  }
+  const worker = await createSafeOcrWorker('eng+heb');
+  try {
+    const { data } = await worker.recognize(buffer);
+    return normalizeResumeSearchText(data?.text || '');
+  } catch (err) {
+    console.warn('[embed-ocr-error]', err?.message || err);
+    return '';
+  } finally {
+    await worker.terminate();
+  }
+};
 
 let _pdfjsLibCache = null;
 let _nodeCanvasShimForPdfjsInstalled = false;
@@ -762,6 +798,13 @@ const getPdfjsLib = () => {
   _pdfjsLibCache = pdfjsLib;
   return pdfjsLib;
 };
+
+// Install canvas shim as early as possible when this module loads (email ingest imports these helpers).
+try {
+  shimNodeCanvasForPdfjs();
+} catch (shimErr) {
+  console.warn('[pdfjs] canvas shim install failed', shimErr?.message || shimErr);
+}
 
 /**
  * Renders the first N PDF pages to PNG buffers for Tesseract (scanned / image-only PDFs).
@@ -818,16 +861,21 @@ const renderPdfPagesToPngBuffers = async (buffer) => {
 
 /** OCR several image buffers; try eng+heb first, then eng if the result is empty (Hebrew pack can fail offline). */
 const ocrImageBuffersWithSharedWorker = async (buffers) => {
-  if (!buffers || !buffers.length) return '';
+  const usable = filterOcrImageBuffers(buffers);
+  if (!usable.length) return '';
   const runWithLang = async (langs) => {
-    const worker = await createWorker(langs);
+    const worker = await createSafeOcrWorker(langs);
     try {
       const parts = [];
-      for (let i = 0; i < buffers.length; i += 1) {
-        // eslint-disable-next-line no-await-in-loop
-        const { data } = await worker.recognize(buffers[i]);
-        const t = (data?.text || '').trim();
-        if (t) parts.push(t);
+      for (let i = 0; i < usable.length; i += 1) {
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          const { data } = await worker.recognize(usable[i]);
+          const t = (data?.text || '').trim();
+          if (t) parts.push(t);
+        } catch (pageErr) {
+          console.warn('[pdf-ocr-page-error]', i + 1, pageErr?.message || pageErr);
+        }
       }
       return normalizeResumeSearchText(parts.join('\n'));
     } finally {
@@ -841,7 +889,7 @@ const ocrImageBuffersWithSharedWorker = async (buffers) => {
     }
     return text;
   } catch (err) {
-    console.error('[pdf-ocr-error]', err.message || err);
+    console.warn('[pdf-ocr-error]', err?.message || err);
     return '';
   }
 };
@@ -872,7 +920,10 @@ const extractJpegBuffersFromBinary = (buf) => {
       }
     }
     if (end > start && end - start >= MIN_JPEG_OCR_BYTES) {
-      found.push(Buffer.from(u8.subarray(start, end)));
+      const slice = Buffer.from(u8.subarray(start, end));
+      if (isLikelyValidJpegBuffer(slice)) {
+        found.push(slice);
+      }
       i = end;
     } else {
       i += 1;
@@ -915,7 +966,7 @@ const extractTextFromScannedPdfBuffer = async (buffer) => {
   return fromRender;
 };
 
-/** Text layer from pdf-parse; if too short, render pages and OCR (image-only / scanned PDFs). */
+/** Text layer: pdf-parse + poppler pdftotext; OCR when all extracts are short or low quality. */
 const extractTextFromPdfBuffer = async (buffer) => {
   let fromParse = '';
   try {
@@ -924,22 +975,69 @@ const extractTextFromPdfBuffer = async (buffer) => {
   } catch (e) {
     console.log('[embed-parse-pdf-error]', e.message || e);
   }
-  if (fromParse.length >= PDF_TEXT_MIN_TO_SKIP_OCR) return normalizeResumeSearchText(fromParse);
+
+  let fromPopplerLayout = '';
+  let fromPopplerPlain = '';
+  try {
+    const poppler = await extractWithPdftotextVariants(buffer);
+    fromPopplerLayout = poppler.layout || '';
+    fromPopplerPlain = poppler.plain || '';
+  } catch (e) {
+    console.log('[pdftotext-error]', e.message || e);
+  }
+
+  const parseFixed = fromParse ? fixCharReversedHebrewText(fromParse) : '';
+  const popplerLayoutFixed = fromPopplerLayout ? fixCharReversedHebrewText(fromPopplerLayout) : '';
+  const popplerPlainFixed = fromPopplerPlain ? fixCharReversedHebrewText(fromPopplerPlain) : '';
+
+  const best = pickBestResumeTextExtract([
+    { text: parseFixed, source: 'pdf-parse' },
+    { text: popplerLayoutFixed, source: 'pdftotext-layout' },
+    { text: popplerPlainFixed, source: 'pdftotext-plain' },
+  ]);
+
+  let chosen = best.text || '';
+  if (best.source) {
+    console.log('[pdf-extract] selected', {
+      source: best.source,
+      score: best.score,
+      length: chosen.length,
+    });
+  }
+
+  const shouldTryOcr =
+    !chosen
+    || chosen.length < PDF_TEXT_MIN_TO_SKIP_OCR
+    || isUnreliableResumeTextExtract(chosen);
+
+  if (!shouldTryOcr) {
+    return normalizeResumeSearchText(chosen);
+  }
+
   let fromOcr = '';
   try {
     fromOcr = await extractTextFromScannedPdfBuffer(buffer);
+    if (fromOcr) fromOcr = fixCharReversedHebrewText(fromOcr);
   } catch (e) {
     console.log('[scanned-pdf-ocr-fallback-error]', e.message || e);
   }
-  if (fromOcr.length > fromParse.length) return normalizeResumeSearchText(fromOcr);
-  if (fromOcr) return normalizeResumeSearchText(fromOcr);
-  if (fromParse) return normalizeResumeSearchText(fromParse);
-  if (!fromOcr && !fromParse) {
-    console.warn('[pdf-extract-empty]', {
-      byteLength: buffer.length,
-      headAscii: buffer.slice(0, Math.min(12, buffer.length)).toString('latin1'),
-    });
+
+  const ocrPick = pickBestResumeTextExtract([
+    { text: chosen, source: best.source },
+    { text: fromOcr, source: 'ocr' },
+  ]);
+  chosen = ocrPick.text || '';
+
+  if (ocrPick.source === 'ocr' && chosen) {
+    console.log('[pdf-extract] OCR beat text layer', { length: chosen.length, score: ocrPick.score });
   }
+
+  if (chosen) return normalizeResumeSearchText(chosen);
+
+  console.warn('[pdf-extract-empty]', {
+    byteLength: buffer.length,
+    headAscii: buffer.slice(0, Math.min(12, buffer.length)).toString('latin1'),
+  });
   return '';
 };
 
@@ -2387,6 +2485,15 @@ const listRelatedCandidates = async (req, res) => {
   }
 };
 
+const listProfileVersions = async (req, res) => {
+  try {
+    const rows = await candidateService.listProfileVersionsForCandidate(req.params.id);
+    res.json(rows);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list profile versions' });
+  }
+};
+
 
 const getCandidateTagsSchemaText = () => `
 Candidate tag schema (from backend/src/models/SystemTag.js):
@@ -2408,14 +2515,9 @@ Use this schema as guidance when tagging professional skills or roles.
 
 
 const get = async (req, res) => {
-  console.log(
-    '[candidateController.get] incoming request',
-    { method: req.method, url: req.originalUrl, host: req.get('host'), candidateId: req.params.id },
-  );
   try {
     const tenantClientId = await getStaffClientIdFromRequest(req);
     const candidate = await candidateService.getById(req.params.id, { tenantClientId });
-    console.log('[candidateController.get] found candidate', { id: candidate.id });
     const out = { ...candidate };
     delete out.embedding;
     res.json(out);
@@ -2429,7 +2531,7 @@ const create = async (req, res) => {
   try {
     const sendWelcome = req.body?.sendWelcomeEmail !== false;
     const allowProfileVersion = req.body?.allowProfileVersion === true;
-    const candidate = await candidateService.create(req.body, { allowProfileVersion });
+    const candidate = await candidateService.create(req.body, { allowProfileVersion, req });
     const identityReused = Boolean(candidate?._identityReused);
     const identityLinked = Boolean(candidate?._identityLinked);
     const identityAttached = identityReused || identityLinked;
@@ -2501,7 +2603,6 @@ const create = async (req, res) => {
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome && !identityAttached) {
       messageTemplateService.queueCandidateWelcomeEmail(enrichedAfter, {
-        sendWelcomeEmail: true,
         clientId: welcomeClientId,
         ...welcomePlaceholderContextFromRequest(req),
       });
@@ -2796,11 +2897,15 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     finalCandidateId = createdCandidate.id;
     try {
       const latestForIdentity = await candidateService.getById(finalCandidateId);
-      const identityResult = await candidateService.mergeIfDuplicateIdentity(finalCandidateId, {
-        email: latestForIdentity?.email,
-        phone: latestForIdentity?.phone,
-        idNumber: latestForIdentity?.idNumber,
-      });
+      const identityResult = await candidateService.mergeIfDuplicateIdentity(
+        finalCandidateId,
+        {
+          email: latestForIdentity?.email,
+          phone: latestForIdentity?.phone,
+          idNumber: latestForIdentity?.idNumber,
+        },
+        { linkAsProfileVersion: true },
+      );
       if (identityResult.merged) {
         finalCandidateId = identityResult.candidateId;
         identityAttached = true;
@@ -2835,7 +2940,6 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     });
     if (sendWelcome && !identityAttached && !portalAccountExists) {
       messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, {
-        sendWelcomeEmail: true,
         clientId: welcomeClientId,
         ...welcomePlaceholderContextFromRequest(req),
       });
@@ -2854,6 +2958,9 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     };
   } finally {
     await clearCandidateIngestPending(finalCandidateId);
+    if (String(stubId) !== String(finalCandidateId)) {
+      await clearCandidateIngestPending(stubId);
+    }
   }
 };
 
@@ -2876,6 +2983,15 @@ const createFromAi = async (req, res) => {
         const hashMatch = await findCandidateByResumeContentHash(resumeContentHash);
         if (hashMatch) {
           const primary = await resolvePrimaryFromHashMatch(hashMatch);
+          try {
+            await recordDuplicateResumeHashIngest(req, {
+              primaryCandidateId: primary.id,
+              source: strOrNull(req.body?.source) || 'ai-upload',
+              fileName: fileName || null,
+            });
+          } catch (evtErr) {
+            console.warn('[createFromAi] duplicate hash journal failed', evtErr?.message || evtErr);
+          }
           const enriched = await candidateService.getById(primary.id);
           return res.status(200).json({
             candidate: enriched,
@@ -2908,7 +3024,7 @@ const createFromAi = async (req, res) => {
     };
     if (portalUserIdEarly) stubPayload.userId = portalUserIdEarly;
     if (portalProfileNameEarly) stubPayload.title = portalProfileNameEarly;
-    const stubRow = await candidateService.create(stubPayload, { allowProfileVersion });
+    const stubRow = await candidateService.create(stubPayload, { allowProfileVersion, req });
     const stubId = stubRow.id;
 
     if (fileBase64) {
@@ -2963,10 +3079,22 @@ const saveParsedText = async (req, res) => {
     if (embedText.length > 3) {
       void tryEmbedCandidate(updated.id, embedText);
     }
-    const refreshed = await candidateService.getById(updated.id);
-    res.json(refreshed);
+    res.json(updated);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Save failed' });
+  }
+};
+
+/** DELETE /api/candidates/:id/parsed-text/history/:index — remove one prior parsed-text version. */
+const deleteParsedTextHistoryVersion = async (req, res) => {
+  try {
+    const updated = await candidateService.deleteParsedTextHistoryVersion(
+      req.params.id,
+      req.params.index,
+    );
+    res.json(updated);
+  } catch (err) {
+    res.status(err.status || 400).json({ message: err.message || 'Delete failed' });
   }
 };
 
@@ -3274,7 +3402,6 @@ const createUploadUrl = async (req, res) => {
         const candidateRow = await candidateService.getById(req.params.id);
         const welcomeClientId = await getStaffClientIdFromRequest(req);
         messageTemplateService.queueCandidateWelcomeEmail(candidateRow, {
-          sendWelcomeEmail: true,
           onlyIfNoResume: true,
           clientId: welcomeClientId,
           ...welcomePlaceholderContextFromRequest(req),
@@ -3308,36 +3435,47 @@ const attachMedia = async (req, res) => {
     if (type === 'resume') attachUpdates.resumeUploadedAt = new Date();
     const baseCandidate = await candidateService.update(req.params.id, attachUpdates);
     if (type === 'resume') {
-      let extraText = '';
-      let pdfBuffer = null;
-      try {
-        const bin = await fetchResumeBinaryForMail(url, baseCandidate.id);
-        if (bin?.buffer?.length) {
-          if (isPdfUploadBuffer(bin.buffer, bin.contentType)) pdfBuffer = bin.buffer;
-          if ((bin.contentType || '').startsWith('image/')) {
-            extraText = await extractTextFromImageBuffer(bin.buffer);
-          } else {
-            extraText = await extractFromBuffer(bin.buffer, bin.contentType);
-          }
-        }
-      } catch (e) {
-        console.warn('[attachMedia] binary extract failed, falling back to fetchResumeText', e?.message || e);
-      }
-      if (!String(extraText || '').trim()) {
-        extraText = await fetchResumeText(url, baseCandidate.id);
-      }
-      console.log('[attachMedia] resume extraText length', baseCandidate.id, extraText ? extraText.length : 0, {
-        hasPdfBuffer: Boolean(pdfBuffer),
-        unreliableText: isUnreliableResumeTextExtract(extraText),
-      });
-      // Prefer client-provided original name; S3 keys often keep ".../original-name.pdf"
       const resumeFileName = bodyFileName || bodyFilename || path.basename(String(key || ''));
-      const refreshedCandidate = await enrichCandidateFromResumeText(baseCandidate, extraText || '', {
-        pdfBuffer: pdfBuffer || undefined,
-        fileName: resumeFileName,
+      const candidateId = baseCandidate.id;
+      void (async () => {
+        let extraText = '';
+        let pdfBuffer = null;
+        try {
+          const bin = await fetchResumeBinaryForMail(url, candidateId);
+          if (bin?.buffer?.length) {
+            if (isPdfUploadBuffer(bin.buffer, bin.contentType)) pdfBuffer = bin.buffer;
+            if ((bin.contentType || '').startsWith('image/')) {
+              extraText = await extractTextFromImageBuffer(bin.buffer);
+            } else {
+              extraText = await extractFromBuffer(bin.buffer, bin.contentType);
+            }
+          }
+        } catch (e) {
+          console.warn('[attachMedia] binary extract failed, falling back to fetchResumeText', e?.message || e);
+        }
+        if (!String(extraText || '').trim()) {
+          extraText = await fetchResumeText(url, candidateId);
+        }
+        console.log('[attachMedia] resume extraText length', candidateId, extraText ? extraText.length : 0, {
+          hasPdfBuffer: Boolean(pdfBuffer),
+          unreliableText: isUnreliableResumeTextExtract(extraText),
+        });
+        await runAttachMediaResumeEnrichment(
+          candidateId,
+          baseCandidate,
+          { extraText, pdfBuffer, fileName: resumeFileName },
+          req,
+        );
+      })().catch((err) => {
+        console.error('[attachMedia-enrich-bg-unhandled]', candidateId, err?.message || err);
       });
-      await candidateCompletenessService.refreshCandidateDataStatusAfterSave(baseCandidate.id, req);
-      return res.json(refreshedCandidate);
+
+      const pendingView = await candidateService.getById(candidateId);
+      return res.status(202).json({
+        ...pendingView,
+        ingestPending: true,
+        processing: true,
+      });
     }
     res.json(baseCandidate);
   } catch (err) {
@@ -3564,8 +3702,30 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
   }
   void tryEmbedCandidate(baseCandidate.id, extraText);
   const refreshedCandidate = await candidateService.getById(baseCandidate.id);
-  await ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id);
+  void ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id);
   return refreshedCandidate;
+};
+
+/** Background CV parse after resume URL is saved — keeps attachMedia HTTP fast. */
+const runAttachMediaResumeEnrichment = async (candidateId, baseCandidate, enrichCtx, req) => {
+  try {
+    await candidateService.update(candidateId, { ingestPending: true });
+    const refreshedCandidate = await enrichCandidateFromResumeText(
+      baseCandidate,
+      enrichCtx.extraText || '',
+      {
+        pdfBuffer: enrichCtx.pdfBuffer,
+        fileName: enrichCtx.fileName,
+      },
+    );
+    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidateId, req);
+    return refreshedCandidate;
+  } catch (err) {
+    console.error('[attachMedia-enrich-bg]', candidateId, err?.message || err);
+    throw err;
+  } finally {
+    await clearCandidateIngestPending(candidateId);
+  }
 };
 
 // Rebuild embeddings for all candidates with resumeUrl (best-effort)
@@ -4306,7 +4466,11 @@ const generateInternalOpinion = async (req, res) => {
       return res.status(500).json({ message: 'Gemini API key not configured' });
     }
 
+    const body = req.body || {};
     const promptRow = await promptService.ensureById('internal_opinion');
+    if (!promptRow?.template && !(typeof body.customPrompt === 'string' && body.customPrompt.trim())) {
+      return res.status(404).json({ message: 'Prompt internal_opinion not found in AI Prompts' });
+    }
 
     const candidateSummary = [
       `שם: ${candidate.fullName || 'לא צוין'}`,
@@ -4316,7 +4480,6 @@ const generateInternalOpinion = async (req, res) => {
       `כישורים: ${JSON.stringify(candidate.skills || {}, null, 0)}`,
     ].join('\n');
 
-    const body = req.body || {};
     const jobContext = body.jobTitle || body.title
       ? [
           `משרה: ${body.jobTitle || body.title}`,
@@ -4337,21 +4500,25 @@ const generateInternalOpinion = async (req, res) => {
     const rawDraft = String(body.currentDraft || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const currentDraftText = rawDraft || '';
 
-    const template = promptRow.template;
+    const template = promptRow?.template || '';
+    const customPromptRaw = typeof body.customPrompt === 'string' ? body.customPrompt.trim() : '';
 
+    const applyPromptVariables = (raw) =>
+      String(raw || '')
+        .replace(/\{\{candidate_summary\}\}/g, candidateSummary)
+        .replace(/\{\{job_context\}\}/g, jobContext)
+        .replace(/\{\{screening_answers\}\}/g, screeningAnswersText)
+        .replace(/\{\{current_draft\}\}/g, currentDraftText || 'אין');
 
-
-    let systemPrompt = template
-      .replace(/\{\{candidate_summary\}\}/g, candidateSummary)
-      .replace(/\{\{job_context\}\}/g, jobContext)
-      .replace(/\{\{screening_answers\}\}/g, screeningAnswersText)
-      .replace(/\{\{current_draft\}\}/g, currentDraftText || 'אין');
+    let systemPrompt = customPromptRaw
+      ? applyPromptVariables(customPromptRaw)
+      : applyPromptVariables(template);
 
     // If the template predates the new variables, append them so they're always available.
-    if (!template.includes('{{screening_answers}}') && screeningAnswersText !== 'אין תשובות לשאלון') {
+    if (!customPromptRaw && !template.includes('{{screening_answers}}') && screeningAnswersText !== 'אין תשובות לשאלון') {
       systemPrompt += `\n\nתשובות המועמד לשאלון הסינון:\n${screeningAnswersText}`;
     }
-    if (!template.includes('{{current_draft}}') && currentDraftText) {
+    if (!customPromptRaw && !template.includes('{{current_draft}}') && currentDraftText) {
       systemPrompt += `\n\nטיוטה קיימת שכתב/ה הרכז/ת (שכתב והרחב לחוות דעת מקצועית אחת):\n${currentDraftText}`;
     }
 
@@ -5428,6 +5595,7 @@ module.exports = {
   listByWorkedAtCompany,
   getByUser,
   listRelatedCandidates,
+  listProfileVersions,
   get,
   create,
   createFromAi,
@@ -5435,6 +5603,7 @@ module.exports = {
   approveProfileByCandidate,
   patchPipelineStage,
   saveParsedText,
+  deleteParsedTextHistoryVersion,
   approveDataCorrections,
   remove,
   createUploadUrl,

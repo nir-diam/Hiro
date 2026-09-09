@@ -1,6 +1,12 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
 import { authHeaders } from '../utils/authHeaders';
+import JobDetailsDrawer from './JobDetailsDrawer';
+import {
+    buildFallbackJobForDrawer,
+    mapApiRecordToJobDetailsDrawerJob,
+    type JobDetailsDrawerJob,
+} from '../utils/jobDetailsDrawerUtils';
 import {
     fetchJobHealthPulse,
     type JobHealthColor,
@@ -151,10 +157,14 @@ const mapApiJob = (row: any): Job => {
     };
 };
 
-const JobCard: React.FC<{ job: Job; pulse?: JobHealthPulseDto | null }> = ({ job, pulse }) => {
+const JobCard: React.FC<{ job: Job; pulse?: JobHealthPulseDto | null; onOpen: () => void }> = ({ job, pulse, onOpen }) => {
     const { bg, text } = statusStyles[job.status];
     return (
-        <div className="bg-bg-card rounded-lg border border-border-default shadow-sm p-4 cursor-pointer hover:shadow-md transition-shadow">
+        <button
+            type="button"
+            onClick={onOpen}
+            className="w-full text-right bg-bg-card rounded-lg border border-border-default shadow-sm p-4 cursor-pointer hover:shadow-md hover:border-primary-200 transition-all"
+        >
             <div className="flex justify-between items-start gap-2">
                 <div>
                     <p className="font-semibold text-primary-700">{job.title}</p>
@@ -171,7 +181,7 @@ const JobCard: React.FC<{ job: Job; pulse?: JobHealthPulseDto | null }> = ({ job
                 <div><p className="text-text-muted">פתוחה (ימים)</p><p className="font-bold text-text-default">{job.daysOpen}</p></div>
                 <div><p className="text-text-muted">פעילות אחרונה</p><p className="font-bold text-text-default">{job.lastActivity}</p></div>
             </div>
-        </div>
+        </button>
     );
 };
 
@@ -179,6 +189,8 @@ interface ClientJobsTabProps {
     /** When set, loads jobs for this single organization (optionally scoped by clientId). */
     organizationId?: string;
     clientId?: string;
+    /** When set with clientId, loads jobs that list this contact in job.contacts. */
+    contactId?: string;
     /** Admin: load jobs for every organization linked to this client. */
     allLinkedOrganizations?: boolean;
 }
@@ -186,6 +198,7 @@ interface ClientJobsTabProps {
 const ClientJobsTab: React.FC<ClientJobsTabProps> = ({
     organizationId,
     clientId,
+    contactId,
     allLinkedOrganizations = false,
 }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -196,23 +209,58 @@ const ClientJobsTab: React.FC<ClientJobsTabProps> = ({
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
-    const useLiveJobs = Boolean(allLinkedOrganizations ? clientId : organizationId);
+    const useLiveJobs = Boolean(
+        allLinkedOrganizations ? clientId : organizationId || (clientId && contactId),
+    );
     const [jobs, setJobs] = useState<Job[]>([]);
     const [loading, setLoading] = useState(useLiveJobs);
     const [error, setError] = useState<string | null>(null);
     const [jobPulseById, setJobPulseById] = useState<Record<string, JobHealthPulseDto>>({});
+    const [drawerJob, setDrawerJob] = useState<JobDetailsDrawerJob | null>(null);
+    const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+
+    const openJobDrawer = useCallback(
+        async (job: Job) => {
+            const jobId = String(job.jobUuid || '').trim();
+            if (!jobId) return;
+            setDrawerJob(buildFallbackJobForDrawer(jobId, job.title));
+            setIsDrawerOpen(true);
+            if (!apiBase) return;
+            try {
+                const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}`, {
+                    headers: authHeaders(true),
+                    cache: 'no-store',
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                const raw = (data?.job ?? data) as Record<string, unknown>;
+                if (raw && typeof raw === 'object') {
+                    setDrawerJob(
+                        mapApiRecordToJobDetailsDrawerJob(raw, { jobId, jobTitle: job.title }),
+                    );
+                }
+            } catch {
+                /* keep fallback */
+            }
+        },
+        [apiBase],
+    );
 
     useEffect(() => {
         if (!apiBase) return;
+        const contactUrl =
+            clientId && contactId
+                ? `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}/jobs`
+                : null;
         const linkedUrl = allLinkedOrganizations && clientId
             ? `${apiBase}/api/clients/${encodeURIComponent(clientId)}/linked-jobs`
             : null;
-        const orgUrl = !linkedUrl && organizationId
+        const orgUrl = !linkedUrl && !contactUrl && organizationId
             ? `${apiBase}/api/organizations/${encodeURIComponent(organizationId)}/jobs${
                 clientId ? `?clientId=${encodeURIComponent(clientId)}` : ''
               }`
             : null;
-        const url = linkedUrl || orgUrl;
+        const url = contactUrl || linkedUrl || orgUrl;
         if (!url) {
             setJobs([]);
             setLoading(false);
@@ -240,7 +288,7 @@ const ClientJobsTab: React.FC<ClientJobsTabProps> = ({
                 if (active) setLoading(false);
             });
         return () => { active = false; };
-    }, [apiBase, organizationId, clientId, allLinkedOrganizations]);
+    }, [apiBase, organizationId, clientId, contactId, allLinkedOrganizations]);
 
     useEffect(() => {
         if (!clientId || !jobs.length) {
@@ -354,7 +402,18 @@ const ClientJobsTab: React.FC<ClientJobsTabProps> = ({
                     </div>
                 );
             case 'title':
-                return <span className="font-semibold text-primary-700">{job.title}</span>;
+                return (
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            void openJobDrawer(job);
+                        }}
+                        className="font-semibold text-primary-700 hover:underline text-right"
+                    >
+                        {job.title}
+                    </button>
+                );
             case 'status':
                 const { bg, text } = statusStyles[job.status];
                 return <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${bg} ${text}`}>{job.status}</span>;
@@ -434,7 +493,11 @@ const ClientJobsTab: React.FC<ClientJobsTabProps> = ({
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
                                 {sortedJobs.map(job => (
-                                    <tr key={job.jobUuid || String(job.id)} className="hover:bg-bg-hover">
+                                    <tr
+                                        key={job.jobUuid || String(job.id)}
+                                        className="hover:bg-bg-hover cursor-pointer"
+                                        onClick={() => void openJobDrawer(job)}
+                                    >
                                         {visibleColumns.map(colId => (
                                             <td key={colId} className="p-4 text-text-muted">{renderCell(job, colId)}</td>
                                         ))}
@@ -450,11 +513,17 @@ const ClientJobsTab: React.FC<ClientJobsTabProps> = ({
                                 key={job.jobUuid || String(job.id)}
                                 job={job}
                                 pulse={jobPulseById[job.jobUuid]}
+                                onOpen={() => void openJobDrawer(job)}
                             />
                         ))}
                     </div>
                 )}
             </main>
+            <JobDetailsDrawer
+                job={drawerJob}
+                isOpen={isDrawerOpen}
+                onClose={() => setIsDrawerOpen(false)}
+            />
         </div>
     );
 };

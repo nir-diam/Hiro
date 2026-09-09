@@ -35,6 +35,12 @@ import {
     type ScreeningJobLanguageRow,
 } from '../utils/jobTagMatchCategories';
 import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
+import {
+    MATCH_SCORE_POPUP_WIDTH,
+    matchScorePopupPositionFromEvent,
+    useMatchScorePopupDismiss,
+} from './MatchScorePopup';
+import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
 
 export { buildResumeDataFromCandidate };
 export type { ScreeningJobSkillRow, ScreeningJobLanguageRow };
@@ -231,6 +237,8 @@ function screeningMetricLabelHe(code: string): string {
     affinity: 'הגשה / התאמת תחום',
     mandatory_skill: 'כישורי חובה',
     negative_skill: 'כישורים שליליים',
+    candidate_mandatory_tag: 'תגית חובה בפרופיל המועמד',
+    candidate_negative_tag: 'תגית שלילית בפרופיל המועמד',
     no_cv: 'קובץ קו״ח',
     license: 'רישיון נהיגה',
     age_unknown: 'גיל',
@@ -708,11 +716,12 @@ function screeningMetricValueClass(tone: ScreeningCardMetricTone): string {
 
 const MatchScoreExplanation: React.FC<{
   job: ScreeningJob;
+  position: { x: number; y: number };
   t: (key: string, opts?: Record<string, string>) => string;
   onClose: () => void;
   onReanalyze: () => void;
   analyzing: boolean;
-}> = ({ job, t, onClose, onReanalyze, analyzing }) => {
+}> = ({ job, position, t, onClose, onReanalyze, analyzing }) => {
   const checks = job.evaluationChecks || [];
   const failed = checks.filter((c) => !c.ok);
   const summary =
@@ -720,14 +729,28 @@ const MatchScoreExplanation: React.FC<{
       ? 'כל בדיקות הסינון האוטומטי עברו — המשרה כלולה במסלול הסינון.'
       : `${failed.length} בדיקות דורשות תשומת לב לפני המשך טיפול במועמד.`;
 
+  const popupStyle = useMemo(() => {
+    if (typeof window === 'undefined') {
+      return { top: position.y, left: position.x, transform: 'translate(-50%, calc(-100% - 12px))' as const };
+    }
+    const left = clampCenteredPopoverX(position.x, MATCH_SCORE_POPUP_WIDTH);
+    const top = Math.max(12, position.y);
+    return { top, left, transform: 'translate(-50%, calc(-100% - 12px))' as const };
+  }, [position.x, position.y]);
+
   return (
     <div
-      className="match-score-popup-content absolute z-[100] top-[44px] left-0 md:left-auto md:right-0 w-[min(100vw-2rem,20rem)] bg-white rounded-2xl shadow-2xl border border-border-default overflow-visible animate-in fade-in zoom-in duration-200"
+      className="match-score-popup fixed z-[1000] w-72 max-h-[min(75vh,28rem)] text-right pointer-events-auto animate-fade-in"
+      style={popupStyle}
       onClick={(e) => e.stopPropagation()}
       dir="rtl"
     >
-      <div className="absolute -top-2 left-8 w-4 h-4 bg-bg-subtle border-t border-l border-border-default rotate-45 z-0" />
-      <div className="relative z-10 bg-white rounded-2xl overflow-hidden">
+      <div className="relative overflow-hidden rounded-xl shadow-xl border border-border-default bg-bg-card">
+        <div
+          className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-bg-card border-b border-r border-border-default rotate-45 pointer-events-none z-10"
+          aria-hidden
+        />
+        <div className="relative z-10 bg-bg-card rounded-2xl overflow-hidden max-h-[min(75vh,28rem)] overflow-y-auto custom-scrollbar">
         <div className="p-3 border-b border-border-default flex items-center justify-between bg-bg-subtle/50">
           <div className="flex items-center gap-2 min-w-0">
             <SparklesIcon className="w-5 h-5 text-accent-600 shrink-0" />
@@ -800,6 +823,7 @@ const MatchScoreExplanation: React.FC<{
             </button>
           </div>
         </div>
+        </div>
       </div>
     </div>
   );
@@ -816,6 +840,7 @@ const AIMatchScore: React.FC<{ score: number; onOpen?: (e: React.MouseEvent) => 
         <button
             type="button"
             className={`match-score-popup-trigger flex items-center justify-center gap-1.5 text-sm font-bold px-2.5 py-1 rounded-full ${bgColor} ${scoreColor} hover:ring-2 hover:ring-offset-1 hover:ring-accent-400 transition-all cursor-pointer`}
+            data-match-score-trigger
             onClick={(e) => {
               e.stopPropagation();
               onOpen?.(e);
@@ -936,7 +961,7 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
   };
 }
 
-/** Chips + send payload: always from current `job.contactsFromJob` (never a stale parallel cache). */
+/** Embedded job JSONB contacts from screening-pool (may be empty when CRM contacts exist on the client). */
 function contactsListFromScreeningJob(job: ScreeningJob): SendModalContact[] {
   const jid = String(job.id);
   const list = job.contactsFromJob ?? [];
@@ -950,8 +975,194 @@ function contactsListFromScreeningJob(job: ScreeningJob): SendModalContact[] {
     .filter((c) => c.name.length > 0);
 }
 
+async function fetchReferralContactsForJob(
+  apiBase: string,
+  token: string,
+  jobId: string,
+  clientIdHint?: string | null,
+): Promise<SendModalContact[]> {
+  const url = new URL(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}/referral-client-contacts`);
+  if (clientIdHint && String(clientIdHint).trim()) {
+    url.searchParams.set('clientId', String(clientIdHint).trim());
+  }
+  const res = await fetch(url.toString(), {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) return [];
+  const data = await res.json().catch(() => ({}));
+  const raw = Array.isArray(data?.contacts) ? data.contacts : [];
+  return raw
+    .map((c: { id?: string; name?: string; email?: string; role?: string }, i: number) => ({
+      id: String(c.id ?? `ref-${jobId}-${i}`),
+      name: String(c.name || '').trim(),
+      role: c.role != null ? String(c.role).trim() : '',
+      email: String(c.email || '').trim() || undefined,
+    }))
+    .filter((c) => c.name.length > 0);
+}
+
+function resolveClientIdFromCompanyLabel(
+  company: string,
+  clientsList: { id: string | number; name?: string; displayName?: string }[],
+  screeningClientId?: string | null,
+): string | null {
+  if (screeningClientId && String(screeningClientId).trim()) {
+    return String(screeningClientId).trim();
+  }
+  const c = company.trim();
+  if (!c || !clientsList.length) return null;
+  const norm = (s: string) => s.trim().toLowerCase();
+  const nc = norm(c);
+  for (const cl of clientsList) {
+    const name = norm(String(cl.displayName || cl.name || ''));
+    if (name === nc) return String(cl.id);
+  }
+  for (const cl of clientsList) {
+    const name = norm(String(cl.displayName || cl.name || ''));
+    if (name && (name.includes(nc) || nc.includes(name))) return String(cl.id);
+  }
+  const beforeParen = c.split('(')[0].trim();
+  const afterParen = c.replace(/^[^)]*\)\s*/, '').trim();
+  for (const fragment of [beforeParen, afterParen].filter((x) => x && x !== c)) {
+    const nf = norm(fragment);
+    for (const cl of clientsList) {
+      const name = norm(String(cl.displayName || cl.name || ''));
+      if (name === nf || (name && (name.includes(nf) || nf.includes(name)))) {
+        return String(cl.id);
+      }
+    }
+  }
+  return null;
+}
+
+async function fetchClientContactsForSendModal(
+  apiBase: string,
+  token: string,
+  clientId: string,
+): Promise<SendModalContact[]> {
+  const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts`, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) return [];
+  const list = await res.json().catch(() => []);
+  return (Array.isArray(list) ? list : [])
+    .filter((x: { isActive?: boolean }) => x.isActive !== false)
+    .map((x: { id: string; name?: string; role?: string; email?: string }) => ({
+      id: String(x.id),
+      name: String(x.name || '').trim(),
+      role: String(x.role || '').trim(),
+      email: String(x.email || '').trim() || undefined,
+    }))
+    .filter((x) => x.name.length > 0);
+}
+
+async function loadSendModalContactsForJobs(
+  apiBase: string,
+  token: string,
+  jobIds: (number | string)[],
+  jobs: ScreeningJob[],
+): Promise<Record<string, SendModalContact[]>> {
+  const result: Record<string, SendModalContact[]> = {};
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/json',
+  };
+
+  let clientsList: { id: string | number; name?: string; displayName?: string }[] = [];
+  try {
+    const res = await fetch(`${apiBase}/api/clients`, { headers, cache: 'no-store' });
+    if (res.ok) {
+      const data = await res.json();
+      clientsList = Array.isArray(data) ? data : [];
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const fetchedByClient = new Map<string, SendModalContact[]>();
+
+  await Promise.all(
+    jobIds.map(async (id) => {
+      const jid = String(id);
+      const job = jobs.find((j) => String(j.id) === jid);
+      if (!job) {
+        result[jid] = [];
+        return;
+      }
+
+      const embedded = contactsListFromScreeningJob(job);
+      if (embedded.length) {
+        result[jid] = embedded;
+        return;
+      }
+
+      const referral = await fetchReferralContactsForJob(
+        apiBase,
+        token,
+        jid,
+        job.screeningClientId ?? null,
+      );
+      if (referral.length) {
+        result[jid] = referral;
+        return;
+      }
+
+      const clientId = resolveClientIdFromCompanyLabel(
+        job.company,
+        clientsList,
+        job.screeningClientId ?? null,
+      );
+      if (clientId) {
+        if (!fetchedByClient.has(clientId)) {
+          fetchedByClient.set(clientId, await fetchClientContactsForSendModal(apiBase, token, clientId));
+        }
+        result[jid] = fetchedByClient.get(clientId) || [];
+        return;
+      }
+
+      result[jid] = [];
+    }),
+  );
+
+  return result;
+}
+
 function stripHtmlToText(html: string) {
   return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function decodeHtmlEntities(text: string): string {
+  if (typeof document === 'undefined') return text;
+  const el = document.createElement('textarea');
+  el.innerHTML = text;
+  return el.value;
+}
+
+/** Render job description HTML (handles plain text, HTML, or entity-escaped HTML). */
+function jobDescriptionMarkup(content: string): { __html: string } {
+  let html = String(content || '').trim();
+  if (!html) return { __html: '' };
+
+  if (!/<[a-z][\s\S]*>/i.test(html) && /&lt;|&gt;|&amp;lt;|&amp;gt;/.test(html)) {
+    html = decodeHtmlEntities(html);
+  }
+
+  if (!/<(p|ul|ol|div|h[1-6]|br)\b/i.test(html)) {
+    html = html.replace(/\n/g, '<br />');
+    html = html.replace(/^(.+):/gm, '<strong>$1:</strong>');
+  }
+
+  return { __html: html };
 }
 
 const REJECTION_REASONS = [
@@ -1001,11 +1212,19 @@ const CandidateScreeningView: React.FC<{
     const [rejectSubmitting, setRejectSubmitting] = useState(false);
     const [sendCvModalOpen, setSendCvModalOpen] = useState(false);
     const [sendModalJobIds, setSendModalJobIds] = useState<(number | string)[]>([]);
+    const [sendModalContactsByJob, setSendModalContactsByJob] = useState<
+      Record<string, SendModalContact[]>
+    >({});
+    const [sendModalContactsLoading, setSendModalContactsLoading] = useState(false);
     const [selectedContactsByJob, setSelectedContactsByJob] = useState<Record<string, Record<string, boolean>>>({});
     const [sendCvSubmitting, setSendCvSubmitting] = useState(false);
     const [sendAttachOriginalCv, setSendAttachOriginalCv] = useState(true);
     const [sendAttachSystemPdf, setSendAttachSystemPdf] = useState(false);
-    const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<number | string | null>(null);
+    const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<{
+      jobId: number | string;
+      x: number;
+      y: number;
+    } | null>(null);
     const [selectedJobForTags, setSelectedJobForTags] = useState<ScreeningJob | null>(null);
     const [tagMatchCandidateSnapshot, setTagMatchCandidateSnapshot] = useState<Record<
       string,
@@ -1040,14 +1259,8 @@ const CandidateScreeningView: React.FC<{
         return;
       }
       let cancelled = false;
-      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      const headers: Record<string, string> = { Accept: 'application/json' };
-      if (token) headers.Authorization = `Bearer ${token}`;
-      fetch(`${apiBase}/api/candidates/${encodeURIComponent(String(candidateId))}`, {
-        headers,
-        cache: 'no-store',
-      })
-        .then((res) => (res.ok ? res.json() : Promise.reject(new Error('candidate'))))
+      void import('../utils/staffCandidateApi')
+        .then(({ fetchStaffCandidateById }) => fetchStaffCandidateById(String(candidateId)))
         .then((data: Record<string, unknown>) => {
           if (!cancelled) setTagMatchCandidateSnapshot(data);
         })
@@ -1119,20 +1332,15 @@ const CandidateScreeningView: React.FC<{
       setSelectedJobForTags(null);
     }, [candidateId]);
 
-    useEffect(() => {
-      const handleClickOutside = (event: MouseEvent) => {
-        const target = event.target as Element;
-        if (
-          activeMatchScorePopup != null &&
-          !target.closest('.match-score-popup-trigger') &&
-          !target.closest('.match-score-popup-content')
-        ) {
-          setActiveMatchScorePopup(null);
-        }
-      };
-      document.addEventListener('mousedown', handleClickOutside);
-      return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [activeMatchScorePopup]);
+    useMatchScorePopupDismiss(Boolean(activeMatchScorePopup), () => setActiveMatchScorePopup(null));
+
+    const activeJobForMatchPopup = useMemo(
+      () =>
+        activeMatchScorePopup
+          ? jobs.find((j) => j.id === activeMatchScorePopup.jobId) ?? null
+          : null,
+      [activeMatchScorePopup, jobs],
+    );
 
     useEffect(() => {
       if (!candidateId || !apiBase || jobs.length === 0) return;
@@ -1283,7 +1491,10 @@ const CandidateScreeningView: React.FC<{
     );
 
     const requestGeneratedInternalOpinionHtml = useCallback(
-      async (job: ScreeningJob): Promise<{ html: string | null; errorMessage?: string }> => {
+      async (
+        job: ScreeningJob,
+        options?: { customPrompt?: string },
+      ): Promise<{ html: string | null; errorMessage?: string }> => {
         if (!candidateId || !apiBase) {
           return { html: null, errorMessage: 'לא זמין: יש לטעון מועמד מהמערכת.' };
         }
@@ -1310,6 +1521,7 @@ const CandidateScreeningView: React.FC<{
               requirements: job.requirements,
               screeningAnswers,
               currentDraft: currentDraftHtml,
+              ...(options?.customPrompt ? { customPrompt: options.customPrompt } : {}),
             }),
           });
           const data = await res.json().catch(() => ({}));
@@ -1382,11 +1594,15 @@ const CandidateScreeningView: React.FC<{
       }
     }, [opinionEditJob, opinionEditDraft, persistInternalOpinion, closeOpinionEditor]);
 
-    const handleRegenerateOpinionInModal = useCallback(async () => {
+    const handleRegenerateOpinionInModal = useCallback(
+      async (options: { useDefaultPrompt: boolean; customPrompt?: string }) => {
       if (!opinionEditJob) return;
       setOpinionEditRegenerating(true);
       try {
-        const { html, errorMessage } = await requestGeneratedInternalOpinionHtml(opinionEditJob);
+        const { html, errorMessage } = await requestGeneratedInternalOpinionHtml(
+          opinionEditJob,
+          options.useDefaultPrompt ? undefined : { customPrompt: options.customPrompt },
+        );
         if (html) {
           setOpinionEditDraft(html);
           setInternalOpinionByJobId((prev) => ({ ...prev, [String(opinionEditJob.id)]: html }));
@@ -1513,14 +1729,56 @@ const CandidateScreeningView: React.FC<{
       closeRejectModal,
     ]);
 
+    const getSendModalContacts = useCallback(
+      (job: ScreeningJob): SendModalContact[] => {
+        const jid = String(job.id);
+        if (Object.prototype.hasOwnProperty.call(sendModalContactsByJob, jid)) {
+          return sendModalContactsByJob[jid];
+        }
+        return contactsListFromScreeningJob(job);
+      },
+      [sendModalContactsByJob],
+    );
+
+    useEffect(() => {
+      if (!sendCvModalOpen || sendModalJobIds.length === 0 || !apiBase) {
+        setSendModalContactsByJob({});
+        setSendModalContactsLoading(false);
+        return;
+      }
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      if (!token) {
+        setSendModalContactsByJob({});
+        setSendModalContactsLoading(false);
+        return;
+      }
+
+      let cancelled = false;
+      setSendModalContactsLoading(true);
+
+      void (async () => {
+        try {
+          const next = await loadSendModalContactsForJobs(apiBase, token, sendModalJobIds, jobs);
+          if (cancelled) return;
+          setSendModalContactsByJob(next);
+        } finally {
+          if (!cancelled) setSendModalContactsLoading(false);
+        }
+      })();
+
+      return () => {
+        cancelled = true;
+      };
+    }, [sendCvModalOpen, sendModalJobIds.join(','), apiBase, jobs]);
+
     useLayoutEffect(() => {
-      if (!sendCvModalOpen || sendModalJobIds.length === 0) return;
+      if (!sendCvModalOpen || sendModalJobIds.length === 0 || sendModalContactsLoading) return;
       const selectedJobObjs = jobs.filter((j) => sendModalJobIds.includes(j.id));
       setSelectedContactsByJob((prev) => {
         const next: Record<string, Record<string, boolean>> = {};
         for (const job of selectedJobObjs) {
           const jid = String(job.id);
-          const contacts = contactsListFromScreeningJob(job);
+          const contacts = getSendModalContacts(job);
           const row: Record<string, boolean> = {};
           for (const c of contacts) {
             const was = prev[jid]?.[c.id];
@@ -1530,11 +1788,13 @@ const CandidateScreeningView: React.FC<{
         }
         return next;
       });
-    }, [sendCvModalOpen, sendModalJobIds.join(','), jobs]);
+    }, [sendCvModalOpen, sendModalJobIds.join(','), jobs, sendModalContactsLoading, getSendModalContacts]);
 
     const closeSendCvModal = useCallback(() => {
       setSendCvModalOpen(false);
       setSendModalJobIds([]);
+      setSendModalContactsByJob({});
+      setSendModalContactsLoading(false);
       setSelectedContactsByJob({});
       setSendCvSubmitting(false);
       setSendAttachOriginalCv(true);
@@ -1567,7 +1827,7 @@ const CandidateScreeningView: React.FC<{
       for (const id of jobIds) {
         const jid = String(id);
         const job = jobs.find((j) => String(j.id) === String(id));
-        const list = job ? contactsListFromScreeningJob(job) : [];
+        const list = job ? getSendModalContacts(job) : [];
        
         const map = selectedContactsByJob[jid];
         const n = map ? Object.entries(map).filter(([, v]) => v).length : 0;
@@ -1635,7 +1895,7 @@ const CandidateScreeningView: React.FC<{
 
         const payload = jobIds.map((id) => {
           const job = jobs.find((j) => String(j.id) === String(id));
-          const contacts = job ? contactsListFromScreeningJob(job) : [];
+          const contacts = job ? getSendModalContacts(job) : [];
           const sel = selectedContactsByJob[String(id)] || {};
           const sc = job ? getScreeningForJob(job) : { answers: [] as string[], telephoneImpression: '' };
           return {
@@ -1695,6 +1955,7 @@ const CandidateScreeningView: React.FC<{
       sendModalJobIds,
       selectedContactsByJob,
       jobs,
+      getSendModalContacts,
       internalOpinionByJobId,
       getScreeningForJob,
       candidateId,
@@ -1717,14 +1978,16 @@ const CandidateScreeningView: React.FC<{
     );
 
     const sendCvBlockedNoJobContacts = useMemo(
-      () => sendModalJobs.some((j) => contactsListFromScreeningJob(j).length === 0),
-      [sendModalJobs]
+      () =>
+        !sendModalContactsLoading &&
+        sendModalJobs.some((j) => getSendModalContacts(j).length === 0),
+      [sendModalJobs, sendModalContactsLoading, getSendModalContacts],
     );
 
     const sendCvBlockedMissingRecipientEmail = useMemo(() => {
       for (const j of sendModalJobs) {
         const jid = String(j.id);
-        const list = contactsListFromScreeningJob(j);
+        const list = getSendModalContacts(j);
         const sel = selectedContactsByJob[jid] || {};
         for (const c of list) {
           if (!sel[c.id]) continue;
@@ -1733,7 +1996,7 @@ const CandidateScreeningView: React.FC<{
         }
       }
       return false;
-    }, [sendModalJobs, selectedContactsByJob]);
+    }, [sendModalJobs, selectedContactsByJob, getSendModalContacts]);
 
     const sendCvSendDisabled =
       sendCvBlockedNoJobContacts || sendCvBlockedMissingRecipientEmail || (!sendAttachOriginalCv && !sendAttachSystemPdf);
@@ -1821,7 +2084,7 @@ const CandidateScreeningView: React.FC<{
                             const tagAttention = tagGaps.length > 0;
                             const stripAlert = screeningGapStrip || tagAttention;
                             return (
-                            <div key={job.id} className={`relative border rounded-lg bg-bg-card transition-all ${expandedJobId === job.id ? 'border-primary-300 shadow-md' : 'border-border-default hover:border-primary-200'} ${activeMatchScorePopup === job.id ? 'z-[55]' : ''}`}>
+                            <div key={job.id} className={`relative border rounded-lg bg-bg-card transition-all ${expandedJobId === job.id ? 'border-primary-300 shadow-md' : 'border-border-default hover:border-primary-200'}`}>
                                 {/* Job Summary */}
                                 <div
                                     className="flex items-start gap-3 p-3 cursor-pointer"
@@ -1875,25 +2138,16 @@ const CandidateScreeningView: React.FC<{
                                                 ) : null}
                                              </div>
                                              <div className="relative shrink-0">
-                                                {activeMatchScorePopup === job.id ? (
-                                                    <MatchScoreExplanation
-                                                      job={job}
-                                                      t={t}
-                                                      onClose={() => setActiveMatchScorePopup(null)}
-                                                      onReanalyze={() => {
-                                                        void handleGenerateInternalOpinion(job);
-                                                        setActiveMatchScorePopup(null);
-                                                      }}
-                                                      analyzing={loadingOpinionForJobId === job.id}
-                                                    />
-                                                ) : null}
                                                 <AIMatchScore
                                                   score={job.aiMatchScore}
-                                                  onOpen={() =>
+                                                  onOpen={(e) => {
+                                                    const position = matchScorePopupPositionFromEvent(e);
                                                     setActiveMatchScorePopup((prev) =>
-                                                      prev === job.id ? null : job.id,
-                                                    )
-                                                  }
+                                                      prev?.jobId === job.id
+                                                        ? null
+                                                        : { jobId: job.id, ...position },
+                                                    );
+                                                  }}
                                                 />
                                              </div>
                                         </div>
@@ -1999,7 +2253,11 @@ const CandidateScreeningView: React.FC<{
                                         <div className="space-y-4">
                                             <div>
                                                 <h5 className="font-bold text-text-muted mb-1 text-xs uppercase">תיאור המשרה</h5>
-                                                <p className="text-text-default leading-relaxed">{job.description}</p>
+                                                <div
+                                                    className="text-text-default leading-relaxed prose prose-sm max-w-none text-right [&>ul]:list-disc [&>ul]:pr-5 [&>ol]:list-decimal [&>ol]:pr-5 [&>h3]:font-bold [&>h3]:text-text-default [&>h3]:mt-3 [&>h3]:mb-1 [&>p]:mb-2"
+                                                    dir="rtl"
+                                                    dangerouslySetInnerHTML={jobDescriptionMarkup(job.description)}
+                                                />
                                             </div>
                                             <div>
                                                 <h5 className="font-bold text-text-muted mb-1 text-xs uppercase">דרישות</h5>
@@ -2127,7 +2385,7 @@ const CandidateScreeningView: React.FC<{
                 onClose={closeOpinionEditor}
                 onSave={() => void handleSaveOpinionFromModal()}
                 saving={opinionEditSaving}
-                onRegenerate={() => void handleRegenerateOpinionInModal()}
+                onRegenerate={(options) => void handleRegenerateOpinionInModal(options)}
                 regenerating={opinionEditRegenerating}
                 onCopy={() => void handleCopyOpinionFromModal()}
                 onReport={handleReportOpinionIssue}
@@ -2275,7 +2533,7 @@ const CandidateScreeningView: React.FC<{
                         <div className="space-y-4">
                           {sendModalJobs.map((job) => {
                             const jid = String(job.id);
-                            const contacts = contactsListFromScreeningJob(job);
+                            const contacts = getSendModalContacts(job);
                             return (
                               <div
                                 key={jid}
@@ -2304,7 +2562,11 @@ const CandidateScreeningView: React.FC<{
                                     </div>
                                   </div>
                                 </div>
-                                {!jobsLoading && contacts.length > 0 ? (
+                                {sendModalContactsLoading ? (
+                                  <p className="text-sm text-text-muted pt-3 border-t border-border-default/50">
+                                    טוען אנשי קשר...
+                                  </p>
+                                ) : contacts.length > 0 ? (
                                   <div className="pt-3 border-t border-border-default/50">
                                     <p className="text-[10px] font-bold text-text-muted uppercase mb-2 tracking-wide">
                                       אנשי קשר לקבלת קו&quot;ח (מהמשרה):
@@ -2354,7 +2616,11 @@ const CandidateScreeningView: React.FC<{
                                       })}
                                     </div>
                                   </div>
-                                ) : null}
+                                ) : (
+                                  <p className="text-sm text-text-muted pt-3 border-t border-border-default/50">
+                                    לא מוגדרים אנשי קשר למשרה
+                                  </p>
+                                )}
                               </div>
                             );
                           })}
@@ -2428,6 +2694,24 @@ const CandidateScreeningView: React.FC<{
                   </div>
                 </div>,
                 document.body
+              )}
+
+            {activeMatchScorePopup &&
+              activeJobForMatchPopup &&
+              typeof document !== 'undefined' &&
+              createPortal(
+                <MatchScoreExplanation
+                  job={activeJobForMatchPopup}
+                  position={{ x: activeMatchScorePopup.x, y: activeMatchScorePopup.y }}
+                  t={t}
+                  onClose={() => setActiveMatchScorePopup(null)}
+                  onReanalyze={() => {
+                    void handleGenerateInternalOpinion(activeJobForMatchPopup);
+                    setActiveMatchScorePopup(null);
+                  }}
+                  analyzing={loadingOpinionForJobId === activeJobForMatchPopup.id}
+                />,
+                document.body,
               )}
         </div>
     );

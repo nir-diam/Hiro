@@ -124,6 +124,22 @@ WHERE NOT EXISTS (
   WHERE e."triggerName" = 'מועמד' AND e."eventName" = 'ניתוק פרופיל'
 );
 
+-- 12b. נקלטו קורות חיים — קובץ זהה (hash dedup) -------------------------------
+INSERT INTO system_events (
+  "isActive", "triggerName", "eventName", "contentTemplate",
+  "forCandidate", "forJob", "forClient", "textColor", "bgColor", "sortOrder"
+)
+SELECT
+  true,
+  'נקלטו קורות חיים',
+  'קליטת קו"ח כפולה',
+  'התקבלה {source} עם קובץ קורות חיים זהה ({fileName}) — לא נוצר מועמד חדש; השימוש בפרופיל "{name}".',
+  true, false, false, '#000000', '#fef3c7', 2
+WHERE NOT EXISTS (
+  SELECT 1 FROM system_events e
+  WHERE e."triggerName" = 'נקלטו קורות חיים' AND e."eventName" = 'קליטת קו"ח כפולה'
+);
+
 -- 13. מועמד — מיזוג זיהוי כפול לפרופיל קיים ---------------------------------
 INSERT INTO system_events (
   "isActive", "triggerName", "eventName", "contentTemplate",

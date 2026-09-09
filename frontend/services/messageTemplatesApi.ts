@@ -7,6 +7,8 @@ function authHeaders(): HeadersInit {
     return h;
 }
 
+export type MessageTemplateRecipientType = 'candidate' | 'client_contact' | 'team_member';
+
 export type MessageTemplateDto = {
     id: string;
     templateKey: string | null;
@@ -21,6 +23,38 @@ export type MessageTemplateDto = {
     attachmentFileName?: string | null;
     attachmentContentType?: string | null;
     attachmentFileSize?: number | null;
+    forCandidate?: boolean;
+    forClientContact?: boolean;
+    forTeamMember?: boolean;
+};
+
+export const templateMatchesRecipientType = (
+    template: Pick<MessageTemplateDto, 'forCandidate' | 'forClientContact' | 'forTeamMember'>,
+    recipientType?: MessageTemplateRecipientType | null,
+): boolean => {
+    if (!recipientType) return true;
+    const forCandidate = Boolean(template.forCandidate);
+    const forClientContact = Boolean(template.forClientContact);
+    const forTeamMember = Boolean(template.forTeamMember);
+    if (!forCandidate && !forClientContact && !forTeamMember) return true;
+    switch (recipientType) {
+        case 'candidate':
+            return forCandidate;
+        case 'client_contact':
+            return forClientContact;
+        case 'team_member':
+            return forTeamMember;
+        default:
+            return true;
+    }
+};
+
+export const filterMessageTemplatesForRecipient = (
+    templates: MessageTemplateDto[],
+    recipientType?: MessageTemplateRecipientType | null,
+): MessageTemplateDto[] => {
+    if (!recipientType) return templates;
+    return templates.filter((t) => templateMatchesRecipientType(t, recipientType));
 };
 
 /** Super-admin catalog row: Hiro templates + all tenants */
@@ -45,8 +79,11 @@ export type MessageTemplatesComposeResponse = {
 };
 
 /** Staff messaging UI: client-scoped templates or admin catalog when user has no clientId. */
-export async function fetchMessageTemplatesForCompose(): Promise<MessageTemplatesComposeResponse> {
-    const res = await fetch(`${apiBase()}/api/message-templates/for-compose`, {
+export async function fetchMessageTemplatesForCompose(
+    recipientType?: MessageTemplateRecipientType | null,
+): Promise<MessageTemplatesComposeResponse> {
+    const qs = recipientType ? `?recipientType=${encodeURIComponent(recipientType)}` : '';
+    const res = await fetch(`${apiBase()}/api/message-templates/for-compose${qs}`, {
         headers: authHeaders(),
         cache: 'no-store',
     });
@@ -85,6 +122,9 @@ export async function createClientMessageTemplate(
         content: string;
         channels?: ('email' | 'sms' | 'whatsapp')[];
         templateKey?: string | null;
+        forCandidate?: boolean;
+        forClientContact?: boolean;
+        forTeamMember?: boolean;
     },
     clientId?: string | null,
 ): Promise<MessageTemplateDto> {
@@ -103,6 +143,9 @@ export async function createAdminMessageTemplate(body: {
     content: string;
     channels?: ('email' | 'sms' | 'whatsapp')[];
     templateKey?: string | null;
+    forCandidate?: boolean;
+    forClientContact?: boolean;
+    forTeamMember?: boolean;
 }): Promise<MessageTemplateDto> {
     const res = await fetch(`${apiBase()}/api/admin/message-templates`, {
         method: 'POST',
@@ -126,6 +169,9 @@ export async function updateClientMessageTemplate(
         attachmentContentType: string | null;
         attachmentFileSize: number | null;
         clearAttachment: boolean;
+        forCandidate: boolean;
+        forClientContact: boolean;
+        forTeamMember: boolean;
     }>,
     clientId?: string | null,
 ): Promise<MessageTemplateDto> {
@@ -190,6 +236,9 @@ export async function createMessageTemplateCatalog(body: {
     content: string;
     channels?: ('email' | 'sms' | 'whatsapp')[];
     templateKey?: string | null;
+    forCandidate?: boolean;
+    forClientContact?: boolean;
+    forTeamMember?: boolean;
 }): Promise<MessageTemplateCatalogDto> {
     const res = await fetch(`${apiBase()}/api/admin/message-templates/catalog`, {
         method: 'POST',
@@ -202,7 +251,16 @@ export async function createMessageTemplateCatalog(body: {
 
 export async function updateMessageTemplateCatalog(
     id: string,
-    body: Partial<{ name: string; subject: string; content: string; channels: ('email' | 'sms' | 'whatsapp')[]; templateKey: string | null }>,
+    body: Partial<{
+        name: string;
+        subject: string;
+        content: string;
+        channels: ('email' | 'sms' | 'whatsapp')[];
+        templateKey: string | null;
+        forCandidate: boolean;
+        forClientContact: boolean;
+        forTeamMember: boolean;
+    }>,
 ): Promise<MessageTemplateCatalogDto> {
     const res = await fetch(`${apiBase()}/api/admin/message-templates/catalog/${encodeURIComponent(id)}`, {
         method: 'PUT',

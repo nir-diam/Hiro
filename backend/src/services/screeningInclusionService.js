@@ -16,7 +16,17 @@ const {
   isExplicitJobCandidateSource,
   JC_EXPLICIT_APPLICATION_SOURCES,
 } = require('./matchingScoreService');
-const { jobRequiredLicenseTypes } = require('./matchingPenaltyService');
+const {
+  jobRequiredLicenseTypes,
+  mandatorySkillsMatch,
+  negativeSkillsMatch,
+  jobHasMandatorySkills,
+  jobHasNegativeSkills,
+  parseCandidateAge,
+  collectCandidateFilterTags,
+  candidateTagFiltersMatch,
+} = require('./matchingPenaltyService');
+const { loadTagAliasIndex } = require('./tagAliasIndexService');
 
 /** Path 1 = explicit application/link source; Path 3 = included via field/title interest match only (still passes hard rules, etc.). */
 function jcHasExplicitApplicationSource(jc) {
@@ -55,50 +65,19 @@ function hasAffinity(jc, candidate, job) {
   return interestMatches(candidate, job);
 }
 
-function collectCandidateSkillKeys(candidate) {
-  const keys = new Set();
-  const sk = candidate.skills;
-  if (!sk || typeof sk !== 'object') return keys;
-  for (const bucket of ['technical', 'soft']) {
-    const arr = sk[bucket];
-    if (!Array.isArray(arr)) continue;
-    for (const item of arr) {
-      if (typeof item === 'string') keys.add(normTag(item));
-      else if (item && typeof item === 'object') {
-        if (item.key) keys.add(normTag(item.key));
-        if (item.name) keys.add(normTag(item.name));
-        if (item.tag_key) keys.add(normTag(item.tag_key));
-      }
-    }
-  }
-  return keys;
-}
-
-function parseCandidateAge(candidate) {
-  const ag =
-    candidate.age != null ? parseInt(String(candidate.age).replace(/[^\d]/g, ''), 10) : NaN;
-  if (Number.isFinite(ag) && ag > 10 && ag < 120) return ag;
-  const y = candidate.birthYear != null ? parseInt(String(candidate.birthYear), 10) : NaN;
-  if (Number.isFinite(y) && y > 1900) {
-    const cy = new Date().getFullYear();
-    return cy - y;
-  }
-  return null;
-}
-
-function checkHardRequirements(candidate, job, settings) {
+function checkHardRequirements(candidate, job, settings, aliasIndex = null) {
   const reasons = [];
-  const keys = collectCandidateSkillKeys(candidate);
   const skills = Array.isArray(job.skills) ? job.skills : [];
 
-  for (const s of skills) {
-    if (!s || typeof s !== 'object') continue;
-    const mode = norm(s.mode);
-    const key = normTag(s.key || s.name || '');
-    if (!key) continue;
-    if (mode === 'mandatory' && !keys.has(key)) reasons.push('mandatory_skill');
-    if (mode === 'negative' && keys.has(key)) reasons.push('negative_skill');
+  if (jobHasMandatorySkills(job) && !mandatorySkillsMatch(job, candidate, aliasIndex)) {
+    reasons.push('mandatory_skill');
   }
+  if (jobHasNegativeSkills(job) && !negativeSkillsMatch(job, candidate, aliasIndex)) {
+    reasons.push('negative_skill');
+  }
+
+  const tagFilter = candidateTagFiltersMatch(job, candidate, aliasIndex);
+  if (!tagFilter.ok) reasons.push(...tagFilter.reasons);
 
   if (settings.requireOriginalCv) {
     const ru = candidate.resumeUrl ? String(candidate.resumeUrl).trim() : '';
@@ -184,13 +163,29 @@ function buildApplicableHardChecks(candidate, job, settings, failedCodes) {
   );
   if (hasMandatoryLang) checks.push({ code: 'mandatory_language', ok: !failed.has('mandatory_language'), category: 'hard_requirements' });
 
+  const { mandatory: candMandatoryTags, negative: candNegativeTags } = collectCandidateFilterTags(candidate);
+  if (candMandatoryTags.length) {
+    checks.push({
+      code: 'candidate_mandatory_tag',
+      ok: !failed.has('candidate_mandatory_tag'),
+      category: 'hard_requirements',
+    });
+  }
+  if (candNegativeTags.length) {
+    checks.push({
+      code: 'candidate_negative_tag',
+      ok: !failed.has('candidate_negative_tag'),
+      category: 'hard_requirements',
+    });
+  }
+
   return checks;
 }
 
 /**
  * Full pass/fail checklist for screening UI (localized labels on the frontend).
  */
-function computeEvaluationChecks(candidate, jc, job, settings, group) {
+function computeEvaluationChecks(candidate, jc, job, settings, group, aliasIndex = null) {
   const checks = [];
 
   const advancedBlocked = group === 'advanced' || group === 'hired';
@@ -211,7 +206,7 @@ function computeEvaluationChecks(candidate, jc, job, settings, group) {
   const affinity = hasAffinity(jc, candidate, job);
   checks.push({ code: 'affinity', ok: affinity, category: 'eligibility' });
 
-  const hard = checkHardRequirements(candidate, job, settings);
+  const hard = checkHardRequirements(candidate, job, settings, aliasIndex);
   checks.push(...buildApplicableHardChecks(candidate, job, settings, hard.reasons));
 
   checks.push({
@@ -296,7 +291,7 @@ function buildScreeningJobPayload(job, candidate, jc) {
   };
 }
 
-async function evaluateLink(candidate, jc, job, settings, clientId, groupPrecomputed = null) {
+async function evaluateLink(candidate, jc, job, settings, clientId, groupPrecomputed = null, aliasIndex = null) {
   const group = groupPrecomputed != null ? groupPrecomputed : await effectiveGroupForLink(jc, clientId);
   const jobPayload = buildScreeningJobPayload(job, candidate, jc);
   const baseOut = {
@@ -319,7 +314,7 @@ async function evaluateLink(candidate, jc, job, settings, clientId, groupPrecomp
     return { include: false, path: null, reasons: ['no_affinity'], ...baseOut };
   }
 
-  const hard = checkHardRequirements(candidate, job, settings);
+  const hard = checkHardRequirements(candidate, job, settings, aliasIndex);
   if (!hard.ok) {
     return { include: false, path: null, reasons: hard.reasons, ...baseOut };
   }
@@ -378,6 +373,7 @@ async function computeScreeningForCandidate(candidateId, opts = {}) {
   const intentScoreOptions = await buildIntentScoreOptions(
     jobInstances.map((j) => ({ id: j.id, field: j.field, role: j.role })),
   );
+  const aliasIndex = await loadTagAliasIndex();
 
   for (const jc of links) {
     const job = jc.job;
@@ -389,8 +385,8 @@ async function computeScreeningForCandidate(candidateId, opts = {}) {
     }
 
     const group = await effectiveGroupForLink(jc, clientId);
-    const evaluationChecks = computeEvaluationChecks(candPlain, jcPlain(jc), job, settings, group);
-    const ev = await evaluateLink(candidate, jc, job, settings, clientId, group);
+    const evaluationChecks = computeEvaluationChecks(candPlain, jcPlain(jc), job, settings, group, aliasIndex);
+    const ev = await evaluateLink(candPlain, jc, job, settings, clientId, group, aliasIndex);
 
     // Compute real multi-dimensional match score (same engine + client preset merge as candidate list / job-matches)
     let matchPercentage = ev.jobPayload.matchPercentage; // fallback (stored or 85)
@@ -420,8 +416,32 @@ async function computeScreeningForCandidate(candidateId, opts = {}) {
       console.warn('[screeningPool] scoring error for job', job.id, e.message || e);
     }
 
+    let jobForRow = { ...ev.jobPayload, matchPercentage };
+    try {
+      const ref = await jobService.resolveReferralContactsForJob(job, { clientIdHint: clientId });
+      if (Array.isArray(ref.contacts) && ref.contacts.length) {
+        jobForRow = {
+          ...jobForRow,
+          contacts: ref.contacts.map((c) => {
+            const rawId = String(c.id || '');
+            const kind = c.source === 'user' ? 'user' : 'contact';
+            const id = rawId.includes(':') ? rawId.split(':').pop() : rawId;
+            return {
+              kind,
+              id,
+              name: c.name,
+              role: c.role || '',
+              email: c.email || null,
+            };
+          }),
+        };
+      }
+    } catch (e) {
+      console.warn('[screeningPool] referral contacts for job', job.id, e.message || e);
+    }
+
     const row = {
-      job: { ...ev.jobPayload, matchPercentage },
+      job: jobForRow,
       jobCandidateId: ev.jobCandidateId,
       path: ev.path,
       reasons: ev.reasons,
@@ -466,13 +486,27 @@ async function computeScreeningForJob(jobId) {
       await recruitmentStatusPresentationService.getScreeningPresentationForClient(clientId);
   }
 
+  const candidateIds = [...new Set(links.map((jc) => String(jc.candidateId)).filter(Boolean))];
+  const enrichedRows = candidateIds.length
+    ? await candidateService.findManyWithTagsForMatchScore(candidateIds)
+    : [];
+  const enrichedById = new Map(
+    enrichedRows.map((row) => {
+      const plain = candidateService.toPlainCandidateForMatchScore(row);
+      return [String(plain.id), plain];
+    }),
+  );
+  const aliasIndex = await loadTagAliasIndex();
+
   for (const jc of links) {
     const candidate = jc.candidate;
-    const candPlain = candidate.get ? candidate.get({ plain: true }) : candidate;
+    const candPlain =
+      enrichedById.get(String(jc.candidateId)) ||
+      (candidate?.get ? candidate.get({ plain: true }) : candidate);
     const jcP = jc.get ? jc.get({ plain: true }) : jc;
     const group = await effectiveGroupForLink(jc, clientId);
-    const evaluationChecks = computeEvaluationChecks(candPlain, jcP, job, settings, group);
-    const ev = await evaluateLink(candidate, jc, job, settings, clientId, group);
+    const evaluationChecks = computeEvaluationChecks(candPlain, jcP, job, settings, group, aliasIndex);
+    const ev = await evaluateLink(candPlain, jc, job, settings, clientId, group, aliasIndex);
     const row = {
       candidate: candPlain,
       jobCandidateId: ev.jobCandidateId,
@@ -493,7 +527,10 @@ async function computeScreeningForJob(jobId) {
 
 async function precheckManualAdd(jobId, candidateId) {
   const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills'] } });
-  const candidate = await Candidate.findByPk(candidateId);
+  const candidateRow = await candidateService.findByPkWithTagsForMatchScore(candidateId);
+  const candidate = candidateRow
+    ? candidateService.toPlainCandidateForMatchScore(candidateRow)
+    : null;
   if (!job || !candidate) {
     const err = new Error(!job ? 'Job not found' : 'Candidate not found');
     err.status = 404;
@@ -532,7 +569,7 @@ async function precheckManualAdd(jobId, candidateId) {
     });
   }
 
-  const hard = checkHardRequirements(candidate, job, settings);
+  const hard = checkHardRequirements(candidate, job, settings, await loadTagAliasIndex());
   if (!hard.ok) {
     warnings.push({ code: 'hard_requirements', reasons: hard.reasons });
   }

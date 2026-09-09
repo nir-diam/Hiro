@@ -288,6 +288,26 @@ function poolMatchesLabelStrict(pool: string[], jobLabel: string): boolean {
   return pool.some((chip) => chipsRelateForCandidateHighlight(chip, core));
 }
 
+/** Job/candidate tags may sit in different buckets (role vs skill) — align with backend flat key match. */
+const PROFESSIONAL_TAG_CATEGORIES: TagCategoryKey[] = [
+  'role',
+  'skill',
+  'tool',
+  'soft',
+  'seniority',
+  'industry',
+];
+
+function unionCandidatePools(
+  candPools: Record<TagCategoryKey, string[]>,
+  categoryKey: TagCategoryKey,
+): string[] {
+  if (!PROFESSIONAL_TAG_CATEGORIES.includes(categoryKey)) return candPools[categoryKey];
+  const merged: string[] = [];
+  for (const k of PROFESSIONAL_TAG_CATEGORIES) merged.push(...candPools[k]);
+  return uniqueNonEmptyStrings(merged);
+}
+
 function chipVisualState(label: string, mode: JobTagChipRow['mode'], candPool: string[]): TagMatchChipState {
   if (mode === 'normal') return 'neutral';
   const negative = mode === 'negative';
@@ -466,6 +486,7 @@ function collectCandidatePoolsDetailed(candidate: unknown): {
     for (const td of detailArr) {
       const o = td && typeof td === 'object' ? (td as Record<string, unknown>) : {};
       const name = String(o.displayNameHe ?? o.displayNameEn ?? o.tagKey ?? '').trim();
+      const tagKey = String(o.tagKey ?? '').trim();
       if (!name) continue;
       const tt = normCandTagType(o.rawType ?? o.raw_type);
       let bucket: TagCategoryKey = 'skill';
@@ -482,6 +503,7 @@ function collectCandidatePoolsDetailed(candidate: unknown): {
       else bucket = 'skill';
 
       p[bucket].push(name);
+      if (tagKey && tagKey !== name) p[bucket].push(tagKey);
       const cw = o.calculatedWeight ?? o.calculated_weight;
       let weight = typeof cw === 'number' && Number.isFinite(cw) ? cw : undefined;
       let weightEstimated = false;
@@ -620,13 +642,17 @@ function buildJobTagMatchCategories(job: JobTagMatchInput, candidate: unknown): 
         ? candWeighted.role.map((t) => t.label).filter(Boolean)
         : candPools[key];
     const chips = rows.map((row) => {
-      const state = chipVisualState(row.label, row.mode, pool);
+      const matchPool =
+        row.mode === 'mandatory' || row.mode === 'negative'
+          ? unionCandidatePools(candPools, key)
+          : pool;
+      const state = chipVisualState(row.label, row.mode, matchPool);
       // Language uses loose matching (substring); all other categories use strict matching
       // so the card colour is always consistent with the highlighted chips.
       const satisfiesRequirement =
         key === 'language'
-          ? poolMatchesLabel(pool, row.label)
-          : poolMatchesLabelStrict(pool, row.label);
+          ? poolMatchesLabel(matchPool, row.label)
+          : poolMatchesLabelStrict(matchPool, row.label);
       return {
         label: row.label,
         state,

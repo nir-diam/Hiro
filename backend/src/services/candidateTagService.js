@@ -585,6 +585,7 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
           displayNameHe: defaults.displayNameHe,
           matchedTarget: target,
         });
+        continue;
       }
       await maybeUpgradeType(catalogTag);
       if (String(catalogTag.status).toLowerCase() === 'pending') {
@@ -607,6 +608,12 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     const active = await findTagByNameOrAlias(trimmed, { status: 'active' });
     if (active) {
       if (String(active.status).toLowerCase() === 'deprecated') return null;
+      if (
+        normalizedIncoming &&
+        !catalogTypesEquivalent(active.type, normalizedIncoming)
+      ) {
+        continue;
+      }
       await maybeUpgradeType(active);
       return { tag: active, created: false };
     }
@@ -671,13 +678,162 @@ const normalizeJobTagType = (tagType) => {
   return JOB_TAG_TYPE_MAP[raw] || 'skill';
 };
 
+const normalizeTagMode = (modeRaw) => {
+  const mode = String(modeRaw || 'normal').trim().toLowerCase();
+  if (mode === 'required') return 'mandatory';
+  if (mode === 'exclusion') return 'negative';
+  return ['mandatory', 'negative', 'normal'].includes(mode) ? mode : 'normal';
+};
+
+const isPersistedTagDetailId = (id) => {
+  const s = String(id || '').trim();
+  if (!s || s.startsWith('local-')) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(s);
+};
+
+const syncCandidateTagModesFromDetails = async (candidateId, tagDetails = []) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid || !Array.isArray(tagDetails) || !tagDetails.length) return;
+
+  for (const td of tagDetails) {
+    const rowId = td?.id != null ? String(td.id).trim() : '';
+    if (!isPersistedTagDetailId(rowId)) continue;
+    const mode = normalizeTagMode(td.mode);
+    const storedMode = mode === 'normal' ? null : mode;
+    const row = await SystemTag.findOne({
+      where: { id: rowId, type: SYSTEM_TAG_TYPE_CANDIDATE, entity_id: cid },
+    });
+    if (!row) continue;
+    const current = row.mode == null || String(row.mode).trim() === '' ? null : String(row.mode).trim();
+    if (current === storedMode) continue;
+    await row.update({ mode: storedMode });
+  }
+};
+
+const normalizeLinkRawType = (rawType, fallback = 'skill') =>
+  normalizeCandidateTagType(rawType) || fallback;
+
+const upsertCandidateTagLink = async (payload) => {
+  if (!payload?.tagKey && !payload?.tag_id) throw new Error('tagKey required');
+  const entityId = payload.entity_id || payload.candidate_id || payload.candidateId;
+  if (!entityId) throw new Error('candidate_id and tagKey required');
+
+  const linkRawType = normalizeLinkRawType(payload.raw_type, 'skill');
+
+  let tag = null;
+  if (payload.tag_id) {
+    const byId = await Tag.findByPk(payload.tag_id);
+    if (byId && catalogTypesEquivalent(byId.type, linkRawType)) {
+      tag = byId;
+    }
+  }
+  if (!tag) {
+    const ensureKey = String(payload.displayNameHe || payload.tagKey || '').trim();
+    const ensured = await ensureTagRecord(ensureKey, {
+      displayNameHe: payload.displayNameHe || ensureKey,
+      displayNameEn: payload.displayNameEn || payload.displayNameHe || ensureKey,
+      type: linkRawType,
+    });
+    tag = ensured?.tag || null;
+  }
+  if (!tag) throw new Error('Unable to ensure tag record');
+
+  const score = tagScoringEngine.scoreTag({ ...payload, raw_type: linkRawType });
+  const normalizedQuote =
+    typeof payload.quote === 'string' && payload.quote.trim()
+      ? payload.quote.trim()
+      : typeof payload.evidence === 'string' && payload.evidence.trim()
+        ? payload.evidence.trim()
+        : null;
+  const mode = normalizeTagMode(payload.mode);
+  const storedMode = mode === 'normal' ? null : mode;
+  const linkFields = {
+    raw_type: linkRawType,
+    context: payload.context ?? null,
+    raw_type_reason: payload.raw_type_reason ?? null,
+    tag_reason: payload.tag_reason ?? null,
+    quote: normalizedQuote,
+    is_current: typeof payload.is_current === 'boolean' ? payload.is_current : true,
+    is_in_summary: typeof payload.is_in_summary === 'boolean' ? payload.is_in_summary : true,
+    confidence_score: payload.confidence_score ?? null,
+    calculated_weight: score.calculatedWeight,
+    final_score: score.finalScore,
+    is_active: true,
+    mode: storedMode,
+  };
+
+  const existingRows = await SystemTag.findAll({
+    where: candidateTagTypeWhere({ entity_id: entityId, tag_id: tag.id }),
+  });
+  const existing = existingRows.find((row) =>
+    catalogTypesEquivalent(row.raw_type, linkRawType),
+  );
+
+  if (existing) {
+    await existing.update(linkFields);
+    await recordTagUsage(tag);
+    return existing;
+  }
+
+  const entry = await SystemTag.create({
+    type: SYSTEM_TAG_TYPE_CANDIDATE,
+    entity_id: entityId,
+    tag_id: tag.id,
+    ...linkFields,
+  });
+  await recordTagUsage(tag);
+  return entry;
+};
+
+/** Persist manually-added tag rows (no system_tags id yet) and sync modes on existing rows. */
+const syncCandidateTagDetailsFromPayload = async (candidateId, tagDetails = []) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid || !Array.isArray(tagDetails) || !tagDetails.length) return;
+
+  for (const td of tagDetails) {
+    if (!td || typeof td !== 'object') continue;
+    const rowId = td.id != null ? String(td.id).trim() : '';
+
+    if (isPersistedTagDetailId(rowId)) {
+      const mode = normalizeTagMode(td.mode);
+      const storedMode = mode === 'normal' ? null : mode;
+      const row = await SystemTag.findOne({
+        where: { id: rowId, type: SYSTEM_TAG_TYPE_CANDIDATE, entity_id: cid },
+      });
+      if (!row) continue;
+      const current = row.mode == null || String(row.mode).trim() === '' ? null : String(row.mode).trim();
+      if (current !== storedMode) {
+        await row.update({ mode: storedMode });
+      }
+      continue;
+    }
+
+    const tagKey = String(td.tagKey || td.displayNameHe || td.displayNameEn || '').trim();
+    if (!tagKey) continue;
+
+    await upsertCandidateTagLink({
+      candidate_id: cid,
+      tag_id: td.tagId || td.tag_id || null,
+      tagKey,
+      displayNameHe: td.displayNameHe || tagKey,
+      displayNameEn: td.displayNameEn || td.displayNameHe || tagKey,
+      raw_type: td.rawType || td.raw_type || 'skill',
+      mode: td.mode,
+      context: td.context,
+      is_current: td.isCurrent ?? td.is_current ?? true,
+      is_in_summary: td.isInSummary ?? td.is_in_summary ?? true,
+      confidence_score: td.confidenceScore ?? td.confidence_score,
+      quote: td.quote || td.evidence || null,
+    });
+  }
+};
+
 const normalizeJobSkillEntry = (skill) => {
   if (!skill || !skill.name) return null;
   const name = String(skill.name).trim();
   const tagKey = String(skill.key ?? skill.name).trim();
   if (!name || !tagKey) return null;
-  const modeRaw = String(skill.mode || 'normal').trim().toLowerCase();
-  const mode = ['mandatory', 'negative', 'normal'].includes(modeRaw) ? modeRaw : 'normal';
+  const mode = normalizeTagMode(skill.mode || 'normal');
   const relevance =
     typeof skill.relevance_score === 'number'
       ? skill.relevance_score
@@ -709,7 +865,7 @@ const mapSystemTagsToJobSkills = (rows = []) =>
       id: tagPlain?.id || plain.tag_id,
       name: tagPlain?.displayNameHe || tagPlain?.displayNameEn || tagPlain?.tagKey || '',
       key: tagPlain?.tagKey || '',
-      mode: plain.mode || 'normal',
+      mode: normalizeTagMode(plain.mode || 'normal'),
       source: uiSource,
       tagType: plain.raw_type || tagPlain?.type || 'skill',
       tag_reason: plain.tag_reason || undefined,
@@ -1205,42 +1361,7 @@ module.exports = {
   hydrateJobSkills,
   hydrateJobsSkills,
   assignJobSkills,
-  createCandidateTag: async (payload) => {
-    if (!payload?.tagKey) throw new Error('tagKey required');
-    const entityId = payload.entity_id || payload.candidate_id || payload.candidateId;
-    if (!entityId) throw new Error('candidate_id and tagKey required');
-    const { tag, created } = await ensureTagRecord(payload.tagKey, {
-      displayNameHe: payload.displayNameHe,
-      displayNameEn: payload.displayNameEn,
-      type: payload.raw_type || 'role',
-    });
-    if (!tag) throw new Error('Unable to ensure tag record');
-    const score = tagScoringEngine.scoreTag(payload);
-    const normalizedQuote =
-      typeof payload.quote === 'string' && payload.quote.trim()
-        ? payload.quote.trim()
-        : typeof payload.evidence === 'string' && payload.evidence.trim()
-          ? payload.evidence.trim()
-          : null;
-    const entry = await SystemTag.create({
-      type: SYSTEM_TAG_TYPE_CANDIDATE,
-      entity_id: entityId,
-      tag_id: tag.id,
-      raw_type: payload.raw_type,
-      context: payload.context,
-      raw_type_reason: payload.raw_type_reason ?? null,
-      tag_reason: payload.tag_reason ?? null,
-      quote: normalizedQuote,
-      is_current: payload.is_current,
-      is_in_summary: payload.is_in_summary,
-      confidence_score: payload.confidence_score,
-      calculated_weight: score.calculatedWeight,
-      final_score: score.finalScore,
-      is_active: true,
-    });
-    await recordTagUsage(tag);
-    return entry;
-  },
+  createCandidateTag: upsertCandidateTagLink,
   updateCandidateTag: async (id, updates = {}) => {
     const candidateTag = await SystemTag.findOne({
       where: { id, type: SYSTEM_TAG_TYPE_CANDIDATE },
@@ -1273,6 +1394,10 @@ module.exports = {
     } else if (typeof updates.evidence === 'string') {
       const q = updates.evidence.trim();
       updates.quote = q || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(updates, 'mode')) {
+      const mode = normalizeTagMode(updates.mode);
+      updates.mode = mode === 'normal' ? null : mode;
     }
     const manualWeight = Number(updates.calculated_weight);
     const manualFinal = Number(updates.final_score);
@@ -1325,5 +1450,8 @@ module.exports = {
   syncSystemTagsActiveForCatalogTag,
   resolveIncomingTagType,
   normalizeCandidateTagType,
+  syncCandidateTagModesFromDetails,
+  syncCandidateTagDetailsFromPayload,
+  isPersistedTagDetailId,
 };
 

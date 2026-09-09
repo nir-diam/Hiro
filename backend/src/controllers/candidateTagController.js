@@ -143,6 +143,7 @@ const bulkCreate = async (req, res) => {
     for (const entry of entries) {
       const tagEntry = {
         candidate_id: candidateId,
+        tag_id: entry.tag_id || entry.tagId || null,
         tagKey: entry.tagKey || entry.key || entry.name,
         displayNameHe: entry.displayNameHe || entry.name,
         displayNameEn: entry.displayNameEn || entry.name,
@@ -151,6 +152,7 @@ const bulkCreate = async (req, res) => {
         confidence_score: entry.confidence_score,
         calculated_weight: entry.calculated_weight,
         final_score: entry.final_score,
+        mode: entry.mode,
       };
       const record = await candidateTagService.createCandidateTag(tagEntry);
       if (record) created.push(record);

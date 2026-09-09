@@ -65,6 +65,24 @@ const MessageTemplate = sequelize.define(
       allowNull: true,
       field: 'attachment_file_size',
     },
+    forCandidate: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+      field: 'for_candidate',
+    },
+    forClientContact: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+      field: 'for_client_contact',
+    },
+    forTeamMember: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+      field: 'for_team_member',
+    },
   },
   {
     tableName: 'message_templates',

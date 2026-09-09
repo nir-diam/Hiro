@@ -8,9 +8,13 @@ export interface CompanyHistoryEntryLike {
     actorDisplayName?: string;
     userName?: string;
     userEmail?: string;
+    summary?: string;
     changes?: {
         before?: Record<string, unknown>;
         after?: Record<string, unknown>;
+        meta?: {
+            summary?: string;
+        };
     };
     createdAt?: string;
     created_at?: string;
@@ -191,6 +195,9 @@ export function formatCompanyHistoryActionType(entry: CompanyHistoryEntryLike): 
 }
 
 export function formatCompanyHistoryDescription(entry: CompanyHistoryEntryLike): string {
+    const directSummary = String(entry.summary || entry.changes?.meta?.summary || '').trim();
+    if (directSummary) return directSummary;
+
     const changes = entry.changes || {};
     const before = changes.before;
     const after = changes.after;

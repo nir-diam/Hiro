@@ -1,6 +1,7 @@
 const clientService = require('../services/clientService');
 const clientAuditService = require('../services/clientAuditService');
 const authService = require('../services/authService');
+const { loadExportLogoForUser } = require('../services/clientExportLogoService');
 const { provisionMainContactManager, STAFF_ROLES } = require('../services/staffUserProvisioningService');
 const { Op } = require('sequelize');
 const User = require('../models/User');
@@ -388,6 +389,24 @@ const listLinkedJobs = async (req, res) => {
   }
 };
 
+/** Authenticated export helper — returns logged-in tenant client logo bytes (avoids browser CORS on S3). */
+const getMyExportLogo = async (req, res) => {
+  try {
+    const user = req.dbUser;
+    if (!user) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    const payload = await loadExportLogoForUser(user);
+    if (!payload) {
+      return res.status(404).json({ message: 'No logo configured' });
+    }
+    res.set('Cache-Control', 'private, no-store');
+    res.json(payload);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load logo' });
+  }
+};
+
 module.exports = {
   list,
   get,
@@ -402,4 +421,5 @@ module.exports = {
   listJobCompanies,
   getInsights,
   listLinkedJobs,
+  getMyExportLogo,
 };

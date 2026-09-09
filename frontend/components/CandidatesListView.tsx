@@ -3287,6 +3287,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 : t('candidates.bulk_message_recipients', { count: list.length });
         openMessageModal({
             mode: 'sms',
+            recipientType: 'candidate',
             candidateName: label,
             candidatePhone: phones.join('; '),
             candidateEmail: list.length === 1 ? list[0].email || null : null,
@@ -3311,6 +3312,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             .join(', ');
         openMessageModal({
             mode: 'email',
+            recipientType: 'candidate',
             candidateName: label,
             candidatePhone: list.map((c) => String(c.phone || '').trim()).filter(Boolean).join('; '),
             candidateEmail: emailField,
@@ -3332,6 +3334,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 : t('candidates.bulk_message_recipients', { count: list.length });
         openMessageModal({
             mode: 'whatsapp',
+            recipientType: 'candidate',
             candidateName: label,
             candidatePhone: phones.join('; '),
             candidateEmail: list.length === 1 ? list[0].email || null : null,

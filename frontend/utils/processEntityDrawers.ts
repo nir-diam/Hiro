@@ -1,4 +1,4 @@
-import type { Client } from '../components/ClientsListView';
+import type { Client, Contact } from '../components/ClientsListView';
 import type { Candidate } from '../components/CandidatesListView';
 import { authHeaders } from './authHeaders';
 
@@ -35,6 +35,104 @@ export function buildCandidateDrawerStub(candidateId: string, name: string): Can
     matchScore: 0,
     phone: '',
   };
+}
+
+export function buildContactDrawerStub(
+  contactId: string,
+  name: string,
+  clientId: string,
+  clientName = '',
+): Contact {
+  const trimmed = String(name || '').trim();
+  const initials =
+    trimmed
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w[0])
+      .join('') || '?';
+  return {
+    id: contactId,
+    clientId,
+    name: trimmed || 'איש קשר',
+    role: '',
+    clientName: clientName || '',
+    phone: '',
+    email: '',
+    lastContact: '',
+    avatar: initials,
+  };
+}
+
+function normalizeContactFromApi(raw: Record<string, unknown>, fallback: Contact): Contact {
+  const clientRow =
+    raw.client && typeof raw.client === 'object' && !Array.isArray(raw.client)
+      ? (raw.client as Record<string, unknown>)
+      : null;
+  const orgRow =
+    raw.organization && typeof raw.organization === 'object' && !Array.isArray(raw.organization)
+      ? (raw.organization as Record<string, unknown>)
+      : null;
+  const organizationId = raw.organizationId ? String(raw.organizationId) : fallback.organizationId || null;
+  const orgName = String(
+    raw.organizationName || orgRow?.name || orgRow?.nameEn || '',
+  ).trim();
+  const tenantClientName = String(
+    clientRow?.displayName || clientRow?.name || fallback.clientName || '',
+  ).trim();
+  const clientName = orgName || tenantClientName || fallback.clientName || 'לקוח';
+  const nm = String(raw.name || fallback.name || '').trim();
+  const initials =
+    nm
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w[0])
+      .join('') || fallback.avatar || '?';
+  return {
+    ...fallback,
+    id: String(raw.id || fallback.id),
+    clientId: String(raw.clientId || clientRow?.id || fallback.clientId || ''),
+    organizationId,
+    name: nm || fallback.name,
+    role: String(raw.role || fallback.role || ''),
+    clientName,
+    clientLogo:
+      (raw.organizationLogo as string | undefined)
+      || (orgRow?.logo as string | undefined)
+      || fallback.clientLogo,
+    phone: String(raw.phone || raw.mobilePhone || fallback.phone || ''),
+    email: String(raw.email || fallback.email || ''),
+    avatar: initials,
+    pipelineId: raw.pipelineId ? String(raw.pipelineId) : fallback.pipelineId,
+    stageId: raw.processStage ? String(raw.processStage) : fallback.stageId,
+  };
+}
+
+export async function hydrateContactForDrawer(
+  apiBase: string,
+  clientId: string,
+  contactId: string,
+  fallback: Contact,
+): Promise<Contact | null> {
+  if (!apiBase || !clientId || !contactId) return null;
+  try {
+    const res = await fetch(
+      `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}`,
+      {
+        credentials: 'include',
+        headers: authHeaders(),
+        cache: 'no-store',
+      },
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    const raw = (json?.data ?? json) as Record<string, unknown>;
+    if (!raw || typeof raw !== 'object') return null;
+    return normalizeContactFromApi(raw, fallback);
+  } catch {
+    return null;
+  }
 }
 
 export function buildClientDrawerStub(clientId: string, name: string): Client {

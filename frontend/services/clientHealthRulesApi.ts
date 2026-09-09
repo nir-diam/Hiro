@@ -57,6 +57,22 @@ export async function fetchClientHealthRules(
     return Array.isArray(json.rules) ? json.rules : [];
 }
 
+/** Clone rules for copying to another scope (fresh ids per target). */
+export function cloneHealthRulesForCopy(rules: ClientHealthRuleDto[]): ClientHealthRuleDto[] {
+    return rules.map((r, i) => ({
+        id: typeof crypto !== 'undefined' && crypto.randomUUID
+            ? crypto.randomUUID()
+            : `tmp-${Date.now()}-${i}`,
+        color: r.color,
+        condition: r.condition,
+        operator: r.operator,
+        value: r.value,
+        enabled: r.enabled,
+        pipelineId: r.pipelineId ?? null,
+        sortIndex: i,
+    }));
+}
+
 export async function syncClientHealthRules(
     clientId: string,
     rules: ClientHealthRuleDto[],

@@ -29,6 +29,8 @@ const Candidate = sequelize.define(
     userId: { type: DataTypes.UUID, allowNull: true },
     /** When set, this row is a version of the primary candidate (same person, different CV ingest). */
     canonicalCandidateId: { type: DataTypes.UUID, allowNull: true },
+    /** Recruiter shadow copy (צור העתק) — hidden from candidate portal profile switcher. */
+    staffProfileCopy: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     employmentType: DataTypes.STRING,
     employmentTypes: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     jobScope: DataTypes.STRING,

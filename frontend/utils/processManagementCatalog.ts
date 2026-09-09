@@ -25,6 +25,278 @@ export type SystemEventOption = {
   groupLabel: string;
 };
 
+export type SystemEventCatalogEntry = {
+  /** Stable key: triggerName::eventName */
+  value: string;
+  /** Display name within the trigger group */
+  label: string;
+  triggerName: string;
+  eventName: string;
+  rowIds: string[];
+};
+
+export type SystemEventCatalogGroup = {
+  label: string;
+  events: SystemEventCatalogEntry[];
+};
+
+export type SystemEventPipelineMatch = {
+  pipelineId: string;
+  stageId: string;
+  outcomeId: string;
+};
+
+const LEGACY_SYSTEM_EVENT_KEYS: Record<string, string> = {
+  candidate_confirmed_profile: 'מועמד.אישור הפרופיל על ידי המועמד',
+  candidate_confirmed_interview: 'מועמד.אישר_הגעה_לראיון',
+  candidate_canceled_interview: 'מועמד.ביטל_הגעה_לראיון',
+  candidate_requested_reschedule: 'מועמד.ביקש_לשנות_מועד',
+  form_completed_onboarding: 'טופס.קליטה_הושלם',
+  form_completed_tech_test: 'טופס.מבחן_מקצועי_הוגש',
+  bg_check_passed: 'בדיקת_רקע.עבר_בהצלחה',
+  hris_sync_completed: 'מערכת_HR.סנכרון_הושלם',
+};
+
+export const systemEventCompositeKey = (triggerName: string, eventName: string) =>
+  `${String(triggerName || '').trim()}::${String(eventName || '').trim()}`;
+
+export function buildSystemEventGroupsFromApiRows(
+  rows: Array<{ id: string; isActive?: boolean; triggerName: string; eventName: string }>,
+): SystemEventCatalogGroup[] {
+  const byTrigger = new Map<string, Map<string, SystemEventCatalogEntry>>();
+  for (const row of rows) {
+    if (row.isActive === false) continue;
+    const triggerName = String(row.triggerName || 'אירועים').trim();
+    const eventName = String(row.eventName || '').trim();
+    if (!eventName) continue;
+    const value = systemEventCompositeKey(triggerName, eventName);
+    if (!byTrigger.has(triggerName)) byTrigger.set(triggerName, new Map());
+    const bucket = byTrigger.get(triggerName)!;
+    if (!bucket.has(value)) {
+      bucket.set(value, { value, label: eventName, triggerName, eventName, rowIds: [] });
+    }
+    const id = String(row.id || '').trim();
+    if (id) bucket.get(value)!.rowIds.push(id);
+  }
+  return Array.from(byTrigger.entries()).map(([label, eventsMap]) => ({
+    label,
+    events: Array.from(eventsMap.values()).sort((a, b) =>
+      a.label.localeCompare(b.label, 'he'),
+    ),
+  }));
+}
+
+function parseLegacySystemEventLabel(label: string): { triggerName: string; eventName: string } | null {
+  const dot = label.indexOf('.');
+  if (dot <= 0) return null;
+  return {
+    triggerName: label.slice(0, dot),
+    eventName: label.slice(dot + 1),
+  };
+}
+
+function legacyEntryFromKey(key: string): SystemEventCatalogEntry | null {
+  const legacyLabel = LEGACY_SYSTEM_EVENT_KEYS[key];
+  if (!legacyLabel) return null;
+  const parsed = parseLegacySystemEventLabel(legacyLabel);
+  if (!parsed) return null;
+  return {
+    value: key,
+    label: parsed.eventName,
+    triggerName: parsed.triggerName,
+    eventName: parsed.eventName,
+    rowIds: [],
+  };
+}
+
+export function resolveSystemEventEntry(
+  selectedKey: string,
+  groups: SystemEventCatalogGroup[],
+): SystemEventCatalogEntry | null {
+  const key = String(selectedKey || '').trim();
+  if (!key) return null;
+  for (const group of groups) {
+    for (const entry of group.events) {
+      if (entry.value === key) return entry;
+      if (entry.rowIds.includes(key)) return entry;
+    }
+  }
+  const legacy = legacyEntryFromKey(key);
+  if (legacy) return legacy;
+  if (key.includes('::')) {
+    const [triggerName, eventName] = key.split('::');
+    if (triggerName && eventName) {
+      return {
+        value: key,
+        label: eventName,
+        triggerName,
+        eventName,
+        rowIds: [],
+      };
+    }
+  }
+  return null;
+}
+
+/** Map stored UUID/composite/legacy keys to catalog option value for selects. */
+export function resolveSystemEventSelectValue(
+  storedId: string | undefined | null,
+  groups: SystemEventCatalogGroup[],
+): string {
+  const raw = String(storedId || '').trim();
+  if (!raw) return '';
+  const entry = resolveSystemEventEntry(raw, groups);
+  return entry?.value || raw;
+}
+
+function outcomeTriggerMatchesSystemEvent(
+  trigger: { type?: string; systemEventId?: string } | undefined,
+  entry: SystemEventCatalogEntry,
+): boolean {
+  if (!trigger || trigger.type !== 'system_event' || !trigger.systemEventId) return false;
+  const configured = String(trigger.systemEventId);
+  if (entry.rowIds.includes(configured)) return true;
+  if (configured === entry.value) return true;
+  if (configured === systemEventCompositeKey(entry.triggerName, entry.eventName)) return true;
+  const legacyLabel = LEGACY_SYSTEM_EVENT_KEYS[configured];
+  if (legacyLabel && legacyLabel === `${entry.triggerName}.${entry.eventName}`) return true;
+  return false;
+}
+
+export function buildSystemEventPipelineMatches(
+  groups: SystemEventCatalogGroup[],
+  pipelines: EnrichedPipeline[],
+): Map<string, SystemEventPipelineMatch[]> {
+  const map = new Map<string, SystemEventPipelineMatch[]>();
+  for (const group of groups) {
+    for (const entry of group.events) {
+      const matches: SystemEventPipelineMatch[] = [];
+      for (const pipeline of pipelines) {
+        for (const stage of pipeline.stages || []) {
+          for (const outcome of stage.outcomes || []) {
+            if (!outcomeTriggerMatchesSystemEvent(outcome.trigger, entry)) continue;
+            matches.push({
+              pipelineId: pipeline.id,
+              stageId: stage.id,
+              outcomeId: outcome.id,
+            });
+          }
+        }
+      }
+      map.set(entry.value, matches);
+    }
+  }
+  return map;
+}
+
+function eventTextHaystack(event: {
+  title?: string;
+  description?: string;
+  updates?: Array<{ title?: string }>;
+}): string {
+  return [
+    event.title,
+    event.description,
+    ...(event.updates || []).map((u) => u.title),
+  ]
+    .map((part) => String(part || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+}
+
+function metadataMatchesSystemEvent(
+  metadata: Record<string, unknown> | undefined,
+  entry: SystemEventCatalogEntry,
+): boolean {
+  if (!metadata) return false;
+  const sys = metadata.systemEvent;
+  if (sys && typeof sys === 'object' && !Array.isArray(sys)) {
+    const row = sys as Record<string, unknown>;
+    const rowId = String(row.rowId || '').trim();
+    if (rowId && entry.rowIds.includes(rowId)) return true;
+    const triggerName = String(row.triggerName || '').trim();
+    const eventName = String(row.eventName || '').trim();
+    if (triggerName === entry.triggerName && eventName === entry.eventName) return true;
+  }
+  const rowId = String(metadata.systemEventRowId || '').trim();
+  if (rowId && entry.rowIds.includes(rowId)) return true;
+  return false;
+}
+
+function pipelinePlacementMatchesSystemEvent(
+  event: {
+    processId?: string | null;
+    stageId?: string | null;
+    stage?: string;
+  },
+  matches: SystemEventPipelineMatch[],
+  pipelines: EnrichedPipeline[],
+): boolean {
+  const pid = event.processId ? String(event.processId) : '';
+  if (!pid || matches.length === 0) return false;
+  const sid = event.stageId ? String(event.stageId) : '';
+  const stageName = String(event.stage || '').trim().toLowerCase();
+  for (const match of matches) {
+    if (match.pipelineId !== pid) continue;
+    if (sid && match.stageId === sid) return true;
+    if (!sid && stageName) {
+      const pipeline = pipelines.find((p) => p.id === pid);
+      const stage = (pipeline?.stages || []).find((s) => s.id === match.stageId);
+      if (stage && String(stage.name || '').trim().toLowerCase() === stageName) return true;
+    }
+    if (!sid && !stageName) return true;
+  }
+  return false;
+}
+
+function textMatchesSystemEvent(
+  event: {
+    title?: string;
+    description?: string;
+    updates?: Array<{ title?: string }>;
+  },
+  entry: SystemEventCatalogEntry,
+): boolean {
+  const hay = eventTextHaystack(event);
+  if (!hay) return false;
+  const needles = [
+    entry.eventName,
+    `${entry.triggerName}.${entry.eventName}`,
+    systemEventCompositeKey(entry.triggerName, entry.eventName),
+  ]
+    .map((part) => String(part || '').trim().toLowerCase())
+    .filter(Boolean);
+  return needles.some((needle) => hay.includes(needle));
+}
+
+export function eventMatchesSystemEventFilters(
+  event: {
+    processId?: string | null;
+    stageId?: string | null;
+    stage?: string;
+    title?: string;
+    description?: string;
+    metadata?: Record<string, unknown>;
+    updates?: Array<{ title?: string }>;
+  },
+  selectedKeys: Set<string>,
+  groups: SystemEventCatalogGroup[],
+  pipelineMatches: Map<string, SystemEventPipelineMatch[]>,
+  pipelines: EnrichedPipeline[],
+): boolean {
+  if (selectedKeys.size === 0) return true;
+  for (const key of selectedKeys) {
+    const entry = resolveSystemEventEntry(key, groups);
+    if (!entry) continue;
+    if (metadataMatchesSystemEvent(event.metadata, entry)) return true;
+    const matches = pipelineMatches.get(entry.value) || [];
+    if (pipelinePlacementMatchesSystemEvent(event, matches, pipelines)) return true;
+    if (textMatchesSystemEvent(event, entry)) return true;
+  }
+  return false;
+}
+
 export const pipelineNameKey = (pipeline: Pick<EnrichedPipeline, 'kind' | 'name'>) =>
   `${pipeline.kind}:${String(pipeline.name || '').trim().toLowerCase()}`;
 
@@ -149,7 +421,7 @@ export function buildStageOutcomeOptions(
 }
 
 export function flattenSystemEventGroups(
-  groups: Array<{ label: string; events: Array<{ value: string; label: string }> }>,
+  groups: Array<{ label: string; events: Array<{ value: string; label: string }> }> | SystemEventCatalogGroup[],
 ): SystemEventOption[] {
   return groups.flatMap((group) =>
     group.events.map((ev) => ({
@@ -160,6 +432,15 @@ export function flattenSystemEventGroups(
   );
 }
 
+/** Legacy events may store a short process label while pipelines use "Name (English)". */
+export function processNameMatchesPipeline(proc: string, pipelineName: string): boolean {
+  if (!proc || !pipelineName) return false;
+  if (proc === pipelineName) return true;
+  if (pipelineName.startsWith(`${proc} (`) || pipelineName.startsWith(`${proc}(`)) return true;
+  if (proc.startsWith(`${pipelineName} (`) || proc.startsWith(`${pipelineName}(`)) return true;
+  return false;
+}
+
 export function eventMatchesPipelineFilters(
   event: { processId?: string | null; process?: string; stageId?: string | null; stage?: string },
   selectedPipelineIds: Set<string>,
@@ -168,19 +449,18 @@ export function eventMatchesPipelineFilters(
 ): boolean {
   if (selectedPipelineIds.size > 0) {
     const pid = event.processId ? String(event.processId) : '';
-    const proc = String(event.process || '').trim().toLowerCase();
-    const matchedById = pid && pipelines.some(
-      (p) => selectedPipelineIds.has(p.id) && String(p.id) === pid,
-    );
-    const matchedBySelection = pipelines.some(
-      (p) =>
-        isPipelineGroupSelected(p, selectedPipelineIds, pipelines) &&
-        (pid === String(p.id) ||
-          proc === String(p.name || '').trim().toLowerCase() ||
-          proc.includes(String(p.name || '').trim().toLowerCase()) ||
-          String(p.name || '').trim().toLowerCase().includes(proc)),
-    );
-    if (!matchedById && !matchedBySelection) return false;
+    if (pid) {
+      if (!selectedPipelineIds.has(pid)) return false;
+    } else {
+      const proc = String(event.process || '').trim().toLowerCase();
+      if (!proc) return false;
+      const matchedBySelection = pipelines.some(
+        (p) =>
+          isPipelineGroupSelected(p, selectedPipelineIds, pipelines) &&
+          processNameMatchesPipeline(proc, String(p.name || '').trim().toLowerCase()),
+      );
+      if (!matchedBySelection) return false;
+    }
   }
 
   if (selectedStageOutcomeKeys.size > 0) {

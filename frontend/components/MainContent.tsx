@@ -388,6 +388,9 @@ const MainContent: React.FC<MainContentProps> = ({
     };
 
     const isBlockedStatus = String(formData.status || '').trim() === 'חסום';
+    /** System-computed only — not selectable; missing fields show in CandidateProfile banner. */
+    const statusSelectValue =
+        String(formData.status || '').trim() === 'חסר נתונים' ? '' : (formData.status || '');
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value, type } = e.target;
@@ -580,7 +583,7 @@ const MainContent: React.FC<MainContentProps> = ({
                             <FormSelect
                                 label={t('form.status')}
                                 name="status"
-                                value={formData.status || ''}
+                                value={statusSelectValue}
                                 onChange={handleInputChange}
                                 labelExtra={
                                     <details className="relative z-10 shrink-0">
@@ -600,7 +603,6 @@ const MainContent: React.FC<MainContentProps> = ({
                                 }
                             >
                                 <option value="">—</option>
-                                <option value="חסר נתונים">חסר נתונים</option>
                                 <option value="פעיל">פעיל</option>
                                 <option value="חדש">חדש</option>
                                 <option value="עבר בדיקה ראשונית">עבר בדיקה ראשונית</option>

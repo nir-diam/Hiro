@@ -41,11 +41,21 @@ interface HiroAIChatProps {
     skipHistory?: boolean;
     initialMessage?: string;
     chatType?: string; // distinguish chat contexts (e.g., candidate-profile vs admin)
-    systemPrompt?: string; // override system prompt per context
+    /** Prompt id from AI Prompts admin (`prompts` table). Defaults by chatType when omitted. */
+    promptId?: string;
+    systemPrompt?: string; // optional legacy override if prompt row is missing
     contextData?: any; // optional profile context JSON
     onProfileUpdate?: (patch: any, meta?: { suggestions?: any[] }) => void | Promise<void>; // optional profile updater callback
     allowTagCreation?: boolean;
 }
+
+const DEFAULT_CHAT_PROMPT_IDS: Record<string, string> = {
+    'candidate-profile': 'candidate_profile_chat',
+    'job-publishing': 'job_publishing_chat',
+    'job-fields': 'Admin_Job_Categories_Smart_Agent',
+    'company-profile': 'company_profile_chat',
+    default: 'taxonomy_tags_chat',
+};
 
 const INSTRUCTION_PROMPT_KEYWORDS = [
     'נתח את ה-JSON',
@@ -169,6 +179,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     skipHistory,
     initialMessage,
     chatType,
+    promptId,
     systemPrompt,
     contextData,
     onProfileUpdate,
@@ -185,6 +196,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const chatScope = chatType || 'default';
+    const effectivePromptId = promptId || DEFAULT_CHAT_PROMPT_IDS[chatScope] || DEFAULT_CHAT_PROMPT_IDS.default;
     const isCandidateProfileChat = chatScope === 'candidate-profile';
 
     /** Always keep the Hiro greeting as the first bubble in candidate-profile chat (not in the input). */
@@ -484,7 +496,16 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             const res = await fetch(`${apiBase}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chatId, userId: resolvedUserId, message: textToSend, tagsText, chatType: chatScope, contextData, systemPrompt }),
+                body: JSON.stringify({
+                    chatId,
+                    userId: resolvedUserId,
+                    message: textToSend,
+                    tagsText,
+                    chatType: chatScope,
+                    contextData,
+                    promptId: effectivePromptId,
+                    systemPrompt,
+                }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -670,6 +691,9 @@ const normalizeProposalSuggestion = (proposal: any) => {
     }
 
     if (!normalized.field && !normalized.tool) return null;
+    if (proposal.replaceExisting === true) {
+        normalized.replaceExisting = true;
+    }
     return normalized;
 };
 
@@ -827,31 +851,74 @@ const normalizeProposalSuggestion = (proposal: any) => {
         }
         setIsApplyingSuggestions(true);
         let firstError: string | null = null;
-        const created: any[] = [];
+        const resolvedTags: any[] = [];
+        const seenTagIds = new Set<string>();
+
+        const createOrResolveTag = async (t: any) => {
+            const payload = {
+                displayNameHe: t.displayNameHe,
+                displayNameEn: t.displayNameEn,
+                category: t.category,
+                type: t.type || 'skill',
+                status: 'draft',
+                qualityState: 'initial_detection',
+                matchable: true,
+                tagKey: slugifyTagKey(t.tagKey || t.displayNameEn || t.displayNameHe || 'tag'),
+                synonyms: t.synonyms || [],
+                domains: t.domains || [],
+                descriptionHe: t.descriptionHe || '',
+            };
+            const res = await fetch(`${apiBase}/api/tags`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (res.status === 409) {
+                const body = (await res.json().catch(() => null)) as {
+                    message?: string;
+                    duplicate?: {
+                        id?: string;
+                        tagKey?: string;
+                        displayNameHe?: string;
+                        displayNameEn?: string;
+                    };
+                } | null;
+                const dup = body?.duplicate;
+                if (dup?.id) {
+                    return {
+                        id: dup.id,
+                        tagKey: dup.tagKey || payload.tagKey,
+                        displayNameHe: dup.displayNameHe || t.displayNameHe,
+                        displayNameEn: dup.displayNameEn || t.displayNameEn || '',
+                        type: payload.type,
+                        reused: true,
+                    };
+                }
+                throw new Error(body?.message || 'Tag already exists');
+            }
+            if (!res.ok) {
+                let msg = await res.text();
+                try {
+                    const parsed = JSON.parse(msg) as { message?: string };
+                    if (parsed?.message) msg = parsed.message;
+                } catch {
+                    /* keep raw text */
+                }
+                throw new Error(msg || 'Failed to create tag');
+            }
+            const createdTag = await res.json();
+            return { ...createdTag, type: createdTag.type || payload.type };
+        };
+
         for (let i = 0; i < tagSuggestions.length; i++) {
             if (!selectedTagIdx.has(i)) continue;
             const t = tagSuggestions[i];
             try {
-                const res = await fetch(`${apiBase}/api/tags`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            displayNameHe: t.displayNameHe,
-                            displayNameEn: t.displayNameEn,
-                            category: t.category,
-                            type: t.type || 'skill',
-                            status: 'draft',
-                            qualityState: 'initial_detection',
-                            matchable: true,
-                            tagKey: slugifyTagKey(t.tagKey || t.displayNameEn || t.displayNameHe || 'tag'),
-                            synonyms: t.synonyms || [],
-                            domains: t.domains || [],
-                            descriptionHe: t.descriptionHe || '',
-                        }),
-                });
-                if (!res.ok) throw new Error(await res.text());
-                const createdTag = await res.json();
-                created.push(createdTag);
+                const tag = await createOrResolveTag(t);
+                const tagId = String(tag?.id || '').trim();
+                if (tagId && seenTagIds.has(tagId)) continue;
+                if (tagId) seenTagIds.add(tagId);
+                resolvedTags.push(tag);
             } catch (err: any) {
                 if (!firstError) firstError = err?.message || 'Failed to create tag';
             }
@@ -860,23 +927,38 @@ const normalizeProposalSuggestion = (proposal: any) => {
         setIsSuggestOpen(false);
         setTagSuggestions([]);
         setSelectedTagIdx(new Set());
-        if (created.length) {
-            window.dispatchEvent(new CustomEvent('hiro-tags-created', { detail: created }));
+        if (resolvedTags.length) {
+            window.dispatchEvent(new CustomEvent('hiro-tags-created', { detail: resolvedTags }));
             if (onProfileUpdate && contextData) {
                 const existing = Array.isArray(contextData.tags) ? contextData.tags : [];
-                const names = created
-                    .map((t) => t.displayNameHe || t.displayNameEn || t.tagKey || t.name)
+                const names = resolvedTags
+                    .map((tag) => tag.displayNameHe || tag.displayNameEn || tag.tagKey || tag.name)
                     .filter(Boolean);
                 const existingDetails = Array.isArray(contextData.tagDetails) ? contextData.tagDetails : [];
-                const newDetails = created.map((t) => ({
-                    tagKey: t.tagKey || t.displayNameEn || t.displayNameHe,
-                    displayNameHe: t.displayNameHe || t.displayNameEn || t.tagKey,
-                    displayNameEn: t.displayNameEn || '',
-                    rawType: t.type || 'skill',
-                    isCurrent: true,
-                    isInSummary: true,
-                }));
-                if (names.length) {
+                const existingKeys = new Set(
+                    existingDetails.map((d: any) =>
+                        String(d?.tagId || d?.tag_id || d?.tagKey || d?.displayNameHe || '').trim().toLowerCase(),
+                    ),
+                );
+                const newDetails = resolvedTags
+                    .filter((tag) => {
+                        const key = String(tag.id || tag.tagKey || tag.displayNameHe || '')
+                            .trim()
+                            .toLowerCase();
+                        if (!key || existingKeys.has(key)) return false;
+                        existingKeys.add(key);
+                        return true;
+                    })
+                    .map((tag) => ({
+                        tagId: tag.id,
+                        tagKey: tag.tagKey || tag.displayNameEn || tag.displayNameHe,
+                        displayNameHe: tag.displayNameHe || tag.displayNameEn || tag.tagKey,
+                        displayNameEn: tag.displayNameEn || '',
+                        rawType: tag.type || 'skill',
+                        isCurrent: true,
+                        isInSummary: true,
+                    }));
+                if (names.length || newDetails.length) {
                     void onProfileUpdate({
                         tags: Array.from(new Set([...existing, ...names])),
                         tagDetails: [...existingDetails, ...newDetails],
@@ -885,7 +967,8 @@ const normalizeProposalSuggestion = (proposal: any) => {
             }
         }
         if (firstError) alert(firstError);
-        else if (created.length) alert('Tags created successfully.');
+        else if (resolvedTags.length) alert('Tags applied successfully.');
+        else alert('No tags were applied.');
     };
 
     const requestProfileSuggestions = async (mode: 'default' | 'soft' = 'default') => {
@@ -906,6 +989,7 @@ const normalizeProposalSuggestion = (proposal: any) => {
                     userId: resolvedUserId,
                     chatType: chatScope,
                     contextData,
+                    promptId: effectivePromptId,
                     systemPrompt,
                     message: instructionPrompt,
                 }),
@@ -1168,8 +1252,27 @@ const normalizeProposalSuggestion = (proposal: any) => {
                 case 'workExperience': {
                     const list = Array.isArray(current.workExperience) ? [...current.workExperience] : [];
                     const incoming = normalizeWorkExperienceIncoming(actualValue);
+                    if (s.replaceExisting) {
+                        patch.workExperience = incoming.map((entry) => ({
+                            ...entry,
+                            id: entry.id || `${Date.now()}-${Math.random()}`,
+                        }));
+                        break;
+                    }
                     for (const entry of incoming) {
-                        if (isDuplicateWorkExperience(entry, list)) continue;
+                        const entryId = String(entry.id || '').trim();
+                        if (entryId) {
+                            const idx = list.findIndex((row: any) => String(row?.id || '').trim() === entryId);
+                            if (idx >= 0) {
+                                list[idx] = { ...list[idx], ...entry, id: list[idx].id };
+                                continue;
+                            }
+                        }
+                        const dupIdx = list.findIndex((row: any) => isDuplicateWorkExperience(entry, [row]));
+                        if (dupIdx >= 0) {
+                            list[dupIdx] = { ...list[dupIdx], ...entry, id: list[dupIdx].id || entry.id };
+                            continue;
+                        }
                         list.push({
                             ...entry,
                             id: entry.id || `${Date.now()}-${Math.random()}`,

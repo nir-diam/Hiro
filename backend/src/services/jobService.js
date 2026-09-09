@@ -3,7 +3,231 @@ const redis = require('./redisService');
 const { invalidateJobMatches, invalidateJobInAllCandidateOpportunities } = require('./matchingCacheService');
 const Job = require('../models/Job');
 const Prompt = require('../models/Prompt');
+const Client = require('../models/Client');
+const ClientContact = require('../models/ClientContact');
+const User = require('../models/User');
+const clientUsageSettingService = require('./clientUsageSettingService');
 const { sequelize } = require('../config/db');
+
+const REFERRAL_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+async function resolveClientIdForJobReferral(jobRow) {
+  if (!jobRow) return null;
+  if (jobRow.clientId) return String(jobRow.clientId);
+
+  const label = String(jobRow.client || '').trim();
+  if (!label) return null;
+
+  let cid = await clientUsageSettingService.getClientIdForJobClientLabel(label);
+  if (cid) return cid;
+
+  const beforeParen = label.split('(')[0].trim();
+  if (beforeParen && beforeParen !== label) {
+    cid = await clientUsageSettingService.getClientIdForJobClientLabel(beforeParen);
+    if (cid) return cid;
+  }
+
+  const parenMatch = label.match(/\(([^)]+)\)/);
+  if (parenMatch?.[1]) {
+    cid = await clientUsageSettingService.getClientIdForJobClientLabel(parenMatch[1].trim());
+    if (cid) return cid;
+  }
+
+  const afterParen = label.replace(/^[^)]*\)\s*/, '').trim();
+  if (afterParen && afterParen !== label) {
+    cid = await clientUsageSettingService.getClientIdForJobClientLabel(afterParen);
+    if (cid) return cid;
+  }
+
+  const nc = label.toLowerCase();
+  const clients = await Client.findAll({
+    where: { isActive: true },
+    attributes: ['id', 'name', 'displayName'],
+  });
+  for (const cl of clients) {
+    const name = String(cl.displayName || cl.name || '').trim().toLowerCase();
+    if (name && (name === nc || name.includes(nc) || nc.includes(name))) {
+      return String(cl.id);
+    }
+  }
+  for (const fragment of [beforeParen, afterParen].filter(Boolean)) {
+    const nf = fragment.toLowerCase();
+    for (const cl of clients) {
+      const name = String(cl.displayName || cl.name || '').trim().toLowerCase();
+      if (name && (name === nf || name.includes(nf) || nf.includes(name))) {
+        return String(cl.id);
+      }
+    }
+  }
+
+  return null;
+}
+
+function pushReferralContact(out, seen, row) {
+  const email = String(row.email || '').trim();
+  const name = String(row.name || '').trim() || email;
+  if (!name) return;
+
+  if (REFERRAL_EMAIL_RE.test(email)) {
+    const key = email.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+  } else if (row.id && seen.has(`id:${row.id}`)) {
+    return;
+  } else if (row.id) {
+    seen.add(`id:${row.id}`);
+  }
+
+  out.push({
+    id: String(row.id),
+    name,
+    email: REFERRAL_EMAIL_RE.test(email) ? email : '',
+    role: String(row.role || '').trim(),
+    source: row.source || 'client',
+  });
+}
+
+/**
+ * Resolve referral / screening-CV recipients for a job:
+ * - job.clientId or fuzzy client label match
+ * - job.contacts JSONB (`kind`+`id` refs or inline name/email)
+ * - fallback: all active client_contacts when no job-specific list
+ */
+async function resolveReferralContactsForJob(job, opts = {}) {
+  const plain = job && typeof job.get === 'function' ? job.get({ plain: true }) : { ...job };
+  const jobId = plain?.id != null ? String(plain.id) : '';
+  const clientIdHint = opts.clientIdHint ? String(opts.clientIdHint).trim() : null;
+
+  let clientId = clientIdHint || (await resolveClientIdForJobReferral(plain));
+  let clientRow = null;
+  if (clientId) {
+    clientRow = await Client.findByPk(clientId, { attributes: ['id', 'name', 'displayName'] });
+    if (!clientRow) {
+      clientId = null;
+    }
+  }
+
+  const out = [];
+  const seen = new Set();
+  const jobJsonContacts = Array.isArray(plain.contacts) ? plain.contacts : [];
+  const assignedRefs = jobJsonContacts.filter(
+    (c) => c && typeof c === 'object' && (c.kind === 'contact' || c.kind === 'user') && c.id,
+  );
+  const hasAssignedRefs = assignedRefs.length > 0;
+
+  if (hasAssignedRefs) {
+    const contactIds = [];
+    const userIds = [];
+    for (const c of assignedRefs) {
+      const id = String(c.id).trim();
+      if (c.kind === 'user') userIds.push(id);
+      else contactIds.push(id);
+    }
+
+    if (contactIds.length) {
+      const rows = await ClientContact.findAll({
+        where: { id: contactIds },
+        attributes: ['id', 'name', 'email', 'role', 'isActive'],
+      });
+      for (const r of rows) {
+        const c = r.get({ plain: true });
+        if (c.isActive === false) continue;
+        pushReferralContact(out, seen, {
+          id: String(c.id),
+          name: String(c.name || '').trim(),
+          email: String(c.email || '').trim(),
+          role: String(c.role || '').trim(),
+          source: 'client',
+        });
+      }
+    }
+
+    if (userIds.length) {
+      const rows = await User.findAll({
+        where: { id: userIds },
+        attributes: ['id', 'name', 'email'],
+      });
+      for (const r of rows) {
+        const c = r.get({ plain: true });
+        pushReferralContact(out, seen, {
+          id: String(c.id),
+          name: String(c.name || '').trim() || String(c.email || '').trim(),
+          email: String(c.email || '').trim(),
+          role: 'משתמש פורטל',
+          source: 'user',
+        });
+      }
+    }
+
+    for (let i = 0; i < jobJsonContacts.length; i++) {
+      const c = jobJsonContacts[i];
+      if (!c || typeof c !== 'object') continue;
+      const embeddedName = String(c.name || '').trim();
+      const embeddedEmail = String(c.email || '').trim();
+      if (!embeddedName && !REFERRAL_EMAIL_RE.test(embeddedEmail)) continue;
+      const kind = c.kind === 'user' ? 'user' : c.kind === 'contact' ? 'contact' : null;
+      const refId = c.id != null ? String(c.id).trim() : '';
+      pushReferralContact(out, seen, {
+        id: kind && refId ? `${kind}:${refId}` : `job:${jobId}:${i}`,
+        name: embeddedName || embeddedEmail,
+        email: embeddedEmail,
+        role: String(c.role || '').trim(),
+        source: 'job',
+      });
+    }
+  } else if (clientRow) {
+    const rows = await ClientContact.findAll({
+      where: { clientId: clientRow.id, isActive: true },
+      attributes: ['id', 'name', 'email', 'role'],
+      order: [['createdAt', 'ASC']],
+    });
+    for (const r of rows) {
+      const c = r.get({ plain: true });
+      pushReferralContact(out, seen, {
+        id: String(c.id),
+        name: String(c.name || '').trim(),
+        email: String(c.email || '').trim(),
+        role: String(c.role || '').trim(),
+        source: 'client',
+      });
+    }
+
+    for (let i = 0; i < jobJsonContacts.length; i++) {
+      const c = jobJsonContacts[i];
+      const email = String(c?.email || '').trim();
+      const name = String(c?.name || '').trim();
+      if (!name && !REFERRAL_EMAIL_RE.test(email)) continue;
+      pushReferralContact(out, seen, {
+        id: `job:${jobId}:${i}`,
+        name: name || email,
+        email,
+        role: String(c?.role || '').trim(),
+        source: 'job',
+      });
+    }
+  } else {
+    for (let i = 0; i < jobJsonContacts.length; i++) {
+      const c = jobJsonContacts[i];
+      const email = String(c?.email || '').trim();
+      const name = String(c?.name || '').trim();
+      if (!name && !REFERRAL_EMAIL_RE.test(email)) continue;
+      pushReferralContact(out, seen, {
+        id: `job:${jobId}:${i}`,
+        name: name || email,
+        email,
+        role: String(c?.role || '').trim(),
+        source: 'job',
+      });
+    }
+  }
+
+  return {
+    clientId: clientRow ? String(clientRow.id) : null,
+    clientResolvedName: clientRow ? String(clientRow.displayName || clientRow.name || '') : '',
+    jobClientLabel: String(plain.client || ''),
+    contacts: out,
+  };
+}
 
 /**
  * Compute and persist the job embedding in the background (fire-and-forget).
@@ -543,4 +767,5 @@ module.exports = {
   toPlainJobForMatchScore,
   mapSystemTagsToJobSkills,
   listJobTags,
+  resolveReferralContactsForJob,
 };

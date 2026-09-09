@@ -27,6 +27,23 @@ type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
 export type HealthProfile = 'standard' | 'high_volume' | 'executive' | 'disabled';
 
+const formatJobOpenDate = (raw: string | null | undefined): string => {
+  const value = String(raw || '').trim();
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value.includes('T') ? value.replace('T', ' ').replace(/\.\d{3}Z?$/, '') : value;
+  }
+  return date.toLocaleString('he-IL', {
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+};
+
 export interface Job {
   id: number;
   title: string;
@@ -472,7 +489,7 @@ const JobCard: React.FC<{
                  <StarRating rating={job.rating} onRate={onRate} />
                  <div className="text-xs text-text-muted flex gap-3">
                      <span title={t('jobs.col_candidates')}>{job.associatedCandidates} <UserIcon className="w-3 h-3 inline"/></span>
-                     <span title={t('jobs.col_open_date')}>{job.openDate}</span>
+                     <span title={t('jobs.col_open_date')}>{formatJobOpenDate(job.openDate)}</span>
                  </div>
             </div>
         </div>
@@ -1018,6 +1035,12 @@ const JobsView: React.FC = () => {
         case 'associatedCandidates': return <span className="font-semibold text-text-default text-center block">{job.associatedCandidates}</span>;
         case 'waitingForScreening': return <span className="font-medium text-amber-600 text-center block">{job.waitingForScreening}</span>;
         case 'activeProcess': return <span className="font-medium text-green-600 text-center block">{job.activeProcess}</span>;
+        case 'openDate':
+          return (
+            <span className="text-text-default whitespace-nowrap tabular-nums">
+              {formatJobOpenDate(job.openDate)}
+            </span>
+          );
         case 'id': return job.id;
         case 'salaryRange': return `${job.salaryMin.toLocaleString()}₪ - ${job.salaryMax.toLocaleString()}₪`;
         case 'ageRange': return `${job.ageMin} - ${job.ageMax}`;

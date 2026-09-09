@@ -177,6 +177,7 @@ export type ProcessJournalUpdate = {
   title: string;
   date: string;
   creator: string;
+  comment?: string;
 };
 
 export type ProcessJournalEntry = {
@@ -228,12 +229,14 @@ export async function patchJobLinkProcessJournalEntry(
   linkId: string,
   entryId: string,
   payload: {
+    title?: string;
     description?: string;
     dueDate?: string | null;
     dueTime?: string | null;
     nextStageTitle?: string;
     creator?: string | null;
     isActive?: boolean;
+    updates?: ProcessJournalUpdate[];
   },
 ): Promise<ProcessJournalResponse> {
   const apiBase = import.meta.env.VITE_API_BASE || '';

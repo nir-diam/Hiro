@@ -3,6 +3,7 @@ const Client = require('../models/Client');
 const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
+const { migrateContactsFromTmpToOrg } = require('./clientContactService');
 
 /** Client metadata keys owned by onboarding / CRM — never overwritten from org sync. */
 const CLIENT_OWNED_META_KEYS = new Set(['notes', 'contactRole']);
@@ -68,15 +69,14 @@ const buildClientUpdatesFromOrg = (client, org, { fullSync = false } = {}) => {
     }
   };
 
-  // name and displayName are user-owned fields — never overwrite from org sync.
-  // Org identity is captured in metadata (name, nameEn, aliases, etc.).
+  // name, displayName, logoUrl, and primaryColor are client-owned — never overwritten from org sync.
+  // Org identity (including org logo) is captured in metadata; tenant branding lives on Client.
 
   setIf('industry', o.mainField);
   setIf('city', o.location || o.hqCountry);
   setIf('region', o.hqCountry);
   setIf('field', o.type);
   setIf('phone', o.phone);
-  setIf('logoUrl', o.logo);
 
   const existingMeta = plain?.metadata && typeof plain.metadata === 'object' ? plain.metadata : {};
   const preservedClientMeta = {};
@@ -197,6 +197,7 @@ const promoteClientsFromTmp = async (tmpId, orgId) => {
     }
     const client = await Client.findByPk(link.clientId);
     if (client) await applyOrgToClient(client, org, { fullSync: true });
+    await migrateContactsFromTmpToOrg(tmpId, org.id);
     promoted += 1;
   }
   return promoted;

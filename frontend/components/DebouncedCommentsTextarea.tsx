@@ -6,6 +6,7 @@ type Props = {
     debounceMs?: number;
     placeholder?: string;
     className?: string;
+    wrapperClassName?: string;
     rows?: number;
 };
 
@@ -16,6 +17,7 @@ export default function DebouncedCommentsTextarea({
     debounceMs = 600,
     placeholder = 'הוסף הערה…',
     className = '',
+    wrapperClassName = 'min-w-[160px] max-w-[220px] mx-auto',
     rows = 3,
 }: Props) {
     const [text, setText] = useState(value ?? '');
@@ -60,7 +62,7 @@ export default function DebouncedCommentsTextarea({
     }, [text, debounceMs]);
 
     return (
-        <div className="flex flex-col gap-1 min-w-[160px] max-w-[220px] mx-auto">
+        <div className={`flex flex-col gap-1 ${wrapperClassName}`}>
             <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}

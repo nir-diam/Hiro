@@ -8,6 +8,10 @@
 const SYSTEM_EVENTS = {
   // 1. נקלטו קורות חיים
   CV_RECEIVED: { triggerName: 'נקלטו קורות חיים', eventName: 'קליטת קו"ח' },
+  CV_DUPLICATE_HASH: {
+    triggerName: 'נקלטו קורות חיים',
+    eventName: 'קליטת קו"ח כפולה',
+  },
   CV_PARSED:   { triggerName: 'נקלטו קורות חיים', eventName: 'פרסור ניתוח ועיבוד מידע' },
   CV_TAGS:     { triggerName: 'נקלטו קורות חיים', eventName: 'הגדרת תגיות' },
   CV_SOURCE:   { triggerName: 'נקלטו קורות חיים', eventName: 'הגדרת מקור גיוס' },

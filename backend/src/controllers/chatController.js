@@ -1,7 +1,7 @@
 const chatService = require('../services/chatService');
 
 const sendMessage = async (req, res) => {
-  const { chatId, userId, message, tagsText, chatType, contextData, systemPrompt } = req.body;
+  const { chatId, userId, message, tagsText, chatType, contextData, systemPrompt, promptId } = req.body;
   try {
     const result = await chatService.chat({
       chatId,
@@ -11,6 +11,7 @@ const sendMessage = async (req, res) => {
       chatType,
       contextData,
       systemPrompt,
+      promptId,
     });
     res.json(result);
   } catch (err) {

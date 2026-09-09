@@ -4,18 +4,27 @@ import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, Lin
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
-import { SmartTagType, SmartTagData, SmartTagTooltipPanel } from './SmartTagTypes';
+import { SmartTagType, SmartTagData, SmartTagTooltipPanel, SmartTagMode } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { buildCandidateFullName } from '../utils/candidateName';
 import CityEditableField from './CityEditableField';
-import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
-import {
+import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';import {
     buildMissingProfileFieldLabels,
     resolveProfileDisplayAge,
 } from '../utils/candidateProfileDisplayCompleteness';
+import {
+    waitForCandidateEnrichment,
+    isCandidateEnrichmentPending,
+} from '../utils/candidateIngestPoll';
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
-import { isStaffDuplicateProfile } from '../utils/candidateProfileDuplicate';
+import {
+    isStaffDuplicateProfile,
+    buildDuplicateProfileName,
+    buildProfileDuplicatePayload,
+    sanitizeProfileDuplicatePayload,
+    shouldSaveCandidateProfileDirectly,
+} from '../utils/candidateProfileDuplicate';
 import { createPortal } from 'react-dom';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
@@ -353,6 +362,10 @@ interface MultiProfileOption {
     profileName: string;
     profilePicture?: string;
     isDeleted?: boolean;
+    canonicalCandidateId?: string | null;
+    staffProfileCopy?: boolean;
+    createdAt?: string;
+    updatedAt?: string;
 }
 
 interface CandidateProfileProps {
@@ -409,7 +422,34 @@ const RAW_TYPE_LABELS: Record<string, string> = {
     Industry: 'ענף',
 };
 
+const buildSmartTagKey = (type: SmartTagType, label: string): string =>
+  `${type}::${String(label || '').trim().toLowerCase()}`;
+
+const withTagModeMeta = (
+  entry: SmartTagData,
+  tagModes: Record<string, SmartTagMode>,
+): SmartTagData => {
+  const tagKey = entry.tagKey || buildSmartTagKey(entry.type, entry.label);
+  return {
+    ...entry,
+    tagKey,
+    mode: tagModes[tagKey] || entry.mode || 'normal',
+  };
+};
+
+const normalizeTagMode = (mode: unknown): SmartTagMode => {
+  const raw = String(mode || 'normal').trim().toLowerCase();
+  if (raw === 'mandatory' || raw === 'required') return 'mandatory';
+  if (raw === 'negative' || raw === 'exclusion') return 'negative';
+  return 'normal';
+};
+
+const cycleTagMode = (current: SmartTagMode): SmartTagMode =>
+  current === 'normal' ? 'mandatory' : current === 'mandatory' ? 'negative' : 'normal';
+
 type CandidateTagDetail = {
+    id?: string;
+    tagId?: string;
     tagKey?: string;
     displayNameHe?: string;
     displayNameEn?: string;
@@ -426,6 +466,7 @@ type CandidateTagDetail = {
     rawTypeReason?: string;
     tagReason?: string;
     descriptionHe?: string;
+    mode?: SmartTagMode | string;
     createdAt?: string;
 };
 
@@ -437,7 +478,42 @@ const getLabelCaseInsensitive = (labels: Record<string, string>, key: string): s
     return labels[capped] ?? labels[key.toLowerCase()] ?? key;
 };
 
+const tagDetailAliases = (detail?: Pick<CandidateTagDetail, 'tagKey' | 'displayNameHe' | 'displayNameEn'> | null): string[] =>
+    [detail?.tagKey, detail?.displayNameHe, detail?.displayNameEn]
+        .filter((key): key is string => typeof key === 'string' && Boolean(key.trim()))
+        .map((key) => key.trim());
+
+const removalTargetAliases = (targetLabel: string, targetDetail?: CandidateTagDetail | null): Set<string> => {
+    const aliases = new Set(tagDetailAliases(targetDetail).map((key) => key.toLowerCase()));
+    const trimmed = String(targetLabel || '').trim().toLowerCase();
+    if (trimmed) aliases.add(trimmed);
+    return aliases;
+};
+
+/** True when a stored tag string belongs to the tag being removed. */
+const tagValueMatchesRemoval = (
+    tagValue: string,
+    targetLabel: string,
+    targetDetail?: CandidateTagDetail | null,
+): boolean => {
+    const value = String(tagValue || '').trim().toLowerCase();
+    if (!value) return false;
+    return removalTargetAliases(targetLabel, targetDetail).has(value);
+};
+
+/** True when a tagDetails row belongs to the tag being removed. */
+const tagDetailMatchesRemoval = (
+    detail: CandidateTagDetail,
+    targetLabel: string,
+    targetDetail?: CandidateTagDetail | null,
+): boolean => {
+    const targets = removalTargetAliases(targetLabel, targetDetail);
+    return tagDetailAliases(detail).some((alias) => targets.has(alias.toLowerCase()));
+};
+
 const normalizeTagDetail = (d: any): CandidateTagDetail => ({
+    id: d?.id != null ? String(d.id) : undefined,
+    tagId: d?.tagId ?? d?.tag_id,
     tagKey: d?.tagKey ?? d?.tag_key,
     displayNameHe: d?.displayNameHe ?? d?.display_name_he,
     displayNameEn: d?.displayNameEn ?? d?.display_name_en,
@@ -453,6 +529,7 @@ const normalizeTagDetail = (d: any): CandidateTagDetail => ({
     rawTypeReason: d?.rawTypeReason ?? d?.raw_type_reason,
     tagReason: d?.tagReason ?? d?.tag_reason,
     descriptionHe: d?.descriptionHe ?? d?.description_he,
+    mode: normalizeTagMode(d?.mode),
     createdAt: d?.createdAt ?? d?.created_at,
 });
 
@@ -628,6 +705,38 @@ const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => {
     return 'skill';
 };
 
+const tagDetailToSmartTagKey = (detail: CandidateTagDetail): string => {
+  const label = String(detail.displayNameHe || detail.displayNameEn || detail.tagKey || '').trim();
+  if (!label) return '';
+  return buildSmartTagKey(inferSmartTagType(detail), label);
+};
+
+const buildTagModesFromDetails = (tagDetails: unknown[]): Record<string, SmartTagMode> => {
+  const modes: Record<string, SmartTagMode> = {};
+  for (const raw of Array.isArray(tagDetails) ? tagDetails : []) {
+    const detail = normalizeTagDetail(raw);
+    const mode = normalizeTagMode(detail.mode);
+    if (mode === 'normal') continue;
+    const tagKey = tagDetailToSmartTagKey(detail);
+    if (tagKey) modes[tagKey] = mode;
+  }
+  return modes;
+};
+
+const applyTagModeToDetails = (
+  tagDetails: unknown[] | undefined,
+  tagKey: string,
+  mode: SmartTagMode,
+): unknown[] => {
+  const list = Array.isArray(tagDetails) ? tagDetails : [];
+  return list.map((raw) => {
+    const detail = normalizeTagDetail(raw);
+    const currentKey = tagDetailToSmartTagKey(detail);
+    if (!currentKey || currentKey !== tagKey) return raw;
+    return { ...(typeof raw === 'object' && raw != null ? raw : {}), mode };
+  });
+};
+
 function formatRecruitmentSourceDisplayDate(value: unknown): string {
     if (value == null || value === '') return '—';
     const d = new Date(String(value));
@@ -689,8 +798,14 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const currentProfileId = activeProfileId ?? candidateData.id;
   const [fetchedProfiles, setFetchedProfiles] = useState<MultiProfileOption[]>([]);
   const profileList = useMemo(() => {
-    if (profiles.length > 0) return profiles;
-    return fetchedProfiles;
+    const merged = new Map<string, MultiProfileOption>();
+    for (const profile of [...profiles, ...fetchedProfiles]) {
+      const id = String(profile?.id ?? '').trim();
+      if (!id) continue;
+      merged.set(id, profile);
+    }
+    if (merged.size > 0) return Array.from(merged.values());
+    return [];
   }, [profiles, fetchedProfiles]);
   const activeProfileOption = profileList.find((p) => p.id === currentProfileId) || profileList[0];
   const showProfileSwitcher = profileList.length > 0;
@@ -698,9 +813,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const duplicateProfileBusy = isSaving || isDuplicatingProfile;
   const [duplicateSaveConfirmOpen, setDuplicateSaveConfirmOpen] = useState(false);
   const isEditingDuplicateProfile = useMemo(
-    () => isStaffDuplicateProfile(candidateData as Record<string, unknown>),
+    () => shouldSaveCandidateProfileDirectly(candidateData as Record<string, unknown>),
     [candidateData],
   );
+  const [tagModes, setTagModes] = useState<Record<string, SmartTagMode>>({});
   const [isSwitcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
   const handleProfileChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -882,19 +998,44 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     if (category === 'tool') return 'tool';
     return category;
   };
+  const normalizeCatalogType = (typeRaw?: string): string => {
+    const raw = String(typeRaw || '').toLowerCase().trim();
+    if (raw === 'soft' || raw === 'soft_skill') return 'soft_skill';
+    if (raw === 'hard_skill') return 'skill';
+    if (raw === 'education') return 'degree';
+    return raw || 'skill';
+  };
+  const catalogTypesEquivalent = (a?: string, b?: string): boolean => {
+    const left = normalizeCatalogType(a);
+    const right = normalizeCatalogType(b);
+    return Boolean(left && right && left === right);
+  };
+  const resolveTagIdForCategory = (tag: TagOption, category: TagCategory): string | undefined => {
+    const catalogId = String(tag.id || '').trim();
+    if (!catalogId || catalogId.startsWith('custom-')) return undefined;
+    const requested = mapCategoryToRawType(category);
+    const catalogType = normalizeCatalogType(tag.rawType || tag.category);
+    return catalogTypesEquivalent(catalogType, requested) ? catalogId : undefined;
+  };
+  const resolveTagKey = (tag: TagOption): string =>
+    String(tag.tagKey || tag.nameHe || tag.nameEn || tag.id || '').trim();
+
   const persistCandidateTag = async (tag: TagOption) => {
     if (!candidateId) return;
     try {
-      await fetch(`${apiBase}/api/admin/candidate-tags`, {
+      const res = await fetch(`${apiBase}/api/admin/candidate-tags`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           candidate_id: candidateId,
-          tagKey: tag.nameHe,
-          displayNameHe: tag.nameHe,
+          tag_id: resolveTagIdForCategory(tag, tag.category) || undefined,
+          tagKey: resolveTagKey(tag),
+          displayNameHe: tag.nameHe || resolveTagKey(tag),
+          displayNameEn: tag.nameEn || tag.nameHe || resolveTagKey(tag),
           raw_type: mapCategoryToRawType(tag.category),
         }),
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (err) {
       console.error('Failed to persist tag', err);
     }
@@ -904,18 +1045,25 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     if (!candidateId || !tags.length) return;
     try {
       const payload = tags.map((tag) => ({
-        tagKey: getTagLabel(tag),
-        displayNameHe: tag.nameHe || getTagLabel(tag),
-        displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
+        tag_id: resolveTagIdForCategory(tag, tag.category) || undefined,
+        tagKey: resolveTagKey(tag),
+        displayNameHe: tag.nameHe || resolveTagKey(tag),
+        displayNameEn: tag.nameEn || tag.nameHe || resolveTagKey(tag),
         raw_type: mapCategoryToRawType(tag.category),
       }));
-      await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
+      const res = await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ candidate_id: candidateId, tags: payload }),
       });
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(body || `HTTP ${res.status}`);
+      }
+      return await res.json();
     } catch (err) {
       console.error('Failed to persist tags batch', err);
+      throw err;
     }
   };
 
@@ -926,11 +1074,37 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     }, {} as Record<SmartTagType, SmartTagData[]>);
 
     const tagsList: string[] = Array.isArray(candidateData.tags) ? candidateData.tags : [];
-    tagsList.forEach((tag) => {
-      const detail = tagDetailLookup.get(tag);
+    const seenDetailKeys = new Set<string>();
+
+    (candidateData.tagDetails || []).forEach((raw: any) => {
+      const detail = normalizeTagDetail(raw);
+      const label = String(detail.displayNameHe || detail.displayNameEn || detail.tagKey || '').trim();
+      if (!label) return;
       const type = inferSmartTagType(detail);
-      const displayNameHe = detail?.displayNameHe?.trim();
-      const label = (displayNameHe || tag).trim() || tag;
+      const dedupeKey = `${type}:${detail.id || detail.tagKey || label}:${String(detail.rawType || '')}`;
+      if (seenDetailKeys.has(dedupeKey)) return;
+      seenDetailKeys.add(dedupeKey);
+      const entry: SmartTagData = {
+        label,
+        type,
+        isVerified: Boolean(detail.isCurrent),
+        isAiSuggested: false,
+        customTooltip: getTagTooltip(label),
+        tooltipPanel: buildTagTooltipPanel(label, detail, candidateData.workExperience),
+      };
+      if (!base[type]) base[type] = [];
+      base[type].push(entry);
+    });
+
+    tagsList.forEach((tag) => {
+      const compositeMatch = tag.includes('::') ? tag.split('::') : null;
+      const lookupKey = compositeMatch ? compositeMatch[0] : tag;
+      const detail = tagDetailLookup.get(tag) || tagDetailLookup.get(lookupKey);
+      const label = (detail?.displayNameHe || lookupKey).trim() || tag;
+      const type = inferSmartTagType(detail);
+      const dedupeKey = `${type}:${detail?.id || detail?.tagKey || label}:${String(detail?.rawType || '')}`;
+      if (seenDetailKeys.has(dedupeKey)) return;
+      seenDetailKeys.add(dedupeKey);
       const entry: SmartTagData = {
         label,
         type,
@@ -1020,8 +1194,25 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       base[entry.type].push(entry);
     });
 
+    for (const type of Object.keys(base) as SmartTagType[]) {
+      base[type] = base[type].map((entry) => withTagModeMeta(entry, tagModes));
+    }
+
     return base;
-  }, [candidateData.tags, candidateData.skills, candidateData.languages, candidateData.workExperience, tagDetailLookup, getTagTooltip]);
+  }, [candidateData.tags, candidateData.skills, candidateData.languages, candidateData.workExperience, tagDetailLookup, getTagTooltip, tagModes]);
+
+  const handleTagModeToggle = useCallback((tagKey: string) => {
+    let nextMode: SmartTagMode = 'normal';
+    setTagModes((prev) => {
+      const current = prev[tagKey] || 'normal';
+      nextMode = cycleTagMode(current);
+      return { ...prev, [tagKey]: nextMode };
+    });
+    onFormChange((formPrev: any) => ({
+      ...formPrev,
+      tagDetails: applyTagModeToDetails(formPrev?.tagDetails, tagKey, nextMode),
+    }));
+  }, [onFormChange]);
 
   const handleRowTagSelectorOpen = (rowId: string) => {
     const category = ROW_CATEGORY_MAP[rowId] || 'role';
@@ -1032,15 +1223,91 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const getTagLabel = (tag: TagOption): string => tag.nameHe || tag.nameEn || tag.id || '';
 
   const deleteCandidateTag = async (candidateTagId?: string) => {
-    if (!candidateTagId) return;
+    if (!candidateTagId) return false;
     try {
-      await fetch(`${apiBase}/api/admin/candidate-tags/${candidateTagId}`, {
+      const res = await fetch(`${apiBase}/api/admin/candidate-tags/${candidateTagId}`, {
         method: 'DELETE',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return true;
     } catch (err) {
       console.error('Failed to delete candidate tag', err);
+      return false;
     }
+  };
+
+  const handleTagRemove = (label: string) => {
+    if (!isEditingDuplicateProfile) return;
+
+    const trimmed = String(label || '').trim();
+    if (!trimmed) return;
+
+    const detail = tagDetailLookup.get(trimmed);
+    const existingTags = Array.isArray(candidateData.tags) ? candidateData.tags : [];
+    const existingDetails = Array.isArray(candidateData.tagDetails) ? candidateData.tagDetails : [];
+    const filteredTags = existingTags.filter((tag) => !tagValueMatchesRemoval(tag, trimmed, detail));
+    const filteredDetails = existingDetails.filter((raw: any) => {
+      const normalized = normalizeTagDetail(raw);
+      return !tagDetailMatchesRemoval(normalized, trimmed, detail);
+    });
+
+    const existingLanguages = ensureArray(candidateData.languages);
+    const filteredLanguages = existingLanguages.filter((lang: any) => {
+      const langLabel = (
+        typeof lang === 'string'
+          ? lang
+          : lang?.lang || lang?.language || lang?.name || lang?.value || ''
+      )
+        .toString()
+        .trim();
+      return !tagValueMatchesRemoval(langLabel, trimmed, detail);
+    });
+
+    const existingSoft = ensureArray(candidateData.skills?.soft);
+    const filteredSoft = existingSoft.filter((softSkill: any) => {
+      const softLabel = (
+        typeof softSkill === 'string'
+          ? softSkill
+          : softSkill?.name ?? softSkill?.label ?? softSkill?.displayNameHe ?? ''
+      )
+        .toString()
+        .trim();
+      return !tagValueMatchesRemoval(softLabel, trimmed, detail);
+    });
+
+    const tagsChanged = filteredTags.length !== existingTags.length;
+    const detailsChanged = filteredDetails.length !== existingDetails.length;
+    const languagesChanged = filteredLanguages.length !== existingLanguages.length;
+    const softChanged = filteredSoft.length !== existingSoft.length;
+    if (!tagsChanged && !detailsChanged && !languagesChanged && !softChanged) return;
+
+    const detailForDelete =
+      detail?.id
+        ? detail
+        : existingDetails
+            .map((raw: any) => normalizeTagDetail(raw))
+            .find((normalized) => tagDetailMatchesRemoval(normalized, trimmed, detail));
+
+    if (detailForDelete?.id) {
+      void deleteCandidateTag(detailForDelete.id);
+    }
+
+    const nextData: any = {
+      ...candidateData,
+      tags: filteredTags,
+      tagDetails: filteredDetails,
+    };
+    if (languagesChanged) nextData.languages = filteredLanguages;
+    if (softChanged) {
+      nextData.skills = {
+        ...(candidateData.skills || {}),
+        soft: filteredSoft,
+      };
+    }
+
+    onFormChange(nextData);
+    if (tagsChanged) onTagsChange(filteredTags);
   };
 
   const handleTagSelectorSave = async (selected: TagOption[]) => {
@@ -1056,24 +1323,31 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     if (newTags.length) {
       const merged = Array.from(new Set([...existingTags, ...newTags]));
       const existingDetails = Array.isArray(candidateData.tagDetails) ? candidateData.tagDetails : [];
-      const addedDetails = selected
-        .filter((tag) => newTags.includes(getTagLabel(tag)))
-        .map((tag) => ({
-          tagKey: getTagLabel(tag),
-          displayNameHe: tag.nameHe || getTagLabel(tag),
-          displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
-          rawType: mapCategoryToRawType(tag.category),
-          context: undefined,
-          isCurrent: true,
-          isInSummary: true,
-          confidenceScore: undefined,
-        }));
+      const addedTags = selected.filter((tag) => newTags.includes(getTagLabel(tag)));
+      const selectorCategory = tagSelectorCategory === 'all' ? 'skill' : tagSelectorCategory;
+      const addedDetails = addedTags.map((tag) => ({
+        tagId: resolveTagIdForCategory(tag, selectorCategory),
+        tagKey: resolveTagKey(tag),
+        displayNameHe: tag.nameHe || getTagLabel(tag),
+        displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
+        rawType: mapCategoryToRawType(selectorCategory),
+        context: undefined,
+        isCurrent: true,
+        isInSummary: true,
+        confidenceScore: undefined,
+      }));
       onFormChange({
         ...candidateData,
         tags: merged,
         tagDetails: [...existingDetails, ...addedDetails],
       });
-      await persistCandidateTagsBatch(selected.filter((tag) => newTags.includes(getTagLabel(tag))));
+      try {
+        await persistCandidateTagsBatch(
+          addedTags.map((tag) => ({ ...tag, category: selectorCategory })),
+        );
+      } catch {
+        // Still saved locally; candidate PUT will retry via tagDetails sync.
+      }
     }
     setIsTagSelectorOpen(false);
   };
@@ -1120,15 +1394,67 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       return btoa(String.fromCharCode(...bytes));
   };
 
+  const createProfileVersionForResumeUpload = async (file: File): Promise<string> => {
+      const sourceId = String(candidateData.backendId || candidateData.id || candidateId || '').trim();
+      if (!sourceId) {
+          throw new Error('מזהה המועמד חסר.');
+      }
+      const existingNames = profileList.map(
+          (profile) =>
+              profile.profileName ||
+              profile.fullName ||
+              buildCandidateFullName(profile.firstName, profile.lastName) ||
+              '',
+      );
+      const fileStem = String(file.name || '')
+          .replace(/\.[^.]+$/, '')
+          .trim();
+      const baseName =
+          fileStem ||
+          candidateData.profileName ||
+          buildCandidateFullName(candidateData.firstName, candidateData.lastName) ||
+          candidateData.fullName ||
+          'פרופיל';
+      const profileName = buildDuplicateProfileName(baseName, existingNames);
+      const primaryCandidateId = String(candidateData.canonicalCandidateId || sourceId).trim();
+      const payload = sanitizeProfileDuplicatePayload(
+          buildProfileDuplicatePayload(
+              candidateData as Record<string, unknown>,
+              profileName,
+              candidateData.userId || null,
+              primaryCandidateId,
+          ),
+      );
+      const createRes = await fetch(`${apiBase}/api/candidates`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ ...payload, allowProfileVersion: true }),
+      });
+      if (!createRes.ok) {
+          const body = await createRes.json().catch(() => ({}));
+          throw new Error(typeof body?.message === 'string' ? body.message : 'יצירת גרסת פרופיל נכשלה.');
+      }
+      const created = await createRes.json();
+      const newId = String(created.id || '').trim();
+      if (!newId) {
+          throw new Error('יצירת גרסת פרופיל נכשלה.');
+      }
+      return newId;
+  };
+
   const uploadToS3 = async (file: File) => {
       if (!candidateId) {
           alert('אנא שמור קודם את הפרופיל לפני העלאת קובץ.');
           return;
       }
       const folder = 'resumes';
+      let targetCandidateId = String(candidateId);
+      let backgroundProcessing = false;
       try {
+          setUploadState({ inProgress: true, type: 'resume', message: 'יוצר גרסת פרופיל...' });
+          targetCandidateId = await createProfileVersionForResumeUpload(file);
           setUploadState({ inProgress: true, type: 'resume', message: 'מכין העלאה...' });
-          const presignRes = await fetch(`${apiBase}/api/candidates/${candidateId}/upload-url`, {
+          const presignRes = await fetch(`${apiBase}/api/candidates/${targetCandidateId}/upload-url`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', ...authHeaders() },
               body: JSON.stringify({ fileName: file.name, contentType: file.type, folder }),
@@ -1151,20 +1477,61 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
               body: file,
           });
           if (!putRes.ok) throw new Error('Upload to S3 failed');
-          setUploadState({ inProgress: true, type: 'resume', message: 'שומר קובץ...' });
-          const attachRes = await fetch(`${apiBase}/api/candidates/${candidateId}/media`, {
+          if (targetCandidateId !== String(candidateId)) {
+              if (onNavigateCandidate) {
+                  onNavigateCandidate(targetCandidateId);
+              } else if (onSwitchProfile) {
+                  onSwitchProfile(targetCandidateId);
+              }
+          }
+          setUploadState({ inProgress: true, type: 'resume', message: 'מעבד קורות חיים...' });
+          const attachRes = await fetch(`${apiBase}/api/candidates/${targetCandidateId}/media`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', ...authHeaders() },
               body: JSON.stringify({ key, type: 'resume', fileName: file.name }),
           });
-          if (!attachRes.ok) throw new Error('Failed to attach media');
-          const updated = await attachRes.json();
-          onFormChange((prev: any) => ({ ...prev, ...updated }));
+          const attachBody = await attachRes.json().catch(() => ({}));
+          if (!attachRes.ok && attachRes.status !== 202) {
+              throw new Error(attachBody?.message || 'Failed to attach media');
+          }
+          const applyEnrichedCandidate = (updated: Record<string, unknown>) => {
+              onFormChange((prev: any) => ({
+                  ...prev,
+                  ...updated,
+                  backendId: targetCandidateId,
+                  id: targetCandidateId,
+              }));
+              window.dispatchEvent(
+                  new CustomEvent('candidate-data-refreshed', {
+                      detail: { backendId: targetCandidateId },
+                  }),
+              );
+          };
+          if (isCandidateEnrichmentPending(attachRes.status, attachBody)) {
+              backgroundProcessing = true;
+              void waitForCandidateEnrichment(apiBase, targetCandidateId, authHeaders)
+                  .then(applyEnrichedCandidate)
+                  .catch((pollErr: unknown) => {
+                      console.error('Resume enrichment poll failed', pollErr);
+                      alert(
+                          pollErr instanceof Error
+                              ? pollErr.message
+                              : 'עיבוד קורות החיים נמשך זמן רב. נסה לרענן את העמוד.',
+                      );
+                  })
+                  .finally(() => {
+                      setUploadState({ inProgress: false, type: 'resume', message: '' });
+                  });
+              return;
+          }
+          applyEnrichedCandidate(attachBody);
       } catch (err: any) {
           console.error('Resume upload failed', err);
           alert(err?.message || 'העלאת קובץ נכשלה.');
       } finally {
-          setUploadState({ inProgress: false, type: 'resume', message: '' });
+          if (!backgroundProcessing) {
+              setUploadState({ inProgress: false, type: 'resume', message: '' });
+          }
       }
   };
 
@@ -1191,13 +1558,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
     const loadProfiles = async () => {
       try {
-        const res = await fetch(`${apiBase}/api/candidates/${backendId}`, { signal: controller.signal });
-        if (!res.ok) return;
-        const data = await res.json();
-        const userId = data.userId || data.userId?.id;
-        if (!userId) return;
-
-        const listRes = await fetch(`${apiBase}/api/candidates/by-user/${userId}`, { signal: controller.signal });
+        const listRes = await fetch(
+          `${apiBase}/api/candidates/${encodeURIComponent(String(backendId))}/profile-versions`,
+          { signal: controller.signal, headers: authHeaders() },
+        );
         if (!listRes.ok) return;
 
         const payload = await listRes.json();
@@ -1213,6 +1577,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
               'פרופיל',
             profilePicture: item.profilePicture,
             isDeleted: Boolean(item.isDeleted),
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt,
+            canonicalCandidateId: item.canonicalCandidateId ?? null,
+            staffProfileCopy: Boolean(item.staffProfileCopy),
           }))
           .filter(Boolean);
         setFetchedProfiles(options);
@@ -1242,6 +1610,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           : undefined;
     onOpenMessageModal({
         mode,
+        recipientType: 'candidate',
         candidateName: displayFullName,
         candidatePhone: candidateData.phone,
         candidateEmail: candidateData.email || candidateData.contactEmail || undefined,
@@ -1250,13 +1619,15 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   };
 
   const profileVersionCount = profileList.length;
-  const getProfileYear = (profile?: MultiProfileOption | null) => {
+  const getProfileDateLabel = (profile?: MultiProfileOption | null) => {
     const createdAt = (profile as any)?.createdAt || (profile as any)?.updatedAt;
-    if (createdAt) {
-      const resolved = new Date(createdAt);
-      if (!Number.isNaN(resolved.getTime())) return resolved.getFullYear();
-    }
-    return new Date().getFullYear();
+    const resolved = createdAt ? new Date(createdAt) : new Date();
+    if (Number.isNaN(resolved.getTime())) return '—';
+    return resolved.toLocaleDateString('he-IL', {
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+    });
   };
 
   const handleDocumentClick = (event: MouseEvent) => {
@@ -1274,6 +1645,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     setSummaryExpanded(false);
     setSummaryEditing(false);
   }, [candidateData.id, candidateData.backendId]);
+
+  useEffect(() => {
+    setTagModes(buildTagModesFromDetails(candidateData.tagDetails || []));
+  }, [candidateData.id, candidateData.backendId, candidateData.tagDetails]);
 
   const handleProfileSelect = (profile: MultiProfileOption) => {
     setSwitcherOpen(false);
@@ -1310,33 +1685,45 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
     const renderProfileSwitcher = () => {
     if (!showProfileSwitcher && !showDuplicateProfileButton) return null;
-    const yearLabel = showProfileSwitcher
-      ? getProfileYear(activeProfileOption || profileList[0])
+    const dateLabel = showProfileSwitcher
+      ? getProfileDateLabel(activeProfileOption || profileList[0])
       : null;
         const normalizedProfileList = profileList.map((profile) => ({
             ...profile,
             isDeleted: Boolean(profile.isDeleted),
         }));
     return (
-      <div ref={switcherRef} className="absolute top-4 left-4 z-30 flex items-center gap-3">
+      <div ref={switcherRef} className="relative z-30 flex flex-wrap items-center gap-3 w-fit max-w-full">
         {showProfileSwitcher ? (
+        <>
         <button
           type="button"
           onClick={() => setSwitcherOpen((prev) => !prev)}
-          className={`group flex items-center gap-2 px-3 py-1.5 rounded-full transition-all text-xs font-semibold border backdrop-blur-sm shadow-sm bg-white/80 text-text-subtle border-border-default hover:text-primary-600 hover:border-primary-200 ${
-            isStaffDuplicateProfile(activeProfileOption as Record<string, unknown>) ? 'opacity-60' : ''
-          }`}
+          className="group flex items-center gap-2 px-3 py-1.5 rounded-full transition-all text-xs font-semibold border backdrop-blur-sm shadow-sm bg-white/80 text-text-subtle border-border-default hover:text-primary-600 hover:border-primary-200"
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="w-3.5 h-3.5 text-primary-500">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <span>{activeProfileOption?.profileName || 'פרופיל'}</span>
+          <span
+            className={
+              isStaffDuplicateProfile(activeProfileOption as Record<string, unknown>) ? 'opacity-60' : ''
+            }
+          >
+            {activeProfileOption?.profileName || 'פרופיל'}
+          </span>
           <span className="w-px h-3 bg-current opacity-20" />
-          <span className="font-mono">{yearLabel}</span>
+          <span className="tabular-nums whitespace-nowrap">{dateLabel}</span>
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className={`w-3 h-3 opacity-50 transition-transform duration-200 ${isSwitcherOpen ? '-rotate-180' : ''}`}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
           </svg>
         </button>
+        <span
+          className="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-2.5 py-1 text-[11px] font-bold text-primary-700 tabular-nums shadow-sm"
+          title={`${profileVersionCount} פרופילים קיימים`}
+        >
+          {profileVersionCount} {profileVersionCount === 1 ? 'פרופיל' : 'פרופילים'}
+        </span>
+        </>
         ) : null}
         {onAddProfile ? (
         <button
@@ -1350,7 +1737,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         {renderDuplicateProfileButton(true)}
 
         {showProfileSwitcher && isSwitcherOpen && (
-          <div className="absolute top-full right-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-border-default z-50 overflow-hidden animate-fade-in origin-top-right">
+          <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-border-default z-50 overflow-hidden animate-fade-in origin-top-left">
             <div className="p-2.5 bg-bg-subtle/50 border-b border-border-default flex justify-between items-center">
               <p className="text-[10px] font-bold text-text-muted uppercase tracking-wider">היסטוריית גרסאות</p>
               <span className="text-[10px] text-primary-600 bg-primary-50 px-1.5 py-0.5 rounded border border-primary-100">{profileVersionCount} גרסאות</span>
@@ -1359,7 +1746,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
               {normalizedProfileList.map((profile, index) => {
                 const isActive = profile.id === activeProfileOption?.id;
                 const isDuplicate = isStaffDuplicateProfile(profile as Record<string, unknown>);
-                const profileYear = getProfileYear(profile);
+                const profileDateLabel = getProfileDateLabel(profile);
                 const sourceLabel = (profile as any).source || (profile as any).sourceClientName || '';
                 const baseRowClasses = [
                     'px-3 py-2.5 border-b border-border-subtle last:border-0 hover:bg-primary-50 transition-all cursor-pointer group flex items-start gap-3',
@@ -1404,10 +1791,14 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                           </svg>
                         </button>
                       </div>
-                      <div className="flex items-center gap-1.5 mt-0.5 text-[10px] text-text-muted">
-                        <span>{profileYear}</span>
-                        <span>•</span>
-                        <span className="truncate max-w-[80px]">{sourceLabel}</span>
+                      <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-0.5 text-[10px] text-text-muted">
+                        <span className="whitespace-nowrap">{profileDateLabel}</span>
+                        {sourceLabel ? (
+                          <>
+                            <span>•</span>
+                            <span className="truncate max-w-[100px]">{sourceLabel}</span>
+                          </>
+                        ) : null}
                         {isActive && (
                           <span className="bg-green-100 text-green-700 px-1 rounded ml-1">פעיל</span>
                         )}
@@ -1435,7 +1826,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
   const handleSaveCandidateClick = useCallback(() => {
     if (!onSaveCandidate || isSaving) return;
-    if (isEditingDuplicateProfile) {
+    if (!isEditingDuplicateProfile) {
       setDuplicateSaveConfirmOpen(true);
       return;
     }
@@ -1490,9 +1881,11 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             <ChevronLeftIcon className="w-4 h-4" />
           </button>
       </div>
-      {renderProfileSwitcher()}
+      <div className="w-full mb-3 clear-both">
+        <div className="float-left max-w-full">{renderProfileSwitcher()}</div>
+      </div>
 
-      <div className="candidate-profile-card flex flex-col bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border border-border-subtle">
+      <div className="candidate-profile-card clear-both flex flex-col bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border border-border-subtle">
          {/* Favorite Button */}
          <button 
             onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }} 
@@ -1777,16 +2170,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                               }
                           }}
                           onRowAdd={handleRowTagSelectorOpen}
-                          onTagRemove={(label) => {
-                              const existingTags = Array.isArray(candidateData.tags) ? candidateData.tags : [];
-                              const filtered = existingTags.filter((tag) => tag !== label);
-                              if (filtered.length === existingTags.length) return;
-                              const detail = tagDetailLookup.get(label.trim());
-                              if (detail?.id) {
-                                  deleteCandidateTag(detail.id);
-                              }
-                              onFormChange({ ...candidateData, tags: filtered });
-                          }}
+                          onTagRemove={isEditingDuplicateProfile ? handleTagRemove : undefined}
+                          onTagToggle={handleTagModeToggle}
                       />
 
                       <div className="mt-4 rounded-2xl border border-border-default/90 bg-gradient-to-br from-bg-card via-bg-card to-bg-subtle/35 p-3 text-sm shadow-sm">
@@ -2090,7 +2475,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                     </div>
                     <div className="flex-1 min-w-0">
                       <h3 id="duplicate-save-confirm-title" className="font-bold text-text-default text-lg">
-                        שמירה על עותק
+                        שמירה על מקור
                       </h3>
                       <p className="text-sm text-text-muted mt-1 leading-relaxed">
                         האם ברצונך לשמור על עותק חי של המועמד?

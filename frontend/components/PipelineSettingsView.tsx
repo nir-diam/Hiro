@@ -26,7 +26,12 @@ import {
     fetchClientMessageTemplates,
     type MessageTemplateDto,
 } from '../services/messageTemplatesApi';
-import { fetchSystemEvents, type SystemEventApiRow } from '../services/systemEventsApi';
+import { fetchSystemEvents } from '../services/systemEventsApi';
+import {
+    buildSystemEventGroupsFromApiRows,
+    resolveSystemEventSelectValue,
+    type SystemEventCatalogGroup,
+} from '../utils/processManagementCatalog';
 import { fetchRecruitmentStatuses, type RecruitmentStatusDto } from '../services/recruitmentStatusesApi';
 import type {
     OutcomeAutomation,
@@ -51,36 +56,85 @@ interface Pipeline {
     id: string;
     name: string;
     description: string;
+    sortIndex?: number;
     stages: Stage[];
 }
 
-const SYSTEM_EVENT_GROUPS: Array<{ label: string; events: Array<{ value: string; label: string }> }> = [
+const SYSTEM_EVENT_GROUPS: SystemEventCatalogGroup[] = [
     {
         label: 'פורטל מועמד',
         events: [
-            { value: 'candidate_confirmed_profile', label: 'מועמד.אישור הפרופיל על ידי המועמד' },
+            {
+                value: 'candidate_confirmed_profile',
+                label: 'אישור הפרופיל על ידי המועמד',
+                triggerName: 'מועמד',
+                eventName: 'אישור הפרופיל על ידי המועמד',
+                rowIds: [],
+            },
         ],
     },
     {
         label: 'אישורי הגעה',
         events: [
-            { value: 'candidate_confirmed_interview', label: 'מועמד.אישר_הגעה_לראיון' },
-            { value: 'candidate_canceled_interview', label: 'מועמד.ביטל_הגעה_לראיון' },
-            { value: 'candidate_requested_reschedule', label: 'מועמד.ביקש_לשנות_מועד' },
+            {
+                value: 'candidate_confirmed_interview',
+                label: 'אישר_הגעה_לראיון',
+                triggerName: 'מועמד',
+                eventName: 'אישר_הגעה_לראיון',
+                rowIds: [],
+            },
+            {
+                value: 'candidate_canceled_interview',
+                label: 'ביטל_הגעה_לראיון',
+                triggerName: 'מועמד',
+                eventName: 'ביטל_הגעה_לראיון',
+                rowIds: [],
+            },
+            {
+                value: 'candidate_requested_reschedule',
+                label: 'ביקש_לשנות_מועד',
+                triggerName: 'מועמד',
+                eventName: 'ביקש_לשנות_מועד',
+                rowIds: [],
+            },
         ],
     },
     {
         label: 'טפסים ושאלונים',
         events: [
-            { value: 'form_completed_onboarding', label: 'טופס.קליטה_הושלם' },
-            { value: 'form_completed_tech_test', label: 'טופס.מבחן_מקצועי_הוגש' },
+            {
+                value: 'form_completed_onboarding',
+                label: 'קליטה_הושלם',
+                triggerName: 'טופס',
+                eventName: 'קליטה_הושלם',
+                rowIds: [],
+            },
+            {
+                value: 'form_completed_tech_test',
+                label: 'מבחן_מקצועי_הוגש',
+                triggerName: 'טופס',
+                eventName: 'מבחן_מקצועי_הוגש',
+                rowIds: [],
+            },
         ],
     },
     {
         label: 'מערכות צד שלישי',
         events: [
-            { value: 'bg_check_passed', label: 'בדיקת_רקע.עבר_בהצלחה' },
-            { value: 'hris_sync_completed', label: 'מערכת_HR.סנכרון_הושלם' },
+            {
+                value: 'bg_check_passed',
+                label: 'עבר_בהצלחה',
+                triggerName: 'בדיקת_רקע',
+                eventName: 'עבר_בהצלחה',
+                rowIds: [],
+            },
+            {
+                value: 'hris_sync_completed',
+                label: 'סנכרון_הושלם',
+                triggerName: 'מערכת_HR',
+                eventName: 'סנכרון_הושלם',
+                rowIds: [],
+            },
         ],
     },
 ];
@@ -97,14 +151,14 @@ function defaultAutomation(): OutcomeAutomation {
         actionType: 'send_email',
         scheduleType: 'immediate',
         requireManualApproval: false,
-        recipients: { candidate: true, hiringManager: false, coordinator: false, extra: '' },
+        recipients: { candidate: false, hiringManager: false, coordinator: false, extra: '' },
     };
 }
 
 const OutcomeTriggerSection: React.FC<{
     trigger: OutcomeTrigger;
     onChange: (trigger: OutcomeTrigger) => void;
-    systemEventGroups: Array<{ label: string; events: Array<{ value: string; label: string }> }>;
+    systemEventGroups: SystemEventCatalogGroup[];
 }> = ({ trigger, onChange, systemEventGroups }) => {
     const triggerType = trigger?.type || 'none';
     return (
@@ -129,7 +183,7 @@ const OutcomeTriggerSection: React.FC<{
                     <div className="flex items-center gap-2 flex-1 min-w-[250px]">
                         <span className="text-xs text-blue-800">בחר אירוע:</span>
                         <select
-                            value={trigger.systemEventId || ''}
+                            value={resolveSystemEventSelectValue(trigger.systemEventId, systemEventGroups)}
                             onChange={(e) => onChange({ type: 'system_event', systemEventId: e.target.value })}
                             className="text-sm border border-blue-200 rounded-md bg-white px-2 py-1 outline-none focus:border-blue-500 w-full"
                         >
@@ -166,7 +220,7 @@ const OutcomeAutomationRow: React.FC<{
     onDelete: () => void;
 }> = ({ automation, pipelines, emailTemplates, smsTemplates, recruitmentStatuses, onChange, onDelete }) => {
     const showManualApproval = automation.actionType === 'send_email' || automation.actionType === 'send_sms';
-    const recipients = automation.recipients || { candidate: true, hiringManager: false, coordinator: false, extra: '' };
+    const recipients = automation.recipients || { candidate: false, hiringManager: false, coordinator: false, extra: '' };
     const selectedPipeline = pipelines.find((p) => p.id === automation.pipelineId) || null;
     const stageOptions = [...(selectedPipeline?.stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     const selectedStage = stageOptions.find((s) => s.id === automation.stageId) || null;
@@ -520,6 +574,7 @@ function dtoToPipeline(d: PipelineDto): Pipeline {
         id: d.id,
         name: d.name,
         description: d.description || '',
+        sortIndex: d.sortIndex,
         stages: (d.stages || []).map((s: PipelineStageDto) => ({
             id: s.id,
             name: s.name,
@@ -531,6 +586,33 @@ function dtoToPipeline(d: PipelineDto): Pipeline {
         })),
     };
 }
+
+function sortPipelinesByIndex(list: Pipeline[]): Pipeline[] {
+    return [...list]
+        .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+        .map((p, i) => ({ ...p, sortIndex: i }));
+}
+
+function pipelineToDto(p: Pipeline, sortIndex: number): PipelineDto {
+    return {
+        id: p.id,
+        name: p.name,
+        description: p.description || '',
+        sortIndex,
+        stages: (p.stages || []).map((s) => ({
+            id: s.id,
+            name: s.name,
+            color: s.color,
+            order: s.order,
+            slaLimit: s.slaLimit,
+            slaLimitUnit: s.slaLimitUnit || 'days',
+            outcomes: Array.isArray(s.outcomes) ? s.outcomes : [],
+        })),
+    };
+}
+
+const PIPELINE_ORDER_HELP_TEXT =
+    'התהליך הראשון ברשימה הוא ברירת המחדל שייפתח כשלב ראשון (למשל בעת הצבת ארגון או איש קשר בתהליך). ניתן להגדיר תהליך אחר כברירת מחדל על ידי גרירה למעלה. הסדר משפיע גם על לוח הקנבן ועל תצוגות נוספות במערכת.';
 
 const AddPipelineModal: React.FC<{
     isOpen: boolean;
@@ -642,6 +724,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
     const [messageTemplates, setMessageTemplates] = useState<MessageTemplateDto[]>(FALLBACK_TEMPLATES);
     const [systemEventGroups, setSystemEventGroups] = useState(SYSTEM_EVENT_GROUPS);
     const [recruitmentStatuses, setRecruitmentStatuses] = useState<RecruitmentStatusDto[]>([]);
+    const [isPipelineOrderHelpExpanded, setIsPipelineOrderHelpExpanded] = useState(false);
 
     const emailTemplates = useMemo(
         () => messageTemplates.filter((t) => t.channels.includes('email')),
@@ -654,6 +737,8 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
 
     const dragItem = useRef<number | null>(null);
     const dragOverItem = useRef<number | null>(null);
+    const pipelineDragItem = useRef<number | null>(null);
+    const pipelineDragOverItem = useRef<number | null>(null);
     const stagesContainerRef = useRef<HTMLDivElement>(null);
     const persistEnabled = useRef(false);
     const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -717,20 +802,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
         fetchSystemEvents(apiBase, token)
             .then((rows) => {
                 if (cancelled) return;
-                const active = rows.filter((r) => r.isActive);
-                const grouped = new Map<string, SystemEventApiRow[]>();
-                for (const row of active) {
-                    const key = row.triggerName || 'אירועים';
-                    if (!grouped.has(key)) grouped.set(key, []);
-                    grouped.get(key)!.push(row);
-                }
-                const fromApi = Array.from(grouped.entries()).map(([label, events]) => ({
-                    label,
-                    events: events.map((ev) => ({
-                        value: ev.id,
-                        label: `${ev.triggerName}.${ev.eventName}`,
-                    })),
-                }));
+                const fromApi = buildSystemEventGroupsFromApiRows(rows);
                 setSystemEventGroups(fromApi.length > 0 ? fromApi : SYSTEM_EVENT_GROUPS);
             })
             .catch(() => {
@@ -816,12 +888,15 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
             try {
                 setSaving(true);
                 const saved = isCandidateKind
-                    ? await syncCandidatePipelines(clientId, snapshot)
-                    : await syncPipelines(clientId, snapshot);
+                    ? await syncCandidatePipelines(
+                        clientId,
+                        snapshot.map((p, i) => pipelineToDto(p, i)),
+                    )
+                    : await syncPipelines(clientId, snapshot.map((p, i) => pipelineToDto(p, i)));
                 // Ignore stale responses — user kept editing while save was in flight.
                 if (rev !== persistRevision.current) return;
 
-                const mapped = saved.map(dtoToPipeline);
+                const mapped = sortPipelinesByIndex(saved.map(dtoToPipeline));
                 const hadTempIds = snapshot.some(
                     (p) => isTempId(p.id) || p.stages.some((s) => isTempId(s.id)),
                 );
@@ -868,7 +943,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
         void (isCandidateKind ? fetchCandidatePipelines(clientId) : fetchPipelines(clientId))
             .then((rows) => {
                 if (cancelled) return;
-                const mapped = rows.map(dtoToPipeline);
+                const mapped = sortPipelinesByIndex(rows.map(dtoToPipeline));
                 setPipelines(mapped);
                 setActivePipelineId(mapped[0]?.id || '');
                 setExpandedStageId(null);
@@ -1092,9 +1167,39 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
     const handleDeletePipeline = () => {
         if (!activePipeline) return;
         if (!window.confirm(`למחוק את התהליך "${activePipeline.name}" ואת כל שלביו?`)) return;
-        const next = pipelines.filter(p => p.id !== activePipelineId);
+        const next = pipelines.filter(p => p.id !== activePipelineId).map((p, i) => ({ ...p, sortIndex: i }));
         setActivePipelineId(next[0]?.id || '');
         updatePipelines(next);
+    };
+
+    const handlePipelineDragStart = (e: React.DragEvent, position: number) => {
+        pipelineDragItem.current = position;
+        e.dataTransfer.effectAllowed = 'move';
+    };
+
+    const handlePipelineDragEnter = (e: React.DragEvent, position: number) => {
+        pipelineDragOverItem.current = position;
+        e.preventDefault();
+    };
+
+    const handlePipelineDragEnd = () => {
+        if (pipelineDragItem.current === null || pipelineDragOverItem.current === null) {
+            pipelineDragItem.current = null;
+            pipelineDragOverItem.current = null;
+            return;
+        }
+        if (pipelineDragItem.current === pipelineDragOverItem.current) {
+            pipelineDragItem.current = null;
+            pipelineDragOverItem.current = null;
+            return;
+        }
+        const reordered = [...pipelines];
+        const dragged = reordered[pipelineDragItem.current];
+        reordered.splice(pipelineDragItem.current, 1);
+        reordered.splice(pipelineDragOverItem.current, 0, dragged);
+        updatePipelines(reordered.map((p, i) => ({ ...p, sortIndex: i })));
+        pipelineDragItem.current = null;
+        pipelineDragOverItem.current = null;
     };
 
     const handleDragStart = (e: React.DragEvent, position: number) => {
@@ -1211,36 +1316,71 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
 
                     <div className="space-y-2">
                         {pipelines.map((pipeline, idx) => (
-                            <button
+                            <div
                                 key={pipeline.id}
-                                type="button"
-                                onClick={() => {
-                                    setActivePipelineId(pipeline.id);
-                                    setExpandedStageId(null);
-                                }}
-                                className={`w-full text-right p-4 rounded-xl border transition-all flex items-center justify-between group ${
-                                    activePipelineId === pipeline.id
-                                    ? 'bg-primary-50 border-primary-200 shadow-sm ring-1 ring-primary-200'
-                                    : 'bg-white border-border-default hover:border-primary-200 hover:shadow-sm'
+                                draggable={pipelines.length > 1}
+                                onDragStart={(e) => handlePipelineDragStart(e, idx)}
+                                onDragEnter={(e) => handlePipelineDragEnter(e, idx)}
+                                onDragEnd={handlePipelineDragEnd}
+                                onDragOver={(e) => e.preventDefault()}
+                                className={`rounded-xl transition-all ${
+                                    pipelines.length > 1 ? 'cursor-grab active:cursor-grabbing' : ''
                                 }`}
                             >
-                                <div className="flex items-center gap-3">
-                                    <div className={`p-2 rounded-lg ${activePipelineId === pipeline.id ? 'bg-white text-primary-600' : 'bg-bg-subtle text-text-muted'}`}>
-                                        {idx === 0 ? <BriefcaseIcon className="w-5 h-5"/> : <UserGroupIcon className="w-5 h-5"/>}
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setActivePipelineId(pipeline.id);
+                                        setExpandedStageId(null);
+                                    }}
+                                    className={`w-full text-right p-4 rounded-xl border transition-all flex items-center justify-between group ${
+                                        activePipelineId === pipeline.id
+                                        ? 'bg-primary-50 border-primary-200 shadow-sm ring-1 ring-primary-200'
+                                        : 'bg-white border-border-default hover:border-primary-200 hover:shadow-sm'
+                                    }`}
+                                >
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        {pipelines.length > 1 ? (
+                                            <span
+                                                className="p-1.5 rounded-lg text-text-muted group-hover:text-primary-600 group-hover:bg-primary-50 shrink-0"
+                                                title="גרור לשינוי סדר"
+                                                aria-hidden
+                                            >
+                                                <Bars3Icon className="w-4 h-4" />
+                                            </span>
+                                        ) : null}
+                                        <div className={`p-2 rounded-lg shrink-0 ${activePipelineId === pipeline.id ? 'bg-white text-primary-600' : 'bg-bg-subtle text-text-muted'}`}>
+                                            {idx === 0 ? <BriefcaseIcon className="w-5 h-5"/> : <UserGroupIcon className="w-5 h-5"/>}
+                                        </div>
+                                        <div className="min-w-0 text-right">
+                                            <span className={`font-bold block truncate ${activePipelineId === pipeline.id ? 'text-primary-900' : 'text-text-default'}`}>
+                                                {pipeline.name}
+                                            </span>
+                                            <span className="text-xs text-text-muted">{pipeline.stages.length} שלבים</span>
+                                        </div>
                                     </div>
-                                    <div>
-                                        <span className={`font-bold block ${activePipelineId === pipeline.id ? 'text-primary-900' : 'text-text-default'}`}>
-                                            {pipeline.name}
-                                        </span>
-                                        <span className="text-xs text-text-muted">{pipeline.stages.length} שלבים</span>
-                                    </div>
-                                </div>
-                            </button>
+                                </button>
+                            </div>
                         ))}
                         {!pipelines.length && (
                             <p className="text-sm text-text-muted px-1">אין תהליכים עדיין.</p>
                         )}
                     </div>
+                    {pipelines.length > 0 ? (
+                        <button
+                            type="button"
+                            onClick={() => setIsPipelineOrderHelpExpanded((v) => !v)}
+                            className={`w-full text-right text-xs mt-3 leading-relaxed bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 text-blue-900 cursor-pointer hover:bg-blue-100/80 transition-colors ${
+                                isPipelineOrderHelpExpanded ? '' : 'truncate'
+                            }`}
+                            title={isPipelineOrderHelpExpanded ? undefined : PIPELINE_ORDER_HELP_TEXT}
+                            aria-expanded={isPipelineOrderHelpExpanded}
+                        >
+                            {isPipelineOrderHelpExpanded
+                                ? PIPELINE_ORDER_HELP_TEXT
+                                : 'התהליך הראשון ברשימה הוא ברירת המחדל שייפתח…'}
+                        </button>
+                    ) : null}
                     {(saving || saveError) && (
                         <p className={`text-xs mt-3 px-1 ${saveError ? 'text-red-600' : 'text-text-muted'}`}>
                             {saveError || 'שומר…'}

@@ -820,7 +820,7 @@ const resolveAiDecisions = async (req, res) => {
   try {
     const { decisionIds = [], action, targetTagId, aliasPriority } = req.body || {};
     const result = await tagAiDecisionResolveService.applyReviewerActions(
-      { decisionIds, action, targetTagId, aliasPriority },
+      { decisionIds, action, targetTagId, aliasPriority, req },
       resolvePendingTags,
     );
     res.json(result);
@@ -912,7 +912,7 @@ const approveAiDecision = async (req, res) => {
   try {
     const { id } = req.params;
     const status = req.body?.status || 'approved';
-    const result = await tagCorrectionAgentService.setApprovalStatus(id, status);
+    const result = await tagCorrectionAgentService.setApprovalStatus(id, status, req);
     res.json(result);
   } catch (err) {
     console.error('[tagController.approveAiDecision]', err);
@@ -923,11 +923,22 @@ const approveAiDecision = async (req, res) => {
 const updateAiDecisionComments = async (req, res) => {
   try {
     const { id } = req.params;
-    const result = await tagCorrectionAgentService.setComments(id, req.body?.comments);
+    const result = await tagCorrectionAgentService.setComments(id, req.body?.comments, req);
     res.json(result);
   } catch (err) {
     console.error('[tagController.updateAiDecisionComments]', err);
     res.status(err.status || 500).json({ message: err.message || 'Failed to update comments' });
+  }
+};
+
+const updateAiDecisionFields = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await tagCorrectionAgentService.setDecisionFields(id, req.body || {}, req);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.updateAiDecisionFields]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to update decision fields' });
   }
 };
 
@@ -945,7 +956,7 @@ const mergeTags = async (req, res) => {
 const blacklistTags = async (req, res) => {
   try {
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
-    const result = await tagCorrectionAgentService.blacklistCatalogTags(ids);
+    const result = await tagCorrectionAgentService.blacklistCatalogTags(ids, req);
     res.json(result);
   } catch (err) {
     console.error('[tagController.blacklistTags]', err);
@@ -977,6 +988,7 @@ module.exports = {
   backfillAutoMerge,
   approveAiDecision,
   updateAiDecisionComments,
+  updateAiDecisionFields,
   mergeTags,
   blacklistTags,
 };

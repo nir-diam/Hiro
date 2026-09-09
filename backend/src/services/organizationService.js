@@ -6,6 +6,7 @@ const CandidateOrganization = require('../models/CandidateOrganization');
 const { sendChat, resolveGeminiApiKey } = require('./geminiService');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const OrganizationAiDecision = require('../models/OrganizationAiDecision');
+const aiDecisionAuditService = require('./aiDecisionAuditService');
 const picklistService = require('./picklistService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { scheduleOrganizationEmbedding } = require('./organizationEmbeddingService');
@@ -1069,21 +1070,35 @@ const findOrCreateByName = async (name, defaults = {}) => {
     ? aiResult.similarEntities
     : buildSimilarEntities(similarCompanies, 'company');
 
-  const saveDecision = (extra = {}) =>
-    OrganizationAiDecision.create({
-      originalTerm: trimmed,
-      candidateId: candidateId || null,
-      aiDecision: aiResult ? aiResult.decision : 'create_company',
-      aiSuggestedTarget: aiResult ? aiResult.target : null,
-      aiSuggestedTargetId: aiResult ? aiResult.targetId : null,
-      aiReasoning: aiResult ? aiResult.explanation : null,
-      hesitationLevel: aiResult ? aiResult.hesitationLevel : null,
-      dilemmaReasoning: aiResult ? aiResult.dilemmaReasoning : null,
-      similarEntities,
-      context,
-      reviewStatus,
-      ...extra,
-    }).catch((e) => console.error('[orgService] failed to save AI decision:', e.message));
+  const saveDecision = async (extra = {}) => {
+    try {
+      const row = await OrganizationAiDecision.create({
+        originalTerm: trimmed,
+        candidateId: candidateId || null,
+        aiDecision: aiResult ? aiResult.decision : 'create_company',
+        aiSuggestedTarget: aiResult ? aiResult.target : null,
+        aiSuggestedTargetId: aiResult ? aiResult.targetId : null,
+        aiReasoning: aiResult ? aiResult.explanation : null,
+        hesitationLevel: aiResult ? aiResult.hesitationLevel : null,
+        dilemmaReasoning: aiResult ? aiResult.dilemmaReasoning : null,
+        similarEntities,
+        context,
+        reviewStatus,
+        ...extra,
+      });
+      await aiDecisionAuditService.recordOrgDecisionCreated(null, row, {
+        actor: 'agent',
+        metadata: {
+          resolveAction: extra.reviewerAction || null,
+          hesitationBand: band,
+        },
+      });
+      return row;
+    } catch (e) {
+      console.error('[orgService] failed to save AI decision:', e.message);
+      return null;
+    }
+  };
 
   // ── 5. merge_company + ודאי → auto-merge ──────────────────────────────────
   if (aiResult?.decision === 'merge_company' && band === 'vodai' && aiResult.targetId) {
@@ -1218,6 +1233,174 @@ const stageOrganizationFromClientCreate = async (payload = {}) => {
   });
 };
 
+const collectOrganizationAliasTerms = (org) => {
+  const plain = org?.get ? org.get({ plain: true }) : org;
+  if (!plain) return [];
+  const terms = [];
+  const push = (val) => {
+    const s = String(val || '').trim();
+    if (s) terms.push(s);
+  };
+  push(plain.name);
+  push(plain.nameEn);
+  push(plain.legalName);
+  if (Array.isArray(plain.aliases)) {
+    plain.aliases.forEach(push);
+  }
+  return terms;
+};
+
+const buildOrganizationAliasKeySet = (org) => {
+  const keys = new Set();
+  const add = (val) => {
+    const s = String(val || '').trim().toLowerCase();
+    if (s) keys.add(s);
+  };
+  const plain = org?.get ? org.get({ plain: true }) : org;
+  if (!plain) return keys;
+  add(plain.name);
+  add(plain.nameEn);
+  add(plain.legalName);
+  (Array.isArray(plain.aliases) ? plain.aliases : []).forEach(add);
+  return keys;
+};
+
+/**
+ * Merge one or more source organizations into a target organization.
+ * Transfers unique aliases and re-links linked candidates.
+ */
+const mergeOrganizations = async (payload = {}, options = {}) => {
+  const uniqueSources = [
+    ...new Set(
+      (Array.isArray(payload.sourceIds) ? payload.sourceIds : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean),
+    ),
+  ];
+  const targetId = String(payload.targetId || '').trim();
+
+  if (!targetId) {
+    const err = new Error('targetOrganizationId is required');
+    err.status = 400;
+    throw err;
+  }
+  if (!uniqueSources.length) {
+    const err = new Error('At least one source organization is required');
+    err.status = 400;
+    throw err;
+  }
+  if (uniqueSources.includes(targetId)) {
+    const err = new Error('Target organization cannot be one of the sources');
+    err.status = 400;
+    throw err;
+  }
+
+  const targetOrg = await Organization.findByPk(targetId);
+  if (!targetOrg) {
+    const err = new Error('Target organization not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const sourceOrgs = await Organization.findAll({ where: { id: { [Op.in]: uniqueSources } } });
+  if (sourceOrgs.length !== uniqueSources.length) {
+    const err = new Error('One or more source organizations were not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const beforeState = clonePlain(targetOrg);
+  const mergedSources = [];
+  let aliasesAdded = 0;
+  let candidatesMigrated = 0;
+
+  const { sequelize } = require('../config/db');
+  await sequelize.transaction(async (transaction) => {
+    const aliasKeys = buildOrganizationAliasKeySet(targetOrg);
+    const currentAliases = Array.isArray(targetOrg.aliases) ? [...targetOrg.aliases] : [];
+    const aliasesToAdd = [];
+
+    for (const sourceOrg of sourceOrgs) {
+      for (const term of collectOrganizationAliasTerms(sourceOrg)) {
+        const key = term.toLowerCase();
+        if (aliasKeys.has(key)) continue;
+        aliasKeys.add(key);
+        aliasesToAdd.push(term);
+      }
+    }
+
+    if (aliasesToAdd.length) {
+      await targetOrg.update(
+        { aliases: [...currentAliases, ...aliasesToAdd] },
+        { transaction },
+      );
+      aliasesAdded = aliasesToAdd.length;
+    }
+
+    for (const sourceOrg of sourceOrgs) {
+      const sourceId = sourceOrg.id;
+      const links = await CandidateOrganization.findAll({
+        where: { organizationId: sourceId },
+        transaction,
+      });
+
+      let migratedForSource = 0;
+      for (const link of links) {
+        const [, created] = await CandidateOrganization.findOrCreate({
+          where: { candidateId: link.candidateId, organizationId: targetId },
+          defaults: { relationType: link.relationType },
+          transaction,
+        });
+        if (created) migratedForSource += 1;
+      }
+      candidatesMigrated += migratedForSource;
+
+      if (links.length) {
+        await CandidateOrganization.destroy({
+          where: { organizationId: sourceId },
+          transaction,
+        });
+      }
+
+      await sourceOrg.update({ activityStatus: 'merged' }, { transaction });
+      mergedSources.push({
+        id: sourceId,
+        name: sourceOrg.name,
+        candidateLinks: links.length,
+        candidatesMigrated: migratedForSource,
+      });
+    }
+  });
+
+  await targetOrg.reload();
+  scheduleOrganizationEmbedding(targetOrg);
+
+  fireAndForget(recordOrganizationHistory({
+    organizationId: targetId,
+    action: 'update',
+    actor: options.actingUser,
+    before: beforeState,
+    after: clonePlain(targetOrg),
+    meta: {
+      ...actorMetaFromOptions(options),
+      mergeType: 'bulk_merge',
+      sourceOrganizationIds: uniqueSources,
+      aliasesAdded,
+      candidatesMigrated,
+      mergedSources,
+    },
+  }));
+
+  return {
+    targetOrganizationId: targetId,
+    targetOrganizationName: targetOrg.name,
+    mergedCount: mergedSources.length,
+    aliasesAdded,
+    candidatesMigrated,
+    mergedSources,
+  };
+};
+
 module.exports = {
   list,
   globalLookup,
@@ -1230,5 +1413,6 @@ module.exports = {
   findOrCreateByName,
   findGenericBucketOrganizations,
   stageOrganizationFromClientCreate,
+  mergeOrganizations,
 };
 

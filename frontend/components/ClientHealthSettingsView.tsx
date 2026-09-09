@@ -2,12 +2,14 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
     ExclamationTriangleIcon, CheckCircleIcon, ClockIcon, UserGroupIcon,
     PlusIcon, TrashIcon, BriefcaseIcon, BuildingOffice2Icon, ChartBarIcon, Bars3Icon,
+    ChevronDownIcon,
 } from './Icons';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import {
     fetchClientHealthRules,
     syncClientHealthRules,
+    cloneHealthRulesForCopy,
     type ClientHealthRuleDto,
     type HealthColor,
     type HealthConditionType,
@@ -206,6 +208,12 @@ const ClientHealthSettingsView: React.FC = () => {
     const [draggingId, setDraggingId] = useState<string | null>(null);
     const draggingIdRef = useRef<string | null>(null);
     const [pipelineRuleCounts, setPipelineRuleCounts] = useState<Record<string, number>>({});
+    const [orgSearchQuery, setOrgSearchQuery] = useState('');
+    const [selectedBulkOrgIds, setSelectedBulkOrgIds] = useState<Set<string>>(() => new Set());
+    const [bulkSourceScopeId, setBulkSourceScopeId] = useState(DEFAULT_SCOPE_ID);
+    const [bulkApplying, setBulkApplying] = useState(false);
+    const [orgPickerOpen, setOrgPickerOpen] = useState(false);
+    const orgPickerRef = useRef<HTMLDivElement>(null);
 
     /** Admin: selected client id. Tenant: organization or default sentinel. */
     const effectiveScopeId = selectedScopeId || (!isPlatformAdmin ? DEFAULT_SCOPE_ID : '');
@@ -357,6 +365,17 @@ const ClientHealthSettingsView: React.FC = () => {
         return () => { active = false; };
     }, [activeClientId, isDefaultScope, pipelines, baselineRules]);
 
+    useEffect(() => {
+        if (!orgPickerOpen) return;
+        const onDocClick = (e: MouseEvent) => {
+            if (orgPickerRef.current && !orgPickerRef.current.contains(e.target as Node)) {
+                setOrgPickerOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDocClick);
+        return () => document.removeEventListener('mousedown', onDocClick);
+    }, [orgPickerOpen]);
+
     const handleAddRule = () => {
         const newRule: HealthRule = {
             id: (typeof crypto !== 'undefined' && crypto.randomUUID)
@@ -433,6 +452,113 @@ const ClientHealthSettingsView: React.FC = () => {
         setError(null);
     };
 
+    const filteredScopeOptions = scopeOptions.filter((o) => {
+        const q = orgSearchQuery.trim().toLowerCase();
+        if (!q) return true;
+        return o.name.toLowerCase().includes(q);
+    });
+
+    const defaultHasUnsavedChanges = isDefaultScope
+        && JSON.stringify(rules) !== JSON.stringify(baselineRules);
+
+    const toggleBulkOrg = (orgId: string) => {
+        setSelectedBulkOrgIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(orgId)) next.delete(orgId);
+            else next.add(orgId);
+            return next;
+        });
+    };
+
+    const toggleSelectAllBulk = () => {
+        const visibleIds = filteredScopeOptions.map((o) => o.id);
+        const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedBulkOrgIds.has(id));
+        setSelectedBulkOrgIds((prev) => {
+            const next = new Set(prev);
+            if (allSelected) {
+                visibleIds.forEach((id) => next.delete(id));
+            } else {
+                visibleIds.forEach((id) => next.add(id));
+            }
+            return next;
+        });
+    };
+
+    const bulkSourceLabel = bulkSourceScopeId === DEFAULT_SCOPE_ID
+        ? 'ברירת מחדל'
+        : (scopeOptions.find((o) => o.id === bulkSourceScopeId)?.name || 'ארגון');
+
+    const activeScopeLabel = effectiveScopeId === DEFAULT_SCOPE_ID
+        ? 'ברירת מחדל'
+        : (scopeOptions.find((o) => o.id === effectiveScopeId)?.name || 'ארגון');
+
+    const selectScopeForEdit = (scopeId: string) => {
+        setSelectedScopeId(scopeId);
+        setOrgPickerOpen(false);
+    };
+
+    const handleBulkApplyTemplate = async () => {
+        if (!activeClientId || !selectedPipelineId || selectedBulkOrgIds.size === 0) return;
+
+        const sourceOrgId = resolveOrganizationId(bulkSourceScopeId);
+        const useUnsavedDefault = bulkSourceScopeId === DEFAULT_SCOPE_ID
+            && isDefaultScope
+            && defaultHasUnsavedChanges;
+
+        if (useUnsavedDefault) {
+            const ok = window.confirm(
+                'לתבנית ברירת המחדל יש שינויים שלא נשמרו. להחיל את השינויים הנוכחיים (ללא שמירה) על הארגונים הנבחרים?',
+            );
+            if (!ok) return;
+        }
+
+        const targetCount = selectedBulkOrgIds.size;
+        const ok = window.confirm(
+            `להחיל את תבנית "${bulkSourceLabel}" (${activePipeline?.name || 'תהליך'}) על ${targetCount} ארגונים? פעולה זו תדרוס את החוקים הקיימים שלהם.`,
+        );
+        if (!ok) return;
+
+        setBulkApplying(true);
+        setError(null);
+        setSaveMessage(null);
+        try {
+            let sourceRules: HealthRule[];
+            if (useUnsavedDefault) {
+                sourceRules = rules;
+            } else {
+                sourceRules = await fetchClientHealthRules(
+                    activeClientId,
+                    sourceOrgId,
+                    selectedPipelineId,
+                );
+            }
+
+            if (!sourceRules.length) {
+                throw new Error('לתבנית המקור אין חוקים להחלה');
+            }
+
+            const targets = [...selectedBulkOrgIds];
+            let applied = 0;
+            for (const orgId of targets) {
+                const cloned = cloneHealthRulesForCopy(sourceRules);
+                await syncClientHealthRules(
+                    activeClientId,
+                    cloned,
+                    orgId,
+                    selectedPipelineId,
+                );
+                applied += 1;
+            }
+
+            setSaveMessage(`התבנית הוחלה בהצלחה על ${applied} ארגונים`);
+            setSelectedBulkOrgIds(new Set());
+        } catch (e: any) {
+            setError(e?.message || 'החלת תבנית נכשלה');
+        } finally {
+            setBulkApplying(false);
+        }
+    };
+
     const handleSave = async () => {
         if (!activeClientId || !selectedPipelineId) return;
         if (!isPlatformAdmin && !effectiveScopeId) {
@@ -474,49 +600,191 @@ const ClientHealthSettingsView: React.FC = () => {
                         <div className="bg-primary-100 p-2 rounded-lg text-primary-600"><CheckCircleIcon className="w-6 h-6"/></div>
                         <h2 className="text-2xl font-bold text-text-default">הגדרת מדדי דופק לקוח (Client Pulse)</h2>
                     </div>
-                    <div className="relative min-w-[220px] max-w-full md:w-72">
+                    <div className="relative min-w-[220px] max-w-full md:w-96 flex-1">
                         <label className="block text-xs font-bold text-text-muted mb-1.5">{scopeLabel}</label>
-                        <div className="relative">
-                            <BuildingOffice2Icon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                            <select
-                                value={selectedScopeId || (!isPlatformAdmin ? DEFAULT_SCOPE_ID : '')}
-                                onChange={(e) => setSelectedScopeId(e.target.value)}
-                                disabled={loadingScopes || (isPlatformAdmin ? scopeOptions.length === 0 : !tenantClientId)}
-                                className="w-full appearance-none bg-bg-input border border-border-default rounded-xl py-2.5 pr-10 pl-3 text-sm font-bold text-text-default focus:ring-2 focus:ring-primary-500 outline-none disabled:opacity-60"
-                            >
-                                {loadingScopes ? (
-                                    <option value="">טוען…</option>
-                                ) : isPlatformAdmin ? (
-                                    scopeOptions.length === 0 ? (
+                        {isPlatformAdmin ? (
+                            <div className="relative">
+                                <BuildingOffice2Icon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                <select
+                                    value={selectedScopeId || ''}
+                                    onChange={(e) => setSelectedScopeId(e.target.value)}
+                                    disabled={loadingScopes || scopeOptions.length === 0}
+                                    className="w-full appearance-none bg-bg-input border border-border-default rounded-xl py-2.5 pr-10 pl-3 text-sm font-bold text-text-default focus:ring-2 focus:ring-primary-500 outline-none disabled:opacity-60"
+                                >
+                                    {loadingScopes ? (
+                                        <option value="">טוען…</option>
+                                    ) : scopeOptions.length === 0 ? (
                                         <option value="">אין לקוחות</option>
                                     ) : (
                                         scopeOptions.map((o) => (
                                             <option key={o.id} value={o.id}>{o.name}</option>
                                         ))
-                                    )
-                                ) : (
-                                    <>
-                                        <option value={DEFAULT_SCOPE_ID}>ברירת מחדל</option>
-                                        {scopeOptions.map((o) => (
-                                            <option key={o.id} value={o.id}>{o.name}</option>
-                                        ))}
-                                    </>
-                                )}
-                            </select>
-                        </div>
-                        {isDefaultScope ? (
-                            <p className="text-[11px] text-primary-700 mt-1.5 leading-snug">
-                                לכל טאב תהליך יש ברירת מחדל נפרדת (שמירה נפרדת לכל טאב). ארגונים חדשים יורשים מכאן.
-                            </p>
-                        ) : null}
+                                    )}
+                                </select>
+                            </div>
+                        ) : (
+                            <div className="relative" ref={orgPickerRef}>
+                                <button
+                                    type="button"
+                                    onClick={() => setOrgPickerOpen((open) => !open)}
+                                    disabled={loadingScopes || !tenantClientId}
+                                    className="w-full flex items-center gap-2 bg-bg-input border border-border-default rounded-xl py-2.5 px-3 text-sm font-bold text-text-default focus:ring-2 focus:ring-primary-500 outline-none disabled:opacity-60 hover:border-primary-300 transition-colors"
+                                    aria-expanded={orgPickerOpen}
+                                    aria-haspopup="listbox"
+                                >
+                                    <BuildingOffice2Icon className="w-4 h-4 text-text-subtle shrink-0" />
+                                    <span className="flex-1 text-right truncate">{activeScopeLabel}</span>
+                                    {selectedBulkOrgIds.size > 0 ? (
+                                        <span className="shrink-0 text-[10px] font-bold bg-primary-100 text-primary-700 px-1.5 py-0.5 rounded-md">
+                                            {selectedBulkOrgIds.size} נבחרו
+                                        </span>
+                                    ) : null}
+                                    <ChevronDownIcon
+                                        className={`w-4 h-4 text-text-subtle shrink-0 transition-transform duration-200 ${orgPickerOpen ? 'rotate-180' : ''}`}
+                                    />
+                                </button>
+
+                                {orgPickerOpen ? (
+                                    <div className="absolute top-full left-0 right-0 z-50 mt-1 border border-border-default rounded-xl bg-bg-card shadow-xl overflow-hidden animate-fade-in">
+                                        <button
+                                            type="button"
+                                            onClick={() => selectScopeForEdit(DEFAULT_SCOPE_ID)}
+                                            disabled={loadingScopes || !tenantClientId}
+                                            className={`w-full flex items-center gap-2 px-3 py-2.5 text-sm font-bold text-right transition-colors border-b border-border-subtle ${
+                                                effectiveScopeId === DEFAULT_SCOPE_ID
+                                                    ? 'bg-primary-50 text-primary-700'
+                                                    : 'hover:bg-bg-hover text-text-default'
+                                            }`}
+                                        >
+                                            <BuildingOffice2Icon className="w-4 h-4 shrink-0" />
+                                            <span className="flex-1">ברירת מחדל — עריכה</span>
+                                            {effectiveScopeId === DEFAULT_SCOPE_ID ? (
+                                                <span className="text-[10px] font-bold uppercase tracking-wide text-primary-600">פעיל</span>
+                                            ) : null}
+                                        </button>
+
+                                        {scopeOptions.length > 0 ? (
+                                            <>
+                                                <div className="px-3 py-2 border-b border-border-subtle bg-bg-subtle/40 space-y-2">
+                                                    <p className="text-[11px] font-bold text-text-muted">החלה מרובה — סמנו ארגונים</p>
+                                                    <input
+                                                        type="search"
+                                                        value={orgSearchQuery}
+                                                        onChange={(e) => setOrgSearchQuery(e.target.value)}
+                                                        placeholder="חיפוש ארגון…"
+                                                        className="w-full bg-bg-card border border-border-default rounded-lg py-1.5 px-2.5 text-xs focus:ring-1 focus:ring-primary-500 outline-none"
+                                                    />
+                                                    <label className="flex items-center gap-2 text-xs font-bold text-text-default cursor-pointer select-none">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={
+                                                                filteredScopeOptions.length > 0
+                                                                && filteredScopeOptions.every((o) => selectedBulkOrgIds.has(o.id))
+                                                            }
+                                                            onChange={toggleSelectAllBulk}
+                                                            className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                        />
+                                                        סמן הכל
+                                                        {filteredScopeOptions.length !== scopeOptions.length ? (
+                                                            <span className="text-text-subtle font-medium">
+                                                                ({filteredScopeOptions.length} מוצגים)
+                                                            </span>
+                                                        ) : (
+                                                            <span className="text-text-subtle font-medium">
+                                                                ({scopeOptions.length})
+                                                            </span>
+                                                        )}
+                                                    </label>
+                                                </div>
+
+                                                <div className="max-h-52 overflow-y-auto custom-scrollbar divide-y divide-border-subtle">
+                                                    {filteredScopeOptions.length === 0 ? (
+                                                        <p className="px-3 py-4 text-xs text-text-muted text-center">לא נמצאו ארגונים</p>
+                                                    ) : (
+                                                        filteredScopeOptions.map((o) => {
+                                                            const isEditing = effectiveScopeId === o.id;
+                                                            const isBulkSelected = selectedBulkOrgIds.has(o.id);
+                                                            return (
+                                                                <div
+                                                                    key={o.id}
+                                                                    className={`flex items-center gap-2 px-3 py-2 text-sm transition-colors ${
+                                                                        isEditing ? 'bg-primary-50/70' : 'hover:bg-bg-hover'
+                                                                    }`}
+                                                                >
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={isBulkSelected}
+                                                                        onChange={() => toggleBulkOrg(o.id)}
+                                                                        onClick={(e) => e.stopPropagation()}
+                                                                        className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer shrink-0"
+                                                                        aria-label={`בחר ${o.name} להחלת תבנית`}
+                                                                    />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => selectScopeForEdit(o.id)}
+                                                                        className={`flex-1 text-right truncate font-medium ${
+                                                                            isEditing ? 'text-primary-700 font-bold' : 'text-text-default'
+                                                                        }`}
+                                                                        title={o.name}
+                                                                    >
+                                                                        {o.name}
+                                                                    </button>
+                                                                    {isEditing ? (
+                                                                        <span className="text-[10px] font-bold uppercase tracking-wide text-primary-600 shrink-0">עריכה</span>
+                                                                    ) : null}
+                                                                </div>
+                                                            );
+                                                        })
+                                                    )}
+                                                </div>
+
+                                                {selectedBulkOrgIds.size > 0 ? (
+                                                    <div className="p-3 border-t border-border-default bg-bg-subtle/30 space-y-2">
+                                                        <p className="text-xs font-bold text-text-default">
+                                                            נבחרו {selectedBulkOrgIds.size} ארגונים
+                                                        </p>
+                                                        <label className="block text-[11px] font-bold text-text-muted">תבנית מקור</label>
+                                                        <select
+                                                            value={bulkSourceScopeId}
+                                                            onChange={(e) => setBulkSourceScopeId(e.target.value)}
+                                                            className="w-full bg-bg-card border border-border-default rounded-lg py-2 px-2.5 text-xs font-bold text-text-default focus:ring-1 focus:ring-primary-500 outline-none"
+                                                        >
+                                                            <option value={DEFAULT_SCOPE_ID}>ברירת מחדל</option>
+                                                            {scopeOptions.map((o) => (
+                                                                <option key={o.id} value={o.id}>{o.name}</option>
+                                                            ))}
+                                                        </select>
+                                                        <button
+                                                            type="button"
+                                                            disabled={bulkApplying || !selectedPipelineId}
+                                                            onClick={() => void handleBulkApplyTemplate()}
+                                                            className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold text-white bg-primary-600 hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                                                        >
+                                                            <CheckCircleIcon className="w-4 h-4" />
+                                                            {bulkApplying
+                                                                ? 'מעדכן…'
+                                                                : `עדכן נבחרים לתבנית "${bulkSourceLabel}"`}
+                                                        </button>
+                                                        <p className="text-[10px] text-text-subtle leading-snug">
+                                                            מומלץ לשמור קודם את תבנית ברירת המחדל, ואז להחיל על הארגונים המסומנים.
+                                                            {activePipeline ? ` (${activePipeline.name})` : ''}
+                                                        </p>
+                                                    </div>
+                                                ) : null}
+                                            </>
+                                        ) : loadingScopes ? (
+                                            <p className="px-3 py-4 text-xs text-text-muted">טוען ארגונים…</p>
+                                        ) : (
+                                            <p className="px-3 py-4 text-xs text-text-muted">אין ארגונים מקושרים</p>
+                                        )}
+                                    </div>
+                                ) : null}
+                            </div>
+                        )}
+                       
                     </div>
                 </div>
-                <p className="text-sm text-text-muted max-w-2xl leading-relaxed">
-                    כאן מגדירים מתי המערכת תתריע על לקוחות &quot;נופלים בין הכסאות&quot; — בנפרד לכל תהליך עבודה.
-                    המערכת בודקת את החוקים לפי הסדר (מלמעלה למטה). החוק הראשון שמתקיים קובע את צבע הדופק.
-                    <br/>
-                    מומלץ לשים חוקים קריטיים (אדום) בראש הרשימה.
-                </p>
+               
             </div>
 
             {error && (

@@ -41,7 +41,16 @@ interface Template {
     attachmentFileName?: string | null;
     attachmentContentType?: string | null;
     attachmentFileSize?: number | null;
+    forCandidate: boolean;
+    forClientContact: boolean;
+    forTeamMember: boolean;
 }
+
+const defaultAudience = () => ({
+    forCandidate: true,
+    forClientContact: true,
+    forTeamMember: true,
+});
 
 function dtoToTemplate(row: MessageTemplateDto): Template {
     return {
@@ -58,8 +67,37 @@ function dtoToTemplate(row: MessageTemplateDto): Template {
         attachmentFileName: row.attachmentFileName ?? null,
         attachmentContentType: row.attachmentContentType ?? null,
         attachmentFileSize: row.attachmentFileSize ?? null,
+        forCandidate: row.forCandidate !== false,
+        forClientContact: row.forClientContact !== false,
+        forTeamMember: row.forTeamMember !== false,
     };
 }
+
+export const AudienceBadges: React.FC<Pick<Template, 'forCandidate' | 'forClientContact' | 'forTeamMember'>> = ({
+    forCandidate,
+    forClientContact,
+    forTeamMember,
+}) => {
+    const { t } = useLanguage();
+    const items = [
+        forCandidate ? t('templates.audience_candidate_short') : null,
+        forClientContact ? t('templates.audience_client_contact_short') : null,
+        forTeamMember ? t('templates.audience_team_member_short') : null,
+    ].filter(Boolean);
+    if (!items.length) return <span className="text-text-subtle">—</span>;
+    return (
+        <div className="flex flex-wrap gap-1">
+            {items.map((label) => (
+                <span
+                    key={label}
+                    className="inline-flex px-2 py-0.5 rounded-full text-[11px] font-bold bg-primary-50 text-primary-700 border border-primary-100"
+                >
+                    {label}
+                </span>
+            ))}
+        </div>
+    );
+};
 
 export function formatMessageTemplateDisplayDate(iso: string | null): string {
     if (!iso) return '—';
@@ -88,7 +126,7 @@ const TemplateForm: React.FC<{
 }> = ({ template, onSave, onCancel, saving }) => {
     const { t } = useLanguage();
     const [formData, setFormData] = useState<Partial<Template>>(
-        template || { name: '', subject: '', content: '', channels: ['email'] },
+        template || { name: '', subject: '', content: '', channels: ['email'], ...defaultAudience() },
     );
     const contentRef = useRef<HTMLTextAreaElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -96,7 +134,7 @@ const TemplateForm: React.FC<{
     const [removeAttachment, setRemoveAttachment] = useState(false);
 
     useEffect(() => {
-        setFormData(template || { name: '', subject: '', content: '', channels: ['email'] });
+        setFormData(template || { name: '', subject: '', content: '', channels: ['email'], ...defaultAudience() });
         setPendingFile(null);
         setRemoveAttachment(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -131,10 +169,18 @@ const TemplateForm: React.FC<{
         }, 0);
     };
 
+    const handleAudienceChange = (key: 'forCandidate' | 'forClientContact' | 'forTeamMember', checked: boolean) => {
+        setFormData((prev) => ({ ...prev, [key]: checked }));
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         const len = formData.content?.length ?? 0;
         if (len > 5000) return;
+        if (!formData.forCandidate && !formData.forClientContact && !formData.forTeamMember) {
+            window.alert(t('templates.audience_required'));
+            return;
+        }
         await onSave(formData, { pendingFile, removeAttachment });
     };
 
@@ -194,6 +240,39 @@ const TemplateForm: React.FC<{
                                 </button>
                             ))}
                         </div>
+                    </div>
+                </div>
+                <div>
+                    <label className="block text-sm font-semibold text-text-muted mb-2">{t('templates.audience_title')}</label>
+                    <p className="text-xs text-text-subtle mb-3">{t('templates.audience_hint')}</p>
+                    <div className="flex flex-wrap gap-4">
+                        <label className="inline-flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={Boolean(formData.forCandidate)}
+                                onChange={(e) => handleAudienceChange('forCandidate', e.target.checked)}
+                                className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-500"
+                            />
+                            <span className="text-sm font-medium text-text-default">{t('templates.audience_candidate')}</span>
+                        </label>
+                        <label className="inline-flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={Boolean(formData.forClientContact)}
+                                onChange={(e) => handleAudienceChange('forClientContact', e.target.checked)}
+                                className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-500"
+                            />
+                            <span className="text-sm font-medium text-text-default">{t('templates.audience_client_contact')}</span>
+                        </label>
+                        <label className="inline-flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={Boolean(formData.forTeamMember)}
+                                onChange={(e) => handleAudienceChange('forTeamMember', e.target.checked)}
+                                className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-500"
+                            />
+                            <span className="text-sm font-medium text-text-default">{t('templates.audience_team_member')}</span>
+                        </label>
                     </div>
                 </div>
                 <div>
@@ -467,6 +546,9 @@ const MessageTemplatesView: React.FC = () => {
                 subject: templateData.subject ?? '',
                 content: templateData.content ?? '',
                 channels: templateData.channels,
+                forCandidate: templateData.forCandidate !== false,
+                forClientContact: templateData.forClientContact !== false,
+                forTeamMember: templateData.forTeamMember !== false,
             };
             let row: MessageTemplateDto;
             if (templateData.id) {
@@ -604,6 +686,7 @@ const MessageTemplatesView: React.FC = () => {
                                 <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
                                     <tr>
                                         <th className="p-4">{t('templates.col_name')}</th>
+                                        <th className="p-4">{t('templates.col_audience')}</th>
                                         <th className="p-4">{t('templates.col_content')}</th>
                                         <th className="p-4">{t('templates.col_attachment')}</th>
                                         <th className="p-4">{t('templates.col_last_updated')}</th>
@@ -615,6 +698,13 @@ const MessageTemplatesView: React.FC = () => {
                                     {filteredTemplates.map((tpl) => (
                                         <tr key={tpl.id} className="hover:bg-bg-hover">
                                             <td className="p-4 font-semibold text-primary-700">{tpl.name}</td>
+                                            <td className="p-4">
+                                                <AudienceBadges
+                                                    forCandidate={tpl.forCandidate}
+                                                    forClientContact={tpl.forClientContact}
+                                                    forTeamMember={tpl.forTeamMember}
+                                                />
+                                            </td>
                                             <td className="p-4 text-text-muted max-w-sm truncate" title={tpl.content}>
                                                 {tpl.content}
                                             </td>

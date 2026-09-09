@@ -42,6 +42,9 @@ export type TagAiDecisionDto = {
     dilemmaReasoning?: string | null;
     manualApprovalStatus: 'pending' | 'approved' | 'agent_approved';
     comments?: string | null;
+    agentNotes?: string | null;
+    agentVerdict?: string | null;
+    userVerdict?: string | null;
 };
 
 export type TagManualApprovalStatus = 'pending' | 'approved' | 'agent_approved';
@@ -160,6 +163,32 @@ export async function updateTagAiDecisionComments(id: string, comments: string):
         method: 'PATCH',
         headers: authHeaders(),
         body: JSON.stringify({ comments }),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
+export type TagAiDecisionFieldsPatch = {
+    comments?: string | null;
+    agentNotes?: string | null;
+    agentVerdict?: string | null;
+    userVerdict?: string | null;
+};
+
+export async function updateTagAiDecisionFields(
+    id: string,
+    fields: TagAiDecisionFieldsPatch,
+): Promise<{
+    id: string;
+    comments: string | null;
+    agentNotes: string | null;
+    agentVerdict: string | null;
+    userVerdict: string | null;
+}> {
+    const res = await fetch(`${apiBase()}/api/tags/ai-decisions/${encodeURIComponent(id)}/fields`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify(fields),
     });
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();

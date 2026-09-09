@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import {
   PhoneIcon,
   EnvelopeIcon,
@@ -10,20 +10,51 @@ import {
   BriefcaseIcon,
   CalendarDaysIcon,
   BanknotesIcon,
+  ArrowPathIcon,
+  ClipboardDocumentCheckIcon,
+  ClockIcon,
 } from './Icons';
 import ContactDetailsTab from './ContactDetailsTab';
+import ContactHistoryTab from './ContactHistoryTab';
 import ContactEventsTab from './ContactEventsTab';
+import ClientContactProcessesTab from './ClientContactProcessesTab';
+import ClientJobsTab from './ClientJobsTab';
+import ClientTasksTab from './ClientTasksTab';
 import ContactFinanceTab from './ContactFinanceTab';
 import ContactEmailsTab from './ContactEmailsTab';
 import ContactSMSTab from './ContactSMSTab';
 import ContactWhatsAppTab from './ContactWhatsAppTab';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { authHeaders } from '../utils/authHeaders';
+import {
+  contactFromApi,
+  contactToApiPayload,
+  primaryEmail,
+  primaryPhone,
+  type ContactFormState,
+} from '../utils/contactFormModel';
+import { useBreadcrumbContext } from '../context/BreadcrumbContext';
 
-type Tab = 'details' | 'events' | 'jobs' | 'finance' | 'emails' | 'sms' | 'whatsapp' | 'company_emails';
+type Tab = 'details' | 'tasks' | 'processes' | 'events' | 'jobs' | 'finance' | 'emails' | 'sms' | 'whatsapp' | 'company_emails' | 'history';
+
+const PROFILE_TABS = new Set<Tab>([
+  'details',
+  'tasks',
+  'processes',
+  'events',
+  'jobs',
+  'finance',
+  'emails',
+  'sms',
+  'whatsapp',
+  'company_emails',
+  'history',
+]);
 
 const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
   { id: 'details', label: 'פרטים אישיים', icon: <PencilIcon className="w-5 h-5" /> },
+  { id: 'tasks', label: 'משימות', icon: <ClipboardDocumentCheckIcon className="w-5 h-5" /> },
+  { id: 'processes', label: 'תהליכים', icon: <ArrowPathIcon className="w-5 h-5" /> },
   { id: 'events', label: 'אירועים', icon: <CalendarDaysIcon className="w-5 h-5" /> },
   { id: 'finance', label: 'כספים', icon: <BanknotesIcon className="w-5 h-5" /> },
   { id: 'emails', label: 'מיילים', icon: <EnvelopeIcon className="w-5 h-5" /> },
@@ -31,6 +62,7 @@ const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
   { id: 'sms', label: 'SMS', icon: <ChatBubbleBottomCenterTextIcon className="w-5 h-5" /> },
   { id: 'whatsapp', label: 'WhatsApp', icon: <WhatsappIcon className="w-5 h-5" /> },
   { id: 'jobs', label: 'משרות משויכות', icon: <BriefcaseIcon className="w-5 h-5" /> },
+  { id: 'history', label: 'היסטוריה', icon: <ClockIcon className="w-5 h-5" /> },
 ];
 
 const SocialButton: React.FC<{
@@ -64,13 +96,54 @@ interface ContactProfileViewProps {
 
 const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModal }) => {
   const { clientId, contactId } = useParams<{ clientId: string; contactId: string }>();
-  const [activeTab, setActiveTab] = useState<Tab>('details');
+  const [searchParams] = useSearchParams();
+  const tabFromUrl = searchParams.get('tab');
+  const pipelineFromUrl = searchParams.get('pipelineId');
+  const processStageFromUrl = searchParams.get('processStage');
+  const [activeTab, setActiveTab] = useState<Tab>(() => {
+    if (tabFromUrl && PROFILE_TABS.has(tabFromUrl as Tab)) return tabFromUrl as Tab;
+    return 'details';
+  });
+  const [eventsPipelineId, setEventsPipelineId] = useState<string | null>(pipelineFromUrl);
+  const [eventsProcessStageId, setEventsProcessStageId] = useState<string | null>(processStageFromUrl);
+
+  useEffect(() => {
+    if (tabFromUrl && PROFILE_TABS.has(tabFromUrl as Tab)) {
+      setActiveTab(tabFromUrl as Tab);
+    }
+    setEventsPipelineId(pipelineFromUrl);
+    setEventsProcessStageId(processStageFromUrl);
+  }, [tabFromUrl, pipelineFromUrl, processStageFromUrl]);
 
   const apiBase = import.meta.env.VITE_API_BASE || '';
   const [contact, setContact] = useState<any | null>(null);
   const [clientName, setClientName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { setContactProfileParent } = useBreadcrumbContext();
+
+  useEffect(() => {
+    if (!contact) {
+      setContactProfileParent(null);
+      return;
+    }
+    const organizationId = contact.organizationId ? String(contact.organizationId).trim() : '';
+    const organizationName = String(
+      contact.organizationName
+        || contact.organization?.name
+        || contact.organization?.displayName
+        || '',
+    ).trim();
+    if (organizationId && organizationName) {
+      setContactProfileParent({
+        label: organizationName,
+        path: `/organizations/${organizationId}`,
+      });
+    } else {
+      setContactProfileParent(null);
+    }
+    return () => setContactProfileParent(null);
+  }, [contact, setContactProfileParent]);
 
   useEffect(() => {
     if (!apiBase || !clientId || !contactId) return;
@@ -113,25 +186,66 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
     };
   }, [apiBase, clientId, contactId]);
 
-  const [formData, setFormData] = useState<any>(null);
+  const [formData, setFormData] = useState<ContactFormState | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
-    setFormData(contact);
+    if (contact) setFormData(contactFromApi(contact));
   }, [contact]);
 
   if (isLoading) return <div className="text-center p-8">טוען...</div>;
   if (error || !contact) return <div className="text-center p-8">{error || 'איש קשר לא נמצא.'}</div>;
 
-  const handleFormChange = (updatedData: any) => {
+  const handleFormChange = (updatedData: ContactFormState) => {
     setFormData(updatedData);
+    setSaveError(null);
   };
+
+  const handleSave = async () => {
+    if (!formData || !apiBase || !clientId || !contactId) return;
+    if (!formData.firstName.trim() && !formData.lastName.trim()) {
+      setSaveError('נא למלא לפחות שם פרטי');
+      return;
+    }
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch(
+        `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}`,
+        {
+          method: 'PUT',
+          credentials: 'include',
+          headers: authHeaders(true),
+          body: JSON.stringify(contactToApiPayload(formData)),
+        },
+      );
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.message || 'שמירה נכשלה');
+      }
+      const updated = await res.json();
+      setContact(updated);
+      setFormData(contactFromApi(updated));
+    } catch (e: any) {
+      setSaveError(e?.message || 'שמירה נכשלה');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const displayEmail = formData ? primaryEmail(formData) : contact.email;
+  const displayPhone = formData
+    ? primaryPhone(formData, 'mobile') || primaryPhone(formData, 'office')
+    : contact.mobilePhone || contact.phone;
 
   const handleActionClick = (mode: 'email' | 'sms' | 'whatsapp') => {
     openMessageModal({
       mode,
+      recipientType: 'client_contact',
       candidateName: contact.name,
-      candidatePhone: contact.mobilePhone || contact.phone,
-      candidateEmail: contact.email || contact.mainContactEmail || undefined,
+      candidatePhone: displayPhone,
+      candidateEmail: displayEmail || undefined,
       linkedClientId: clientId || null,
       linkedContactId: contactId || null,
       linkedOrganizationId: contact.organizationId ? String(contact.organizationId) : null,
@@ -139,8 +253,8 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
         {
           id: String(contactId || contact.id),
           name: contact.name,
-          email: contact.email || contact.mainContactEmail || '',
-          phone: contact.mobilePhone || contact.phone || '',
+          email: displayEmail || contact.mainContactEmail || '',
+          phone: displayPhone || '',
           clientId: clientId || null,
           organizationId: contact.organizationId ? String(contact.organizationId) : null,
         },
@@ -153,11 +267,35 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
     switch (activeTab) {
       case 'details':
         return formData ? (
-          <ContactDetailsTab formData={formData} onFormChange={handleFormChange} />
+          <ContactDetailsTab
+            formData={formData}
+            onFormChange={handleFormChange}
+            onSave={handleSave}
+            isSaving={isSaving}
+            error={saveError}
+          />
         ) : null;
+      case 'tasks':
+        return (
+          <ClientTasksTab
+            clientId={clientId!}
+            organizationId={contact.organizationId ? String(contact.organizationId) : undefined}
+            contactName={contact.name}
+          />
+        );
+      case 'processes':
+        return (
+          <ClientContactProcessesTab
+            clientId={clientId!}
+            organizationId={contact.organizationId ? String(contact.organizationId) : undefined}
+            contactId={contactId}
+            contactName={contact.name}
+          />
+        );
       case 'events':
         return (
           <ContactEventsTab
+            key={`${eventsPipelineId || 'all'}:${eventsProcessStageId || ''}`}
             clientId={clientId!}
             clientName={clientName}
             organizationId={contact.organizationId ? String(contact.organizationId) : null}
@@ -171,6 +309,14 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
             }
             contactId={contactId}
             contactName={contact.name}
+            contactProcessPipelineId={
+              contact.pipelineId != null ? String(contact.pipelineId) : null
+            }
+            contactProcessStageId={
+              contact.processStage != null ? String(contact.processStage) : null
+            }
+            defaultActionPipelineId={eventsPipelineId}
+            defaultProcessStageId={eventsProcessStageId}
           />
         );
       case 'finance':
@@ -229,15 +375,29 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
           />
         );
       case 'jobs':
-        return <div className="text-center p-8 text-text-muted">אין משרות משויכות.</div>;
+        return (
+          <ClientJobsTab
+            clientId={clientId!}
+            contactId={contactId!}
+          />
+        );
+      case 'history':
+        return (
+          <ContactHistoryTab
+            clientId={clientId!}
+            contactId={contactId!}
+            contactName={contact.name}
+            organizationId={contact.organizationId ? String(contact.organizationId) : null}
+          />
+        );
       default:
         return null;
     }
   };
 
   const domainHint =
-    typeof contact.email === 'string' && contact.email.includes('@')
-      ? contact.email.split('@')[1]
+    typeof displayEmail === 'string' && displayEmail.includes('@')
+      ? displayEmail.split('@')[1]
       : clientName;
 
   return (
@@ -252,7 +412,7 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <SocialButton href={`tel:${contact.mobilePhone || contact.phone}`} title="Phone">
+            <SocialButton href={`tel:${displayPhone}`} title="Phone">
               <PhoneIcon className="w-5 h-5" />
             </SocialButton>
             <SocialButton onClick={() => handleActionClick('email')} title="Send Email">

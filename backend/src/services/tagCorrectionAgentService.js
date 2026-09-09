@@ -9,6 +9,7 @@ const ClientUsageSetting = require('../models/ClientUsageSetting');
 const promptService = require('./promptService');
 const { sendChat, resolveGeminiApiKey } = require('./geminiService');
 const tagHybridSearchService = require('./tagHybridSearchService');
+const aiDecisionAuditService = require('./aiDecisionAuditService');
 const tagEmbeddingService = require('./tagEmbeddingService');
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
@@ -326,6 +327,8 @@ const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
     reviewStatus: decision.action === 'manual' ? 'manual_queue' : 'pending_review',
   });
 
+  await aiDecisionAuditService.recordTagDecisionCreated(null, tagDecision, { actor: 'agent' });
+
   // Auto-apply high-confidence merge decisions immediately so the alias is added
   // without waiting for a human reviewer.
   // When hesitationLevel is null (Gemini omitted it), treat as 0 (fully confident).
@@ -351,12 +354,18 @@ const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
           targetTagId,
           aliasPriority: 4,
         });
+        const beforeMerge = tagDecision.get ? tagDecision.get({ plain: true }) : { ...tagDecision };
         // FK is ON DELETE SET NULL — pendingTagId is now null but the record survives.
         await tagDecision.update({
           reviewStatus: 'approved',
           reviewerAction: 'auto_merge',
           resolvedAt: new Date(),
           resolvedTargetTagId: targetTagId,
+        });
+        await tagDecision.reload();
+        await aiDecisionAuditService.recordTagDecisionAudit(null, beforeMerge, tagDecision, {
+          actor: 'agent',
+          metadata: { resolveAction: 'auto_merge' },
         });
         console.log(
           `[tagCorrectionAgent] auto-merged "${originalTerm}" → "${decision.aiSuggestedTarget}" ` +
@@ -632,6 +641,9 @@ const listDecisions = async ({
         dilemmaReasoning: plain.dilemmaReasoning ?? null,
         manualApprovalStatus: plain.manualApprovalStatus ?? 'pending',
         comments: plain.comments ?? null,
+        agentNotes: plain.agentNotes ?? null,
+        agentVerdict: plain.agentVerdict ?? null,
+        userVerdict: plain.userVerdict ?? null,
       };
     }),
     total: count,
@@ -731,12 +743,18 @@ const backfillAutoMergeDecisions = async (threshold = 30, limit = 200) => {
         aliasPriority: 4,
         bypassStatusCheck: true,
       });
+      const beforeMerge = row.get ? row.get({ plain: true }) : { ...row };
       // FK is ON DELETE SET NULL — pendingTagId is now null but the record survives.
       await row.update({
         reviewStatus: 'approved',
         reviewerAction: 'auto_merge',
         resolvedAt: new Date(),
         resolvedTargetTagId: targetTagId,
+      });
+      await row.reload();
+      await aiDecisionAuditService.recordTagDecisionAudit(null, beforeMerge, row, {
+        actor: 'agent',
+        metadata: { resolveAction: 'auto_merge', backfill: true },
       });
       console.log(
         `[tagCorrectionAgent] backfillAutoMerge: merged "${plain.originalTerm}" → "${plain.aiSuggestedTarget}" ` +
@@ -755,27 +773,70 @@ const backfillAutoMergeDecisions = async (threshold = 30, limit = 200) => {
 
 const APPROVAL_STATUSES = new Set(['pending', 'approved', 'agent_approved']);
 
-const setApprovalStatus = async (id, status = 'approved') => {
+const setApprovalStatus = async (id, status = 'approved', req = null) => {
   const next = String(status || 'approved');
   if (!APPROVAL_STATUSES.has(next)) {
     throw Object.assign(new Error('Invalid approval status'), { status: 400 });
   }
   const decision = await TagAiDecision.findByPk(id);
   if (!decision) throw Object.assign(new Error('Decision not found'), { status: 404 });
+  const before = decision.get ? decision.get({ plain: true }) : { ...decision };
   await decision.update({ manualApprovalStatus: next });
+  await decision.reload();
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision);
   return { id, manualApprovalStatus: next };
 };
 
-const setComments = async (id, comments) => {
+const normalizeOptionalText = (value) =>
+  value == null || value === '' ? null : String(value);
+
+const setComments = async (id, comments, req = null) => {
   const decision = await TagAiDecision.findByPk(id);
   if (!decision) throw Object.assign(new Error('Decision not found'), { status: 404 });
-  const value = comments == null || comments === '' ? null : String(comments);
+  const before = decision.get ? decision.get({ plain: true }) : { ...decision };
+  const value = normalizeOptionalText(comments);
   await decision.update({ comments: value });
+  await decision.reload();
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision);
   return { id, comments: decision.comments ?? null };
 };
 
+const setDecisionFields = async (id, fields = {}, req = null) => {
+  const decision = await TagAiDecision.findByPk(id);
+  if (!decision) throw Object.assign(new Error('Decision not found'), { status: 404 });
+  const before = decision.get ? decision.get({ plain: true }) : { ...decision };
+  const patch = {};
+  if (Object.prototype.hasOwnProperty.call(fields, 'comments')) {
+    patch.comments = normalizeOptionalText(fields.comments);
+  }
+  if (Object.prototype.hasOwnProperty.call(fields, 'agentNotes')) {
+    patch.agentNotes = normalizeOptionalText(fields.agentNotes);
+  }
+  if (Object.prototype.hasOwnProperty.call(fields, 'agentVerdict')) {
+    patch.agentVerdict = normalizeOptionalText(fields.agentVerdict);
+  }
+  if (Object.prototype.hasOwnProperty.call(fields, 'userVerdict')) {
+    patch.userVerdict = normalizeOptionalText(fields.userVerdict);
+  }
+  if (!Object.keys(patch).length) {
+    const err = new Error('No fields to update');
+    err.status = 400;
+    throw err;
+  }
+  await decision.update(patch);
+  await decision.reload();
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision);
+  return {
+    id,
+    comments: decision.comments ?? null,
+    agentNotes: decision.agentNotes ?? null,
+    agentVerdict: decision.agentVerdict ?? null,
+    userVerdict: decision.userVerdict ?? null,
+  };
+};
+
 /** Mark catalog tags as deprecated and record a blacklist audit row for the admin blacklist tab. */
-const blacklistCatalogTags = async (tagIds = []) => {
+const blacklistCatalogTags = async (tagIds = [], req = null) => {
   const ids = [...new Set((tagIds || []).map((id) => String(id).trim()).filter(isValidTagUuid))];
   if (!ids.length) {
     const err = new Error('No valid tag ids');
@@ -820,6 +881,7 @@ const blacklistCatalogTags = async (tagIds = []) => {
     }
 
     if (decision) {
+      const before = decision.get ? decision.get({ plain: true }) : { ...decision };
       await decision.update({
         reviewStatus: 'overridden',
         reviewerAction: 'blacklist',
@@ -827,8 +889,12 @@ const blacklistCatalogTags = async (tagIds = []) => {
         originalTerm: decision.originalTerm || originalTerm,
         detectedType: decision.detectedType || detectedType,
       });
+      await decision.reload();
+      await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision, {
+        metadata: { resolveAction: 'blacklist' },
+      });
     } else {
-      await TagAiDecision.create({
+      const created = await TagAiDecision.create({
         pendingTagId: tag.id,
         originalTerm,
         detectedType,
@@ -839,6 +905,10 @@ const blacklistCatalogTags = async (tagIds = []) => {
         reviewStatus: 'overridden',
         reviewerAction: 'blacklist',
         resolvedAt: new Date(),
+      });
+      await aiDecisionAuditService.recordTagDecisionCreated(req, created, {
+        actor: req ? 'user' : 'agent',
+        metadata: { resolveAction: 'blacklist' },
       });
     }
 
@@ -863,5 +933,6 @@ module.exports = {
   resolveOccurrencesTagId,
   setApprovalStatus,
   setComments,
+  setDecisionFields,
   blacklistCatalogTags,
 };

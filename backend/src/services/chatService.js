@@ -96,6 +96,48 @@ const loadPromptTemplateById = async (promptId) => {
   }
 };
 
+const fillPromptVariables = (template, vars = {}) => {
+  if (!template) return '';
+  let out = String(template);
+  for (const [key, value] of Object.entries(vars)) {
+    const replacement = value == null ? '' : String(value);
+    out = out.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'g'), replacement);
+    out = out.replace(new RegExp(`\\{${key}\\}`, 'g'), replacement);
+  }
+  return out;
+};
+
+const buildPromptVariableMap = ({ message, contextData, tagsText }) => {
+  const pruned = pruneContextData(contextData);
+  return {
+    message: message || '',
+    context: JSON.stringify(pruned || {}, null, 2),
+    fullName: String(contextData?.fullName || pruned?.fullName || '').trim(),
+    tagsText: tagsText || '',
+    schema: getCandidateSchemaText(),
+  };
+};
+
+const resolveChatPromptFromDb = async (promptId, vars = {}) => {
+  const template = await loadPromptTemplateById(promptId);
+  if (!template) return null;
+  return fillPromptVariables(template, vars);
+};
+
+const DEFAULT_CHAT_PROMPT_IDS = {
+  'candidate-profile': 'candidate_profile_chat',
+  'job-publishing': 'job_publishing_chat',
+  'job-fields': 'Admin_Job_Categories_Smart_Agent',
+  'company-profile': 'company_profile_chat',
+  default: 'taxonomy_tags_chat',
+};
+
+const resolveEffectiveChatPromptId = (chatType, promptId) => {
+  const explicit = String(promptId || '').trim();
+  if (explicit) return explicit;
+  return DEFAULT_CHAT_PROMPT_IDS[chatType] || DEFAULT_CHAT_PROMPT_IDS.default;
+};
+
 const pruneContextData = (obj) => {
   if (!obj || typeof obj !== 'object') return obj;
   const copy = JSON.parse(JSON.stringify(obj));
@@ -103,6 +145,14 @@ const pruneContextData = (obj) => {
   delete copy.embedding;
   // Keep CV text but cap it
   if (typeof copy.searchText === 'string') copy.searchText = copy.searchText.slice(0, 20000);
+  if (typeof copy.resumeText === 'string') copy.resumeText = copy.resumeText.slice(0, 20000);
+  if (typeof copy.originalCvText === 'string') copy.originalCvText = copy.originalCvText.slice(0, 20000);
+  if (typeof copy.generatedCvText === 'string') copy.generatedCvText = copy.generatedCvText.slice(0, 20000);
+  if (Array.isArray(copy.originalCvTextHistory)) {
+    copy.originalCvTextHistory = copy.originalCvTextHistory
+      .slice(-3)
+      .map((entry) => String(entry || '').slice(0, 8000));
+  }
   return copy;
 };
 
@@ -221,6 +271,8 @@ ${contextBlock}`;
 const SYSTEM_TEMPLATE_CANDIDATE_PROFILE = ({ message, contextData, overridePrompt, relevantFields = [] }) => {
   const pruned = pruneContextData(contextData);
   const cvText = (contextData && typeof contextData.searchText === 'string') ? contextData.searchText.slice(0, 20000) : '';
+  const originalCvText = String(contextData?.originalCvText || '').slice(0, 20000);
+  const generatedCvText = String(contextData?.generatedCvText || '').slice(0, 20000);
   const formData = pruned || {};
   const schemaDescription = getCandidateSchemaDescription();
   const candidateSchemaText = getCandidateSchemaText();
@@ -243,6 +295,7 @@ You are Hiro, an expert AI Career Coach and Recruitment Assistant dedicated to h
    - INFER information: If the user says "I worked at Wix as a Dev", map it correctly to the tool arguments without asking unnecessary questions.
 3. **Validation:** If the user provides vague info (e.g., "I do marketing"), ask for specifics ("What kind of marketing? Digital? Content?") before saving.
 4. **Salary Limits:** Keep any salary patches within 0-20000 ש"ח (e.g., "מ-8000 עד 10000"); ask the user to adjust the range if it falls outside that window.
+5. **CV Sources:** When rewriting workExperience, ground facts in originalCvText (uploaded CV), searchText/generatedCvText (parsed/published CV), and the existing workExperience array. Prefer enriching existing roles over inventing new employers.
 ${fieldsHint}
 **Current Profile Context:** ${JSON.stringify(formData || {}, null, 2)}
 `;
@@ -286,8 +339,14 @@ OUTPUT RULES (CRITICAL):
 Candidate profile JSON (ground truth):
 ${JSON.stringify(pruned || {}, null, 2)}
 
-CV text (ground truth, may be partial):
+Original uploaded CV text (ground truth, may be partial):
+${originalCvText || ''}
+
+Generated/published CV text (searchText, may be partial):
 ${cvText || ''}
+
+Structured generated resume snapshot:
+${generatedCvText || ''}
 
 message from user:
 ${message || ''}
@@ -665,7 +724,7 @@ const appendTurn = async (chatId, userText, modelText) => {
   await appendMessage(chatId, 'model', modelText);
 };
 
-const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, systemPrompt }) => {
+const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, systemPrompt, promptId }) => {
   if (!message) {
     const err = new Error('Message is required');
     err.status = 400;
@@ -679,6 +738,11 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
     || process.env.GEMINI_API_KEY
     || process.env.GOOGLE_API_KEY
     || process.env.API_KEY;
+  const effectivePromptId = resolveEffectiveChatPromptId(chatType, promptId);
+  const promptVars = buildPromptVariableMap({ message, contextData, tagsText });
+  const dbPromptOverride =
+    (await resolveChatPromptFromDb(effectivePromptId, promptVars)) ||
+    (systemPrompt ? String(systemPrompt) : null);
 
   let finalReply;
   if (chatType === 'candidate-profile') {
@@ -713,15 +777,28 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       : [];
     if (!relevantFields.length) {
       let updatedHistory = await fetchHistory(chatRow.id);
-      // create LLM that get the message and reply based on the next promp:
-      const nextPrompt = `
+      const nextPrompt =
+        dbPromptOverride ||
+        `
       You are Hiro, an expert AI Career Coach and Recruitment Assistant dedicated to helping the candidate .
       **Your Goal:** Help the candidate create a "winning profile" that maximizes their chances of getting hired. You have direct write-access to their profile data via tools.
       **Your Personality:**
       **user messages can be without any fields or information, just a question or a statement.... so you need to reply with a short reply in Hebrew for the user to proceed with the conversation.
       dont reply with "לא נמצאו שדות לעדכון בהודעה זו" or any other message like that, just reply with a short reply in Hebrew for the user to proceed with the conversation.  
       `;
-      const nextReply = await sendChat({ apiKey, systemPrompt: nextPrompt, history, message });
+      const nextReply = await sendChat({
+        apiKey,
+        systemPrompt: nextPrompt,
+        history,
+        message,
+        promptId: effectivePromptId,
+        llmInputJson: {
+          chatType,
+          candidateId: contextData?.id || null,
+          message,
+          mode: 'candidate-conversation',
+        },
+      });
       console.debug('[chatService] next reply', { reply: nextReply?.slice?.(0, 400) });
       await appendTurn(chatRow.id, message, nextReply);
       updatedHistory = await fetchHistory(chatRow.id);
@@ -731,13 +808,14 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
     const resolvedSystemPrompt = SYSTEM_TEMPLATE_CANDIDATE_PROFILE({
       message,
       contextData,
-      overridePrompt: systemPrompt,
+      overridePrompt: dbPromptOverride || systemPrompt,
       relevantFields,
     });
     console.debug('[chatService] calling sendChat for candidate profile', {
       chatType,
       userId,
       message,
+      promptId: effectivePromptId,
       snippet: resolvedSystemPrompt?.slice?.(0, 400).replace(/\s+/g, ' ').trim(),
       context: contextData && { id: contextData.id, fullName: contextData.fullName },
     });
@@ -746,6 +824,13 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       systemPrompt: resolvedSystemPrompt,
       history,
       message,
+      promptId: effectivePromptId,
+      llmInputJson: {
+        chatType,
+        candidateId: contextData?.id || null,
+        message,
+        relevantFields,
+      },
     });
     console.debug('[chatService] raw LLM reply', { reply: reply?.slice?.(0, 400) });
     finalReply = filterHallucinationsCandidateProfile(reply, contextData, message);
@@ -775,15 +860,23 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       ? detectionData.intent
       : 'reply';
     if (intent === 'reply') {
-      //create LLM that get the message and reply based on the next promp:
-      const nextPrompt = `
+      const nextPrompt =
+        dbPromptOverride ||
+        `
       You are Hiro, a corporate intelligence assistant for this organization.
       **Your Goal:** Help the get any information that he asked from your knowledge base or the internet.
       **Your Personality:**
       **user messages can be without any fields or information, just a question or a statement.... so you need to reply with a short reply in Hebrew for the user to proceed with the conversation.
       dont reply with "לא נמצאו שדות לעדכון בהודעה זו" or any other message like that, just reply with a short reply in Hebrew for the user to proceed with the conversation.  
       `;
-      const nextReply = await sendChat({ apiKey, systemPrompt: nextPrompt, history, message });
+      const nextReply = await sendChat({
+        apiKey,
+        systemPrompt: nextPrompt,
+        history,
+        message,
+        promptId: effectivePromptId,
+        llmInputJson: { chatType, message, mode: 'company-conversation' },
+      });
       console.debug('[chatService] next reply', { reply: nextReply?.slice?.(0, 400) });
       await appendTurn(chatRow.id, message, nextReply);
 
@@ -794,7 +887,7 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
     const resolvedSystemPrompt = SYSTEM_TEMPLATE_COMPANY_PROFILE({
       message,
       contextData,
-      overridePrompt: systemPrompt,
+      overridePrompt: dbPromptOverride || systemPrompt,
       relevantFields,
       intent,
     });
@@ -811,6 +904,8 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       systemPrompt: resolvedSystemPrompt,
       history,
       message,
+      promptId: effectivePromptId,
+      llmInputJson: { chatType, message, intent, relevantFields },
     });
     console.debug('[chatService] raw company reply', { reply: reply?.slice?.(0, 400) });
     finalReply = filterCompanyProfileResponse(reply);
@@ -819,22 +914,26 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
     const resolvedSystemPrompt = SYSTEM_TEMPLATE_JOB_PUBLISHING({
       message,
       contextData,
-      overridePrompt: systemPrompt,
+      overridePrompt: dbPromptOverride || systemPrompt,
     });
     const reply = await sendChat({
       apiKey,
       systemPrompt: resolvedSystemPrompt,
       history,
       message,
+      promptId: effectivePromptId,
+      llmInputJson: { chatType, message },
     });
     finalReply = reply;
     await appendTurn(chatRow.id, message, finalReply);
   } else if (chatType === 'job-fields') {
-    const resolvedSystemPrompt = await resolvePromptTemplate('Admin_Job_Categories_Smart_Agent', {
-      message,
-      contextData,
-      overridePrompt: systemPrompt,
-    });
+    const resolvedSystemPrompt =
+      dbPromptOverride ||
+      (await resolvePromptTemplate(effectivePromptId, {
+        message,
+        contextData,
+        overridePrompt: systemPrompt,
+      }));
     console.debug('[chatService] calling sendChat for job fields', {
       chatType,
       userId,
@@ -846,7 +945,7 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       systemPrompt: resolvedSystemPrompt,
       history,
       message,
-      promptId: 'Admin_Job_Categories_Smart_Agent',
+      promptId: effectivePromptId,
       llmInputJson: {
         chatType,
         message,
@@ -857,7 +956,7 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
     finalReply = reply;
     await appendTurn(chatRow.id, message, finalReply);
   } else {
-    const resolvedSystemPrompt = SYSTEM_TEMPLATE_TAGS(tagsText);
+    const resolvedSystemPrompt = dbPromptOverride || SYSTEM_TEMPLATE_TAGS(tagsText);
     console.debug('[chatService] calling sendChat', {
       chatType,
       userId,
@@ -870,6 +969,8 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       systemPrompt: resolvedSystemPrompt,
       history,
       message,
+      promptId: effectivePromptId,
+      llmInputJson: { chatType, message },
     });
     console.debug('[chatService] raw LLM reply', { reply: reply?.slice?.(0, 400) });
     finalReply = reply;

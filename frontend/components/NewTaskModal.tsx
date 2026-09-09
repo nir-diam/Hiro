@@ -20,6 +20,11 @@ import {
     filterEventTypesForContext,
     type EventTypeApiRow,
 } from '../services/eventTypesApi';
+import {
+    fetchStaffUsers,
+    mapStaffUsersToEmailOptions,
+    type StaffEmailOption,
+} from '../services/usersApi';
 
 interface NewTaskModalProps {
   isOpen: boolean;
@@ -34,7 +39,9 @@ type TaskLinkedRoute =
   | { kind: 'candidate'; id: string }
   | { kind: 'job'; id: string }
   | { kind: 'client'; id: string }
-  | { kind: 'contact'; clientId: string; contactId: string };
+  | { kind: 'contact'; clientId: string; contactId: string }
+  | { kind: 'organization'; id: string }
+  | { kind: 'organization_tmp'; id: string };
 
 function parseTaskLinkedRoute(pathname: string): TaskLinkedRoute {
   const parts = pathname.split('/').filter(Boolean);
@@ -53,6 +60,10 @@ function parseTaskLinkedRoute(pathname: string): TaskLinkedRoute {
   }
   if (parts[0] === 'portal' && parts[1] === 'manager' && parts[2] === 'jobs' && parts[3]) {
     return { kind: 'job', id: parts[3] };
+  }
+  if (parts[0] === 'organizations') {
+    if (parts[1] === 'tmp' && parts[2]) return { kind: 'organization_tmp', id: parts[2] };
+    if (parts[1] && parts[1] !== 'new') return { kind: 'organization', id: parts[1] };
   }
   if (parts[0] === 'clients' && parts[1] && parts[1] !== 'new') {
     if (parts[2] === 'contacts' && parts[3]) {
@@ -82,13 +93,41 @@ function candidateFromApiRow(row: Record<string, unknown>): Candidate {
   };
 }
 
-function fixedLinkedPlainLines(candidate: string, job: string, client: string): { label: string; value: string }[] {
+function organizationLinkedPlainLines(orgName: string, clientName = ''): { label: string; value: string }[] {
     const v = (s: string) => (String(s ?? '').trim() || EMPTY_LINKED_LABEL);
     return [
+        { label: 'ארגון:', value: v(orgName) },
+        { label: 'מועמד:', value: EMPTY_LINKED_LABEL },
+        { label: 'משרה:', value: EMPTY_LINKED_LABEL },
+        { label: 'לקוח:', value: v(clientName) },
+    ];
+}
+
+function fixedLinkedPlainLines(
+    candidate: string,
+    job: string,
+    client: string,
+    contact?: string,
+): { label: string; value: string }[] {
+    const v = (s: string) => (String(s ?? '').trim() || EMPTY_LINKED_LABEL);
+    const lines = [
         { label: 'מועמד:', value: v(candidate) },
         { label: 'משרה:', value: v(job) },
         { label: 'לקוח:', value: v(client) },
     ];
+    if (contact !== undefined) {
+        lines.push({ label: 'איש קשר:', value: v(contact) });
+    }
+    return lines;
+}
+
+function contactNameFromRow(row: Record<string, unknown> | undefined): string {
+    if (!row) return '';
+    const name = String(row.name ?? '').trim();
+    if (name) return name;
+    const first = String(row.firstName ?? '').trim();
+    const last = String(row.lastName ?? '').trim();
+    return [first, last].filter(Boolean).join(' ');
 }
 
 function jsonHeaders(): HeadersInit {
@@ -202,11 +241,6 @@ function openOutlookCalendarFromMeta(meta: ReturnType<typeof buildCalendarEventM
   window.open(`${base}?${q.toString()}`, '_blank', 'noopener,noreferrer');
 }
 
-type ClientContactOption = {
-    email: string;
-    label: string;
-};
-
 const SingleRangeSlider: React.FC<{
     label: string;
     min: number;
@@ -272,7 +306,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
     const openSummaryRef = useRef(onOpenCandidateSummary);
     openSummaryRef.current = onOpenCandidateSummary;
     const [contactsLoading, setContactsLoading] = useState(false);
-    const [clientContactOptions, setClientContactOptions] = useState<ClientContactOption[]>([]);
+    const [clientContactOptions, setClientContactOptions] = useState<StaffEmailOption[]>([]);
     const [flightCategories, setFlightCategories] = useState<EventTypeApiRow[]>([]);
 
     useEffect(() => {
@@ -373,46 +407,20 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
     }, [isOpen, onClose]);
 
     useEffect(() => {
-        if (!isOpen || !apiBase) return;
+        if (!isOpen) return;
         let active = true;
 
-        const loadContacts = async () => {
+        const loadCoordinators = async () => {
+            const tenantClientId = user?.clientId ? String(user.clientId).trim() : '';
+            if (!tenantClientId) {
+                setClientContactOptions([]);
+                return;
+            }
+
             setContactsLoading(true);
             try {
-                const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-                const headers: Record<string, string> = {
-                    Accept: 'application/json',
-                    'Cache-Control': 'no-cache',
-                };
-                if (token) headers.Authorization = `Bearer ${token}`;
-
-                const res = await fetch(`${apiBase}/api/clients/all-contacts`, {
-                    method: 'GET',
-                    credentials: 'include',
-                    cache: 'no-store',
-                    headers,
-                });
-
-                if (!res.ok) {
-                    const t = await res.text().catch(() => '');
-                    throw new Error(t || `HTTP ${res.status}`);
-                }
-
-                const data: unknown = await res.json();
-                const rows = Array.isArray(data) ? data : Array.isArray((data as any)?.data) ? (data as any).data : [];
-
-                const options: ClientContactOption[] = [];
-                const unique = new Map<string, ClientContactOption>();
-
-                for (const row of rows as any[]) {
-                    const email = String(row?.email || '').trim();
-                    if (!email) continue;
-                    const name = String(row?.name || row?.client?.name || '').trim();
-                    const label = name ? `${name} (${email})` : email;
-                    unique.set(email, { email, label });
-                }
-
-                options.push(...Array.from(unique.values()));
+                const rows = await fetchStaffUsers(tenantClientId);
+                const options = mapStaffUsersToEmailOptions(rows);
 
                 if (!active) return;
                 setClientContactOptions(options);
@@ -437,7 +445,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                     return { ...prev, assigneeEmails: first ? [first] : [] };
                 });
             } catch (err) {
-                console.error('[NewTaskModal] Failed to load client contacts for assignee', err);
+                console.error('[NewTaskModal] Failed to load coordinators for assignee', err);
                 if (!active) return;
                 setClientContactOptions([]);
             } finally {
@@ -446,11 +454,11 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
             }
         };
 
-        void loadContacts();
+        void loadCoordinators();
         return () => {
             active = false;
         };
-    }, [isOpen, apiBase, user?.email, user?.name]);
+    }, [isOpen, user?.email, user?.name, user?.clientId]);
 
     const orderedContactOptions = useMemo(() => {
         const me = user?.email?.trim();
@@ -724,10 +732,15 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                     if (cancelled) return;
                     const clientName =
                         String(clientRow.displayName || clientRow.name || '').trim() || 'לקוח';
-                    const plainLines = fixedLinkedPlainLines('', '', clientName);
+                    const contactRow = contacts.find(
+                        (c) => String(c.id ?? '') === String(route.contactId),
+                    );
+                    const contactName = contactNameFromRow(contactRow);
+                    const plainLines = fixedLinkedPlainLines('', '', clientName, contactName);
                     const candLabel = plainLines[0].value;
                     const jobLabel = plainLines[1].value;
                     const clientLabel = plainLines[2].value;
+                    const contactLabel = plainLines[3].value;
                     setLinkedPanel({
                         phase: 'ok',
                         rows: [
@@ -752,6 +765,121 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                                         >
                                             {clientLabel}
                                         </a>
+                                    ),
+                            },
+                            {
+                                label: 'איש קשר:',
+                                node:
+                                    contactLabel === EMPTY_LINKED_LABEL ? (
+                                        <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>
+                                    ) : (
+                                        <a
+                                            href={`/clients/${encodeURIComponent(route.clientId)}/contacts/${encodeURIComponent(route.contactId)}`}
+                                            className="text-primary-600 font-bold hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            {contactLabel}
+                                        </a>
+                                    ),
+                            },
+                        ],
+                        plainLines,
+                    });
+                    return;
+                }
+
+                if (route.kind === 'organization' || route.kind === 'organization_tmp') {
+                    const orgUrl =
+                        route.kind === 'organization_tmp'
+                            ? `${apiBase}/api/organizations/tmp/${encodeURIComponent(route.id)}`
+                            : `${apiBase}/api/organizations/${encodeURIComponent(route.id)}`;
+                    const orgRes = await fetch(orgUrl, {
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: jsonHeaders(),
+                    });
+                    if (!orgRes.ok) {
+                        const t = await orgRes.text().catch(() => '');
+                        fail(t || `HTTP ${orgRes.status}`);
+                        return;
+                    }
+                    const orgRow = (await orgRes.json()) as Record<string, unknown>;
+                    if (cancelled) return;
+
+                    let clientName = '';
+                    let clientId: string | null = null;
+                    if (route.kind === 'organization') {
+                        try {
+                            const pcRes = await fetch(
+                                `${apiBase}/api/organizations/${encodeURIComponent(route.id)}/primary-client`,
+                                {
+                                    credentials: 'include',
+                                    cache: 'no-store',
+                                    headers: jsonHeaders(),
+                                },
+                            );
+                            if (pcRes.ok) {
+                                const pc = (await pcRes.json()) as Record<string, unknown>;
+                                clientId = pc.clientId ? String(pc.clientId) : null;
+                                clientName = String(pc.clientName || '').trim();
+                            }
+                        } catch {
+                            /* optional enrichment */
+                        }
+                    }
+
+                    const orgName = String(orgRow.name || '').trim() || 'ארגון';
+                    const orgHref =
+                        route.kind === 'organization_tmp'
+                            ? `/organizations/tmp/${encodeURIComponent(route.id)}`
+                            : `/organizations/${encodeURIComponent(route.id)}`;
+                    const plainLines = organizationLinkedPlainLines(orgName, clientName);
+                    const orgLabel = plainLines[0].value;
+                    const candLabel = plainLines[1].value;
+                    const jobLabel = plainLines[2].value;
+                    const clientLabel = plainLines[3].value;
+
+                    setLinkedPanel({
+                        phase: 'ok',
+                        rows: [
+                            {
+                                label: 'ארגון:',
+                                node:
+                                    orgLabel === EMPTY_LINKED_LABEL ? (
+                                        <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>
+                                    ) : (
+                                        <a
+                                            href={orgHref}
+                                            className="text-primary-600 font-bold hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            {orgLabel}
+                                        </a>
+                                    ),
+                            },
+                            {
+                                label: 'מועמד:',
+                                node: <span className="text-text-default font-semibold">{candLabel}</span>,
+                            },
+                            {
+                                label: 'משרה:',
+                                node: <span className="text-text-default font-semibold">{jobLabel}</span>,
+                            },
+                            {
+                                label: 'לקוח:',
+                                node:
+                                    clientLabel === EMPTY_LINKED_LABEL ? (
+                                        <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>
+                                    ) : clientId ? (
+                                        <a
+                                            href={`/clients/${encodeURIComponent(clientId)}`}
+                                            className="text-primary-600 font-bold hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            {clientLabel}
+                                        </a>
+                                    ) : (
+                                        <span className="text-text-default font-semibold">{clientLabel}</span>
                                     ),
                             },
                         ],
@@ -821,13 +949,26 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
         } else if (route.kind === 'contact') {
             linkFields.linkedClientId = route.clientId;
             linkFields.linkedContactId = route.contactId;
+        } else if (route.kind === 'organization') {
+            linkFields.linkedOrganizationId = route.id;
+        } else if (route.kind === 'organization_tmp') {
+            linkFields.linkedOrganizationTmpId = route.id;
         }
         const linkLabels =
             linkedPlain.length >= 3
                 ? {
-                      linkedCandidateLabel: linkedPlain[0].value,
-                      linkedJobLabel: linkedPlain[1].value,
-                      linkedClientLabel: linkedPlain[2].value,
+                      ...(linkedPlain[0]?.label.startsWith('ארגון:')
+                          ? { linkedOrganizationLabel: linkedPlain[0].value }
+                          : { linkedCandidateLabel: linkedPlain[0].value }),
+                      linkedJobLabel: linkedPlain.find((l) => l.label.startsWith('משרה:'))?.value
+                          ?? linkedPlain[1]?.value
+                          ?? '',
+                      linkedClientLabel: linkedPlain.find((l) => l.label.startsWith('לקוח:'))?.value
+                          ?? linkedPlain[2]?.value
+                          ?? '',
+                      ...(linkedPlain.find((l) => l.label.startsWith('איש קשר:'))
+                          ? { linkedContactLabel: linkedPlain.find((l) => l.label.startsWith('איש קשר:'))!.value }
+                          : {}),
                   }
                 : {};
         const taskPayload = {
@@ -944,10 +1085,10 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                                         </label>
                                         {contactsLoading ? (
                                             <div className="w-full min-h-[44px] flex items-center px-3.5 rounded-xl border border-border-default bg-bg-input text-sm text-text-muted">
-                                                טוען אנשי קשר…
+                                                טוען רכזים…
                                             </div>
                                         ) : orderedContactOptions.length === 0 ? (
-                                            <p className="text-sm text-amber-700 py-2">לא נמצאו אנשי קשר. ודאו שמחוברים למערכת.</p>
+                                            <p className="text-sm text-amber-700 py-2">לא נמצאו רכזים ללקוח המחובר.</p>
                                         ) : (
                                             <>
                                                 <button
@@ -1103,7 +1244,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                                     <div className="p-5 rounded-2xl border border-border-default/80 bg-bg-subtle/30 flex flex-col">
                                       <h3 className="text-sm font-bold text-text-default mb-3">מידע מקושר</h3>
                                       {linkedPanel.phase === 'none' && (
-                                          <p className="text-sm text-text-muted flex-grow">אין הקשר מהמסך הנוכחי (מועמד, משרה או לקוח).</p>
+                                          <p className="text-sm text-text-muted flex-grow">אין הקשר מהמסך הנוכחי (מועמד, משרה, לקוח או ארגון).</p>
                                       )}
                                       {linkedPanel.phase === 'loading' && (
                                           <p className="text-sm text-text-muted flex-grow">טוען נתונים...</p>

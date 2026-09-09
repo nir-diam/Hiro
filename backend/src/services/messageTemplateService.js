@@ -12,6 +12,45 @@ const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
 const ALLOWED_CHANNELS = new Set(['email', 'sms', 'whatsapp']);
+const ALLOWED_RECIPIENT_TYPES = new Set(['candidate', 'client_contact', 'team_member']);
+
+const normalizeAudienceFlags = (payload = {}) => ({
+  forCandidate: payload.forCandidate !== undefined ? Boolean(payload.forCandidate) : undefined,
+  forClientContact: payload.forClientContact !== undefined ? Boolean(payload.forClientContact) : undefined,
+  forTeamMember: payload.forTeamMember !== undefined ? Boolean(payload.forTeamMember) : undefined,
+});
+
+const assertAtLeastOneAudience = ({ forCandidate, forClientContact, forTeamMember }) => {
+  if (!forCandidate && !forClientContact && !forTeamMember) {
+    const err = new Error('At least one audience (candidate, client contact, team member) must be selected');
+    err.status = 400;
+    throw err;
+  }
+};
+
+/** Templates with no audience flags set are treated as universal (legacy). */
+const templateMatchesRecipientType = (row, recipientType) => {
+  if (!recipientType || !ALLOWED_RECIPIENT_TYPES.has(String(recipientType))) return true;
+  const forCandidate = Boolean(row.forCandidate);
+  const forClientContact = Boolean(row.forClientContact);
+  const forTeamMember = Boolean(row.forTeamMember);
+  if (!forCandidate && !forClientContact && !forTeamMember) return true;
+  switch (String(recipientType)) {
+    case 'candidate':
+      return forCandidate;
+    case 'client_contact':
+      return forClientContact;
+    case 'team_member':
+      return forTeamMember;
+    default:
+      return true;
+  }
+};
+
+const filterTemplatesForRecipient = (rows, recipientType) => {
+  if (!recipientType) return rows;
+  return rows.filter((row) => templateMatchesRecipientType(row, recipientType));
+};
 
 const normalizeChannels = (raw) => {
   if (!raw) return ['email'];
@@ -36,6 +75,9 @@ const toRow = (t) => {
     attachmentFileName: plain.attachmentFileName || null,
     attachmentContentType: plain.attachmentContentType || null,
     attachmentFileSize: plain.attachmentFileSize ?? null,
+    forCandidate: Boolean(plain.forCandidate),
+    forClientContact: Boolean(plain.forClientContact),
+    forTeamMember: Boolean(plain.forTeamMember),
   };
 };
 
@@ -194,6 +236,11 @@ const createAdmin = async (payload, user) => {
     err.status = 400;
     throw err;
   }
+  const audience = normalizeAudienceFlags(payload);
+  const forCandidate = audience.forCandidate !== undefined ? audience.forCandidate : true;
+  const forClientContact = audience.forClientContact !== undefined ? audience.forClientContact : true;
+  const forTeamMember = audience.forTeamMember !== undefined ? audience.forTeamMember : true;
+  assertAtLeastOneAudience({ forCandidate, forClientContact, forTeamMember });
   const row = await MessageTemplate.create({
     scope: 'admin',
     clientId: null,
@@ -203,6 +250,9 @@ const createAdmin = async (payload, user) => {
     body: String(text),
     channels: normalizeChannels(channels),
     isSystem: false,
+    forCandidate,
+    forClientContact,
+    forTeamMember,
     updatedByUserId: user.id,
     updatedByName: user.name || user.email || null,
     ...normalizeAttachmentPayload(payload),
@@ -218,6 +268,11 @@ const createClient = async (clientId, payload, user) => {
     err.status = 400;
     throw err;
   }
+  const audience = normalizeAudienceFlags(payload);
+  const forCandidate = audience.forCandidate !== undefined ? audience.forCandidate : true;
+  const forClientContact = audience.forClientContact !== undefined ? audience.forClientContact : true;
+  const forTeamMember = audience.forTeamMember !== undefined ? audience.forTeamMember : true;
+  assertAtLeastOneAudience({ forCandidate, forClientContact, forTeamMember });
   const row = await MessageTemplate.create({
     scope: 'client',
     clientId,
@@ -227,6 +282,9 @@ const createClient = async (clientId, payload, user) => {
     body: String(text),
     channels: normalizeChannels(channels),
     isSystem: false,
+    forCandidate,
+    forClientContact,
+    forTeamMember,
     updatedByUserId: user.id,
     updatedByName: user.name || user.email || null,
     ...normalizeAttachmentPayload(payload),
@@ -250,6 +308,21 @@ const update = async (id, scope, clientId, payload, user) => {
   if (channels !== undefined) updates.channels = normalizeChannels(channels);
   if (templateKey !== undefined && !row.isSystem) {
     updates.templateKey = templateKey ? String(templateKey).trim().slice(0, 128) : null;
+  }
+  const audience = normalizeAudienceFlags(payload);
+  if (audience.forCandidate !== undefined) updates.forCandidate = audience.forCandidate;
+  if (audience.forClientContact !== undefined) updates.forClientContact = audience.forClientContact;
+  if (audience.forTeamMember !== undefined) updates.forTeamMember = audience.forTeamMember;
+  if (
+    audience.forCandidate !== undefined
+    || audience.forClientContact !== undefined
+    || audience.forTeamMember !== undefined
+  ) {
+    assertAtLeastOneAudience({
+      forCandidate: updates.forCandidate ?? row.forCandidate,
+      forClientContact: updates.forClientContact ?? row.forClientContact,
+      forTeamMember: updates.forTeamMember ?? row.forTeamMember,
+    });
   }
   Object.assign(updates, normalizeAttachmentPayload(payload));
   updates.updatedByUserId = user.id;
@@ -788,13 +861,11 @@ const sendAdminTemplateEmailOptional = async (opts) =>
  * (or CANDIDATE_WELCOME_TEMPLATE_KEY) exists for that tenant; otherwise admin catalog.
  *
  * Gating order:
- *   1. `options.sendWelcomeEmail === false` (per-request) → skip.
+ *   1. `options.sendWelcomeEmail === false` (per-request opt-out) → skip.
  *   2. Missing record / email / onlyIfNoResume guards → skip.
- *   3. Client Usage "מייל התחברות" (`autoThanksEmail`) — default off — unless
- *      `options.sendWelcomeEmail === true` (staff explicitly checked "send welcome" in UI):
- *        • resolve client from `options.clientId` or linked `options.jobId` (Job.client → Client)
- *        • send when setting is `true` for that client, or when step-3 bypass applies
- *        • unresolved client → admin welcome template catalog
+ *   3. Client Usage "מייל התחברות" (`autoThanksEmail`) must be true for the resolved client:
+ *        • resolve client from `options.clientId`, linked `options.jobId`, or inbox address
+ *        • send only when that client's `autoThanksEmail` is enabled (default off)
  *
  * @param {{ onlyIfNoResume?: boolean; clientId?: string | null; sendWelcomeEmail?: boolean; jobId?: string | null; inboxTo?: string | null; recruiter?: object }} options
  */
@@ -863,14 +934,12 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
       jobId: jobIdOpt,
       inboxTo: options.inboxTo,
     });
-    const explicitSend = options.sendWelcomeEmail === true;
-    const enabled = explicitSend || (await clientUsageSettingService.getAutoThanksEmailForClient(clientId));
+    const enabled = await clientUsageSettingService.getAutoThanksEmailForClient(clientId);
     if (!enabled) {
       console.log('[message-templates] welcome skipped: autoThanksEmail disabled or client unresolved', {
         candidateId: id,
         clientId: clientId || null,
         jobId: jobIdOpt,
-        explicitSend,
       });
       return;
     }
@@ -924,6 +993,7 @@ module.exports = {
   listAdmin,
   listByClient,
   listAllCatalog,
+  filterTemplatesForRecipient,
   createAdmin,
   createClient,
   createCatalog,

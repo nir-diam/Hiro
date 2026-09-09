@@ -1521,8 +1521,12 @@ async function ensureClientEventForCandidate(
   const prevEvents = Array.isArray(client?.events) ? client.events : [];
   const existing = prevEvents.find((event) => {
     if (event?.isActive === false) return false;
+    const meta = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+    if (meta.profileCompletenessOnly || meta.missingDetailsCompletedCandidate || meta.profileApprovedByCandidate) {
+      return false;
+    }
     if (String(event?.contactId || '') === cid) return true;
-    if (String(event?.metadata?.candidateId || '') === cid) return true;
+    if (String(meta.candidateId || '') === cid) return true;
     return false;
   });
   if (existing?.id) {

@@ -38,6 +38,9 @@ export type OrgAiDecisionDto = {
     organizationTmpId: string | null;
     manualApprovalStatus: OrgManualApprovalStatus;
     comments?: string | null;
+    agentNotes?: string | null;
+    agentVerdict?: string | null;
+    userVerdict?: string | null;
 };
 
 export async function fetchOrgAiDecisions(params: {
@@ -102,6 +105,32 @@ export async function updateOrgAiDecisionComments(id: string, comments: string):
         method: 'PATCH',
         headers: authHeaders(),
         body: JSON.stringify({ comments }),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
+export type OrgAiDecisionFieldsPatch = {
+    comments?: string | null;
+    agentNotes?: string | null;
+    agentVerdict?: string | null;
+    userVerdict?: string | null;
+};
+
+export async function updateOrgAiDecisionFields(
+    id: string,
+    fields: OrgAiDecisionFieldsPatch,
+): Promise<{
+    id: string;
+    comments: string | null;
+    agentNotes: string | null;
+    agentVerdict: string | null;
+    userVerdict: string | null;
+}> {
+    const res = await fetch(`${apiBase()}/api/organizations/ai-decisions/${encodeURIComponent(id)}/fields`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify(fields),
     });
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();

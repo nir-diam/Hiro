@@ -1,6 +1,8 @@
 const { Op } = require('sequelize');
 const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
+const ClientOrganizationLink = require('../models/ClientOrganizationLink');
+const clientService = require('../services/clientService');
 const OrganizationHistory = require('../models/OrganizationHistory');
 const Candidate = require('../models/Candidate');
 const CandidateOrganization = require('../models/CandidateOrganization');
@@ -183,5 +185,37 @@ const resolve = async (req, res) => {
   });
 };
 
-module.exports = { list, resolve, listHistory };
+const getById = async (req, res) => {
+  try {
+    const tmpId = String(req.params.id || '').trim();
+    if (!tmpId) return res.status(400).json({ message: 'Missing id' });
+
+    const tmp = await OrganizationTmp.findByPk(tmpId);
+    if (!tmp) return res.status(404).json({ message: 'Organization not found' });
+
+    const actor = req.dbUser;
+    if (!actor) return res.status(401).json({ message: 'Unauthorized' });
+
+    if (!clientService.isPlatformAdmin(actor)) {
+      const clientId = actor.clientId ? String(actor.clientId).trim() : '';
+      if (!clientId) return res.status(403).json({ message: 'Forbidden' });
+      const link = await ClientOrganizationLink.findOne({
+        where: { clientId, organizationTmpId: tmpId },
+      });
+      if (!link) return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const plain = tmp.toJSON ? tmp.toJSON() : tmp.get({ plain: true });
+    res.json({
+      ...plain,
+      isPending: true,
+      organizationTmpId: plain.id,
+      activityStatus: 'pending',
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load organization' });
+  }
+};
+
+module.exports = { list, resolve, listHistory, getById };
 

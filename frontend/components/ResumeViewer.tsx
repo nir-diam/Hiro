@@ -14,9 +14,15 @@ import {
     splitWorkExperienceForPrint,
     stripResumeHtml,
 } from '../utils/printableResumeFormatting';
-import { downloadElementAsMultiPagePdf, sanitizePdfFilename } from '../utils/resumeViewerPdfExport';
+import { downloadPrintableResumeAsPdf, printableResumePdfFilename } from '../utils/printableResumePdfExport';
+import { fetchLoggedInClientLogoForExport } from '../utils/exportImagePayload';
 import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
+import { isRichHtmlContent } from '../utils/parsedSearchTextHtml';
 import { normalizeOriginalTextHistory } from '../utils/parsedTextHistory';
+import {
+    waitForCandidateEnrichment,
+    isCandidateEnrichmentPending,
+} from '../utils/candidateIngestPoll';
 import {
     DRIVING_LICENSE_FALLBACK,
     DRIVING_LICENSE_PICKLIST_KEY,
@@ -332,7 +338,6 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const [copyButtonText, setCopyButtonText] = useState(t('resume.copy_cv'));
   const [uploading, setUploading] = useState(false);
   const [parsedPdfDownloading, setParsedPdfDownloading] = useState(false);
-  const parsedResumeCaptureRef = useRef<HTMLDivElement>(null);
   const filesPdfExporterRef = useRef<CvFilesPdfExporter | null>(null);
   const [latestEmail, setLatestEmail] = useState<EmailUploadRecord | null>(null);
   const [drivingLicensePicklist, setDrivingLicensePicklist] = useState<PicklistValueRow[]>(
@@ -388,9 +393,8 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
 
   const candidateSearchText = useMemo(() => {
       const fd = fullData && typeof fullData === 'object' ? fullData : {};
-      return normalizeSearchTextLineBreaks(
-          String(fd.searchText ?? fd.resumeText ?? fd.cvText ?? ''),
-      );
+      const raw = String(fd.searchText ?? fd.resumeText ?? fd.cvText ?? '');
+      return isRichHtmlContent(raw) ? raw : normalizeSearchTextLineBreaks(raw);
   }, [fullData]);
 
   const candidateOriginalText = useMemo(() => {
@@ -550,16 +554,11 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
           return;
       }
 
-      const host = parsedResumeCaptureRef.current;
-      if (!host) {
-          alert(t('resume.download_pdf_error'));
-          return;
-      }
-
       setParsedPdfDownloading(true);
       try {
-          const baseName = sanitizePdfFilename(finalResumeData.name || 'resume');
-          await downloadElementAsMultiPagePdf(host, `${baseName}_hir_resume.pdf`);
+          const baseName = printableResumePdfFilename(finalResumeData.name || 'resume');
+          const clientLogo = await fetchLoggedInClientLogoForExport();
+          await downloadPrintableResumeAsPdf(printablePayload, baseName, { clientLogo });
       } catch (e) {
           console.error('[ResumeViewer] parsed PDF export failed', e);
           alert(t('resume.download_pdf_error'));
@@ -623,9 +622,13 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
         body: JSON.stringify({ key, type: 'resume', fileName: file.name }),
       });
-      if (!attachRes.ok) throw new Error('Failed to attach media');
+      const attachBody = await attachRes.json().catch(() => ({}));
+      if (!attachRes.ok && attachRes.status !== 202) throw new Error('Failed to attach media');
 
-      const updated = await attachRes.json();
+      let updated = attachBody;
+      if (isCandidateEnrichmentPending(attachRes.status, attachBody)) {
+        updated = await waitForCandidateEnrichment(apiBase, targetId, getAuthHeaders);
+      }
       let refreshedCandidate = null;
       try {
         refreshedCandidate = await fetchCandidateData(targetId);
@@ -873,7 +876,6 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                                     }}
                                     onCandidateUpdated={(payload) => {
                                         onResumeUploaded?.(payload);
-                                        dispatchCandidateRefreshedEvent(payload);
                                     }}
                                 />
                             )
@@ -967,16 +969,6 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
               .custom-scrollbar-modal::-webkit-scrollbar-thumb:hover { background: rgb(var(--color-text-subtle)); }
           `}</style>
       </div>
-      {activeTab === 'resume' && resumePanelMode === 'ai' && (
-          <div
-              className="fixed pointer-events-none top-0 left-0 z-[-20] w-[210mm] max-w-[210mm] -translate-x-full"
-              aria-hidden
-          >
-              <div ref={parsedResumeCaptureRef} className="inline-block w-full">
-                  <PrintableResume data={printablePayload} density="compact" />
-              </div>
-          </div>
-      )}
       {isIndustryModalOpen && (
         <IndustryExperienceModal
           onClose={() => setIsIndustryModalOpen(false)}

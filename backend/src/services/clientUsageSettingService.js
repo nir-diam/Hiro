@@ -186,11 +186,17 @@ const getClientIdForJobClientLabel = async (label) => {
   return client ? String(client.id) : null;
 };
 
-/** Job inbox local-part before + (e.g. humand+220029@… → humand). */
+/** Job inbox local-part (e.g. humand+220029@… → humand, humand@app… → humand). */
 const inboxLocalPrefixFromAddress = (inboxTo) => {
   const text = String(inboxTo || '').toLowerCase();
-  const m = text.match(/([a-z0-9_-]+)\+[^@]+@/);
-  return m ? m[1].trim() : null;
+  const emails = text.match(/[a-z0-9._-]+@[a-z0-9.-]+/g) || [];
+  for (const addr of emails) {
+    const plus = addr.match(/^([a-z0-9_-]+)\+/);
+    if (plus) return plus[1].trim();
+    const bare = addr.match(/^([a-z0-9_-]+)@/);
+    if (bare) return bare[1].trim();
+  }
+  return null;
 };
 
 /** Known application-inbox prefixes → Client.name / displayName (see emailService humand lane). */
@@ -271,7 +277,7 @@ const getAutoDisconnectForClient = async (clientId) => {
 };
 
 /**
- * Client Usage "מייל התחברות" (autoThanksEmail): when true, queue welcome email on new candidate.
+ * Client Usage "מייל התחברות" (autoThanksEmail): when true, queue welcome email on new candidate / CV ingest.
  * Default is false (model + DEFAULTS + missing usage row).
  */
 const getAutoThanksEmailForClient = async (clientId) => {

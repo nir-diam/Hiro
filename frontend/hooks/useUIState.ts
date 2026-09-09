@@ -25,6 +25,8 @@ export interface MessageRecipientOption {
     organizationId?: string | null;
 }
 
+export type MessageModalRecipientType = 'candidate' | 'client_contact' | 'team_member';
+
 export interface MessageModalConfig {
     mode: MessageMode;
     candidateName: string;
@@ -33,6 +35,8 @@ export interface MessageModalConfig {
     candidateEmail?: string | null;
     /** Backend candidate UUID when known (audit / system events) */
     candidateId?: string | null;
+    /** Filters compose templates to those marked for this audience. */
+    recipientType?: MessageModalRecipientType;
     /** When set, modal shows a contacts dropdown to pick recipient(s). */
     recipientOptions?: MessageRecipientOption[];
     /** Pre-selected option ids (defaults to options that already have email/phone for the mode). */

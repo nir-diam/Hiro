@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import Quill from 'quill';
 import 'quill/dist/quill.snow.css';
@@ -125,6 +125,11 @@ export interface InternalOpinionEditorJob {
     company: string;
 }
 
+export type InternalOpinionRegenerateOptions = {
+    useDefaultPrompt: boolean;
+    customPrompt?: string;
+};
+
 export type InternalOpinionEditorModalProps = {
     job: InternalOpinionEditorJob | null;
     draftHtml: string;
@@ -133,7 +138,7 @@ export type InternalOpinionEditorModalProps = {
     onClose: () => void;
     onSave: () => void;
     saving: boolean;
-    onRegenerate: () => void;
+    onRegenerate: (options: InternalOpinionRegenerateOptions) => void;
     regenerating: boolean;
     onCopy: () => void | Promise<void>;
     onReport: () => void;
@@ -152,7 +157,132 @@ export const InternalOpinionEditorModal: React.FC<InternalOpinionEditorModalProp
     onCopy,
     onReport,
 }) => {
+    const [promptSettingsOpen, setPromptSettingsOpen] = useState(false);
+    const [promptMode, setPromptMode] = useState<'default' | 'custom'>('default');
+    const [customPromptDraft, setCustomPromptDraft] = useState('');
+    const [confirmedPromptMode, setConfirmedPromptMode] = useState<'default' | 'custom'>('default');
+    const [confirmedCustomPrompt, setConfirmedCustomPrompt] = useState('');
+
+    useEffect(() => {
+        if (!job) return;
+        setPromptSettingsOpen(false);
+        setPromptMode('default');
+        setCustomPromptDraft('');
+        setConfirmedPromptMode('default');
+        setConfirmedCustomPrompt('');
+    }, [job?.id]);
+
     if (!job || typeof document === 'undefined') return null;
+
+    const openPromptSettings = () => {
+        setPromptMode(confirmedPromptMode);
+        setCustomPromptDraft(confirmedCustomPrompt);
+        setPromptSettingsOpen(true);
+    };
+
+    const runRegenerate = (mode: 'default' | 'custom', customPrompt: string) => {
+        onRegenerate({
+            useDefaultPrompt: mode === 'default',
+            customPrompt: mode === 'custom' ? customPrompt : undefined,
+        });
+    };
+
+    const confirmPromptSettings = () => {
+        if (promptMode === 'custom' && !customPromptDraft.trim()) {
+            alert('נא לכתוב Prompt מותאם או לבחור ב-Prompt ברירת המחדל של Hiro.');
+            return;
+        }
+        const nextMode = promptMode;
+        const nextCustom = promptMode === 'custom' ? customPromptDraft.trim() : '';
+        setConfirmedPromptMode(nextMode);
+        setConfirmedCustomPrompt(nextCustom);
+        setPromptSettingsOpen(false);
+        runRegenerate(nextMode, nextCustom);
+    };
+
+    const handleRegenerateClick = () => {
+        openPromptSettings();
+    };
+
+    const promptSettingsDialog = promptSettingsOpen ? (
+        <div
+            className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-black/40"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="internal-opinion-prompt-settings-title"
+            onClick={() => setPromptSettingsOpen(false)}
+        >
+            <div
+                className="bg-bg-card w-full max-w-lg rounded-2xl shadow-2xl border border-border-default overflow-hidden"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="p-4 border-b border-border-default bg-bg-subtle/30">
+                    <h4 id="internal-opinion-prompt-settings-title" className="font-bold text-lg text-text-default">
+                        הגדרות Prompt לחוות דעת
+                    </h4>
+                    <p className="text-xs text-text-muted mt-1">
+                        בחרו Prompt ולחצו &quot;הפק מחדש&quot; ליצירת חוות דעת.
+                    </p>
+                </div>
+                <div className="p-4 space-y-4">
+                    <label className="flex items-start gap-3 cursor-pointer rounded-xl border border-border-default p-3 hover:bg-bg-subtle/50 transition-colors">
+                        <input
+                            type="radio"
+                            name="opinion-prompt-mode"
+                            checked={promptMode === 'default'}
+                            onChange={() => setPromptMode('default')}
+                            className="mt-1"
+                        />
+                        <span className="min-w-0">
+                            <span className="block font-bold text-sm text-text-default">Prompt ברירת מחדל של Hiro</span>
+                            <span className="block text-xs text-text-muted mt-0.5">
+                                משתמש בPrompt המערכתי <code className="text-primary-600">internal_opinion</code> ממסך AI Prompts.
+                            </span>
+                        </span>
+                    </label>
+                    <label className="flex items-start gap-3 cursor-pointer rounded-xl border border-border-default p-3 hover:bg-bg-subtle/50 transition-colors">
+                        <input
+                            type="radio"
+                            name="opinion-prompt-mode"
+                            checked={promptMode === 'custom'}
+                            onChange={() => setPromptMode('custom')}
+                            className="mt-1"
+                        />
+                        <span className="block font-bold text-sm text-text-default">Prompt מותאם אישית</span>
+                    </label>
+                    {promptMode === 'custom' ? (
+                        <textarea
+                            value={customPromptDraft}
+                            onChange={(e) => setCustomPromptDraft(e.target.value)}
+                            placeholder="כתבו כאן הנחיות ל-AI. ניתן להשתמש במשתנים: {{candidate_summary}}, {{job_context}}, {{screening_answers}}, {{current_draft}}"
+                            dir="rtl"
+                            rows={6}
+                            className="w-full rounded-xl border border-border-default bg-white px-3 py-2 text-sm text-text-default focus:outline-none focus:ring-2 focus:ring-primary-500/30 focus:border-primary-500"
+                        />
+                    ) : null}
+                </div>
+                <div className="p-4 border-t border-border-default flex justify-end gap-2 bg-bg-subtle/20">
+                    <button
+                        type="button"
+                        onClick={() => setPromptSettingsOpen(false)}
+                        className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg transition-colors"
+                        disabled={regenerating}
+                    >
+                        ביטול
+                    </button>
+                    <button
+                        type="button"
+                        onClick={confirmPromptSettings}
+                        disabled={regenerating}
+                        className="px-5 py-2 text-sm font-bold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors disabled:opacity-50 inline-flex items-center gap-1.5"
+                    >
+                        <SparklesIcon className="w-4 h-4" />
+                        {regenerating ? 'מייצר...' : 'הפק מחדש'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    ) : null;
 
     const modal = (
         <div
@@ -178,6 +308,7 @@ export const InternalOpinionEditorModal: React.FC<InternalOpinionEditorModalProp
                             <p className="text-xs text-text-muted truncate">
                                 {candidateLabel ? `${candidateLabel} · ` : ''}
                                 {job.title} @ {job.company}
+                                {confirmedPromptMode === 'custom' ? ' · Prompt מותאם' : ''}
                             </p>
                         </div>
                     </div>
@@ -193,7 +324,7 @@ export const InternalOpinionEditorModal: React.FC<InternalOpinionEditorModalProp
                         </button>
                         <button
                             type="button"
-                            onClick={onRegenerate}
+                            onClick={handleRegenerateClick}
                             disabled={regenerating}
                             className="flex items-center gap-1.5 px-2 sm:px-3 py-1.5 bg-white border border-border-default rounded-lg text-sm font-medium text-text-default hover:bg-bg-subtle transition-colors disabled:opacity-50"
                             title="הפק מחדש"
@@ -320,7 +451,13 @@ export const InternalOpinionEditorModal: React.FC<InternalOpinionEditorModalProp
         </div>
     );
 
-    return createPortal(modal, document.body);
+    return createPortal(
+        <>
+            {modal}
+            {promptSettingsDialog}
+        </>,
+        document.body,
+    );
 };
 
 export default InternalOpinionEditorModal;

@@ -179,6 +179,7 @@ const renderField = (label: string, name: string, value: string, onChange: (e: R
 
 const ClientBrandingSection: React.FC<{
     clientId: string | null;
+    clientLabel?: string;
     isPlatformAdmin?: boolean;
     clientOptions?: Array<{ id: string; label: string }>;
     adminClientId?: string | null;
@@ -186,6 +187,7 @@ const ClientBrandingSection: React.FC<{
     clientsListLoading?: boolean;
 }> = ({
     clientId,
+    clientLabel = '',
     isPlatformAdmin = false,
     clientOptions = [],
     adminClientId = null,
@@ -272,7 +274,18 @@ const ClientBrandingSection: React.FC<{
         setIsUploadingLogo(true);
         try {
             const publicUrl = await uploadClientLogo(clientId, file);
-            setBranding((prev) => ({ ...prev, logoUrl: publicUrl }));
+            const saved = await saveClientBranding(clientId, {
+                logoUrl: publicUrl,
+                primaryColor: branding.primaryColor.trim() || '#1e293b',
+            });
+            const normalized = {
+                logoUrl: saved.logoUrl,
+                primaryColor: saved.primaryColor || '#1e293b',
+            };
+            setBranding(normalized);
+            setSavedBranding(normalized);
+            setBrandingSaveSuccess(true);
+            setTimeout(() => setBrandingSaveSuccess(false), 2500);
         } catch (e: unknown) {
             setBrandingSaveError(e instanceof Error ? e.message : 'העלאת לוגו נכשלה');
         } finally {
@@ -285,8 +298,14 @@ const ClientBrandingSection: React.FC<{
             <div>
                 <h3 className="text-lg font-bold text-text-default">לוגו וצבע מותג</h3>
                 <p className="text-sm text-text-muted mt-1">
-                    משמש בדפי נחיתה, מודעות Nano Banana ופרסום משרות.
+                    נשמר ישירות ברשומת הלקוח (logoUrl, primaryColor) — משמש בדפי נחיתה, מודעות Nano Banana ופרסום משרות.
                 </p>
+                {clientId && (
+                    <p className="text-xs text-text-subtle mt-2 font-mono dir-ltr text-right">
+                        {clientLabel ? `${clientLabel} · ` : ''}
+                        {clientId}
+                    </p>
+                )}
             </div>
             {!clientId ? (
                 isPlatformAdmin ? (
@@ -1086,10 +1105,11 @@ const CompanySettingsView: React.FC = () => {
 
                         <ClientBrandingSection
                             clientId={usageClientId}
+                            clientLabel={selectedClientLabel}
                             isPlatformAdmin={isPlatformAdmin}
                             clientOptions={clientOptions.map((c) => ({
                                 id: c.id,
-                                label: c.displayName || c.name,
+                                label: `${c.displayName || c.name} (${c.id.slice(0, 8)}…)`,
                             }))}
                             adminClientId={adminClientId}
                             onAdminClientChange={handleAdminClientChange}

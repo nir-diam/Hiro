@@ -44,6 +44,9 @@ export interface Event {
   description: string;
   notes?: string;
   history?: HistoryEntry[];
+  /** Profile version this event belongs to (merged view across duplicates). */
+  sourceProfileId?: string;
+  sourceProfileName?: string;
 }
 
 export const normalizeCandidateEventRow = (row: Record<string, unknown>): Event => {
@@ -68,6 +71,12 @@ export const normalizeCandidateEventRow = (row: Record<string, unknown>): Event 
   };
   if (row.coordinatorUserId != null && String(row.coordinatorUserId).trim() !== '') {
     base.coordinatorUserId = String(row.coordinatorUserId);
+  }
+  if (row.sourceProfileId != null && String(row.sourceProfileId).trim() !== '') {
+    base.sourceProfileId = String(row.sourceProfileId);
+  }
+  if (row.sourceProfileName != null && String(row.sourceProfileName).trim() !== '') {
+    base.sourceProfileName = String(row.sourceProfileName);
   }
   return base;
 };
@@ -117,6 +126,7 @@ function formatRelativeTime(dateString: string) {
 interface EventsViewProps {
     candidateId?: string;
     candidateName?: string;
+    relatedProfiles?: { id: string; label: string }[];
     events?: Event[];
     setEvents?: React.Dispatch<React.SetStateAction<Event[]>>;
 }
@@ -124,6 +134,7 @@ interface EventsViewProps {
 const EventsView: React.FC<EventsViewProps> = ({
     candidateId,
     candidateName = '',
+    relatedProfiles = [],
 }) => {
     const { t } = useLanguage();
     const { user } = useAuth();
@@ -258,9 +269,16 @@ const EventsView: React.FC<EventsViewProps> = ({
         [coordinatorOptions],
     );
 
+    const hasMultipleProfiles = relatedProfiles.length > 1;
+    const profileFilterOptions = useMemo(
+        () => relatedProfiles.map((p) => p.label).filter(Boolean),
+        [relatedProfiles],
+    );
+
     const [filters, setFilters] = useState({
         eventType: [] as string[],
         coordinator: [] as string[],
+        profile: [] as string[],
         fromDate: '',
         toDate: '',
     });
@@ -272,14 +290,20 @@ const EventsView: React.FC<EventsViewProps> = ({
     const menuRef = useRef<HTMLDivElement>(null);
     
     // Column configuration using translations
-    const allColumns = useMemo(() => [
-        { id: 'type', header: t('events_view.col_type') },
-        { id: 'title', header: t('events_view.col_title') },
-        { id: 'date', header: t('events_view.col_date') },
-        { id: 'coordinator', header: t('events_view.col_coordinator') },
-        { id: 'status', header: t('events_view.col_status') },
-        { id: 'linkedTo', header: t('events_view.col_linkedTo') },
-    ], [t]);
+    const allColumns = useMemo(() => {
+        const cols = [
+            { id: 'type', header: t('events_view.col_type') },
+            { id: 'title', header: t('events_view.col_title') },
+            { id: 'date', header: t('events_view.col_date') },
+            { id: 'coordinator', header: t('events_view.col_coordinator') },
+            { id: 'status', header: t('events_view.col_status') },
+            { id: 'linkedTo', header: t('events_view.col_linkedTo') },
+        ];
+        if (hasMultipleProfiles) {
+            cols.splice(3, 0, { id: 'profile', header: t('events_view.col_profile') });
+        }
+        return cols;
+    }, [t, hasMultipleProfiles]);
     
     const defaultVisibleColumns = useMemo(() => allColumns.map(c => c.id), [allColumns]);
     const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
@@ -574,9 +598,40 @@ const EventsView: React.FC<EventsViewProps> = ({
         }
         let cancelled = false;
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        fetchAuditLogsByEntity(apiBase, token, 'candidate', resolvedCandidateId, { page: 1, pageSize: 500 })
-            .then((r) => {
-                if (!cancelled) setEntityAuditItems(r.items);
+        const profileIds =
+            relatedProfiles.length > 1
+                ? relatedProfiles.map((p) => p.id).filter(Boolean)
+                : [resolvedCandidateId];
+        const labelById = new Map(relatedProfiles.map((p) => [p.id, p.label]));
+
+        Promise.all(
+            profileIds.map((id) =>
+                fetchAuditLogsByEntity(apiBase, token, 'candidate', id, { page: 1, pageSize: 500 }).catch(
+                    () => ({ items: [] as AuditLogEntry[], total: 0, page: 1, pageSize: 500, hasMore: false }),
+                ),
+            ),
+        )
+            .then((responses) => {
+                if (cancelled) return;
+                const merged: AuditLogEntry[] = [];
+                responses.forEach((response, index) => {
+                    const profileId = profileIds[index];
+                    const profileLabel = labelById.get(profileId) || '';
+                    for (const item of response.items || []) {
+                        merged.push({
+                            ...item,
+                            metadata: {
+                                ...item.metadata,
+                                sourceProfileId: profileId,
+                                sourceProfileName: profileLabel,
+                            },
+                        });
+                    }
+                });
+                merged.sort(
+                    (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+                );
+                setEntityAuditItems(merged);
             })
             .catch(() => {
                 if (!cancelled) setEntityAuditItems([]);
@@ -584,7 +639,7 @@ const EventsView: React.FC<EventsViewProps> = ({
         return () => {
             cancelled = true;
         };
-    }, [apiBase, hasPersistedCandidate, resolvedCandidateId]);
+    }, [apiBase, hasPersistedCandidate, resolvedCandidateId, relatedProfiles]);
     
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -604,6 +659,12 @@ const EventsView: React.FC<EventsViewProps> = ({
             if (fromDate && eventDate < fromDate) return false;
             if (toDate && eventDate > toDate) return false;
             if (filters.coordinator.length > 0 && !filters.coordinator.includes(event.coordinator)) {
+                return false;
+            }
+            if (
+                filters.profile.length > 0 &&
+                !(event.sourceProfileName && filters.profile.includes(event.sourceProfileName))
+            ) {
                 return false;
             }
             if (
@@ -661,6 +722,8 @@ const EventsView: React.FC<EventsViewProps> = ({
                 return ev.date;
             case 'coordinator':
                 return ev.coordinator || '';
+            case 'profile':
+                return ev.sourceProfileName || '';
             case 'status':
                 return ev.status || '';
             case 'linkedTo':
@@ -677,6 +740,13 @@ const EventsView: React.FC<EventsViewProps> = ({
             auditFiltered = auditFiltered.filter((e) => {
                 const who = String(e.user.name || '').trim() || String(e.user.email || '').trim();
                 return who && filters.coordinator.includes(who);
+            });
+        }
+
+        if (filters.profile.length > 0) {
+            auditFiltered = auditFiltered.filter((entry) => {
+                const label = String(entry.metadata?.sourceProfileName || '').trim();
+                return label && filters.profile.includes(label);
             });
         }
 
@@ -704,6 +774,7 @@ const EventsView: React.FC<EventsViewProps> = ({
         filters.fromDate,
         filters.toDate,
         filters.coordinator,
+        filters.profile,
         filters.eventType,
         sortConfig,
         getMergedSortValue,
@@ -737,6 +808,15 @@ const EventsView: React.FC<EventsViewProps> = ({
 
     const renderCell = (event: Event, columnId: string, isMobile: boolean = false, isExpanded: boolean = false) => {
         switch (columnId) {
+            case 'profile': {
+                const label = event.sourceProfileName || '';
+                if (!label) return null;
+                return (
+                    <span className="text-xs font-medium text-text-subtle truncate max-w-[140px] block" title={label}>
+                        {label}
+                    </span>
+                );
+            }
             case 'type': {
                 const types = event.type || [];
                 if (types.length === 0) return null;
@@ -814,6 +894,15 @@ const EventsView: React.FC<EventsViewProps> = ({
                 );
             case 'coordinator':
                 return <span>{entry.user.name || entry.user.email || '—'}</span>;
+            case 'profile': {
+                const label = String(entry.metadata?.sourceProfileName || '').trim();
+                if (!label) return null;
+                return (
+                    <span className="text-xs font-medium text-text-subtle truncate max-w-[140px] block" title={label}>
+                        {label}
+                    </span>
+                );
+            }
             case 'status':
                 return (
                     <span
@@ -869,7 +958,7 @@ const EventsView: React.FC<EventsViewProps> = ({
             <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
             <header className="flex flex-col sm:flex-row items-center justify-between gap-4 mb-4">
                 <div className="p-4 bg-bg-subtle rounded-xl border border-border-default w-full">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 items-end">
+                    <div className={`grid grid-cols-1 sm:grid-cols-2 ${hasMultipleProfiles ? 'md:grid-cols-6' : 'md:grid-cols-5'} gap-4 items-end`}>
                         <div>
                             <label htmlFor="filter-event-type" className="block text-xs font-semibold text-text-muted mb-1">
                                 {t('job_events.filter_type')}
@@ -892,6 +981,19 @@ const EventsView: React.FC<EventsViewProps> = ({
                                 onChange={(coordinator) => setFilters((prev) => ({ ...prev, coordinator }))}
                             />
                         </div>
+                        {hasMultipleProfiles && (
+                            <div>
+                                <label htmlFor="filter-profile" className="block text-xs font-semibold text-text-muted mb-1">
+                                    {t('events_view.filter_profile')}
+                                </label>
+                                <EventsFilterMultiselect
+                                    triggerId="filter-profile"
+                                    options={profileFilterOptions}
+                                    value={filters.profile}
+                                    onChange={(profile) => setFilters((prev) => ({ ...prev, profile }))}
+                                />
+                            </div>
+                        )}
                         <div>
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_from')}</label>
                             <input type="date" name="fromDate" value={filters.fromDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none" />

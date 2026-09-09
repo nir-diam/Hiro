@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
+import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDismiss } from './MatchScorePopup';
+import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
 import {
     ArrowPathIcon,
     CheckCircleIcon,
@@ -36,6 +38,8 @@ const SONAR_FILTER_KEYS = [
     'license',
     'salary',
     'affinity',
+    'mandatory_skill',
+    'negative_skill',
 ] as const;
 
 /** Subset of matching engine breakdown used by Sonar cards */
@@ -48,6 +52,23 @@ export interface SonarScanRow {
     engineMatchPct?: number;
     vectorSimilarity: number | null;
     scoreBreakdown?: SonarScoreBreakdown | null;
+    /** Backend traffic-light per hard-filter dimension (key+alias tag matching). */
+    parameterMatches?: Partial<
+        Record<
+            | 'gender'
+            | 'mobility'
+            | 'scope'
+            | 'license'
+            | 'work_hours'
+            | 'availability'
+            | 'age'
+            | 'salary'
+            | 'mandatory_skill'
+            | 'negative_skill'
+            | 'mandatory_language',
+            'match' | 'missing' | 'mismatch' | 'gap' | 'unknown'
+        >
+    > | null;
 }
 
 export interface JobSonarViewProps {
@@ -96,11 +117,39 @@ function jobRecordToTagMatchJob(job: Record<string, unknown>): JobTagMatchInput 
     };
 }
 
-function gapChipLabels(categories: TagMatchCategory[], max = 8): string[] {
+function stripGapChipLabel(label: string): string {
+    return label
+        .replace(/\s*\(חובה\)\s*$/u, '')
+        .replace(/\s*\(שלילי\)\s*$/u, '')
+        .trim();
+}
+
+function isNegativeGapChipLabel(label: string): boolean {
+    return /\(\s*שלילי\s*\)\s*$/u.test(label.trim());
+}
+
+/**
+ * Tag gap chips for Sonar cards. When skill hard-filters passed on the backend
+ * (parameterMatches), hide false-positive gaps from frontend label-only matching.
+ */
+function sonarGapChipLabels(
+    categories: TagMatchCategory[],
+    row: SonarScanRow,
+    activeFilters: ReadonlySet<string>,
+    max = 8,
+): string[] {
+    const pm = row.parameterMatches;
+    const hideMandatoryGaps = activeFilters.has('mandatory_skill') && pm?.mandatory_skill === 'match';
+    const hideNegativeGaps = activeFilters.has('negative_skill') && pm?.negative_skill === 'match';
+
     const out: string[] = [];
     for (const cat of categories) {
         for (const ch of cat.chips) {
-            if (ch.state === 'gap') out.push(ch.label);
+            if (ch.state !== 'gap' || ch.satisfiesRequirement) continue;
+            const negativeGap = isNegativeGapChipLabel(ch.label);
+            if (hideMandatoryGaps && !negativeGap) continue;
+            if (hideNegativeGaps && negativeGap) continue;
+            out.push(stripGapChipLabel(ch.label));
         }
     }
     return out.slice(0, max);
@@ -490,15 +539,23 @@ function buildSonarMetricCells(
     ];
 }
 
-function SonarScoreRing({ pct, compact }: { pct: number; compact?: boolean }) {
+function SonarScoreRing({
+    pct,
+    compact,
+    onClick,
+}: {
+    pct: number;
+    compact?: boolean;
+    onClick?: (e: React.MouseEvent) => void;
+}) {
     const clamped = Math.max(0, Math.min(100, Math.round(pct)));
     const high = clamped >= 90;
     const arcCls = high ? 'text-accent-500' : 'text-primary-500';
     const labelCls = high ? 'text-accent-600' : 'text-primary-700';
     const wrap = compact ? 'relative w-12 h-12 flex items-center justify-center shrink-0' : 'relative w-14 h-14 flex items-center justify-center shrink-0';
     const labelSize = compact ? 'text-[11px]' : 'text-sm';
-    return (
-        <div className={wrap}>
+    const ring = (
+        <>
             <svg className="w-full h-full transform -rotate-90" viewBox="0 0 36 36" aria-hidden>
                 <path
                     className="text-bg-subtle"
@@ -520,8 +577,27 @@ function SonarScoreRing({ pct, compact }: { pct: number; compact?: boolean }) {
             <div className="absolute inset-0 flex items-center justify-center flex-col">
                 <span className={`${labelSize} font-black ${labelCls}`}>{clamped}</span>
             </div>
-        </div>
+        </>
     );
+
+    if (onClick) {
+        return (
+            <button
+                type="button"
+                data-match-score-trigger
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onClick(e);
+                }}
+                className={`${wrap} cursor-pointer hover:scale-105 transition-transform outline-none`}
+                aria-label={`${clamped}%`}
+            >
+                {ring}
+            </button>
+        );
+    }
+
+    return <div className={wrap}>{ring}</div>;
 }
 
 function MetricDot({ tone }: { tone: SonarMetricTone }) {
@@ -592,6 +668,7 @@ interface SonarResultRowProps {
     row: SonarScanRow;
     job: Record<string, unknown>;
     tagJobModel: JobTagMatchInput;
+    activeFilters: ReadonlySet<string>;
     actingId: string | null;
     tagLoadingId: string | null;
     matchVectorThresholdMin: number;
@@ -599,6 +676,7 @@ interface SonarResultRowProps {
     openTagPanel: (row: SonarScanRow) => void;
     handleAddToJob: (row: SonarScanRow) => void;
     handleIgnore: (row: SonarScanRow) => void;
+    onOpenMatchPopup: (e: React.MouseEvent, row: SonarScanRow) => void;
     t: (key: string, opts?: Record<string, string | number>) => string;
 }
 
@@ -607,6 +685,7 @@ function SonarResultRow({
     row,
     job,
     tagJobModel,
+    activeFilters,
     actingId,
     tagLoadingId,
     matchVectorThresholdMin,
@@ -614,11 +693,12 @@ function SonarResultRow({
     openTagPanel,
     handleAddToJob,
     handleIgnore,
+    onOpenMatchPopup,
     t,
 }: SonarResultRowProps) {
     const cid = row.candidate.id != null ? String(row.candidate.id) : '';
     const categories = buildJobTagMatchCategories(tagJobModel, row.candidate);
-    const gaps = gapChipLabels(categories);
+    const gaps = sonarGapChipLabels(categories, row, activeFilters);
     const name = candidateDisplayName(row.candidate) || cid || '—';
     const title = candidateDisplayTitle(row.candidate);
     const busy = actingId === cid;
@@ -681,7 +761,7 @@ function SonarResultRow({
 
                 <div className="flex-1 w-full flex flex-col gap-6 pe-2 min-w-0 self-stretch">
                     <div className="flex flex-col md:flex-row gap-6 items-start md:items-center w-full min-w-0">
-                        <SonarScoreRing pct={row.matchPercentage} compact />
+                        <SonarScoreRing pct={row.matchPercentage} compact onClick={(e) => onOpenMatchPopup(e, row)} />
                         <div className="flex flex-wrap gap-x-6 gap-y-2 items-center flex-1 min-w-0 pe-2">
                             {metrics.map((m) => (
                                 <React.Fragment key={m.label}>
@@ -751,7 +831,7 @@ function SonarResultRow({
             />
             <div className="flex flex-col flex-grow z-10 gap-4">
                 <div className="flex justify-between items-start">
-                    <SonarScoreRing pct={row.matchPercentage} />
+                    <SonarScoreRing pct={row.matchPercentage} onClick={(e) => onOpenMatchPopup(e, row)} />
                     <div className="flex flex-col items-end text-right min-w-0 flex-1 ml-8 sm:ml-10">
                         <div className="relative mb-2">
                             <SonarCandidateAvatar candidate={row.candidate} />
@@ -885,9 +965,75 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
     const [ignoreItems, setIgnoreItems] = useState<SonarIgnoreItem[]>([]);
     const [ignoreCount, setIgnoreCount] = useState(0);
     const [restoringId, setRestoringId] = useState<string | null>(null);
+    const [activeMatchPopup, setActiveMatchPopup] = useState<{ candidateId: string; x: number; y: number } | null>(null);
     const ignorePanelRef = useRef<HTMLDivElement>(null);
 
     const jidKey = jobId != null ? String(jobId).trim() : '';
+
+    const jobSkillHardFilterKeys = useMemo(() => {
+        const skills = Array.isArray(job.skills) ? job.skills : [];
+        const keys: string[] = [];
+        const normSkillMode = (mode?: string) => {
+            const m = String(mode || '').trim().toLowerCase();
+            if (m === 'required') return 'mandatory';
+            if (m === 'exclusion') return 'negative';
+            return m;
+        };
+        const hasMandatory = skills.some(
+            (s) => s && typeof s === 'object' && normSkillMode((s as { mode?: string }).mode) === 'mandatory',
+        );
+        const hasNegative = skills.some(
+            (s) => s && typeof s === 'object' && normSkillMode((s as { mode?: string }).mode) === 'negative',
+        );
+        if (hasMandatory) keys.push('mandatory_skill');
+        if (hasNegative) keys.push('negative_skill');
+        return keys;
+    }, [job.skills]);
+
+    const skillFiltersSyncedRef = useRef('');
+
+    useEffect(() => {
+        const syncKey = `${jidKey}|${jobSkillHardFilterKeys.join(',')}`;
+        if (syncKey === skillFiltersSyncedRef.current) return;
+        skillFiltersSyncedRef.current = syncKey;
+        setActiveFilters((prev) => {
+            const next = new Set(prev);
+            if (jobSkillHardFilterKeys.includes('mandatory_skill')) next.add('mandatory_skill');
+            else next.delete('mandatory_skill');
+            if (jobSkillHardFilterKeys.includes('negative_skill')) next.add('negative_skill');
+            else next.delete('negative_skill');
+            return next;
+        });
+    }, [jidKey, jobSkillHardFilterKeys]);
+
+    const openMatchPopup = useCallback((e: React.MouseEvent, row: SonarScanRow) => {
+        const candidateId = row.candidate.id != null ? String(row.candidate.id) : '';
+        if (!candidateId) return;
+        const position = matchScorePopupPositionFromEvent(e);
+        setActiveMatchPopup((prev) => {
+            if (prev?.candidateId === candidateId) return null;
+            return { candidateId, ...position };
+        });
+    }, []);
+
+    useMatchScorePopupDismiss(Boolean(activeMatchPopup), () => setActiveMatchPopup(null));
+
+    const activeMatchRow = useMemo(() => {
+        if (!activeMatchPopup) return null;
+        return rows.find((row) => String(row.candidate.id) === activeMatchPopup.candidateId) ?? null;
+    }, [activeMatchPopup, rows]);
+
+    const topSonarRow = useMemo(() => {
+        if (!rows.length) return null;
+        return [...rows].sort((a, b) => b.matchPercentage - a.matchPercentage)[0];
+    }, [rows]);
+
+    const jobTitle =
+        typeof job.title === 'string'
+            ? job.title
+            : typeof job.publicJobTitle === 'string'
+              ? job.publicJobTitle
+              : null;
 
     const refreshIgnoreList = useCallback(async () => {
         const base = apiBase();
@@ -1143,6 +1289,17 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                 <p className="text-sm text-text-muted font-medium">
                                     {t('job.sonar.subtitle', { batch: batchSize, threshold })}
                                 </p>
+                                {topSonarRow ? (
+                                    <button
+                                        type="button"
+                                        data-match-score-trigger
+                                        onClick={(e) => openMatchPopup(e, topSonarRow)}
+                                        className="inline-flex items-center gap-1.5 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-2.5 py-1 rounded-full transition-colors mx-auto md:mx-0"
+                                    >
+                                        <SparklesIcon className="w-3.5 h-3.5" />
+                                        {t('job.sonar.popup_title')} · {topSonarRow.matchPercentage}%
+                                    </button>
+                                ) : null}
                             </div>
                             <div className="flex flex-col sm:flex-row items-center gap-3 justify-center md:justify-end">
                                 <button
@@ -1419,6 +1576,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                         row={row}
                                         job={job}
                                         tagJobModel={tagJobModel}
+                                        activeFilters={activeFilters}
                                         actingId={actingId}
                                         tagLoadingId={tagLoadingId}
                                         matchVectorThresholdMin={threshold}
@@ -1426,6 +1584,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                         openTagPanel={openTagPanel}
                                         handleAddToJob={handleAddToJob}
                                         handleIgnore={handleIgnore}
+                                        onOpenMatchPopup={openMatchPopup}
                                         t={t}
                                     />
                                 </React.Fragment>
@@ -1444,6 +1603,22 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                     categories={tagPanelCategories}
                 />
             )}
+
+            {activeMatchPopup && activeMatchRow ? (
+                <MatchScorePopup
+                    position={{ x: activeMatchPopup.x, y: activeMatchPopup.y }}
+                    onClose={() => setActiveMatchPopup(null)}
+                    matchScore={activeMatchRow.matchPercentage}
+                    jobTitle={jobTitle}
+                    scoreBreakdown={(activeMatchRow.scoreBreakdown as MatchScoreBreakdownData | null) ?? null}
+                    job={job}
+                    candidate={activeMatchRow.candidate}
+                    vectorSimilarity={activeMatchRow.vectorSimilarity}
+                    candidateName={candidateDisplayName(activeMatchRow.candidate) || null}
+                    candidateTitle={candidateDisplayTitle(activeMatchRow.candidate) || null}
+                    professionalSummary={sonarInsightLine(activeMatchRow.candidate, t)}
+                />
+            ) : null}
         </div>
     );
 };

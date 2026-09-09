@@ -99,10 +99,11 @@ export async function syncPipelines(clientId: string, pipelines: PipelineDto[]):
         method: 'PUT',
         headers: authHeaders(),
         body: JSON.stringify({
-            pipelines: pipelines.map((p) => ({
+            pipelines: pipelines.map((p, index) => ({
                 id: p.id,
                 name: p.name,
                 description: p.description || '',
+                sortIndex: index,
                 stages: (p.stages || []).map((s) => ({
                     id: s.id,
                     name: s.name,

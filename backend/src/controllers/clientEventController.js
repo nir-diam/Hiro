@@ -38,16 +38,90 @@ const displayNameFromUser = (u) => {
   return 'משתמש';
 };
 
+const mapUpdateRows = (rows, max = 20) => {
+  const list = Array.isArray(rows) ? rows : [];
+  const slice = list.length > max ? list.slice(-max) : list;
+  return slice
+    .filter((u) => u && (u.title || u.summary))
+    .map((u, i) => ({
+      id: u.id || `u-${i}`,
+      title: u.title || u.summary || '',
+      date: u.date || u.timestamp || '',
+      creator: u.creator || u.user || '',
+    }));
+};
+
+/** Build journal updates — full merge for detail, capped/light for list endpoints. */
+const buildEventUpdates = (event, { summary = false } = {}) => {
+  const max = summary ? 8 : 24;
+  const fromUpdates = mapUpdateRows(event.updates, max);
+  if (summary) {
+    if (fromUpdates.length) return fromUpdates;
+    return mapUpdateRows(event.history, 5);
+  }
+
+  const fromHistory = mapUpdateRows(event.history, max);
+  if (!fromUpdates.length) return fromHistory;
+  if (!fromHistory.length) return fromUpdates;
+
+  const seen = new Set(fromUpdates.map((u) => `${u.title}|${u.date}|${u.creator}`));
+  const merged = [...fromUpdates];
+  for (const h of fromHistory) {
+    const key = `${h.title}|${h.date}|${h.creator}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      merged.push(h);
+    }
+  }
+  return merged.length > max ? merged.slice(-max) : merged;
+};
+
+const mapClientEventToJournalRow = (event, clientId, clientName, options = {}) => {
+  if (!event || typeof event !== 'object') return null;
+  const linked = event.linkedTo && typeof event.linkedTo === 'object' ? event.linkedTo : null;
+  const types = normalizeTypes(event.type);
+  return normalizeEventRow({
+    ...event,
+    id: String(event.id || ''),
+    clientId,
+    clientName,
+    contactId: event.contactId || linked?.id || null,
+    contactName: linked?.name || event.contactName || null,
+    linkedToType: linked?.type != null ? String(linked.type) : null,
+    process: event.process || types[0] || '',
+    processId: event.processId || null,
+    stage: event.stage || types[1] || '',
+    stageId: event.stageId || null,
+    creator: event.creator || event.coordinator || '',
+    dueDate: event.dueDate || (event.date ? String(event.date).slice(0, 10) : null),
+    updates: buildEventUpdates(event, options),
+  });
+};
+
+const parsePositiveInt = (raw, fallback, max) => {
+  const n = parseInt(String(raw ?? ''), 10);
+  if (!Number.isFinite(n) || n < 1) return fallback;
+  return Math.min(n, max);
+};
+
 const list = async (req, res) => {
   const client = await clientService.getById(req.params.id);
   const organizationId = req.query?.organizationId
     ? String(req.query.organizationId).trim()
     : null;
+  const summary = req.query?.summary === '1' || req.query?.summary === 'true';
+  const limit = parsePositiveInt(req.query?.limit, 0, 5000);
   let rows = Array.isArray(client.events) ? client.events : [];
   if (organizationId) {
     rows = rows.filter((e) => String(e?.organizationId || '') === organizationId);
   }
-  res.json(rows.map(normalizeEventRow));
+  const clientId = String(client.id);
+  const clientName = String(client.displayName || client.name || '').trim() || 'לקוח';
+  const mapped = rows
+    .map((e) => mapClientEventToJournalRow(e, clientId, clientName, { summary }))
+    .filter(Boolean);
+  mapped.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+  res.json(limit > 0 ? mapped.slice(0, limit) : mapped);
 };
 
 /** Cross-client events journal (admin sees all; tenant sees own client only). */
@@ -55,78 +129,51 @@ const listAll = async (req, res) => {
   try {
     const Client = require('../models/Client');
     const u = req.dbUser;
+    const clientIdFilter = req.query?.clientId ? String(req.query.clientId).trim() : null;
+    const organizationId = req.query?.organizationId
+      ? String(req.query.organizationId).trim()
+      : null;
+    const summary = req.query?.summary !== '0' && req.query?.summary !== 'false';
+    const limit = parsePositiveInt(req.query?.limit, 600, 2000);
+
     const where = {};
-    if (u && u.role !== 'admin' && u.role !== 'super_admin') {
+    if (clientIdFilter) {
+      where.id = clientIdFilter;
+    } else if (u && u.role !== 'admin' && u.role !== 'super_admin') {
       if (!u.clientId) return res.json([]);
       where.id = u.clientId;
     }
+
     const clients = await Client.findAll({
       where,
       attributes: ['id', 'name', 'displayName', 'events'],
       order: [['name', 'ASC']],
     });
+
+    const perClientCap = Math.max(80, Math.ceil(limit / Math.max(clients.length, 1)) + 20);
+
     const out = [];
     for (const c of clients) {
       const plain = c.toJSON ? c.toJSON() : c;
       const clientId = String(plain.id);
       const clientName = String(plain.displayName || plain.name || '').trim() || 'לקוח';
-      const rows = Array.isArray(plain.events) ? plain.events : [];
+      let rows = Array.isArray(plain.events) ? plain.events : [];
+      if (organizationId) {
+        rows = rows.filter((e) => String(e?.organizationId || '') === organizationId);
+      }
+      if (rows.length > perClientCap) {
+        rows = [...rows]
+          .sort((a, b) => new Date(b?.date || 0).getTime() - new Date(a?.date || 0).getTime())
+          .slice(0, perClientCap);
+      }
       for (const e of rows) {
-        if (!e || typeof e !== 'object') continue;
-        const linked = e.linkedTo && typeof e.linkedTo === 'object' ? e.linkedTo : null;
-        const types = normalizeTypes(e.type);
-        out.push(
-          normalizeEventRow({
-            ...e,
-            id: String(e.id || ''),
-            clientId,
-            clientName,
-            contactId: e.contactId || linked?.id || null,
-            contactName: linked?.name || e.contactName || null,
-            process: e.process || types[0] || '',
-            processId: e.processId || null,
-            stage: e.stage || types[1] || '',
-            stageId: e.stageId || null,
-            creator: e.creator || e.coordinator || '',
-            dueDate: e.dueDate || (e.date ? String(e.date).slice(0, 10) : null),
-            updates: (() => {
-              const fromUpdates = Array.isArray(e.updates) ? e.updates.filter((u) => u && (u.title || u.summary)) : [];
-              const fromHistory = Array.isArray(e.history)
-                ? e.history
-                    .map((h, i) => ({
-                      id: h.id || `h-${i}`,
-                      title: h.summary || h.title || '',
-                      date: h.timestamp || h.date || '',
-                      creator: h.user || h.creator || '',
-                    }))
-                    .filter((u) => u.title)
-                : [];
-              if (fromUpdates.length) {
-                const mapped = fromUpdates.map((u, i) => ({
-                  id: u.id || `u-${i}`,
-                  title: u.title || u.summary || '',
-                  date: u.date || u.timestamp || '',
-                  creator: u.creator || u.user || '',
-                }));
-                if (!fromHistory.length) return mapped;
-                const seen = new Set(mapped.map((u) => `${u.title}|${u.date}|${u.creator}`));
-                for (const h of fromHistory) {
-                  const key = `${h.title}|${h.date}|${h.creator}`;
-                  if (!seen.has(key)) {
-                    seen.add(key);
-                    mapped.push(h);
-                  }
-                }
-                return mapped;
-              }
-              return fromHistory;
-            })(),
-          }),
-        );
+        const mapped = mapClientEventToJournalRow(e, clientId, clientName, { summary });
+        if (mapped) out.push(mapped);
       }
     }
+
     out.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
-    return res.json(out);
+    return res.json(out.slice(0, limit));
   } catch (err) {
     return res.status(500).json({ message: err.message || 'Failed to list events' });
   }

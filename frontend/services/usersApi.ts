@@ -35,6 +35,41 @@ export async function fetchClientOptions(): Promise<ClientOptionDto[]> {
     }));
 }
 
+export type StaffAssigneeOption = {
+    id: string;
+    name: string;
+    email?: string;
+};
+
+export type StaffEmailOption = {
+    email: string;
+    label: string;
+};
+
+export function mapStaffUsersToAssigneeOptions(rows: StaffUserDto[]): StaffAssigneeOption[] {
+    return (Array.isArray(rows) ? rows : [])
+        .filter((u) => u.isActive !== false)
+        .map((u) => ({
+            id: String(u.id),
+            name: String(u.name || u.email || '').trim(),
+            email: u.email ? String(u.email).trim() : undefined,
+        }))
+        .filter((r) => r.id && r.name);
+}
+
+export function mapStaffUsersToEmailOptions(rows: StaffUserDto[]): StaffEmailOption[] {
+    const unique = new Map<string, StaffEmailOption>();
+    for (const u of Array.isArray(rows) ? rows : []) {
+        if (u.isActive === false) continue;
+        const email = String(u.email || '').trim();
+        if (!email) continue;
+        const name = String(u.name || '').trim();
+        const label = name ? `${name} (${email})` : email;
+        unique.set(email.toLowerCase(), { email, label });
+    }
+    return Array.from(unique.values());
+}
+
 export async function fetchStaffUsers(clientId?: string | null): Promise<StaffUserDto[]> {
     const id = clientId?.trim();
     if (id) {

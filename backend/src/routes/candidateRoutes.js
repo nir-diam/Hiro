@@ -33,6 +33,7 @@ router.post('/:id/jobs/:jobId/deep-insight', authMiddleware, candidateController
 router.get('/:id/screening-pool', authMiddleware, candidateController.getScreeningPoolForCandidate);
 router.get('/:id/screening-precheck', authMiddleware, candidateController.getScreeningPrecheck);
 router.get('/:id/related-candidates', candidateController.listRelatedCandidates);
+router.get('/:id/profile-versions', candidateController.listProfileVersions);
 router.get('/:id/linked-jobs', candidateController.listLinkedJobs);
 router.post('/:id/linked-jobs', authMiddleware, candidateController.linkCandidateToJob);
 router.post('/:id/field-interest', authMiddleware, candidateController.addFieldInterest);
@@ -40,6 +41,11 @@ router.get('/:id/screening-data', candidateController.getScreeningData);
 router.put('/:id/screening-data', candidateController.saveScreeningData);
 router.patch('/:id/pipeline-stage', authMiddleware, candidateController.patchPipelineStage);
 router.patch('/:id/parsed-text', authMiddleware, candidateController.saveParsedText);
+router.delete(
+  '/:id/parsed-text/history/:index',
+  authMiddleware,
+  candidateController.deleteParsedTextHistoryVersion,
+);
 router.post(
   '/:id/approve-data-corrections',
   authMiddleware,

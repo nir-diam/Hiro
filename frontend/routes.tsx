@@ -2,8 +2,6 @@
 // ... (imports)
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { useRoutes, Navigate, useParams, Outlet, useNavigate, useLocation } from 'react-router-dom';
-import { GoogleGenAI, Chat, GenerateContentResponse, FunctionDeclaration, Type } from '@google/genai';
-
 // Import all page components
 import CandidatesListView, { Candidate } from './components/CandidatesListView';
 import NewCandidateViewV2 from './components/NewCandidateViewV2';
@@ -126,44 +124,7 @@ import DocumentsView from './components/DocumentsView';
 import { MessageModalConfig } from './hooks/useUIState';
 import { JobAlertModalConfig } from './components/CreateJobAlertModal';
 import { deriveLocalCandidateId } from './utils/candidateId';
-
-interface Message {
-    role: 'user' | 'model';
-    text: string;
-}
-
-// ... (keep tool definitions and interface props) ...
-// 1. הגדרת הפונקציות עבור ה-AI (Tools)
-const updateCandidateFunctionDeclaration: FunctionDeclaration = {
-  name: 'updateCandidateField',
-  parameters: {
-    type: Type.OBJECT,
-    description: 'Update a basic field in the candidate profile data (address, phone, email, title, etc).',
-    properties: {
-      fieldName: { type: Type.STRING, description: 'Field name to update.' },
-      newValue: { type: Type.STRING, description: 'New value.' },
-    },
-    required: ['fieldName', 'newValue'],
-  },
-};
-
-const upsertWorkExperienceFunctionDeclaration: FunctionDeclaration = {
-  name: 'upsertWorkExperience',
-  parameters: {
-    type: Type.OBJECT,
-    description: 'Add a new work experience or update an existing one for the candidate.',
-    properties: {
-      id: { type: Type.NUMBER, description: 'Optional. Use ONLY if updating an existing record ID from the context.' },
-      title: { type: Type.STRING, description: 'Job title / position name.' },
-      company: { type: Type.STRING, description: 'Company name.' },
-      companyField: { type: Type.STRING, description: 'Industry or field of the company.' },
-      startDate: { type: Type.STRING, description: 'Format YYYY-MM.' },
-      endDate: { type: Type.STRING, description: 'Format YYYY-MM or "Present".' },
-      description: { type: Type.STRING, description: 'Description of the role and achievements.' },
-    },
-    required: ['title', 'company', 'startDate', 'endDate'],
-  },
-};
+import { buildCandidateChatContext } from './utils/candidateChatContext';
 
 interface AppRoutesProps {
     openSummaryDrawer: (candidate: Candidate | number, options?: import('../hooks/useUIState').SummaryDrawerOptions) => void;
@@ -268,6 +229,7 @@ const normalizeCandidatePayload = (payload: any) => {
         ...initialData,
         ...payload,
         tags: ensureArray(payload?.tags, initialData.tags),
+        tagDetails: ensureArray(payload?.tagDetails, []),
         internalTags: ensureArray(payload?.internalTags, initialData.internalTags),
         workExperience: ensureArray(payload?.workExperience, initialData.workExperience),
         languages: ensureArray(payload?.languages, initialData.languages),
@@ -359,33 +321,36 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const [approveCorrectionsLoading, setApproveCorrectionsLoading] = useState(false);
     const [candidateList, setCandidateList] = useState<{ id: string }[]>([]);
 
-    const loadProfilesForUser = useCallback(async (userId?: string | number) => {
-        if (!userId || !apiBase) {
+    const authHeaders = useCallback(() => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    }, []);
+
+    const loadProfileVersionsForCandidate = useCallback(async (candidateId?: string | number) => {
+        const cid = String(candidateId || '').trim();
+        if (!cid || !apiBase) {
             setProfiles([]);
             return;
         }
         try {
-            const res = await fetch(`${apiBase}/api/candidates/by-user/${userId}`);
+            const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(cid)}/profile-versions`, {
+                headers: { ...authHeaders() },
+            });
             if (!res.ok) return;
             const payload = await res.json();
             const list = Array.isArray(payload) ? payload : payload ? [payload] : [];
             const normalizedList = list
                 .map(normalizeCandidatePayload)
-                .map(candidate => ({
+                .map((candidate) => ({
                     ...candidate,
                     backendId: candidate.backendId || candidate.id,
                 }));
             setProfiles(normalizedList);
-            setActiveProfileId(prev => prev ?? normalizedList[0]?.backendId ?? normalizedList[0]?.id ?? null);
+            setActiveProfileId((prev) => prev ?? normalizedList[0]?.backendId ?? normalizedList[0]?.id ?? null);
         } catch (err) {
-            console.error('Failed to load candidate profiles', err);
+            console.error('Failed to load candidate profile versions', err);
         }
-    }, [apiBase]);
-
-    const authHeaders = useCallback(() => {
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        return token ? { Authorization: `Bearer ${token}` } : {};
-    }, []);
+    }, [apiBase, authHeaders]);
 
     const fetchCandidateList = useCallback(async () => {
         if (!apiBase) return;
@@ -440,14 +405,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         }
 
             try {
-        const response = await fetch(`${apiBase}/api/candidates/${urlId}`, { signal, cache: 'no-store' });
-                if (!response.ok) {
-                    throw new Error('לא ניתן למצוא את המועמד המבוקש.');
-                }
-
-                const payload = await response.json();
+        const { fetchStaffCandidateById } = await import('./utils/staffCandidateApi');
+        const payload = await fetchStaffCandidateById(urlId);
                 const normalized = normalizeCandidatePayload(payload);
-                const localId = deriveLocalCandidateId(payload.id ?? payload.userId, 0);
+                const localId = deriveLocalCandidateId(String(payload.id ?? payload.userId ?? ''), 0);
 
             if (!signal?.aborted) {
                 setFormData({
@@ -458,9 +419,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 setActiveProfileId(payload.id ?? payload.backendId ?? normalized.backendId ?? null);
             }
 
-                if (payload.userId) {
-                    void loadProfilesForUser(payload.userId);
-                }
+                void loadProfileVersionsForCandidate(payload.id ?? urlId);
             } catch (error: any) {
             if (!signal?.aborted) {
                     setCandidateFetchError(error.message || 'תקלה בטעינת המועמד.');
@@ -470,7 +429,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     setIsCandidateLoading(false);
                 }
             }
-    }, [apiBase, loadProfilesForUser, urlId]);
+    }, [apiBase, loadProfileVersionsForCandidate, urlId]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -545,13 +504,14 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             window.dispatchEvent(
                 new CustomEvent('candidate-data-refreshed', { detail: { backendId: payload.id } }),
             );
+            void loadProfileVersionsForCandidate(payload.id ?? urlId);
             setCandidateUpdateMessage('השינויים נשמרו בהצלחה.');
         } catch (error: any) {
             setCandidateUpdateMessage(error?.message || 'עדכון נכשל.');
         } finally {
             setIsUpdatingCandidate(false);
         }
-    }, [apiBase, urlId, formData, authHeaders]);
+    }, [apiBase, urlId, formData, authHeaders, loadProfileVersionsForCandidate]);
 
     const mockResumeData = {
         name: formData.fullName,
@@ -648,12 +608,12 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             });
             setActiveProfileId(normalizedCreated.backendId ?? normalizedCreated.id);
             setFormData({ ...normalizedCreated, backendId: created.id });
-            void loadProfilesForUser(formData.userId);
+            void loadProfileVersionsForCandidate(created.id);
             navigate(`/candidates/${created.id}`);
         } catch (err: any) {
             console.error('Failed to add profile', err);
         }
-    }, [apiBase, formData, loadProfilesForUser, navigate]);
+    }, [apiBase, formData, loadProfileVersionsForCandidate, navigate]);
 
     const handleDuplicateProfile = useCallback(async () => {
         if (!apiBase) {
@@ -739,9 +699,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             });
             setActiveProfileId(newId);
             setFormData({ ...normalizedCreated, id: normalizedCreated.id, backendId: newId });
-            if (formData.userId) {
-                void loadProfilesForUser(formData.userId);
-            }
+            void loadProfileVersionsForCandidate(primaryCandidateId);
             navigate(`/candidates/${newId}`);
             setCandidateUpdateMessage('עותק הצל נוצר בהצלחה.');
         } catch (err: unknown) {
@@ -749,7 +707,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         } finally {
             setIsDuplicatingProfile(false);
         }
-    }, [apiBase, authHeaders, formData, loadProfilesForUser, navigate, profiles, urlId]);
+    }, [apiBase, authHeaders, formData, loadProfileVersionsForCandidate, navigate, profiles, urlId]);
 
     const profileOptions = useMemo(() => {
         const list =
@@ -766,6 +724,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 profile.fullName ||
                 'פרופיל',
             profilePicture: profile.profilePicture,
+            canonicalCandidateId: profile.canonicalCandidateId ?? null,
+            staffProfileCopy: Boolean(profile.staffProfileCopy),
         }));
     }, [profiles, formData]);
 
@@ -774,7 +734,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             profiles
                 .map((profile) => ({
                     id: String(profile.backendId || profile.id || '').trim(),
-                    label: String(profile.profileName || profile.fullName || profile.title || 'פרופיל').trim(),
+                    label:
+                        String(profile.profileName || '').trim() ||
+                        buildCandidateFullName(profile.firstName, profile.lastName) ||
+                        String(profile.fullName || profile.title || 'פרופיל').trim(),
                 }))
                 .filter((row) => row.id),
         [profiles],
@@ -835,78 +798,50 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const handleNavClick = (view: string) => {
         props.handleSetActiveView(view);
     };
-    
-    const [chatMessages, setChatMessages] = useState<Message[]>([]);
-    const [chatSession, setChatSession] = useState<Chat | null>(null);
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [isChatLoading, setIsChatLoading] = useState(false);
-    const [chatError, setChatError] = useState<string | null>(null);
 
-    const initializeChat = () => {
-        if (chatSession) return;
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const contextData = { candidate: formData, resume: mockResumeData };
-        const systemInstruction = `You are an expert recruitment assistant named Hiro AI. Use the context to answer questions about the candidate in Hebrew. You have access to tools to update candidate information and work experience. Context: ${JSON.stringify(contextData)}`;
-        
-        const newChatSession = ai.chats.create({ 
-            model: 'gemini-3-flash-preview', 
-            config: { 
-                systemInstruction,
-                tools: [{ functionDeclarations: [updateCandidateFunctionDeclaration, upsertWorkExperienceFunctionDeclaration] }]
-            } 
-        });
-        setChatSession(newChatSession);
-    };
+    const [isChatOpen, setIsChatOpen] = useState(false);
+
+    const chatContextData = useMemo(() => buildCandidateChatContext(formData), [formData]);
+
+    const handleChatProfileUpdate = useCallback(
+        async (patch: any) => {
+            if (!patch || typeof patch !== 'object') return;
+            const targetId = urlId || formData.backendId;
+            if (!targetId || !apiBase) {
+                setCandidateUpdateMessage('לא ניתן לשמור — חסר מזהה מועמד.');
+                return;
+            }
+
+            const merged = { ...formData, ...patch };
+            setFormData(merged);
+
+            try {
+                const response = await fetch(`${apiBase}/api/candidates/${targetId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                    body: JSON.stringify(patch),
+                });
+                if (!response.ok) {
+                    const errBody = await response.json().catch(() => null);
+                    throw new Error(errBody?.message || 'עדכון הפרופיל נכשל');
+                }
+                const payload = await response.json();
+                const normalized = normalizeCandidatePayload(payload);
+                const localId = deriveLocalCandidateId(payload.id ?? payload.userId, formData.id);
+                setFormData({ ...normalized, id: localId, backendId: payload.id });
+                window.dispatchEvent(
+                    new CustomEvent('candidate-data-refreshed', { detail: { backendId: payload.id } }),
+                );
+                setCandidateUpdateMessage('הפרופיל עודכן לפי הצעות ה-AI.');
+            } catch (error: any) {
+                setCandidateUpdateMessage(error?.message || 'עדכון הפרופיל נכשל');
+            }
+        },
+        [apiBase, authHeaders, formData, urlId],
+    );
 
     const handleOpenChat = () => {
-        initializeChat();
         setIsChatOpen(true);
-    };
-
-    const handleSendMessage = async (input: string) => {
-        if (!input.trim() || isChatLoading || !chatSession) return;
-        const userMessage: Message = { role: 'user', text: input };
-        setChatMessages(prev => [...prev, userMessage]);
-        setIsChatLoading(true);
-        setChatError(null);
-
-        try {
-            const response = await chatSession.sendMessage({ message: input });
-            
-            if (response.functionCalls) {
-                for (const fc of response.functionCalls) {
-                    if (fc.name === 'updateCandidateField') {
-                        const { fieldName, newValue } = fc.args as any;
-                        setFormData((prev: any) => ({ ...prev, [fieldName]: newValue }));
-                        const toolResponse = await chatSession.sendMessage({ message: `Field ${fieldName} updated to ${newValue}.` });
-                        setChatMessages(prev => [...prev, { role: 'model', text: toolResponse.text || "עודכן בהצלחה." }]);
-                    }
-                    
-                    if (fc.name === 'upsertWorkExperience') {
-                        const newExp = fc.args as any;
-                        setFormData((prev: any) => {
-                            const currentExp = prev.workExperience || [];
-                            let updatedExp;
-                            if (newExp.id) {
-                                updatedExp = currentExp.map((e: any) => e.id === newExp.id ? { ...e, ...newExp } : e);
-                            } else {
-                                updatedExp = [{ ...newExp, id: Date.now() }, ...currentExp];
-                            }
-                            return { ...prev, workExperience: updatedExp };
-                        });
-                        const toolResponse = await chatSession.sendMessage({ message: `Work experience at ${newExp.company} has been added/updated.` });
-                        setChatMessages(prev => [...prev, { role: 'model', text: toolResponse.text || "הניסיון התעסוקתי עודכן בהצלחה." }]);
-                    }
-                }
-            } else {
-                setChatMessages(prev => [...prev, { role: 'model', text: response.text || "" }]);
-            }
-        } catch (e) {
-            console.error("Gemini API error:", e);
-            setChatError("Error communicating with AI.");
-        } finally {
-            setIsChatLoading(false);
-        }
     };
 
     const renderContent = () => {
@@ -947,6 +882,15 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                                 onOpenMessageModal={props.openMessageModal}
                                 candidateId={formData.backendId || urlId || null}
                                 highlightKeywords={searchHighlightKeywords}
+                                onResumeUploaded={(updated) => {
+                                    const normalized = normalizeCandidatePayload(updated);
+                                    setFormData((prev: any) => ({
+                                        ...prev,
+                                        ...normalized,
+                                        id: prev.id,
+                                        backendId: updated.id ?? prev.backendId,
+                                    }));
+                                }}
                             />
                         </div>
                     </>
@@ -988,6 +932,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                             || [formData.firstName, formData.lastName].filter(Boolean).join(' ')
                             || ''
                         }
+                        relatedProfiles={relatedProfilesForJobs}
                         events={props.events}
                         setEvents={props.setEvents}
                     />
@@ -1067,11 +1012,11 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             <HiroAIChat
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
-                messages={chatMessages}
-                isLoading={isChatLoading}
-                error={chatError}
-                onSendMessage={handleSendMessage}
-                onReset={() => { setChatSession(null); setChatMessages([]); setChatError(null); initializeChat(); }}
+                chatType="candidate-profile"
+                promptId="candidate_profile_chat"
+                userId={String(formData.backendId || urlId || '')}
+                contextData={chatContextData}
+                onProfileUpdate={(patch) => void handleChatProfileUpdate(patch)}
             />
         </div>
     );
@@ -1101,6 +1046,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/clients', element: <ClientsListView openMessageModal={props.openMessageModal} /> },
         { path: '/clients/new', element: <NewClientView onCancel={() => {}} onSave={props.handleSaveClient} /> },
         { path: '/clients/:clientId', element: <ClientProfileView openMessageModal={props.openMessageModal} /> },
+        { path: '/organizations/tmp/:organizationTmpId', element: <OrganizationProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/organizations/:organizationId', element: <OrganizationProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/clients/:clientId/contacts/:contactId', element: <ContactProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/notifications', element: <NotificationCenter onOpenCandidateSummary={props.openSummaryDrawer} /> },

@@ -12,6 +12,40 @@ export interface CompanyFilters {
     roles: string[];
 }
 
+export const EMPTY_COMPANY_FILTERS: CompanyFilters = {
+    sizes: [],
+    sectors: [],
+    industries: [],
+    fields: [],
+    roles: [],
+};
+
+/** Accept legacy `{ industry, field }` shapes from older screens without crashing. */
+export function normalizeCompanyFilters(raw: unknown): CompanyFilters {
+    if (!raw || typeof raw !== 'object') return { ...EMPTY_COMPANY_FILTERS };
+    const o = raw as Record<string, unknown>;
+    const pickArray = (key: keyof CompanyFilters) =>
+        Array.isArray(o[key])
+            ? o[key].map((v) => String(v).trim()).filter(Boolean)
+            : [];
+
+    const industries = pickArray('industries');
+    const legacyIndustry = String(o.industry || '').trim();
+    if (legacyIndustry && !industries.includes(legacyIndustry)) industries.push(legacyIndustry);
+
+    const fields = pickArray('fields');
+    const legacyField = String(o.field || '').trim();
+    if (legacyField && !fields.includes(legacyField)) fields.push(legacyField);
+
+    return {
+        sizes: pickArray('sizes'),
+        sectors: pickArray('sectors'),
+        industries,
+        fields,
+        roles: pickArray('roles'),
+    };
+}
+
 interface CompanyFilterPopoverProps {
     onClose: () => void;
     filters: CompanyFilters;
@@ -67,9 +101,14 @@ const CheckItem: React.FC<{
 const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, filters, setFilters, onApply }) => {
     const popoverRef = useRef<HTMLDivElement>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const normalizedFilters = useMemo(() => normalizeCompanyFilters(filters), [filters]);
 
     // ── Internal draft — only committed to parent on Apply ────────────────────
-    const [draft, setDraft] = useState<CompanyFilters>(() => ({ ...filters }));
+    const [draft, setDraft] = useState<CompanyFilters>(() => normalizeCompanyFilters(filters));
+
+    useEffect(() => {
+        setDraft(normalizedFilters);
+    }, [normalizedFilters]);
 
     // Search state per column
     const [industrySearch, setIndustrySearch] = useState('');
@@ -144,24 +183,33 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
 
     // ── Draft toggle helpers (no API call, no parent state change) ────────────
     const toggleIndustry = (name: string) =>
-        setDraft((prev) => ({
-            ...prev,
-            industries: prev.industries.includes(name)
-                ? prev.industries.filter((x) => x !== name)
-                : [...prev.industries, name],
-        }));
+        setDraft((prev) => {
+            const p = normalizeCompanyFilters(prev);
+            return {
+                ...p,
+                industries: p.industries.includes(name)
+                    ? p.industries.filter((x) => x !== name)
+                    : [...p.industries, name],
+            };
+        });
 
     const toggleField = (label: string) =>
-        setDraft((prev) => ({
-            ...prev,
-            fields: prev.fields.includes(label) ? prev.fields.filter((x) => x !== label) : [...prev.fields, label],
-        }));
+        setDraft((prev) => {
+            const p = normalizeCompanyFilters(prev);
+            return {
+                ...p,
+                fields: p.fields.includes(label) ? p.fields.filter((x) => x !== label) : [...p.fields, label],
+            };
+        });
 
     const toggleSize = (size: string) =>
-        setDraft((prev) => ({
-            ...prev,
-            sizes: prev.sizes.includes(size) ? prev.sizes.filter((s) => s !== size) : [...prev.sizes, size],
-        }));
+        setDraft((prev) => {
+            const p = normalizeCompanyFilters(prev);
+            return {
+                ...p,
+                sizes: p.sizes.includes(size) ? p.sizes.filter((s) => s !== size) : [...p.sizes, size],
+            };
+        });
 
     const handleSectorChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const v = e.target.value;
@@ -174,8 +222,9 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
 
     // Commit draft to parent and run search via onApply (parent fetches once).
     const handleApply = () => {
-        onApply?.(draft);
-        setFilters(draft);
+        const next = normalizeCompanyFilters(draft);
+        onApply?.(next);
+        setFilters(next);
         onClose();
     };
 

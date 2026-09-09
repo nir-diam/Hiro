@@ -22,7 +22,13 @@ const list = async (req, res) => {
     const organizationId = req.query?.organizationId
       ? String(req.query.organizationId).trim()
       : null;
-    const rows = await clientContactService.listByClientIdWithClient(clientId, { organizationId });
+    const organizationTmpId = req.query?.organizationTmpId
+      ? String(req.query.organizationTmpId).trim()
+      : null;
+    const rows = await clientContactService.listByClientIdWithClient(clientId, {
+      organizationId,
+      organizationTmpId,
+    });
     res.json(rows);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list contacts' });
@@ -60,6 +66,9 @@ const create = async (req, res) => {
     // organizationId is optional and scopes the contact to a linked org.
     if (body.organizationId != null) {
       body.organizationId = String(body.organizationId).trim() || null;
+    }
+    if (body.organizationTmpId != null) {
+      body.organizationTmpId = String(body.organizationTmpId).trim() || null;
     }
     const row = await clientContactService.createForClient(clientId, body);
     res.status(201).json(row);
@@ -110,5 +119,21 @@ const deleteGroup = async (req, res) => {
   }
 };
 
-module.exports = { list, listAll, create, update, remove, listGroups, createGroup, deleteGroup };
+/** GET /api/clients/:id/contacts/:contactId/jobs — jobs that assign this contact in job.contacts */
+const listJobs = async (req, res) => {
+  try {
+    const clientId = String(req.params.id || '').trim();
+    const contactId = String(req.params.contactId || '').trim();
+    assertCanListClientContacts(req.dbUser, clientId);
+    const rows = await clientContactService.listJobsForContact(clientId, contactId);
+    if (rows === null) {
+      return res.status(404).json({ message: 'Contact not found' });
+    }
+    res.json(rows);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs for contact' });
+  }
+};
+
+module.exports = { list, listAll, create, update, remove, listGroups, createGroup, deleteGroup, listJobs };
 

@@ -4,6 +4,7 @@ const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const Candidate = require('../models/Candidate');
 const organizationService = require('../services/organizationService');
+const aiDecisionAuditService = require('../services/aiDecisionAuditService');
 
 /**
  * GET /api/organizations/ai-decisions
@@ -170,6 +171,9 @@ const list = async (req, res) => {
         organizationTmpId: r.organizationTmpId,
         manualApprovalStatus: r.manualApprovalStatus ?? 'pending',
         comments: r.comments ?? null,
+        agentNotes: r.agentNotes ?? null,
+        agentVerdict: r.agentVerdict ?? null,
+        userVerdict: r.userVerdict ?? null,
       };
     });
 
@@ -197,6 +201,7 @@ const resolve = async (req, res) => {
     const decision = await OrganizationAiDecision.findByPk(id);
     if (!decision) return res.status(404).json({ message: 'Decision not found' });
 
+    const before = decision.get ? decision.get({ plain: true }) : { ...decision };
     const updates = {};
     if (reviewerAction !== undefined) updates.reviewerAction = reviewerAction;
     if (reviewStatus !== undefined) updates.reviewStatus = reviewStatus;
@@ -312,6 +317,10 @@ const resolve = async (req, res) => {
     }
 
     await decision.update(updates);
+    await decision.reload();
+    await aiDecisionAuditService.recordOrgDecisionAudit(req, before, decision, {
+      metadata: { resolveAction: reviewerAction || decision.reviewerAction },
+    });
     return res.json({
       success: true,
       id: decision.id,
@@ -343,7 +352,18 @@ const bulkResolve = async (req, res) => {
       if (reviewStatus !== 'pending_review') updates.resolvedAt = new Date();
     }
 
+    const beforeRows = await OrganizationAiDecision.findAll({ where: { id: ids } });
+    const beforeMap = new Map(beforeRows.map((row) => [row.id, row.get({ plain: true })]));
+
     await OrganizationAiDecision.update(updates, { where: { id: ids } });
+
+    const afterRows = await OrganizationAiDecision.findAll({ where: { id: ids } });
+    for (const row of afterRows) {
+      await aiDecisionAuditService.recordOrgDecisionAudit(req, beforeMap.get(row.id), row, {
+        metadata: { bulk: true, resolveAction: reviewerAction },
+      });
+    }
+
     return res.json({ success: true, resolvedIds: ids });
   } catch (err) {
     console.error('[orgAiDecision] bulkResolve error:', err);
@@ -454,7 +474,10 @@ const approve = async (req, res) => {
     }
     const decision = await OrganizationAiDecision.findByPk(id);
     if (!decision) return res.status(404).json({ message: 'Decision not found' });
+    const before = decision.get ? decision.get({ plain: true }) : { ...decision };
     await decision.update({ manualApprovalStatus: status });
+    await decision.reload();
+    await aiDecisionAuditService.recordOrgDecisionAudit(req, before, decision);
     return res.json({ id, manualApprovalStatus: status });
   } catch (err) {
     console.error('[orgAiDecision] approve error:', err);
@@ -473,7 +496,10 @@ const updateComments = async (req, res) => {
       req.body?.comments == null ? null : String(req.body.comments);
     const decision = await OrganizationAiDecision.findByPk(id);
     if (!decision) return res.status(404).json({ message: 'Decision not found' });
+    const before = decision.get ? decision.get({ plain: true }) : { ...decision };
     await decision.update({ comments: comments === '' ? null : comments });
+    await decision.reload();
+    await aiDecisionAuditService.recordOrgDecisionAudit(req, before, decision);
     return res.json({ id, comments: decision.comments ?? null });
   } catch (err) {
     console.error('[orgAiDecision] updateComments error:', err);
@@ -481,4 +507,52 @@ const updateComments = async (req, res) => {
   }
 };
 
-module.exports = { list, resolve, bulkResolve, stats, approve, updateComments };
+const normalizeOptionalText = (value) =>
+  value == null || value === '' ? null : String(value);
+
+/**
+ * PATCH /api/organizations/ai-decisions/:id/fields
+ * Persist review text fields without changing review/approval status.
+ */
+const updateDecisionFields = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const body = req.body || {};
+    const decision = await OrganizationAiDecision.findByPk(id);
+    if (!decision) return res.status(404).json({ message: 'Decision not found' });
+
+    const before = decision.get ? decision.get({ plain: true }) : { ...decision };
+    const patch = {};
+    if (Object.prototype.hasOwnProperty.call(body, 'comments')) {
+      patch.comments = normalizeOptionalText(body.comments);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'agentNotes')) {
+      patch.agentNotes = normalizeOptionalText(body.agentNotes);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'agentVerdict')) {
+      patch.agentVerdict = normalizeOptionalText(body.agentVerdict);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'userVerdict')) {
+      patch.userVerdict = normalizeOptionalText(body.userVerdict);
+    }
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ message: 'No fields to update' });
+    }
+
+    await decision.update(patch);
+    await decision.reload();
+    await aiDecisionAuditService.recordOrgDecisionAudit(req, before, decision);
+    return res.json({
+      id,
+      comments: decision.comments ?? null,
+      agentNotes: decision.agentNotes ?? null,
+      agentVerdict: decision.agentVerdict ?? null,
+      userVerdict: decision.userVerdict ?? null,
+    });
+  } catch (err) {
+    console.error('[orgAiDecision] updateDecisionFields error:', err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = { list, resolve, bulkResolve, stats, approve, updateComments, updateDecisionFields };

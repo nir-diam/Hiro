@@ -2,6 +2,7 @@ import {
     AlignmentType,
     BorderStyle,
     Document,
+    ImageRun,
     Packer,
     Paragraph,
     TextRun,
@@ -17,6 +18,7 @@ import {
     type ParsedSearchTextExportOptions,
 } from './parsedSearchTextExportHtml';
 import { downloadBlobAsFile } from './downloadBlobAsFile';
+import type { ExportImagePayload } from './exportImagePayload';
 
 const DOCX_MIME =
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -163,9 +165,32 @@ function paragraphForLine(line: string, style: CvLineStyle): Paragraph {
     }
 }
 
-function buildTitleParagraphs(candidateName?: string): Paragraph[] {
-    const name = String(candidateName ?? '').trim();
-    const blocks: Paragraph[] = [
+function buildLogoParagraph(logo?: ExportImagePayload | null): Paragraph | null {
+    if (!logo) return null;
+    return new Paragraph({
+        bidirectional: true,
+        alignment: AlignmentType.LEFT,
+        spacing: { after: 160 },
+        children: [
+            new ImageRun({
+                type: logo.type,
+                data: logo.data,
+                transformation: {
+                    width: logo.width,
+                    height: logo.height,
+                },
+            }),
+        ],
+    });
+}
+
+function buildTitleParagraphs(options?: ParsedSearchTextExportOptions): Paragraph[] {
+    const name = String(options?.candidateName ?? '').trim();
+    const blocks: Paragraph[] = [];
+    const logoParagraph = buildLogoParagraph(options?.clientLogo);
+    if (logoParagraph) blocks.push(logoParagraph);
+
+    blocks.push(
         rtlParagraph(
             [
                 textRun('מסמך קורות חיים', {
@@ -195,7 +220,7 @@ function buildTitleParagraphs(candidateName?: string): Paragraph[] {
                 },
             },
         ),
-    ];
+    );
     if (name) {
         blocks.push(
             rtlParagraph(
@@ -227,7 +252,7 @@ async function buildDocxBlob(text: string, options?: ParsedSearchTextExportOptio
                         margin: { top: 720, right: 720, bottom: 720, left: 720 },
                     },
                 },
-                children: [...buildTitleParagraphs(options?.candidateName), ...bodyParagraphs],
+                children: [...buildTitleParagraphs(options), ...bodyParagraphs],
             },
         ],
     });

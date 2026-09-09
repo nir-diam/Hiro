@@ -15,12 +15,20 @@ import {
     resolveOrgAiDecision,
     approveOrgAiDecision,
     updateOrgAiDecisionComments,
+    updateOrgAiDecisionFields,
     type OrgAiDecisionDto,
     type OrgManualApprovalStatus,
 } from '../services/organizationCorrectionsApi';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 import DebouncedCommentsTextarea from './DebouncedCommentsTextarea';
+import AgentDecisionHistoryDrawer from './AgentDecisionHistoryDrawer';
+import { AI_DECISION_USER_NOTES_FIELD_PROPS } from '../utils/agentDecisionNotes';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+    STICKY_TABLE_CLASS,
+    ADMIN_TABLE_SCROLL_CLASS,
+    stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
 import DateRangeSelector, { type DateRange } from './DateRangeSelector';
 
 function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: string } {
@@ -84,6 +92,9 @@ interface AiDecision {
     source: string;
     manualApprovalStatus: OrgManualApprovalStatus;
     comments?: string | null;
+    agentNotes?: string | null;
+    agentVerdict?: string | null;
+    userVerdict?: string | null;
 }
 
 interface BlacklistEntry {
@@ -262,6 +273,9 @@ const mapApiEntry = (entry: OrgAiDecisionDto): AiDecision => {
         source: 'קורות חיים',
         manualApprovalStatus: entry.manualApprovalStatus ?? 'pending',
         comments: entry.comments ?? null,
+        agentNotes: entry.agentNotes ?? null,
+        agentVerdict: entry.agentVerdict ?? null,
+        userVerdict: entry.userVerdict ?? null,
     };
 };
 
@@ -471,6 +485,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [drawerCandidate, setDrawerCandidate] = useState<any | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+    const [historyDecision, setHistoryDecision] = useState<{ id: string; label: string } | null>(null);
 
     const notify = (message: string, type: 'success' | 'error' | 'info' = 'success') =>
         setNotification({ message, type });
@@ -942,9 +957,11 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                         ),
                     },
                     { key: 'actionDate', label: 'תאריך', getValue: (r) => (r.actionDate ? new Date(r.actionDate).toLocaleString('he-IL') : '') },
-                    { key: 'aiReasoning', label: 'נימוק AI', getValue: (r) => r.aiReasoning || '' },
                     { key: 'dilemmaReasoning', label: 'נימוק התלבטות', getValue: (r) => r.dilemmaReasoning || '' },
-                    { key: 'comments', label: 'הערות', getValue: (r) => r.comments || '' },
+                    { key: 'agentNotes', label: 'הערות סוכן', getValue: (r) => r.agentNotes || '' },
+                    { key: 'agentVerdict', label: 'פסיקת סוכן', getValue: (r) => r.agentVerdict || '' },
+                    { key: 'comments', label: 'הערות משתמש', getValue: (r) => r.comments || '' },
+                    { key: 'userVerdict', label: 'פסיקת משתמש', getValue: (r) => r.userVerdict || '' },
                 ],
                 `company_ai_decisions_${stamp}.xlsx`,
             );
@@ -1415,9 +1432,6 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                     {meta.icon}
                     <span>{meta.labelFn(d.decisionTarget)}</span>
                 </div>
-                <div className="text-[11px] text-text-subtle mt-3 max-w-[280px] mx-auto leading-relaxed">
-                    {d.decisionExplanation}
-                </div>
             </div>
         );
     };
@@ -1522,7 +1536,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     // ══════════════════════════════════════════════════════════════════════════
 
     return (
-        <div className="space-y-4 h-full flex flex-col pb-6 relative font-sans">
+        <div className="flex flex-col gap-4 pb-6 relative font-sans">
             {notification && (
                 <Toast message={notification.message} type={notification.type} onClose={() => setNotification(null)} />
             )}
@@ -2036,7 +2050,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
 
             {/* ══════════════ AI DECISIONS TAB ══════════════ */}
             {activeTab === 'ai_decisions' && (
-                <>
+                <div className="flex flex-col gap-4">
                     {/* Filter bar */}
                     <div className="bg-white p-4 rounded-2xl border border-border-default shadow-sm space-y-4 flex-shrink-0">
                         <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
@@ -2108,7 +2122,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                     </div>
 
                     {/* Table */}
-                    <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden flex-1 flex flex-col min-h-[400px]">
+                    <div className="bg-white rounded-2xl border border-border-default shadow-sm">
                         <PaginationBar
                             variant="top"
                             page={aiPage}
@@ -2119,11 +2133,11 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                             onPageSizeChange={(size) => { setAiPageSize(size); setAiPage(1); }}
                             label="החלטות"
                         />
-                        <HorizontalScrollArea className="flex flex-col flex-1 min-h-0 min-w-0" scrollClassName="overflow-x-auto flex-1 min-h-0 min-w-0 w-full [scrollbar-width:thin]">
-                            <table className="w-full min-w-[1200px] text-right border-collapse" dir="rtl">
-                                <thead className="bg-[#f8fafc] border-b border-border-default sticky top-0 z-10">
+                        <HorizontalScrollArea pinHeader scrollClassName={ADMIN_TABLE_SCROLL_CLASS}>
+                            <table className={`w-full min-w-[1680px] text-right ${STICKY_TABLE_CLASS}`} dir="rtl">
+                                <thead className="border-b border-border-default">
                                     <tr>
-                                        <th className="p-4 w-12 text-center align-middle border-l border-border-default/50">
+                                        <th className={`p-4 w-12 text-center align-middle border-l border-border-default/50 ${stickyTableHeaderCellClass('', 'surface')}`}>
                                             <button
                                                 title="בחירה מרובה"
                                                 onClick={() => { setIsMultiSelect(v => !v); setAiCheckedIds(new Set()); }}
@@ -2133,12 +2147,15 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                             </button>
                                         </th>
                                         {['מונח מקורי', 'תאריך פעולה', 'קונטקסט', 'החלטת מודל והסבר', 'מדד התלבטות AI', 'הקשר רחב בבסיס הנתונים'].map((col, i) => (
-                                            <th key={col} className={`p-4 text-xs font-bold text-text-muted uppercase whitespace-nowrap ${i === 0 ? 'text-right min-w-[200px]' : 'text-center'} ${i === 1 ? 'min-w-[120px]' : ''} ${i === 2 ? 'min-w-[110px]' : ''} ${i === 3 ? 'min-w-[340px]' : ''} ${i === 4 || i === 5 ? 'min-w-[250px]' : ''}`}>
+                                            <th key={col} className={`p-4 text-xs font-bold text-text-muted uppercase whitespace-nowrap ${stickyTableHeaderCellClass(`${i === 0 ? 'text-right min-w-[200px]' : 'text-center'} ${i === 1 ? 'min-w-[120px]' : ''} ${i === 2 ? 'min-w-[110px]' : ''} ${i === 3 ? 'min-w-[340px]' : ''} ${i === 4 || i === 5 ? 'min-w-[250px]' : ''}`, 'surface')}`}>
                                                 {col}
                                             </th>
                                         ))}
-                                        <th className="p-4 text-xs font-bold text-text-muted uppercase text-center whitespace-nowrap min-w-[180px]">הערות</th>
-                                        <th className="p-4 text-xs font-bold text-text-muted uppercase text-left whitespace-nowrap">פעולה</th>
+                                        <th className={`p-4 text-xs font-bold text-text-muted uppercase text-center whitespace-nowrap min-w-[180px] ${stickyTableHeaderCellClass('', 'surface')}`}>הערות סוכן</th>
+                                        <th className={`p-4 text-xs font-bold text-text-muted uppercase text-center whitespace-nowrap min-w-[220px] ${stickyTableHeaderCellClass('', 'surface')}`}>פסיקת סוכן</th>
+                                        <th className={`p-4 text-xs font-bold text-text-muted uppercase text-center whitespace-nowrap min-w-[220px] ${stickyTableHeaderCellClass('', 'surface')}`}>הערות משתמש</th>
+                                        <th className={`p-4 text-xs font-bold text-text-muted uppercase text-center whitespace-nowrap min-w-[220px] ${stickyTableHeaderCellClass('', 'surface')}`}>פסיקת משתמש</th>
+                                        <th className={`p-4 text-xs font-bold text-text-muted uppercase text-left whitespace-nowrap min-w-[220px] ${stickyTableHeaderCellClass('', 'surface')}`}>פעולה</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-default">
@@ -2174,6 +2191,15 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                                     <IconUser />
                                                     <span>{d.candidateName}</span>
                                                 </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setHistoryDecision({ id: d.id, label: d.originalTerm })}
+                                                    className="inline-flex items-center gap-1.5 text-violet-700 text-xs cursor-pointer hover:bg-violet-50 px-2 py-1 rounded-md border border-violet-200/60 mt-1"
+                                                    title="היסטוריית שינויים"
+                                                >
+                                                    <IconClock />
+                                                    <span>היסטוריה</span>
+                                                </button>
                                                 <div className="mt-2.5">
                                                     <span className="text-[10px] font-black text-indigo-600 bg-indigo-100/50 border border-indigo-200/60 rounded px-1.5 py-0.5">{d.source}</span>
                                                 </div>
@@ -2190,6 +2216,27 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                             <td className="p-4 align-top text-center pt-5">{renderSimilarEntities(d)}</td>
                                             <td className="p-4 align-top pt-5">
                                                 <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                    value={d.agentNotes}
+                                                    onSave={async (agentNotes) => {
+                                                        const res = await updateOrgAiDecisionFields(d.id, { agentNotes });
+                                                        updateDecision(d.id, { agentNotes: res.agentNotes });
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="p-4 align-top pt-5">
+                                                <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                    value={d.agentVerdict}
+                                                    onSave={async (agentVerdict) => {
+                                                        const res = await updateOrgAiDecisionFields(d.id, { agentVerdict });
+                                                        updateDecision(d.id, { agentVerdict: res.agentVerdict });
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="p-4 align-top pt-5">
+                                                <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
                                                     value={d.comments}
                                                     onSave={async (comments) => {
                                                         const res = await updateOrgAiDecisionComments(d.id, comments);
@@ -2197,12 +2244,22 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                                     }}
                                                 />
                                             </td>
-                                            <td className="p-4 align-top text-left pt-5">{renderActionDropdown(d)}</td>
+                                            <td className="p-4 align-top pt-5">
+                                                <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                    value={d.userVerdict}
+                                                    onSave={async (userVerdict) => {
+                                                        const res = await updateOrgAiDecisionFields(d.id, { userVerdict });
+                                                        updateDecision(d.id, { userVerdict: res.userVerdict });
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="p-4 align-top text-left pt-5 min-w-[220px]">{renderActionDropdown(d)}</td>
                                         </tr>
                                     ))}
                                     {loadingDecisions && (
                                         <tr>
-                                            <td colSpan={9} className="p-12 text-center text-text-muted text-sm">
+                                            <td colSpan={12} className="p-12 text-center text-text-muted text-sm">
                                                 <div className="flex items-center justify-center gap-2">
                                                     <svg className="animate-spin w-4 h-4 text-orange-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -2215,7 +2272,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                     )}
                                     {!loadingDecisions && filteredDecisions.length === 0 && (
                                         <tr>
-                                            <td colSpan={9} className="p-12 text-center text-text-muted text-sm">אין נתונים להצגה</td>
+                                            <td colSpan={12} className="p-12 text-center text-text-muted text-sm">אין נתונים להצגה</td>
                                         </tr>
                                     )}
                                 </tbody>
@@ -2232,12 +2289,12 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                             label="החלטות"
                         />
                     </div>
-                </>
+                </div>
             )}
 
             {/* ══════════════ BLACKLIST TAB ══════════════ */}
             {activeTab === 'blacklist' && (
-                <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden flex-1 flex flex-col min-h-[400px]">
+                <div className="bg-white rounded-2xl border border-border-default shadow-sm">
                     {blacklistLoading ? (
                         <div className="flex-1 flex flex-col gap-3 p-6">
                             {[...Array(6)].map((_, i) => (
@@ -2272,12 +2329,12 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 onPageSizeChange={(size) => { setBlacklistPageSize(size); setBlacklistPage(1); }}
                                 label="מונחים"
                             />
-                            <HorizontalScrollArea className="flex flex-col flex-1 min-h-0 min-w-0" scrollClassName="overflow-x-auto overflow-y-auto min-w-0 w-full [scrollbar-width:thin]">
-                                <table className="w-full min-w-[900px] text-right border-collapse" dir="rtl">
-                                    <thead className="bg-[#f8fafc] border-b border-border-default sticky top-0 z-10">
+                            <HorizontalScrollArea pinHeader scrollClassName={ADMIN_TABLE_SCROLL_CLASS}>
+                                <table className={`w-full min-w-[900px] text-right ${STICKY_TABLE_CLASS}`} dir="rtl">
+                                    <thead className="border-b border-border-default">
                                         <tr>
                                             {['מונח', 'מקור', 'מועמד', 'תאריך הוספה', 'פעולה'].map(col => (
-                                                <th key={col} className={`p-4 text-xs font-bold text-text-muted uppercase whitespace-nowrap ${col === 'מונח' ? 'text-right' : 'text-center'}`}>{col}</th>
+                                                <th key={col} className={`p-4 text-xs font-bold text-text-muted uppercase whitespace-nowrap ${stickyTableHeaderCellClass(col === 'מונח' ? 'text-right' : 'text-center', 'surface')}`}>{col}</th>
                                             ))}
                                         </tr>
                                     </thead>
@@ -2475,6 +2532,13 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                     </div>
                 </div>
             )}
+            <AgentDecisionHistoryDrawer
+                isOpen={Boolean(historyDecision)}
+                onClose={() => setHistoryDecision(null)}
+                decisionId={historyDecision?.id ?? null}
+                entityKind="organization-ai-decision"
+                decisionLabel={historyDecision?.label}
+            />
         </div>
     );
 };

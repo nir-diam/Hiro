@@ -7,7 +7,11 @@ type BuildBreadcrumbsOptions = {
   search?: string;
   savedSearches?: SavedSearch[];
   t: (key: string) => string;
+  /** When viewing a contact profile, parent crumb (organization name + link). */
+  contactProfileParent?: BreadcrumbParentCrumb | null;
 };
+
+type BreadcrumbParentCrumb = { label: string; path: string };
 
 const JOB_RESERVED_SEGMENTS = new Set(['new', 'existing', 'edit', 'public']);
 
@@ -20,6 +24,7 @@ export function buildBreadcrumbs({
   search = '',
   savedSearches = [],
   t,
+  contactProfileParent = null,
 }: BuildBreadcrumbsOptions): BreadcrumbItem[] {
   const parts = pathname.split('/').filter(Boolean);
   const crumbs: BreadcrumbItem[] = [{ label: t('breadcrumbs.home'), path: '/dashboard' }];
@@ -100,16 +105,24 @@ export function buildBreadcrumbs({
       if (rest[0] === 'new') {
         push(t('breadcrumbs.new_client'), '/clients/new');
       } else if (rest[0]) {
-        push(t('breadcrumbs.client_profile'), `/clients/${rest[0]}`);
         if (rest[1] === 'contacts' && rest[2]) {
+          if (contactProfileParent?.label && contactProfileParent.path) {
+            push(contactProfileParent.label, contactProfileParent.path);
+          } else {
+            push(t('breadcrumbs.client_profile'), `/clients/${rest[0]}`);
+          }
           push(t('breadcrumbs.contact_profile'), `/clients/${rest[0]}/contacts/${rest[2]}`);
+        } else {
+          push(t('breadcrumbs.client_profile'), `/clients/${rest[0]}`);
         }
       }
       break;
     }
 
     case 'organizations':
-      if (rest[0]) {
+      if (rest[0] === 'tmp' && rest[1]) {
+        push(t('breadcrumbs.organization_profile'), `/organizations/tmp/${rest[1]}`);
+      } else if (rest[0]) {
         push(t('breadcrumbs.organization_profile'), `/organizations/${rest[0]}`);
       }
       break;

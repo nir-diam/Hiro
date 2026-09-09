@@ -33,6 +33,10 @@ jest.mock('../clientUsageSettingService', () => ({
   resolveScreeningDefaultsForJob: jest.fn().mockResolvedValue({}),
 }));
 
+jest.mock('../tagAliasIndexService', () => ({
+  loadTagAliasIndex: jest.fn().mockResolvedValue(new Map()),
+}));
+
 jest.mock('../../models/Job', () => ({
   findByPk: jest.fn(),
 }));
@@ -75,6 +79,34 @@ describe('jobSonarService', () => {
     expect(passesHardFilters(cand, jobPlain, ['gender'], {})).toBe(false);
     expect(passesHardFilters(cand, jobPlain, ['mobility'], {})).toBe(false);
     expect(passesHardFilters({ gender: 'זכר', mobility: 'כן', jobScope: 'מלאה' }, jobPlain, ['gender', 'mobility'], {})).toBe(true);
+  });
+
+  it('passesHardFilters rejects missing mandatory job tags when filter enabled', () => {
+    const jobWithMandatory = {
+      skills: [{ key: 'tech_support', name: 'תמיכה טכנית', mode: 'mandatory' }],
+    };
+    const matching = {
+      tagDetails: [{ tagKey: 'tech_support', displayNameHe: 'תמיכה טכנית', rawType: 'skill' }],
+    };
+    const missing = {
+      tagDetails: [{ tagKey: 'other', displayNameHe: 'אחר', rawType: 'skill' }],
+    };
+    expect(passesHardFilters(matching, jobWithMandatory, ['mandatory_skill'], {})).toBe(true);
+    expect(passesHardFilters(missing, jobWithMandatory, ['mandatory_skill'], {})).toBe(false);
+  });
+
+  it('passesHardFilters rejects candidates with negative job tags when filter enabled', () => {
+    const jobWithNegative = {
+      skills: [{ key: 'sales', name: 'מכירות', mode: 'negative' }],
+    };
+    const hasRed = {
+      tagDetails: [{ tagKey: 'sales', displayNameHe: 'מכירות', rawType: 'skill' }],
+    };
+    const clean = {
+      tagDetails: [{ tagKey: 'tech_support', displayNameHe: 'תמיכה טכנית', rawType: 'skill' }],
+    };
+    expect(passesHardFilters(hasRed, jobWithNegative, ['negative_skill'], {})).toBe(false);
+    expect(passesHardFilters(clean, jobWithNegative, ['negative_skill'], {})).toBe(true);
   });
 
   it('passesDistanceHardFilter rejects weak geo when distance filter on', () => {

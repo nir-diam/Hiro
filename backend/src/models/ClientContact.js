@@ -29,9 +29,13 @@ const ClientContact = sequelize.define(
       allowNull: true,
     },
     name: { type: DataTypes.STRING, allowNull: false },
+    firstName: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
+    lastName: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
     phone: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
     mobilePhone: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
     email: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
+    /** Extra emails/phones + structured contact data. */
+    metadata: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
     role: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
     linkedin: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
     username: { type: DataTypes.STRING, allowNull: true, defaultValue: '' },
@@ -39,6 +43,9 @@ const ClientContact = sequelize.define(
     notes: { type: DataTypes.TEXT, allowNull: true, defaultValue: '' },
     hasSystemAccess: { type: DataTypes.BOOLEAN, defaultValue: false },
     isInvited: { type: DataTypes.BOOLEAN, defaultValue: false },
+    distributionEmail: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    distributionSms: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    distributionWhatsapp: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     /** Active CRM process for this contact (pipeline id from client_pipelines). */
     pipelineId: { type: DataTypes.UUID, allowNull: true },
     /** Current stage within that pipeline. */

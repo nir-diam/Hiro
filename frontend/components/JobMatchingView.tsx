@@ -8,6 +8,8 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import AIFeedbackModal from './AIFeedbackModal';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import JobMatchDeepInsightModal from './JobMatchDeepInsightModal';
+import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDismiss } from './MatchScorePopup';
+import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
 import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
 import {
   fetchJobMatches, assignCandidateToJob, fetchCandidate, fetchClientOptions, fetchCityOptions,
@@ -75,8 +77,8 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(true);
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
-  const [activePopoverId, setActivePopoverId] = useState<string | null>(null);
-  const popoverRef = useRef<HTMLDivElement>(null);
+  const [activeMatchPopup, setActiveMatchPopup] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [candidateRecord, setCandidateRecord] = useState<Record<string, unknown> | null>(null);
 
   // ── assign state ──
   const [assignedJobs, setAssignedJobs] = useState<Set<string>>(new Set());
@@ -199,18 +201,34 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     }).catch(() => {});
   }, []);
 
-  // ─── click outside popover ─────────────────────────────────────────────────
-
   useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      const t = e.target as HTMLElement;
-      if (popoverRef.current && !popoverRef.current.contains(t) && !t.closest('[data-popover-trigger]')) {
-        setActivePopoverId(null);
-      }
+    if (!candidateId) {
+      setCandidateRecord(null);
+      return;
+    }
+    let cancelled = false;
+    fetchCandidate(candidateId)
+      .then((row) => {
+        if (!cancelled) setCandidateRecord(row);
+      })
+      .catch(() => {
+        if (!cancelled) setCandidateRecord({ id: candidateId });
+      });
+    return () => {
+      cancelled = true;
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
+  }, [candidateId]);
+
+  useMatchScorePopupDismiss(Boolean(activeMatchPopup), () => setActiveMatchPopup(null));
+
+  const openMatchPopup = (e: React.MouseEvent, jobId: string) => {
+    e.stopPropagation();
+    if (activeMatchPopup?.id === jobId) {
+      setActiveMatchPopup(null);
+      return;
+    }
+    setActiveMatchPopup({ id: jobId, ...matchScorePopupPositionFromEvent(e) });
+  };
 
   // ─── handlers ─────────────────────────────────────────────────────────────
 
@@ -282,7 +300,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       // silently ignore
     } finally {
       setRecalculatingId(null);
-      setActivePopoverId(null);
+      setActiveMatchPopup(null);
     }
   };
 
@@ -331,101 +349,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
 
   const passedCount = filteredJobs.filter((j) => j.requirementsMet).length;
 
-  // ─── popover ──────────────────────────────────────────────────────────────
-
-  const JobMatchPopover: React.FC<{ job: JobMatchResult; onClose: () => void }> = ({ job, onClose }) => {
-    const [recalcLoading, setRecalcLoading] = useState(false);
-    const pm = job.parameterMatches;
-    const checks: { label: string; key: keyof typeof pm }[] = [
-      { label: 'כישורי חובה', key: 'mandatory_skill' },
-      { label: 'רישיון נהיגה', key: 'license' },
-      { label: 'גיל', key: 'age' },
-      { label: 'מין', key: 'gender' },
-      { label: 'ניידות', key: 'mobility' },
-      { label: 'שפות חובה', key: 'mandatory_language' },
-    ].filter((c) => pm && pm[c.key] !== 'unknown');
-
-    return (
-      <div
-        ref={popoverRef}
-        className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-80 bg-bg-card rounded-xl shadow-2xl border border-border-default z-30 p-4"
-      >
-        <div className="absolute left-1/2 -translate-x-1/2 bottom-0 w-4 h-4 transform rotate-45 -mb-2 bg-bg-card border-b border-r border-border-default" />
-        <div className="flex justify-between items-center mb-3">
-          <h4 className="font-bold text-text-default text-sm flex items-center gap-2">
-            <SparklesIcon className="w-5 h-5 text-primary-500" />
-            <span>ניתוח התאמת AI</span>
-          </h4>
-          <button onClick={onClose} className="p-1 rounded-full hover:bg-bg-hover" aria-label="סגור">
-            <XMarkIcon className="w-4 h-4 text-text-muted" />
-          </button>
-        </div>
-
-        {Array.isArray(job.scoreBreakdown?.penaltyReasons) && job.scoreBreakdown.penaltyReasons.length > 0 && (
-          <div className="mb-3 space-y-1 rounded-lg border border-rose-100 bg-rose-50/80 p-2">
-            {(job.scoreBreakdown.penaltyReasons as { label: string; amount: number }[]).map((pr, i) => (
-              <div key={i} className="flex justify-between text-xs text-rose-800 font-semibold">
-                <span>{pr.label}</span>
-                <span>-{pr.amount}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {checks.length > 0 && (
-          <div className="mb-3 space-y-1.5">
-            {checks.map((c) => {
-              const state = pm[c.key];
-              return (
-                <div key={c.key} className="flex items-center justify-between text-xs">
-                  <span className="text-text-muted">{c.label}</span>
-                  <span className={`font-semibold ${state === 'match' ? 'text-emerald-600' : 'text-red-600'}`}>
-                    {state === 'match' ? '✓ עומד' : '✗ חסר'}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        <div className="mt-3 pt-3 border-t border-border-default">
-          <div className="flex justify-between items-center mb-2">
-            <p className="text-xs text-text-subtle">נותח: {job.lastAnalyzed}</p>
-            <button
-              onClick={() => setIsFeedbackModalOpen(true)}
-              className="text-text-subtle hover:text-red-500 p-1 rounded transition-colors"
-              title="דווח על אי-דיוק"
-            >
-              <FlagIcon className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => { setDeepInsightJob(job); onClose(); }}
-              className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold text-primary-600 bg-primary-50 py-2 px-3 rounded-lg hover:bg-primary-100 transition"
-            >
-              <SparklesIcon className="w-3.5 h-3.5" />
-              ניתוח עומק
-            </button>
-            <button
-              onClick={async () => {
-                setRecalcLoading(true);
-                await handleRecalculateMatch(job.id);
-                setRecalcLoading(false);
-              }}
-              disabled={recalcLoading}
-              className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold text-purple-600 bg-purple-50 py-2 px-3 rounded-lg hover:bg-purple-100 transition disabled:opacity-50 disabled:cursor-wait"
-            >
-              {recalcLoading
-                ? <svg className="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" /></svg>
-                : <ArrowPathIcon className="w-3.5 h-3.5" />}
-              חשב מחדש
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  };
+  const activeMatchJob = activeMatchPopup ? filteredJobs.find((j) => j.id === activeMatchPopup.id) : null;
 
   // ─── expanded detail ───────────────────────────────────────────────────────
 
@@ -605,15 +529,13 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           <div className="flex justify-between items-start">
             <div className="text-left relative">
               <button
-                onClick={(e) => { e.stopPropagation(); setActivePopoverId((p) => p === job.id ? null : job.id); }}
-                data-popover-trigger
+                type="button"
+                data-match-score-trigger
+                onClick={(e) => openMatchPopup(e, job.id)}
                 className="font-extrabold text-3xl text-text-default"
               >
                 {recalculatingId === job.id ? '...' : `${job.matchScore}%`}
               </button>
-              {activePopoverId === job.id && (
-                <JobMatchPopover job={job} onClose={() => setActivePopoverId(null)} />
-              )}
               <p className={`text-xs font-semibold ${job.requirementsMet ? 'text-emerald-600' : 'text-red-600'}`}>
                 {job.requirementsMet ? 'עבר תנאי סף' : 'לא עומד בדרישות'}
               </p>
@@ -686,8 +608,9 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           <td className="p-4">
             <div className="relative flex justify-start">
               <button
-                onClick={(e) => { e.stopPropagation(); setActivePopoverId((p) => p === job.id ? null : job.id); }}
-                data-popover-trigger
+                type="button"
+                data-match-score-trigger
+                onClick={(e) => openMatchPopup(e, job.id)}
                 className="flex items-center gap-2 cursor-pointer w-full"
               >
                 <div className="w-16">
@@ -697,9 +620,6 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
                 </div>
                 <span className="font-bold text-text-default">{recalculatingId === job.id ? '' : `${job.matchScore}%`}</span>
               </button>
-              {activePopoverId === job.id && (
-                <JobMatchPopover job={job} onClose={() => setActivePopoverId(null)} />
-              )}
             </div>
           </td>
           <td className="p-4">
@@ -1016,6 +936,32 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           candidateName={candidateName}
         />
       )}
+
+      {activeMatchPopup && activeMatchJob ? (
+        <MatchScorePopup
+          position={{ x: activeMatchPopup.x, y: activeMatchPopup.y }}
+          onClose={() => setActiveMatchPopup(null)}
+          matchScore={activeMatchJob.matchScore}
+          jobTitle={activeMatchJob.title}
+          scoreBreakdown={(activeMatchJob.scoreBreakdown as MatchScoreBreakdownData | null) ?? null}
+          parameterMatches={activeMatchJob.parameterMatches}
+          job={activeMatchJob as unknown as Record<string, unknown>}
+          candidate={candidateRecord || { id: candidateId }}
+          candidateName={candidateName}
+          candidateTitle={
+            typeof candidateRecord?.title === 'string'
+              ? candidateRecord.title
+              : typeof candidateRecord?.currentTitle === 'string'
+                ? candidateRecord.currentTitle
+                : null
+          }
+          professionalSummary={
+            typeof candidateRecord?.professionalSummary === 'string'
+              ? candidateRecord.professionalSummary
+              : activeMatchJob.description || null
+          }
+        />
+      ) : null}
     </div>
   );
 };

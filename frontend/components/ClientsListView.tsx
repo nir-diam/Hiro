@@ -7,7 +7,7 @@ import {
     XMarkIcon, UserGroupIcon, PhoneIcon, EnvelopeIcon, ChartBarIcon, 
     CheckCircleIcon, ExclamationTriangleIcon, BriefcaseIcon, ArrowRightIcon,
     FunnelIcon, ClockIcon, MapPinIcon, ChatBubbleBottomCenterTextIcon, WhatsappIcon, UserIcon,
-    EllipsisVerticalIcon, DocumentArrowDownIcon, PlayIcon, CalendarDaysIcon, ClipboardDocumentCheckIcon, LinkIcon
+    EllipsisVerticalIcon, DocumentArrowDownIcon, PlayIcon, CalendarDaysIcon, ClipboardDocumentCheckIcon, LinkIcon, ArrowLeftIcon
 } from './Icons';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { fetchPublishingLinks, type PublishingLinkRow } from '../services/publishingApi';
@@ -17,13 +17,14 @@ import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import ActivityLogModal from './ActivityLogModal';
 import { authHeaders } from '../utils/authHeaders';
 import LocationSelector, { LocationItem } from './LocationSelector';
-import CompanyFilterPopover from './CompanyFilterPopover';
+import CompanyFilterPopover, { type CompanyFilters, EMPTY_COMPANY_FILTERS, normalizeCompanyFilters } from './CompanyFilterPopover';
 import ContactDrawer from './ContactDrawer';
 import ClientDetailsDrawer from './ClientDetailsDrawer';
 import SearchableSelect from './SearchableSelect'; 
 import ClientTasksTab from './ClientTasksTab';
 import ClientsEventsJournalTab from './ClientsEventsJournalTab';
 import { fetchPipelines, syncPipelines, type PipelineDto, type StageOutcomeDto } from '../services/pipelinesApi';
+import { buildMoveTargetOptions, isOutcomeTarget, resolveMoveTarget } from '../utils/pipelineMoveTargets';
 import { fetchClientHealthPulse, type OrgHealthPulseDto } from '../services/clientHealthRulesApi';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
@@ -135,6 +136,161 @@ const namesMatchLoosely = (left: string, right: string) => {
     const b = String(right || '').trim().toLowerCase();
     if (!a || !b) return false;
     return a === b || a.includes(b) || b.includes(a);
+};
+
+const companyFiltersAreActive = (filters: CompanyFilters) => {
+    const f = normalizeCompanyFilters(filters);
+    return !!(f.industries.length || f.fields.length || f.roles.length || f.sizes.length || f.sectors.length);
+};
+
+const getCompanyFilterButtonLabel = (filters: CompanyFilters): string => {
+    const f = normalizeCompanyFilters(filters);
+    const parts: string[] = [];
+    if (f.industries.length === 1) parts.push(f.industries[0]);
+    else if (f.industries.length > 1) parts.push(`${f.industries.length} תעשיות`);
+    if (f.fields.length === 1) parts.push(f.fields[0]);
+    else if (f.fields.length > 1) parts.push(`${f.fields.length} תחומים`);
+    if (!parts.length && f.sizes.length) parts.push(`${f.sizes.length} גדלים`);
+    if (!parts.length && f.sectors.length) parts.push(f.sectors[0]);
+    return parts.length ? parts.join(' · ') : 'כל התעשיות';
+};
+
+const matchesCompanyFiltersForOrg = (org: LinkedOrganizationItem, filters: CompanyFilters): boolean => {
+    const f = normalizeCompanyFilters(filters);
+    if (!companyFiltersAreActive(f)) return true;
+
+    if (f.industries.length) {
+        const main = org.mainField.trim().toLowerCase();
+        const subs = org.subFields.map((s) => s.trim().toLowerCase()).filter(Boolean);
+        const matchesIndustry = f.industries.some((ind) => {
+            const value = ind.trim().toLowerCase();
+            return value && (main === value || subs.includes(value) || subs.some((s) => s.includes(value)));
+        });
+        if (!matchesIndustry) return false;
+    }
+
+    if (f.fields.length) {
+        const pool = [org.secondaryField, ...org.subFields]
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean);
+        const matchesField = f.fields.some((field) => pool.includes(field.trim().toLowerCase()));
+        if (!matchesField) return false;
+    }
+
+    if (f.sizes.length && org.employeeCount) {
+        const count = org.employeeCount.trim();
+        const matchesSize = f.sizes.some((size) => count.includes(size) || size.includes(count));
+        if (!matchesSize) return false;
+    }
+
+    return true;
+};
+
+const matchesCompanyFiltersForClient = (client: Client, filters: CompanyFilters): boolean => {
+    const f = normalizeCompanyFilters(filters);
+    if (!companyFiltersAreActive(f)) return true;
+
+    if (f.industries.length) {
+        const industry = client.industry.trim().toLowerCase();
+        const matchesIndustry = f.industries.some((ind) => industry === ind.trim().toLowerCase());
+        if (!matchesIndustry) return false;
+    }
+
+    return true;
+};
+
+const matchesPipelineStageFilter = (
+    recordStage: string | undefined,
+    filterValue: string,
+    stages: PipelineStage[] = [],
+): boolean => {
+    if (filterValue === 'all') return true;
+    const stage = String(recordStage || '').trim();
+    if (!stage) return false;
+    if (stage === filterValue) return true;
+
+    if (isOutcomeTarget(filterValue)) {
+        return stage === filterValue;
+    }
+
+    if (isOutcomeTarget(stage)) {
+        const resolved = resolveMoveTarget(stage, stages);
+        return resolved?.stageId === filterValue;
+    }
+
+    return false;
+};
+
+const firstStageIdForPipelineStages = (stages: PipelineStage[] = []): string | null => {
+    const sorted = [...stages].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const id = sorted[0]?.id;
+    return id ? String(id) : null;
+};
+
+/** Effective stage placement for an org in a pipeline — mirrors Kanban column logic. */
+const getOrgEffectiveStageIdsInPipeline = (
+    org: Pick<LinkedOrganizationItem, 'pipelineId' | 'pipelineStage'>,
+    pipeline: Pipeline,
+): string[] => {
+    const pid = String(org.pipelineId || '').trim();
+    const sid = String(org.pipelineStage || '').trim();
+    const stageIdSet = new Set(pipeline.stages.map((s) => s.id));
+    const firstStageId = firstStageIdForPipelineStages(pipeline.stages);
+
+    if (sid) {
+        if (stageIdSet.has(sid)) return [sid];
+        if (isOutcomeTarget(sid)) {
+            const resolved = resolveMoveTarget(sid, pipeline.stages);
+            if (resolved?.stageId && stageIdSet.has(resolved.stageId)) {
+                return [sid, resolved.stageId];
+            }
+        }
+        if (pid === pipeline.id) return [sid];
+        return [];
+    }
+
+    if (firstStageId) {
+        if (!pid) return [firstStageId];
+        if (pid === pipeline.id) return [firstStageId];
+    }
+
+    return [];
+};
+
+const orgMatchesPipelineStageFilter = (
+    org: LinkedOrganizationItem,
+    pipeline: Pipeline,
+    filterStageId: string,
+): boolean => {
+    if (filterStageId === 'all') return true;
+    const effectiveStageIds = getOrgEffectiveStageIdsInPipeline(org, pipeline);
+    if (!effectiveStageIds.length) return false;
+    return effectiveStageIds.some((stageId) =>
+        matchesPipelineStageFilter(stageId, filterStageId, pipeline.stages),
+    );
+};
+
+const orgMatchesPipelineFilter = (
+    org: LinkedOrganizationItem,
+    pipeline: Pipeline,
+    filterStageId: string,
+): boolean => getOrgEffectiveStageIdsInPipeline(org, pipeline).length > 0
+    && orgMatchesPipelineStageFilter(org, pipeline, filterStageId);
+
+const recordMatchesKanbanColumnStages = (
+    org: Pick<LinkedOrganizationItem, 'pipelineId' | 'pipelineStage'>,
+    pipeline: Pipeline,
+    columnStageIds: Set<string>,
+): boolean => {
+    const effectiveStageIds = getOrgEffectiveStageIdsInPipeline(org, pipeline);
+    return effectiveStageIds.some((stageId) => {
+        if (columnStageIds.has(stageId)) return true;
+        if (isOutcomeTarget(stageId)) {
+            const resolved = resolveMoveTarget(stageId, pipeline.stages);
+            return Boolean(resolved?.stageId && columnStageIds.has(resolved.stageId));
+        }
+        return false;
+    });
 };
 
 // --- PIPELINE DEFINITIONS ---
@@ -1381,20 +1537,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     // --- Filter States ---
     const [searchTerm, setSearchTerm] = useState('');
-    const [filterStatus, setFilterStatus] = useState<string>('all');
     const [filterAccountManager, setFilterAccountManager] = useState<string>('all');
-    const [filterIndustry, setFilterIndustry] = useState<string>('all');
-    const [filterLocation, setFilterLocation] = useState<string>('');
     
     // Use LocationSelector items
     const [selectedLocations, setSelectedLocations] = useState<LocationItem[]>([]);
     const [isCompanyFilterOpen, setIsCompanyFilterOpen] = useState(false);
-    const [companyFilters, setCompanyFilters] = useState<{
-        sizes: string[];
-        sectors: string[];
-        industry: string;
-        field: string;
-    }>({ sizes: [], sectors: [], industry: '', field: '' });
+    const [companyFilters, setCompanyFilters] = useState<CompanyFilters>(EMPTY_COMPANY_FILTERS);
     const companyFilterButtonRef = useRef<HTMLButtonElement>(null);
 
 
@@ -1415,6 +1563,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [filterContactDateTo, setFilterContactDateTo] = useState('');
     
     const [isBulkProcessMenuOpen, setIsBulkProcessMenuOpen] = useState(false);
+    const [bulkProcessTarget, setBulkProcessTarget] = useState<'companies' | 'contacts' | null>(null);
+    const [bulkProcessPipelineId, setBulkProcessPipelineId] = useState('');
+    const [bulkProcessStageId, setBulkProcessStageId] = useState('');
+    const [bulkProcessSaving, setBulkProcessSaving] = useState(false);
 
     // Mobile States (NEW)
     const [showMobileStats, setShowMobileStats] = useState(false);
@@ -1444,7 +1596,6 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     const filteredLinkedOrganizations = useMemo(() => {
         const q = searchTerm.trim().toLowerCase();
-        const industry = String(companyFilters.industry || '').trim().toLowerCase();
         return linkedOrganizations.filter((org) => {
             if (q) {
                 const hay = [
@@ -1457,14 +1608,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 ].join(' ').toLowerCase();
                 if (!hay.includes(q)) return false;
             }
-            if (filterStatus === 'pending' && !org.isPending) return false;
-            if (filterStatus === 'approved' && org.isPending) return false;
-            if (industry) {
-                const fields = [org.mainField, org.secondaryField, ...org.subFields]
-                    .join(' ')
-                    .toLowerCase();
-                if (!fields.includes(industry)) return false;
-            }
+            if (!matchesCompanyFiltersForOrg(org, companyFilters)) return false;
             if (selectedLocations.length > 0) {
                 const locHay = String(org.location || '').toLowerCase();
                 const matchesLocation = selectedLocations.some((loc) => {
@@ -1473,20 +1617,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 });
                 if (!matchesLocation) return false;
             }
-            if (activePipelineId !== 'all') {
-                const stageIds = activePipeline?.stages.map((s) => s.id) || [];
-                if (activeStageId !== 'all') {
-                    if (org.pipelineStage !== activeStageId) return false;
-                } else {
-                    const inThisPipeline = org.pipelineId === activePipelineId
-                        || Boolean(org.pipelineStage && stageIds.includes(org.pipelineStage));
-                    const unassigned = !org.pipelineId && !org.pipelineStage;
-                    if (!inThisPipeline && !unassigned) return false;
-                }
+            if (activePipelineId !== 'all' && activePipeline) {
+                if (!orgMatchesPipelineFilter(org, activePipeline, activeStageId)) return false;
             }
             return true;
         });
-    }, [linkedOrganizations, searchTerm, filterStatus, companyFilters.industry, selectedLocations, activePipelineId, activeStageId, activePipeline]);
+    }, [linkedOrganizations, searchTerm, companyFilters, selectedLocations, activePipelineId, activeStageId, activePipeline]);
     
     // Dynamic Filter Options
     const accountManagers = useMemo(() => Array.from(new Set(clients.map(c => c.accountManager))), [clients]);
@@ -1501,11 +1637,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         }
         if (tenantClientId) {
             const orgOptions = linkedOrganizations
-                .filter((o) => o.organizationId && !o.isPending)
+                .filter((o) => o.organizationId || o.organizationTmpId)
                 .map((o) => ({
                     id: tenantClientId,
                     name: o.name,
                     organizationId: o.organizationId,
+                    organizationTmpId: o.organizationTmpId,
                 }));
             return orgOptions.length
                 ? orgOptions
@@ -1551,20 +1688,27 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         return null;
     }, [filterContactClient, isTenantUser, isPlatformAdmin, linkedOrganizations, clients, contacts, tenantClientId]);
     
-    // Available stages based on selected pipeline
-    const availableStages = useMemo(() => {
-        if (activePipelineId === 'all') return [];
-        return activePipeline ? activePipeline.stages : [];
+    // Available stages based on selected pipeline (stages + outcomes)
+    const availableStageOptions = useMemo(() => {
+        if (activePipelineId === 'all' || !activePipeline) return [];
+        return buildMoveTargetOptions(activePipeline.stages);
     }, [activePipelineId, activePipeline]);
     
-    const availableContactStages = useMemo(() => {
+    const availableContactStageOptions = useMemo(() => {
         if (filterContactPipeline === 'all') return [];
         const pipeline = pipelines.find(p => p.id === filterContactPipeline);
-        return pipeline ? pipeline.stages : [];
+        return pipeline ? buildMoveTargetOptions(pipeline.stages) : [];
     }, [filterContactPipeline, pipelines]);
+
+    const bulkProcessStageOptions = useMemo(() => {
+        if (!bulkProcessPipelineId) return [];
+        const pipeline = pipelines.find((p) => p.id === bulkProcessPipelineId);
+        return pipeline ? buildMoveTargetOptions(pipeline.stages) : [];
+    }, [bulkProcessPipelineId, pipelines]);
 
 
     const filteredClients = useMemo(() => {
+        const pipelineStages = activePipeline?.stages || [];
         return clients.filter(c => {
              // 1. Search Filter
              const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase()) || c.contactPerson.toLowerCase().includes(searchTerm.toLowerCase());
@@ -1573,20 +1717,20 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
              let matchesPipeline = true;
              
              if (activePipelineId !== 'all') {
-                  const activePipelineStages = activePipeline?.stages.map(s => s.id) || [];
-                  const isInPipeline = activePipelineStages.includes(c.pipelineStage);
+                  const activePipelineStages = pipelineStages.map(s => s.id);
+                  const isInPipeline = activePipelineStages.includes(c.pipelineStage)
+                      || (isOutcomeTarget(c.pipelineStage) && resolveMoveTarget(c.pipelineStage, pipelineStages));
                   
                   if (activeStageId !== 'all') {
-                      matchesPipeline = c.pipelineStage === activeStageId;
+                      matchesPipeline = matchesPipelineStageFilter(c.pipelineStage, activeStageId, pipelineStages);
                   } else {
-                      matchesPipeline = isInPipeline;
+                      matchesPipeline = Boolean(isInPipeline);
                   }
              }
 
              // 3. New Filters
-             const matchesStatus = filterStatus === 'all' || c.status === filterStatus;
              const matchesManager = filterAccountManager === 'all' || c.accountManager === filterAccountManager;
-             const matchesIndustry = !companyFilters.industry || c.industry === companyFilters.industry;
+             const matchesIndustry = matchesCompanyFiltersForClient(c, companyFilters);
              
              // Location Match using LocationSelector logic (simplified for client city/region)
              const matchesLocation = selectedLocations.length === 0 || selectedLocations.some(loc => {
@@ -1595,9 +1739,9 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  return true;
              });
 
-             return matchesSearch && matchesPipeline && matchesStatus && matchesManager && matchesIndustry && matchesLocation;
+             return matchesSearch && matchesPipeline && matchesManager && matchesIndustry && matchesLocation;
         });
-    }, [clients, searchTerm, activePipelineId, activeStageId, activePipeline, filterStatus, filterAccountManager, companyFilters.industry, selectedLocations]);
+    }, [clients, searchTerm, activePipelineId, activeStageId, activePipeline, filterAccountManager, companyFilters, selectedLocations]);
 
     const sortedClients = useMemo(() => {
         let sortable = [...filteredClients];
@@ -1629,10 +1773,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             // NOTE: Mock data assumes fields exist. In real app, make sure fields match interface.
             // Using logic assuming if field doesn't exist, it passes 'all' check but fails specific check
             
+            const contactPipeline = pipelines.find((p) => p.id === filterContactPipeline);
+            const contactStages = contactPipeline?.stages || [];
             const matchesPipeline = filterContactPipeline === 'all'
                 || c.pipelineId === filterContactPipeline
                 || (!c.pipelineId && !c.stageId);
-            const matchesStage = filterContactStage === 'all' || c.stageId === filterContactStage;
+            const matchesStage = filterContactStage === 'all'
+                || matchesPipelineStageFilter(c.stageId, filterContactStage, contactStages);
             
             let matchesDate = true;
             if (filterContactDateFrom || filterContactDateTo) {
@@ -1651,7 +1798,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
             return matchesSearch && matchesRole && matchesClient && matchesPipeline && matchesStage && matchesDate;
         });
-    }, [contacts, searchTerm, filterContactRole, filterContactClient, filterContactPipeline, filterContactStage, filterContactDateFrom, filterContactDateTo]);
+    }, [contacts, searchTerm, filterContactRole, filterContactClient, filterContactPipeline, filterContactStage, filterContactDateFrom, filterContactDateTo, pipelines]);
 
     // --- Sorting Logic (Contacts) ---
     const sortedContacts = useMemo(() => {
@@ -2180,6 +2327,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             || selected[0];
         openMessageModal({
             mode: action,
+            recipientType: 'client_contact',
             candidateName:
                 selected.length === 1
                     ? primary.name
@@ -2231,6 +2379,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
         openMessageModal({
             mode: action,
+            recipientType: 'client_contact',
             candidateName: primary?.name || label,
             candidatePhone: primary?.phone || '',
             candidateEmail: primary?.email || '',
@@ -2240,89 +2389,316 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         setSelectedCompanyIds(new Set());
     };
 
-    const handleBulkStartProcess = (pipelineId: string) => {
-        const selected = sortedContacts.filter((c) => selectedContactIds.has(c.id));
-        if (!selected.length) return;
-        const pipeline = pipelines.find((p) => p.id === pipelineId);
-        const firstStage = pipeline?.stages[0]?.id || '';
-        const now = Date.now();
-        const newItems: Client[] = selected.map((contact, idx) => ({
-            id: `tmp-${now}-${idx}`,
-            name: `${contact.name} (${contact.clientName})`,
-            contactPerson: contact.name,
-            phone: contact.phone,
-            email: contact.email,
-            openJobs: 0,
-            status: 'ליד חדש',
-            accountManager: 'אני',
-            city: 'לא ידוע',
-            region: 'מרכז',
-            industry: 'כללי',
-            tier: 'Standard',
-            pipelineStage: firstStage,
-            pipelineValue: 0,
-            lastContactDate: new Date().toISOString(),
-            daysSinceLastContact: 0,
-            nextScheduledActivity: null,
-            activePlacements: 0,
-            isContactProcess: true,
-        }));
-        setClients((prev) => [...prev, ...newItems]);
-        setActiveTab('companies');
-        setActivePipelineId(pipelineId);
-        if (!isTenantUser) setViewMode('board');
-        setSelectedContactIds(new Set());
-        setIsBulkProcessMenuOpen(false);
+    const resolveContactClientId = (contact: Contact): string | null => {
+        if (contact.clientId) return contact.clientId;
+        const match = clients.find((c) => c.name === contact.clientName);
+        return match?.id ?? null;
     };
 
-    const handleCompanyBulkStartProcess = (pipelineId: string) => {
+    const getMoveTargetLabel = (pipeline: Pipeline, targetId: string): string => {
+        const opt = buildMoveTargetOptions(pipeline.stages).find((o) => o.value === targetId);
+        if (opt?.label) return opt.label;
+        const resolved = resolveMoveTarget(targetId, pipeline.stages);
+        if (resolved?.outcomeName && resolved?.stageName) {
+            return `${resolved.outcomeName} (${resolved.stageName})`;
+        }
+        return resolved?.stageName || resolved?.outcomeName || targetId;
+    };
+
+    const createClientProcessEvent = async (
+        clientId: string,
+        args: {
+            pipelineId: string;
+            pipelineName: string;
+            stageId: string;
+            stageName: string;
+            organizationId?: string | null;
+            entityName: string;
+            contactId?: string | null;
+            contactName?: string | null;
+        },
+    ) => {
+        if (!apiBase) return;
+        const actor = user?.name || 'אני';
+        const payload = {
+            title: `${args.pipelineName} — ${args.stageName}`,
+            type: [args.pipelineName, args.stageName].filter(Boolean),
+            date: new Date().toISOString(),
+            description: '',
+            coordinator: actor,
+            creator: actor,
+            status: 'עתידי',
+            isActive: true,
+            ...(args.organizationId ? { organizationId: args.organizationId } : {}),
+            process: args.pipelineName,
+            processId: args.pipelineId,
+            stage: args.stageName,
+            stageId: args.stageId,
+            linkedTo: args.contactId
+                ? { type: 'איש קשר', id: args.contactId, name: args.contactName || '' }
+                : { type: 'לקוח', name: args.entityName },
+            history: [{
+                user: actor,
+                timestamp: new Date().toISOString(),
+                summary: 'יצר אירוע תהליכי (פתיחת תהליך)',
+            }],
+        };
+        const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/events`, {
+            method: 'POST',
+            headers: authHeaders(true),
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            throw new Error(typeof body?.message === 'string' ? body.message : 'יצירת אירוע נכשלה');
+        }
+    };
+
+    const applyOrgProcess = async (org: LinkedOrganizationItem, pipelineId: string, stageId: string) => {
+        if (!tenantClientId || !apiBase) return;
         const pipeline = pipelines.find((p) => p.id === pipelineId);
-        const firstStage = pipeline?.stages[0]?.id || '';
-        if (!firstStage) {
+        if (!pipeline) return;
+        const stageName = getMoveTargetLabel(pipeline, stageId);
+
+        setLinkedOrganizations((list) =>
+            list.map((o) =>
+                o.linkId === org.linkId ? { ...o, pipelineId, pipelineStage: stageId } : o,
+            ),
+        );
+
+        const res = await fetch(
+            `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/organization-link/${encodeURIComponent(org.linkId)}`,
+            {
+                method: 'PATCH',
+                headers: authHeaders(true),
+                body: JSON.stringify({ pipelineId, pipelineStage: stageId }),
+            },
+        );
+        if (!res.ok) throw new Error('עדכון תהליך החברה נכשל');
+
+        await createClientProcessEvent(tenantClientId, {
+            pipelineId,
+            pipelineName: pipeline.name,
+            stageId,
+            stageName,
+            organizationId: org.organizationId,
+            entityName: org.name,
+        });
+    };
+
+    const applyContactProcess = async (contact: Contact, pipelineId: string, stageId: string) => {
+        const clientId = resolveContactClientId(contact);
+        if (!clientId || !apiBase) return;
+        const pipeline = pipelines.find((p) => p.id === pipelineId);
+        if (!pipeline) return;
+        const stageName = getMoveTargetLabel(pipeline, stageId);
+
+        setContacts((list) =>
+            list.map((c) =>
+                c.id === contact.id ? { ...c, pipelineId, stageId } : c,
+            ),
+        );
+
+        const res = await fetch(
+            `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contact.id)}`,
+            {
+                method: 'PUT',
+                headers: authHeaders(true),
+                body: JSON.stringify({ pipelineId, processStage: stageId }),
+            },
+        );
+        if (!res.ok) throw new Error('עדכון תהליך איש הקשר נכשל');
+
+        await createClientProcessEvent(clientId, {
+            pipelineId,
+            pipelineName: pipeline.name,
+            stageId,
+            stageName,
+            organizationId: contact.organizationId || null,
+            entityName: contact.clientName || contact.name,
+            contactId: contact.id,
+            contactName: contact.name,
+        });
+
+        if (isTenantUser && contact.organizationId && tenantClientId) {
+            const orgLink = linkedOrganizations.find((o) => o.organizationId === contact.organizationId);
+            if (orgLink) {
+                setLinkedOrganizations((list) =>
+                    list.map((o) =>
+                        o.linkId === orgLink.linkId
+                            ? { ...o, pipelineId, pipelineStage: stageId }
+                            : o,
+                    ),
+                );
+                await fetch(
+                    `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/organization-link/${encodeURIComponent(orgLink.linkId)}`,
+                    {
+                        method: 'PATCH',
+                        headers: authHeaders(true),
+                        body: JSON.stringify({ pipelineId, pipelineStage: stageId }),
+                    },
+                );
+            }
+        }
+    };
+
+    const applyClientProcess = async (client: Client, pipelineId: string, stageId: string) => {
+        if (!apiBase || client.id.startsWith('tmp-')) return;
+        const pipeline = pipelines.find((p) => p.id === pipelineId);
+        if (!pipeline) return;
+        const stageName = getMoveTargetLabel(pipeline, stageId);
+
+        const updated: Client = { ...client, pipelineStage: stageId, status: 'ליד חדש' as ClientStatus };
+        setClients((prev) => prev.map((c) => (c.id === client.id ? updated : c)));
+
+        const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(client.id)}`, {
+            method: 'PUT',
+            headers: authHeaders(true),
+            body: JSON.stringify({ metadata: buildClientMetadataPatch(updated), status: 'ליד חדש' }),
+        });
+        if (!res.ok) throw new Error('עדכון תהליך הלקוח נכשל');
+
+        await createClientProcessEvent(client.id, {
+            pipelineId,
+            pipelineName: pipeline.name,
+            stageId,
+            stageName,
+            entityName: client.name,
+        });
+    };
+
+    const toggleBulkProcessMenu = (target: 'companies' | 'contacts') => {
+        if (isBulkProcessMenuOpen && bulkProcessTarget === target) {
             setIsBulkProcessMenuOpen(false);
             return;
         }
-        if (isTenantUser) {
-            const orgs = filteredLinkedOrganizations.filter((o) => selectedCompanyIds.has(o.linkId));
-            if (!orgs.length) return;
-            const now = Date.now();
-            const newItems: Client[] = orgs.map((org, idx) => ({
-                id: `tmp-org-${now}-${idx}`,
-                name: org.name,
-                contactPerson: '',
-                phone: '',
-                email: '',
-                openJobs: 0,
-                status: 'ליד חדש',
-                accountManager: user?.name || 'אני',
-                city: org.location || 'לא ידוע',
-                region: 'מרכז',
-                industry: org.mainField || 'כללי',
-                tier: 'Standard',
-                pipelineStage: firstStage,
-                pipelineValue: 0,
-                lastContactDate: new Date().toISOString(),
-                daysSinceLastContact: 0,
-                nextScheduledActivity: null,
-                activePlacements: 0,
-                logo: org.logo || undefined,
-            }));
-            setClients((prev) => [...prev, ...newItems]);
-            setViewMode('board');
-        } else {
-            setClients((prev) =>
-                prev.map((c) =>
-                    selectedCompanyIds.has(c.id)
-                        ? { ...c, pipelineStage: firstStage, status: 'ליד חדש' as ClientStatus }
-                        : c,
-                ),
-            );
-            setActivePipelineId(pipelineId);
-            setViewMode('board');
-        }
-        setSelectedCompanyIds(new Set());
-        setIsBulkProcessMenuOpen(false);
+        const defaultPipelineId =
+            target === 'companies' && activePipelineId !== 'all'
+                ? activePipelineId
+                : target === 'contacts' && filterContactPipeline !== 'all'
+                  ? filterContactPipeline
+                  : (pipelines[0]?.id || '');
+        const pipeline = pipelines.find((p) => p.id === defaultPipelineId);
+        const defaultStage = firstStageIdForPipelineStages(pipeline?.stages || []) || '';
+        setBulkProcessTarget(target);
+        setBulkProcessPipelineId(defaultPipelineId);
+        setBulkProcessStageId(defaultStage);
+        setIsBulkProcessMenuOpen(true);
     };
+
+    const handleBulkProcessPipelineChange = (pipelineId: string) => {
+        setBulkProcessPipelineId(pipelineId);
+        const pipeline = pipelines.find((p) => p.id === pipelineId);
+        setBulkProcessStageId(firstStageIdForPipelineStages(pipeline?.stages || []) || '');
+    };
+
+    const confirmBulkStartProcess = async () => {
+        if (!bulkProcessPipelineId || !bulkProcessStageId || bulkProcessSaving) return;
+        setBulkProcessSaving(true);
+        try {
+            if (bulkProcessTarget === 'companies') {
+                if (isTenantUser) {
+                    const orgs = filteredLinkedOrganizations.filter((o) => selectedCompanyIds.has(o.linkId));
+                    if (!orgs.length) return;
+                    for (const org of orgs) {
+                        await applyOrgProcess(org, bulkProcessPipelineId, bulkProcessStageId);
+                    }
+                    setActivePipelineId(bulkProcessPipelineId);
+                    setActiveStageId('all');
+                    setViewMode('board');
+                    setSelectedCompanyIds(new Set());
+                } else {
+                    const selected = sortedClients.filter((c) => selectedCompanyIds.has(c.id));
+                    if (!selected.length) return;
+                    for (const client of selected) {
+                        await applyClientProcess(client, bulkProcessPipelineId, bulkProcessStageId);
+                    }
+                    setActivePipelineId(bulkProcessPipelineId);
+                    setActiveStageId('all');
+                    setViewMode('board');
+                    setSelectedCompanyIds(new Set());
+                }
+            } else if (bulkProcessTarget === 'contacts') {
+                const selected = sortedContacts.filter((c) => selectedContactIds.has(c.id));
+                if (!selected.length) return;
+                for (const contact of selected) {
+                    await applyContactProcess(contact, bulkProcessPipelineId, bulkProcessStageId);
+                }
+                setFilterContactPipeline(bulkProcessPipelineId);
+                setFilterContactStage('all');
+                setActiveTab('contacts');
+                setContactsViewMode('board');
+                setSelectedContactIds(new Set());
+            }
+            setIsBulkProcessMenuOpen(false);
+        } catch (e: any) {
+            alert(e?.message || 'פתיחת תהליך נכשלה');
+        } finally {
+            setBulkProcessSaving(false);
+        }
+    };
+
+    const renderBulkProcessMenu = (target: 'companies' | 'contacts') => (
+        isBulkProcessMenuOpen && bulkProcessTarget === target ? (
+            <div
+                className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-80 bg-white border border-border-default rounded-xl shadow-xl overflow-hidden z-50"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="p-4 space-y-3">
+                    <p className="text-xs font-bold text-text-muted uppercase tracking-wide">פתיחת תהליך</p>
+                    <div>
+                        <label className="block text-xs font-semibold text-text-muted mb-1">תהליך</label>
+                        <select
+                            value={bulkProcessPipelineId}
+                            onChange={(e) => handleBulkProcessPipelineChange(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                        >
+                            {pipelines.length === 0 ? (
+                                <option value="">אין תהליכים מוגדרים</option>
+                            ) : (
+                                pipelines.map((p) => (
+                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                ))
+                            )}
+                        </select>
+                    </div>
+                    {bulkProcessPipelineId && bulkProcessStageOptions.length > 0 ? (
+                        <div>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">שלב / תוצאה</label>
+                            <select
+                                value={bulkProcessStageId}
+                                onChange={(e) => setBulkProcessStageId(e.target.value)}
+                                className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                            >
+                                {bulkProcessStageOptions.some((o) => o.kind === 'stage') ? (
+                                    <optgroup label="שלבים">
+                                        {bulkProcessStageOptions.filter((o) => o.kind === 'stage').map((option) => (
+                                            <option key={option.value} value={option.value}>{option.label}</option>
+                                        ))}
+                                    </optgroup>
+                                ) : null}
+                                {bulkProcessStageOptions.some((o) => o.kind === 'outcome') ? (
+                                    <optgroup label="תוצאות">
+                                        {bulkProcessStageOptions.filter((o) => o.kind === 'outcome').map((option) => (
+                                            <option key={option.value} value={option.value}>{option.label}</option>
+                                        ))}
+                                    </optgroup>
+                                ) : null}
+                            </select>
+                        </div>
+                    ) : null}
+                    <button
+                        type="button"
+                        onClick={() => void confirmBulkStartProcess()}
+                        disabled={!bulkProcessPipelineId || !bulkProcessStageId || bulkProcessSaving || pipelines.length === 0}
+                        className="w-full py-2.5 rounded-lg bg-primary-600 text-white text-sm font-bold hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                    >
+                        {bulkProcessSaving ? 'יוצר…' : 'יצירה'}
+                    </button>
+                </div>
+            </div>
+        ) : null
+    );
 
     const handleBulkExport = () => {
         const rows = sortedContacts.filter((c) => selectedContactIds.has(c.id));
@@ -2387,6 +2763,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
          const clientId = resolveContactClientId(contact);
          openMessageModal({
             mode: action,
+            recipientType: 'client_contact',
             candidateName: contact.name, // Reusing candidate modal for contacts for simplicity
             candidatePhone: contact.phone,
             candidateEmail: contact.email,
@@ -2423,51 +2800,16 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         setActiveActionMenuId(null);
     };
 
-    const handleStartProcess = async (contact: Contact, pipelineId: string) => {
+    const handleStartProcess = async (contact: Contact, pipelineId: string, stageId?: string) => {
         const pipeline = pipelines.find((p) => p.id === pipelineId);
-        const firstStage = pipeline?.stages[0]?.id || '';
-        const clientId = resolveContactClientId(contact);
+        const targetStage = stageId || firstStageIdForPipelineStages(pipeline?.stages || []) || '';
+        if (!targetStage) return;
 
-        setContacts((list) =>
-            list.map((c) =>
-                c.id === contact.id
-                    ? { ...c, pipelineId, stageId: firstStage }
-                    : c,
-            ),
-        );
-
-        if (apiBase && clientId) {
-            try {
-                await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contact.id)}`, {
-                    method: 'PUT',
-                    headers: authHeaders(true),
-                    body: JSON.stringify({ pipelineId, processStage: firstStage }),
-                });
-            } catch (_e) { /* keep optimistic */ }
-        }
-
-        // Tenant: also put the linked organization onto the same pipeline stage.
-        if (isTenantUser && contact.organizationId && tenantClientId && apiBase) {
-            const orgLink = linkedOrganizations.find((o) => o.organizationId === contact.organizationId);
-            if (orgLink) {
-                setLinkedOrganizations((list) =>
-                    list.map((o) =>
-                        o.linkId === orgLink.linkId
-                            ? { ...o, pipelineId, pipelineStage: firstStage }
-                            : o,
-                    ),
-                );
-                try {
-                    await fetch(
-                        `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/organization-link/${encodeURIComponent(orgLink.linkId)}`,
-                        {
-                            method: 'PATCH',
-                            headers: authHeaders(true),
-                            body: JSON.stringify({ pipelineId, pipelineStage: firstStage }),
-                        },
-                    );
-                } catch (_e) { /* keep optimistic */ }
-            }
+        try {
+            await applyContactProcess(contact, pipelineId, targetStage);
+        } catch (e: any) {
+            alert(e?.message || 'פתיחת תהליך נכשלה');
+            return;
         }
 
         setFilterContactPipeline(pipelineId);
@@ -2479,12 +2821,6 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         alert(`תהליך ${pipeline?.name || 'עבודה'} נפתח עבור ${contact.name}!`);
     };
 
-    const resolveContactClientId = (contact: Contact): string | null => {
-        if (contact.clientId) return contact.clientId;
-        const match = clients.find((c) => c.name === contact.clientName);
-        return match?.id ?? null;
-    };
-
     const navigateToContactProfile = (contact: Contact) => {
         const clientId = resolveContactClientId(contact);
         if (!clientId) {
@@ -2494,6 +2830,20 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         setActiveActionMenuId(null);
         setIsContactDrawerOpen(false);
         navigate(`/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contact.id)}`);
+    };
+
+    const openClientFileForOrg = (org: LinkedOrganizationItem, e?: React.MouseEvent) => {
+        e?.stopPropagation();
+        setOrgDrawer(null);
+        if (org.organizationId) {
+            navigate(`/organizations/${org.organizationId}`);
+            return;
+        }
+        if (org.organizationTmpId) {
+            navigate(`/organizations/tmp/${org.organizationTmpId}`);
+            return;
+        }
+        void openOrgDrawer(org);
     };
 
     const handleDeleteContact = (contact: Contact) => {
@@ -2878,31 +3228,6 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  {/* Filters Row - Companies tab (admin clients + tenant linked orgs) */}
                  {activeTab === 'companies' && (
                      <div className="w-full grid grid-cols-2 md:grid-cols-4 lg:flex lg:flex-wrap gap-3 items-center pt-2 border-t border-border-subtle">
-                        {/* Status Filter */}
-                        <div className="relative">
-                            <select 
-                                value={filterStatus}
-                                onChange={(e) => setFilterStatus(e.target.value)}
-                                className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm pr-8 focus:ring-2 focus:ring-primary-500 outline-none appearance-none cursor-pointer pl-9"
-                            >
-                                <option value="all">כל הסטטוסים</option>
-                                {isTenantUser ? (
-                                    <>
-                                        <option value="approved">מאושר</option>
-                                        <option value="pending">ממתין לאישור</option>
-                                    </>
-                                ) : (
-                                    <>
-                                        <option value="פעיל">פעיל</option>
-                                        <option value="בהקפאה">בהקפאה</option>
-                                        <option value="לא פעיל">לא פעיל</option>
-                                        <option value="ליד חדש">ליד חדש</option>
-                                    </>
-                                )}
-                            </select>
-                            <ChevronDownIcon className="w-4 h-4 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"/>
-                        </div>
-
                         {/* Account Manager Filter — agency clients only */}
                         {!isTenantUser && (
                         <div className="relative">
@@ -2918,13 +3243,14 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                         </div>
                         )}
 
-                         {/* Industry Filter (Smart Button) */}
+                         {/* Industry Filter — opens full modal */}
                          <div className="relative">
                             <button
                                 ref={companyFilterButtonRef}
-                                onClick={() => setIsCompanyFilterOpen(prev => !prev)}
+                                type="button"
+                                onClick={() => setIsCompanyFilterOpen(true)}
                                 className={`w-full flex items-center justify-between gap-2 font-medium py-2 px-3 rounded-lg border transition-all text-sm h-[38px] ${
-                                    isCompanyFilterOpen || companyFilters.industry
+                                    isCompanyFilterOpen || companyFiltersAreActive(companyFilters)
                                         ? 'bg-primary-100 text-primary-700 border-primary-300'
                                         : 'bg-bg-input text-text-default border-border-default hover:border-primary-300'
                                 }`}
@@ -2932,18 +3258,16 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                             >
                                 <div className="flex items-center gap-2 truncate">
                                     <BuildingOffice2Icon className="w-4 h-4 flex-shrink-0" />
-                                    <span className="truncate">{companyFilters.industry || 'כל התעשיות'}</span>
+                                    <span className="truncate">{getCompanyFilterButtonLabel(companyFilters)}</span>
                                 </div>
                                 <ChevronDownIcon className="w-4 h-4 text-text-subtle flex-shrink-0" />
                             </button>
                             {isCompanyFilterOpen && (
-                                <div className="absolute top-full right-0 z-30 mt-2">
-                                     <CompanyFilterPopover
-                                        onClose={() => setIsCompanyFilterOpen(false)}
-                                        filters={companyFilters}
-                                        setFilters={setCompanyFilters}
-                                    />
-                                </div>
+                                <CompanyFilterPopover
+                                    onClose={() => setIsCompanyFilterOpen(false)}
+                                    filters={companyFilters}
+                                    setFilters={setCompanyFilters}
+                                />
                             )}
                         </div>
 
@@ -2957,35 +3281,49 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                              />
                          </div>
 
-                        {/* Pipeline Selector */}
-                         <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] col-span-2 md:col-span-2 lg:ml-auto w-full md:w-auto">
-                            <FunnelIcon className="w-4 h-4 text-text-subtle ml-2 flex-shrink-0"/>
-                            <select 
-                                value={activePipelineId}
-                                onChange={(e) => {
-                                    setActivePipelineId(e.target.value);
-                                    setActiveStageId('all'); // Reset stage when pipeline changes
-                                }}
-                                className="bg-transparent text-sm font-bold text-text-default outline-none cursor-pointer w-full min-w-[140px]"
-                            >
-                                <option value="all">כל התהליכים</option>
-                                {pipelines.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                            </select>
-                         </div>
-                         
-                         {/* Stage Filter (Conditional) */}
-                         {activePipelineId !== 'all' && (
-                             <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] col-span-2 md:col-span-2 w-full md:w-auto animate-fade-in">
+                        {/* Pipeline + Stage filters — stage appears adjacent to pipeline */}
+                         <div className="flex flex-wrap items-center gap-2 col-span-2 md:col-span-4 lg:col-span-none lg:ml-auto">
+                            <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] flex-1 min-w-[140px]">
+                                <FunnelIcon className="w-4 h-4 text-text-subtle ml-2 flex-shrink-0"/>
                                 <select 
-                                    value={activeStageId}
-                                    onChange={(e) => setActiveStageId(e.target.value)}
-                                    className="bg-transparent text-sm font-medium text-text-default outline-none cursor-pointer w-full min-w-[120px]"
+                                    value={activePipelineId}
+                                    onChange={(e) => {
+                                        setActivePipelineId(e.target.value);
+                                        setActiveStageId('all');
+                                    }}
+                                    className="bg-transparent text-sm font-bold text-text-default outline-none cursor-pointer w-full"
                                 >
-                                    <option value="all">כל השלבים</option>
-                                    {availableStages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                    <option value="all">כל התהליכים</option>
+                                    {pipelines.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                                 </select>
-                             </div>
-                         )}
+                            </div>
+
+                            {activePipelineId !== 'all' && (
+                                <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] flex-1 min-w-[160px] animate-fade-in">
+                                    <select 
+                                        value={activeStageId}
+                                        onChange={(e) => setActiveStageId(e.target.value)}
+                                        className="bg-transparent text-sm font-medium text-text-default outline-none cursor-pointer w-full"
+                                    >
+                                        <option value="all">כל השלבים והתוצאות</option>
+                                        {availableStageOptions.some((o) => o.kind === 'stage') && (
+                                            <optgroup label="שלבים">
+                                                {availableStageOptions.filter((o) => o.kind === 'stage').map((option) => (
+                                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                                ))}
+                                            </optgroup>
+                                        )}
+                                        {availableStageOptions.some((o) => o.kind === 'outcome') && (
+                                            <optgroup label="תוצאות">
+                                                {availableStageOptions.filter((o) => o.kind === 'outcome').map((option) => (
+                                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                                ))}
+                                            </optgroup>
+                                        )}
+                                    </select>
+                                </div>
+                            )}
+                         </div>
 
                      </div>
                  )}
@@ -3010,16 +3348,29 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                              <BriefcaseIcon className="w-4 h-4 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"/>
                          </div>
                          
-                         {/* Stage Filter (Conditional) */}
+                         {/* Stage Filter (Conditional) — adjacent to process, includes outcomes */}
                          {filterContactPipeline !== 'all' && (
-                             <div className="relative flex-grow md:flex-grow-0 md:w-48 animate-fade-in">
+                             <div className="relative flex-grow md:flex-grow-0 md:w-56 animate-fade-in">
                                  <select
                                     value={filterContactStage}
                                     onChange={(e) => setFilterContactStage(e.target.value)}
                                     className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm pr-8 focus:ring-2 focus:ring-primary-500 outline-none appearance-none cursor-pointer"
                                  >
-                                     <option value="all">כל השלבים</option>
-                                     {availableContactStages.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                                     <option value="all">כל השלבים והתוצאות</option>
+                                     {availableContactStageOptions.some((o) => o.kind === 'stage') && (
+                                         <optgroup label="שלבים">
+                                             {availableContactStageOptions.filter((o) => o.kind === 'stage').map((option) => (
+                                                 <option key={option.value} value={option.value}>{option.label}</option>
+                                             ))}
+                                         </optgroup>
+                                     )}
+                                     {availableContactStageOptions.some((o) => o.kind === 'outcome') && (
+                                         <optgroup label="תוצאות">
+                                             {availableContactStageOptions.filter((o) => o.kind === 'outcome').map((option) => (
+                                                 <option key={option.value} value={option.value}>{option.label}</option>
+                                             ))}
+                                         </optgroup>
+                                     )}
                                  </select>
                                  <FunnelIcon className="w-4 h-4 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"/>
                              </div>
@@ -3271,7 +3622,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                         </div>
                                                     )}
                                                     <div>
-                                                        <p className="font-bold text-text-default">{org.name}</p>
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => openClientFileForOrg(org, e)}
+                                                            className="font-bold text-text-default hover:text-primary-600 hover:underline text-right"
+                                                        >
+                                                            {org.name}
+                                                        </button>
                                                         <div className="flex gap-1 mt-0.5">
                                                             {org.isPrimary ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-primary-50 text-primary-700">ראשית</span> : null}
                                                             {org.isPending ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">ממתין</span> : null}
@@ -3324,16 +3681,14 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                     return (
                                             <td key={colId} className="p-4 text-center" onClick={(e) => e.stopPropagation()}>
                                                 <div className="flex items-center justify-center gap-1.5">
-                                                    {org.organizationId && (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => navigate(`/organizations/${org.organizationId}`)}
-                                                            className="text-xs font-bold text-primary-600 hover:text-primary-700 bg-primary-50 hover:bg-primary-100 px-2.5 py-1 rounded-lg transition whitespace-nowrap"
-                                                            title="ניהול תיק לקוח"
-                                                        >
-                                                            ניהול תיק לקוח
-                                                        </button>
-                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => openClientFileForOrg(org, e)}
+                                                        className="text-xs font-bold text-primary-600 hover:text-primary-700 bg-primary-50 hover:bg-primary-100 px-2.5 py-1 rounded-lg transition whitespace-nowrap"
+                                                        title="ניהול תיק לקוח"
+                                                    >
+                                                        ניהול תיק לקוח
+                                                    </button>
                                                     <button
                                                         type="button"
                                                         onClick={() => handleUnlinkOrganization(org)}
@@ -3373,10 +3728,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                              ) : (
                                 <div className="flex gap-6 h-full min-w-max" dir="rtl">
                                     {activePipeline && groupStagesByColor(activePipeline.stages).map((column) => {
-                                        const firstStageId = activePipeline.stages[0]?.id;
                                         const stageItems = filteredLinkedOrganizations.filter((o) =>
-                                            (o.pipelineStage && column.stageIds.has(o.pipelineStage))
-                                            || (!o.pipelineStage && !o.pipelineId && firstStageId && column.stageIds.has(firstStageId)),
+                                            recordMatchesKanbanColumnStages(o, activePipeline, column.stageIds),
                                         );
                                         return (
                                             <div
@@ -3438,8 +3791,14 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                     </div>
                                                                 )}
                                                                 <div className="min-w-0 flex-1">
-                                                                    <div className="flex items-center gap-2">
-                                                                        <p className="font-bold text-sm text-text-default truncate">{org.name}</p>
+                                                                    <div className="flex items-center gap-2 min-w-0">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => openClientFileForOrg(org, e)}
+                                                                            className="font-bold text-sm text-text-default truncate hover:text-primary-600 hover:underline text-right min-w-0 flex-1"
+                                                                        >
+                                                                            {org.name}
+                                                                        </button>
                                                                         <OrgHealthIndicator
                                                                             org={org}
                                                                             pulseData={org.organizationId ? orgPulseById[org.organizationId] : null}
@@ -3448,15 +3807,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                     <p className="text-xs text-text-muted mt-0.5 truncate">{org.mainField || org.location || '—'}</p>
                                                                 </div>
                                                             </div>
-                                                            {org.organizationId && (
-                                                                <button
-                                                                    type="button"
-                                                                    onClick={(e) => { e.stopPropagation(); navigate(`/organizations/${org.organizationId}`); }}
-                                                                    className="mt-3 w-full text-xs font-bold text-primary-600 bg-primary-50 hover:bg-primary-100 rounded-lg py-1.5 transition"
-                                                                >
-                                                                    ניהול תיק לקוח
-                                                                </button>
-                                                            )}
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => openClientFileForOrg(org, e)}
+                                                                className="mt-3 w-full text-xs font-bold text-primary-600 bg-primary-50 hover:bg-primary-100 rounded-lg py-1.5 transition"
+                                                            >
+                                                                ניהול תיק לקוח
+                                                            </button>
                                                         </div>
                                                     ))}
                                                     {stageItems.length === 0 ? (
@@ -3509,8 +3866,14 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                  </div>
                                              )}
                                              <div className="min-w-0 flex-1">
-                                                 <div className="flex flex-wrap items-center gap-2">
-                                                     <h3 className="font-bold text-text-default truncate">{org.name}</h3>
+                                                 <div className="flex flex-wrap items-center gap-2 min-w-0">
+                                                     <button
+                                                         type="button"
+                                                         onClick={(e) => openClientFileForOrg(org, e)}
+                                                         className="font-bold text-text-default truncate hover:text-primary-600 hover:underline text-right max-w-full"
+                                                     >
+                                                         {org.name}
+                                                     </button>
                                                      <OrgHealthIndicator
                                                          org={org}
                                                          pulseData={org.organizationId ? orgPulseById[org.organizationId] : null}
@@ -3572,18 +3935,16 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                              </div>
                                          </dl>
                                          {/* Card footer action */}
-                                         {org.organizationId && (
-                                             <div className="mt-4 pt-4 border-t border-border-subtle" onClick={(e) => e.stopPropagation()}>
-                                                 <button
-                                                     type="button"
-                                                     onClick={(e) => { e.stopPropagation(); navigate(`/organizations/${org.organizationId}`); }}
-                                                     className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-xl text-sm font-bold text-primary-600 bg-primary-50 hover:bg-primary-100 border border-primary-200 transition"
-                                                 >
-                                                     <BriefcaseIcon className="w-4 h-4" />
-                                                     ניהול תיק לקוח
-                                                 </button>
-                                             </div>
-                                         )}
+                                         <div className="mt-4 pt-4 border-t border-border-subtle" onClick={(e) => e.stopPropagation()}>
+                                             <button
+                                                 type="button"
+                                                 onClick={(e) => openClientFileForOrg(org, e)}
+                                                 className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-xl text-sm font-bold text-primary-600 bg-primary-50 hover:bg-primary-100 border border-primary-200 transition"
+                                             >
+                                                 <BriefcaseIcon className="w-4 h-4" />
+                                                 ניהול תיק לקוח
+                                             </button>
+                                         </div>
                                      </div>
                                  ))}
                              </div>
@@ -3818,10 +4179,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                              const col = allContactColumns.find(c => c.id === colId);
                                              if (!col) return null;
                                              return (
-                                                 <th 
-                                                    key={col.id} 
-                                                    className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors select-none ${draggingColumn === col.id ? 'dragging' : ''}`}
-                                                    draggable
+                                                <th 
+                                                   key={col.id} 
+                                                   className={`p-4 text-center cursor-pointer hover:bg-bg-hover transition-colors select-none ${draggingColumn === col.id ? 'dragging' : ''}`}
+                                                   draggable
                                                     onDragStart={() => handleDragStart(index, col.id, 'contacts')}
                                                     onDragEnter={() => handleDragEnter(index, 'contacts')}
                                                     onDragEnd={handleDragEnd}
@@ -3852,8 +4213,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                              {contactVisibleColumns.map(colId => {
                                                 if (colId === 'actions') {
                                                     return (
-                                                        <td key={colId} className="p-4" onClick={(e) => e.stopPropagation()}>
-                                                            <div className="relative inline-block" data-menu-trigger>
+                                                        <td key={colId} className="p-4 text-center" onClick={(e) => e.stopPropagation()}>
+                                                            <div className="relative inline-block mx-auto" data-menu-trigger>
                                                                 <button 
                                                                     onClick={(e) => {
                                                                          e.stopPropagation(); 
@@ -3894,11 +4255,11 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                 }
                                                 if (colId === 'name') {
                                                     return (
-                                                        <td key={colId} className="p-4 text-text-default">
+                                                        <td key={colId} className="p-4 text-center text-text-default">
                                                             <button
                                                                 type="button"
                                                                 onClick={(e) => { e.stopPropagation(); navigateToContactProfile(contact); }}
-                                                                className="font-bold text-text-default hover:text-primary-600 hover:underline text-right"
+                                                                className="font-bold text-text-default hover:text-primary-600 hover:underline text-center"
                                                             >
                                                                 {contact.name}
                                                             </button>
@@ -3907,8 +4268,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                 }
                                                 if (colId === 'clientName') {
                                                     return (
-                                                        <td key={colId} className="p-4 text-text-default">
-                                                            <div className="flex items-center gap-2 justify-end">
+                                                        <td key={colId} className="p-4 text-center text-text-default">
+                                                            <div className="flex items-center gap-2 justify-center">
                                                                 <span>{contact.clientName}</span>
                                                                 <div className="w-6 h-6 rounded-md bg-bg-subtle border border-border-default flex items-center justify-center text-[10px] font-bold text-text-muted shrink-0 overflow-hidden">
                                                                     {contact.clientLogo ? (
@@ -3922,7 +4283,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                     );
                                                 }
                                                 return (
-                                                     <td key={colId} className="p-4 text-text-default">
+                                                     <td key={colId} className="p-4 text-center text-text-default">
                                                         {/* @ts-ignore */}
                                                         {contact[colId]}
                                                      </td>
@@ -4080,6 +4441,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                         preferredOrganizationLabel={
                             filterContactClient !== 'all' ? filterContactClient : null
                         }
+                        crossClientJournal={Boolean(isPlatformAdmin && !eventScopeOrganization?.organizationId)}
                     />
                  ) : (
                     // --- TASKS VIEW: admin → all clients; tenant → orgs under tenant client ---
@@ -4106,28 +4468,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
                     <div className="relative">
                         <button
-                            onClick={() => setIsBulkProcessMenuOpen(!isBulkProcessMenuOpen)}
+                            onClick={() => toggleBulkProcessMenu('companies')}
                             className="font-semibold hover:text-purple-600 transition-colors flex items-center gap-2 text-sm"
                         >
                             <PlayIcon className="w-4 h-4"/> פתח תהליך
                         </button>
-                        {isBulkProcessMenuOpen && (
-                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-white border border-border-default rounded-lg shadow-xl overflow-hidden">
-                                {pipelines.length === 0 ? (
-                                    <div className="px-4 py-2 text-xs text-text-muted">אין תהליכים מוגדרים</div>
-                                ) : (
-                                    pipelines.map((p, idx) => (
-                                        <button
-                                            key={p.id}
-                                            onClick={() => handleCompanyBulkStartProcess(p.id)}
-                                            className={`w-full text-right px-4 py-2 text-sm hover:bg-bg-hover ${idx === 0 ? '' : 'border-t border-border-subtle'}`}
-                                        >
-                                            {p.name}
-                                        </button>
-                                    ))
-                                )}
-                            </div>
-                        )}
+                        {renderBulkProcessMenu('companies')}
                     </div>
 
                     <button onClick={handleCompanyBulkExport} className="font-semibold hover:text-gray-600 transition-colors flex items-center gap-2 text-sm">
@@ -4161,28 +4507,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                     {/* START PROCESS BUTTON */}
                     <div className="relative">
                         <button 
-                            onClick={() => setIsBulkProcessMenuOpen(!isBulkProcessMenuOpen)}
+                            onClick={() => toggleBulkProcessMenu('contacts')}
                             className="font-semibold hover:text-purple-600 transition-colors flex items-center gap-2 text-sm"
                         >
                             <PlayIcon className="w-4 h-4"/> פתח תהליך
                         </button>
-                        {isBulkProcessMenuOpen && (
-                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-white border border-border-default rounded-lg shadow-xl overflow-hidden">
-                                {pipelines.length === 0 ? (
-                                    <div className="px-4 py-2 text-xs text-text-muted">אין תהליכים מוגדרים</div>
-                                ) : (
-                                    pipelines.map((p, idx) => (
-                                        <button
-                                            key={p.id}
-                                            onClick={() => handleBulkStartProcess(p.id)}
-                                            className={`w-full text-right px-4 py-2 text-sm hover:bg-bg-hover ${idx === 0 ? '' : 'border-t border-border-subtle'}`}
-                                        >
-                                            {p.name}
-                                        </button>
-                                    ))
-                                )}
-                            </div>
-                        )}
+                        {renderBulkProcessMenu('contacts')}
                     </div>
 
                     <button onClick={handleBulkExport} className="font-semibold hover:text-gray-600 transition-colors flex items-center gap-2 text-sm">
@@ -4465,6 +4795,19 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                 )}
                             </div>
                         </div>
+
+                        {orgDrawer.org.organizationId || orgDrawer.org.organizationTmpId ? (
+                            <footer className="p-4 border-t border-border-default shrink-0 bg-bg-card shadow-[0_-4px_20px_-1px_rgba(0,0,0,0.05)]">
+                                <button
+                                    type="button"
+                                    onClick={() => openClientFileForOrg(orgDrawer.org)}
+                                    className="w-full flex items-center justify-center gap-2 bg-primary-600 text-white font-bold py-3.5 px-6 rounded-xl hover:bg-primary-700 transition-all shadow-lg shadow-primary-500/20 active:scale-[0.98] group"
+                                >
+                                    <span>צפה בפרופיל החברה</span>
+                                    <ArrowLeftIcon className="w-5 h-5 group-hover:-translate-x-1 transition-transform" />
+                                </button>
+                            </footer>
+                        ) : null}
                     </div>
                 </div>
             ) : null}

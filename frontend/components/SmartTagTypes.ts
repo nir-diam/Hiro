@@ -1,6 +1,9 @@
 export type SmartTagType = 'role' | 'seniority' | 'skill' | 'industry' | 'certification' | 'language' | 'tool' | 'soft' | 'degree' | 'education';
 
-/** Rich tag detail panel (click-to-open); built in CandidateProfile from tag metadata */
+/** User-facing chip mode (green/red border) — same cycle as job tags. */
+export type SmartTagMode = 'normal' | 'mandatory' | 'negative';
+
+/** Rich tag detail panel (hover); built in CandidateProfile from tag metadata */
 export interface SmartTagTooltipPanel {
     categoryLabel: string;
     title: string;
@@ -21,10 +24,12 @@ export interface SmartTagTooltipPanel {
 export interface SmartTagData {
     label: string;
     type: SmartTagType;
+    tagKey?: string;
+    mode?: SmartTagMode;
     isVerified?: boolean;
     isAiSuggested?: boolean;
     customTooltip?: string;
-    /** When set, SmartTagBadge renders the new click panel instead of parsing customTooltip */
+    /** When set, SmartTagBadge renders the rich hover panel instead of parsing customTooltip */
     tooltipPanel?: SmartTagTooltipPanel;
 }
 

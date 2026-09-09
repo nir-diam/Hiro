@@ -34,9 +34,9 @@ const richTextSyncEffect = (
     editorRef: React.RefObject<HTMLDivElement | null>,
     value: string,
     isUserInput: React.MutableRefObject<boolean>,
-    onChange: (html: string) => void
 ) => {
     if (!editorRef.current) return;
+    if (document.activeElement === editorRef.current) return;
     if (isUserInput.current) {
         isUserInput.current = false;
         return;
@@ -73,7 +73,11 @@ const TEXT_COLORS = [
     { label: 'סגול', color: '#6b21a8' },
 ];
 
-export const RichTextArea: React.FC<{
+export type RichTextAreaHandle = {
+    getHtml: () => string;
+};
+
+type RichTextAreaProps = {
     value: string;
     onChange: (html: string) => void;
     placeholder?: string;
@@ -83,7 +87,9 @@ export const RichTextArea: React.FC<{
     editorClassName?: string;
     minHeight?: string;
     fullToolbar?: boolean;
-}> = ({
+};
+
+export const RichTextArea = React.forwardRef<RichTextAreaHandle, RichTextAreaProps>(({
     value,
     onChange,
     placeholder,
@@ -92,12 +98,20 @@ export const RichTextArea: React.FC<{
     toolbarClassName = '',
     editorClassName = '',
     fullToolbar = false,
-}) => {
+}, ref) => {
     const editorRef = React.useRef<HTMLDivElement>(null);
     const isUserInput = React.useRef(false);
+    React.useImperativeHandle(ref, () => ({
+        getHtml: () => editorRef.current?.innerHTML ?? '',
+    }), []);
     React.useEffect(() => {
-        richTextSyncEffect(editorRef, value, isUserInput, onChange);
+        richTextSyncEffect(editorRef, value, isUserInput);
     }, [value]);
+    const syncEditorHtml = () => {
+        if (!editorRef.current) return;
+        isUserInput.current = true;
+        onChange(editorRef.current.innerHTML);
+    };
     const execCmd = (cmd: string, arg?: string) => {
         try {
             if (cmd === 'fontName' && arg) document.execCommand('fontName', false, arg);
@@ -105,7 +119,7 @@ export const RichTextArea: React.FC<{
             else if (cmd === 'foreColor' && arg) document.execCommand('foreColor', false, arg);
             else document.execCommand(cmd, false, arg);
         } catch (_) {}
-        if (editorRef.current) onChange(editorRef.current.innerHTML);
+        syncEditorHtml();
         editorRef.current?.focus();
     };
     const toolbar = (
@@ -288,12 +302,7 @@ export const RichTextArea: React.FC<{
             <div
                 ref={editorRef}
                 contentEditable
-                onInput={() => {
-                    if (editorRef.current) {
-                        isUserInput.current = true;
-                        onChange(editorRef.current.innerHTML);
-                    }
-                }}
+                onInput={syncEditorHtml}
                 data-placeholder={placeholder}
                 className={`rich-text-editor-content outline-none p-4 overflow-y-auto text-right w-full resize-y rich-text-area-empty ${editorClassName}`}
                 style={{
@@ -320,4 +329,6 @@ export const RichTextArea: React.FC<{
             `}</style>
         </div>
     );
-};
+});
+
+RichTextArea.displayName = 'RichTextArea';

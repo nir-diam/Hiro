@@ -1135,6 +1135,9 @@ const AdminCandidateProfileView: React.FC = () => {
                             resumeFileUrl={resumeUrl}
                             className="h-full border-0 shadow-none"
                             highlightKeywords={searchHighlightKeywords}
+                            onResumeUploaded={(updated) => {
+                                setCandidate((prev: any) => (prev ? { ...prev, ...updated } : updated));
+                            }}
                         />
                     </div>
                 )}

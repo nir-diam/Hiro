@@ -11,10 +11,11 @@ import {
 import { useLanguage } from '../context/LanguageContext';
 import type { Candidate } from './CandidatesListView';
 import {
-  buildDuplicateJobSeed,
-  buildDuplicatePublicationSeed,
-  formatRecruitmentSourceLabel,
+    buildDuplicateJobSeed,
+    buildDuplicatePublicationSeed,
+    formatRecruitmentSourceLabel,
 } from '../utils/duplicateJob';
+import { jobStatusApiToDisplay } from '../utils/jobStatusLabels';
 import { fetchJobPublication } from '../services/publishingApi';
 
 const SidebarCard: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode }> = ({
@@ -172,11 +173,7 @@ const JobDetailsSidebar: React.FC<JobDetailsSidebarProps> = ({ job, onCandidateC
     }
   };
 
-  const statusLabel = (() => {
-    const key = `status.${job.status}`;
-    const translated = t(key);
-    return translated === key ? job.status : translated;
-  })();
+  const statusLabel = jobStatusApiToDisplay(job.status);
 
   return (
     <div className="space-y-6">
@@ -186,9 +183,11 @@ const JobDetailsSidebar: React.FC<JobDetailsSidebarProps> = ({ job, onCandidateC
           <div>
             <span
               className={`font-bold px-2 py-0.5 rounded-full ${
-                job.status === 'פתוחה' || job.status === 'Open'
+                job.status === 'פתוחה' || job.status === 'פעילה' || job.status === 'Open'
                   ? 'text-green-600 bg-green-100'
-                  : 'text-text-default bg-bg-subtle'
+                  : job.status === 'מאוישת' || job.status === 'סגורה'
+                    ? 'text-gray-700 bg-gray-100'
+                    : 'text-text-default bg-bg-subtle'
               }`}
             >
               {statusLabel}

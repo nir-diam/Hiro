@@ -1,6 +1,7 @@
 const {
   computeParameterMatches,
   computeGeneralPenalties,
+  normalizeJobSkillMode,
   parseCandidateAge,
   jobRequiresGender,
   jobRequiresMobility,
@@ -14,6 +15,62 @@ const {
 } = require('../matchingPenaltyService');
 
 const CONFIG = { penaltyPolicies: DEFAULT_PENALTY_POLICIES };
+
+describe('normalizeJobSkillMode', () => {
+  it('maps required/exclusion aliases like the frontend', () => {
+    expect(normalizeJobSkillMode('required')).toBe('mandatory');
+    expect(normalizeJobSkillMode('exclusion')).toBe('negative');
+    expect(normalizeJobSkillMode('mandatory')).toBe('mandatory');
+  });
+});
+
+describe('mandatory / negative job skills', () => {
+  const job = {
+    skills: [
+      { key: 'tech_support', name: 'תמיכה טכנית', mode: 'required' },
+      { key: 'sales', name: 'מכירות', mode: 'exclusion' },
+    ],
+  };
+
+  it('requires all mandatory (green) job tags on the candidate', () => {
+    const withTag = {
+      tagDetails: [{ tagKey: 'tech_support', displayNameHe: 'תמיכה טכנית', rawType: 'skill' }],
+    };
+    const withoutTag = {
+      tagDetails: [{ tagKey: 'other', displayNameHe: 'אחר', rawType: 'skill' }],
+    };
+    expect(computeParameterMatches(withTag, job).mandatory_skill).toBe('match');
+    expect(computeParameterMatches(withoutTag, job).mandatory_skill).toBe('mismatch');
+  });
+
+  it('rejects candidates that have negative (red) job tags', () => {
+    const withRed = {
+      tagDetails: [{ tagKey: 'sales', displayNameHe: 'מכירות', rawType: 'skill' }],
+    };
+    const clean = {
+      tagDetails: [{ tagKey: 'tech_support', displayNameHe: 'תמיכה טכנית', rawType: 'skill' }],
+    };
+    expect(computeParameterMatches(withRed, job).negative_skill).toBe('mismatch');
+    expect(computeParameterMatches(clean, job).negative_skill).toBe('match');
+  });
+
+  it('does not treat CV skills.soft free text as a mandatory tag match', () => {
+    const jobMandatory = {
+      skills: [{ key: 'technical_support_representative', name: 'תמיכה טכנית', mode: 'mandatory' }],
+    };
+    const cvTextOnly = {
+      tagDetails: [{ tagKey: 'IT Support', displayNameHe: 'IT Support', rawType: 'skill' }],
+      skills: { soft: ['תמיכה טכנית'] },
+    };
+    const withStructuredTag = {
+      tagDetails: [
+        { tagKey: 'technical_support_representative', displayNameHe: 'תמיכה טכנית', rawType: 'role' },
+      ],
+    };
+    expect(computeParameterMatches(cvTextOnly, jobMandatory).mandatory_skill).toBe('mismatch');
+    expect(computeParameterMatches(withStructuredTag, jobMandatory).mandatory_skill).toBe('match');
+  });
+});
 
 describe('parseCandidateAge', () => {
   it('uses explicit age field', () => {
@@ -50,7 +107,7 @@ describe('computeParameterMatches — traffic lights', () => {
     jobScope: 'משרה מלאה',
     preferredWorkingHours: '09:00-17:00',
     availability: 'מיידי',
-    skills: { technical: [{ key: 'excel', name: 'Excel' }] },
+    tagDetails: [{ tagKey: 'excel', displayNameHe: 'Excel', rawType: 'skill' }],
     languages: ['אנגלית'],
   };
 

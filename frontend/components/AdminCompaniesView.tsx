@@ -8,11 +8,16 @@ import {
     ChartBarIcon, BoltIcon, ShieldCheckIcon, Cog6ToothIcon, ChatBubbleBottomCenterTextIcon,
     BuildingOffice2Icon, ExclamationTriangleIcon, CheckCircleIcon, AdjustmentsHorizontalIcon, FunnelIcon,
     AvatarIcon, ArrowTopRightOnSquareIcon, UserGroupIcon, ArrowUpTrayIcon, ArrowDownTrayIcon,
-    EnvelopeIcon, PhoneIcon, PencilIcon,
+    EnvelopeIcon, PhoneIcon, PencilIcon, ArrowPathIcon,
 } from './Icons';
 import { GoogleGenAI, Chat, FunctionDeclaration, Type } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+    STICKY_TABLE_CLASS,
+    ADMIN_TABLE_SCROLL_CLASS,
+    stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import {
     fetchPicklistValuesByKey,
@@ -476,6 +481,37 @@ function organizationApiHeaders(jsonBody = false): Record<string, string> {
     return h;
 }
 
+type OrgMergePick = { id: string; name: string };
+
+async function fetchOrganizationsForMerge(
+    apiBase: string,
+    search: string,
+    limit = 20,
+): Promise<OrgMergePick[]> {
+    const params = new URLSearchParams();
+    params.set('page', '1');
+    params.set('limit', String(limit));
+    if (search.trim()) params.set('search', search.trim());
+    const res = await fetch(`${apiBase}/api/organizations?${params.toString()}`, {
+        credentials: 'include',
+        cache: 'no-store',
+        headers: organizationApiHeaders(),
+    });
+    if (!res.ok) return [];
+    const raw: unknown = await res.json();
+    const list = raw && typeof raw === 'object' && !Array.isArray(raw) && 'data' in (raw as object)
+        ? (raw as { data: Record<string, unknown>[] }).data
+        : Array.isArray(raw)
+            ? (raw as Record<string, unknown>[])
+            : [];
+    return list
+        .map((row) => ({
+            id: String(row.id ?? ''),
+            name: String(row.name ?? ''),
+        }))
+        .filter((row) => row.id && row.name);
+}
+
 /** Presign S3 upload for org logo; falls back to candidate upload-url when org route is not deployed yet. */
 async function requestOrganizationLogoPresign(
     apiBase: string,
@@ -649,7 +685,8 @@ const getCompanyTableColumnClass = (colId: string) => COMPANY_TABLE_COLUMN_WIDTH
 const COMPANY_ALIASES_COLUMN_CLASS = 'min-w-[420px] w-[420px] max-w-[420px]';
 const COMPANY_CHECKBOX_STICKY_CLASS =
     'sticky right-0 z-20 bg-bg-card border-l border-border-default shadow-[-2px_0_6px_-2px_rgba(0,0,0,0.08)]';
-const COMPANY_CHECKBOX_HEADER_STICKY_CLASS = `${COMPANY_CHECKBOX_STICKY_CLASS} bg-bg-subtle z-30`;
+const COMPANY_CHECKBOX_HEADER_STICKY_CLASS =
+    'sticky top-0 right-0 z-30 bg-bg-subtle shadow-[inset_0_-1px_0_0] shadow-border-default border-l border-border-default shadow-[-2px_0_6px_-2px_rgba(0,0,0,0.08)] w-12 text-center';
 
 const formatCompanyAliasesForExport = (company: Company) =>
     (company.aliases || []).map((alias) => String(alias).trim()).filter(Boolean).join(', ');
@@ -844,15 +881,15 @@ const CompanyUsersTab: React.FC<{ companyName: string; organizationId?: CompanyI
                 <p className="text-sm text-red-600 font-medium">{fetchError}</p>
             )}
 
-            <div className="border border-border-default rounded-xl overflow-hidden bg-bg-card">
-                <table className="w-full text-right">
-                    <thead className="bg-bg-subtle border-b border-border-default text-xs font-bold text-text-muted">
+            <div className="border border-border-default rounded-xl overflow-hidden bg-bg-card max-h-[min(70vh,720px)] overflow-y-auto">
+                <table className={`w-full text-right ${STICKY_TABLE_CLASS}`}>
+                    <thead className="border-b border-border-default text-xs font-bold text-text-muted">
                         <tr>
-                            <th className="p-4">שם מועמד/ת</th>
-                            <th className="p-4">תפקיד ב-{companyName}</th>
-                            <th className="p-4">שנות ניסיון בחברה</th>
-                            <th className="p-4">סטטוס</th>
-                            <th className="p-4 w-10"></th>
+                            <th className={`p-4 ${stickyTableHeaderCellClass()}`}>שם מועמד/ת</th>
+                            <th className={`p-4 ${stickyTableHeaderCellClass()}`}>תפקיד ב-{companyName}</th>
+                            <th className={`p-4 ${stickyTableHeaderCellClass()}`}>שנות ניסיון בחברה</th>
+                            <th className={`p-4 ${stickyTableHeaderCellClass()}`}>סטטוס</th>
+                            <th className={`p-4 w-10 ${stickyTableHeaderCellClass()}`}></th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-border-default">
@@ -1267,16 +1304,16 @@ const CompanyContactsTab: React.FC<{ organizationId?: CompanyId | null }> = ({ o
                     אין אנשי קשר עדיין
                 </div>
             ) : (
-                <div className="overflow-x-auto border border-border-default rounded-xl">
-                    <table className="w-full text-right text-sm">
-                        <thead className="bg-bg-subtle text-text-muted text-[10px] uppercase tracking-wider">
+                <div className="overflow-x-auto border border-border-default rounded-xl max-h-[min(60vh,640px)] overflow-y-auto">
+                    <table className={`w-full text-right text-sm ${STICKY_TABLE_CLASS}`}>
+                        <thead className="text-text-muted text-[10px] uppercase tracking-wider">
                             <tr>
-                                <th className="p-3 font-bold">שם</th>
-                                <th className="p-3 font-bold">תפקיד</th>
-                                <th className="p-3 font-bold">טלפון משרד</th>
-                                <th className="p-3 font-bold">נייד</th>
-                                <th className="p-3 font-bold">קישורים</th>
-                                <th className="p-3 font-bold w-24"></th>
+                                <th className={`p-3 font-bold ${stickyTableHeaderCellClass()}`}>שם</th>
+                                <th className={`p-3 font-bold ${stickyTableHeaderCellClass()}`}>תפקיד</th>
+                                <th className={`p-3 font-bold ${stickyTableHeaderCellClass()}`}>טלפון משרד</th>
+                                <th className={`p-3 font-bold ${stickyTableHeaderCellClass()}`}>נייד</th>
+                                <th className={`p-3 font-bold ${stickyTableHeaderCellClass()}`}>קישורים</th>
+                                <th className={`p-3 font-bold w-24 ${stickyTableHeaderCellClass()}`}></th>
                             </tr>
                         </thead>
                         <tbody>
@@ -2427,6 +2464,15 @@ const AdminCompaniesView: React.FC = () => {
 
     // Selection State
     const [selectedIds, setSelectedIds] = useState<Set<CompanyId>>(new Set());
+    const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+    const [mergeTargetId, setMergeTargetId] = useState<string | null>(null);
+    const [mergeTargetName, setMergeTargetName] = useState('');
+    const [mergeOrgSearch, setMergeOrgSearch] = useState('');
+    const [mergeOrgDebouncedSearch, setMergeOrgDebouncedSearch] = useState('');
+    const [mergeOrgResults, setMergeOrgResults] = useState<OrgMergePick[]>([]);
+    const [mergeOrgsLoading, setMergeOrgsLoading] = useState(false);
+    const [mergeError, setMergeError] = useState<string | null>(null);
+    const [isMergingOrgs, setIsMergingOrgs] = useState(false);
 
     const loadOrganizations = useCallback(async (opts?: {
         includeMerged?: boolean;
@@ -3396,9 +3442,117 @@ const AdminCompaniesView: React.FC = () => {
         downloadRowsAsXlsx(selected, allExportColumns, `companies_${stamp}.xlsx`);
     };
 
+    const selectedCompaniesForMerge = useMemo(
+        () => companies.filter((company) => selectedIds.has(company.id) && isPersistedOrganizationId(company.id)),
+        [companies, selectedIds],
+    );
+
+    const selectedMergeSourceIds = useMemo(
+        () => new Set(selectedCompaniesForMerge.map((company) => String(company.id))),
+        [selectedCompaniesForMerge],
+    );
+
+    useEffect(() => {
+        if (!isMergeModalOpen) return;
+        const timer = setTimeout(() => setMergeOrgDebouncedSearch(mergeOrgSearch.trim()), 350);
+        return () => clearTimeout(timer);
+    }, [isMergeModalOpen, mergeOrgSearch]);
+
+    useEffect(() => {
+        if (!isMergeModalOpen || !apiBase) {
+            setMergeOrgResults([]);
+            return;
+        }
+        if (mergeOrgDebouncedSearch.length <= 2) {
+            setMergeOrgResults([]);
+            return;
+        }
+        let cancelled = false;
+        setMergeOrgsLoading(true);
+        void (async () => {
+            try {
+                const rows = await fetchOrganizationsForMerge(apiBase, mergeOrgDebouncedSearch, 20);
+                if (cancelled) return;
+                setMergeOrgResults(
+                    rows.filter((row) => !selectedMergeSourceIds.has(row.id)),
+                );
+            } catch {
+                if (!cancelled) setMergeOrgResults([]);
+            } finally {
+                if (!cancelled) setMergeOrgsLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [isMergeModalOpen, apiBase, mergeOrgDebouncedSearch, selectedMergeSourceIds]);
+
+    const resetMergeModal = () => {
+        setIsMergeModalOpen(false);
+        setMergeTargetId(null);
+        setMergeTargetName('');
+        setMergeOrgSearch('');
+        setMergeOrgDebouncedSearch('');
+        setMergeOrgResults([]);
+        setMergeError(null);
+    };
+
+    const handleOpenMergeModal = () => {
+        if (selectedCompaniesForMerge.length === 0) {
+            alert('יש לבחור לפחות חברה אחת למיזוג.');
+            return;
+        }
+        setMergeError(null);
+        setMergeTargetId(null);
+        setMergeTargetName('');
+        setMergeOrgSearch('');
+        setMergeOrgDebouncedSearch('');
+        setMergeOrgResults([]);
+        setIsMergeModalOpen(true);
+    };
+
+    const handleConfirmOrgMerge = async () => {
+        if (!apiBase) {
+            alert('הגדר VITE_API_BASE כדי לבצע מיזוג.');
+            return;
+        }
+        if (!mergeTargetId) {
+            setMergeError('יש לבחור חברת יעד למיזוג.');
+            return;
+        }
+        if (selectedMergeSourceIds.has(mergeTargetId)) {
+            setMergeError('חברת היעד לא יכולה להיות בין החברות שנבחרו למיזוג.');
+            return;
+        }
+
+        setIsMergingOrgs(true);
+        setMergeError(null);
+        try {
+            const res = await fetch(`${apiBase}/api/organizations/merge`, {
+                method: 'POST',
+                credentials: 'include',
+                cache: 'no-store',
+                headers: organizationApiHeaders(true),
+                body: JSON.stringify({
+                    sourceOrganizationIds: selectedCompaniesForMerge.map((company) => String(company.id)),
+                    targetOrganizationId: mergeTargetId,
+                }),
+            });
+            if (!res.ok) {
+                const payload = await res.json().catch(() => ({}));
+                throw new Error((payload as { message?: string }).message || `HTTP ${res.status}`);
+            }
+            resetMergeModal();
+            setSelectedIds(new Set());
+            await loadOrganizations({ page: currentPage });
+        } catch (err) {
+            setMergeError(err instanceof Error ? err.message : 'מיזוג החברות נכשל');
+        } finally {
+            setIsMergingOrgs(false);
+        }
+    };
+
 
     return (
-        <div className="flex flex-col h-full bg-bg-default relative min-w-0">
+        <div className="bg-bg-default relative min-w-0">
              <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
             
             {/* 1. Header (Fixed at top) */}
@@ -3457,8 +3611,8 @@ const AdminCompaniesView: React.FC = () => {
             </div>
 
             {/* 2. Scrollable Content Area */}
-            <div className="flex-1 overflow-auto min-w-0">
-                <div className="p-6">
+            <div className="flex flex-col min-w-0">
+                <div className="p-6 pb-0 flex-shrink-0 space-y-6">
                     
                     {/* Filters Container */}
                     <div className="bg-bg-card border border-border-default rounded-2xl p-4 shadow-sm flex flex-col gap-4 mb-6">
@@ -3779,7 +3933,9 @@ const AdminCompaniesView: React.FC = () => {
                         )}
                         <style>{`.input-field { @apply w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none; }`}</style>
                     </div>
+                </div>
 
+                <div className="flex flex-col px-6 pb-6 min-w-0">
                     {/* Bulk Action Bar */}
                     {selectedIds.size > 0 && (
                         <div className="bg-primary-50 border border-primary-200 rounded-xl p-3 flex items-center justify-between animate-fade-in flex-shrink-0 mb-4">
@@ -3803,6 +3959,14 @@ const AdminCompaniesView: React.FC = () => {
                                         </>
                                     )}
                                 </button>
+                                <button
+                                    type="button"
+                                    onClick={handleOpenMergeModal}
+                                    className="flex items-center gap-2 bg-white text-text-default font-bold py-1.5 px-4 rounded-lg shadow-sm border border-border-default hover:bg-bg-hover transition"
+                                >
+                                    <ArrowPathIcon className="w-4 h-4 text-primary-600" />
+                                    <span>מיזוג לחברה אחרת</span>
+                                </button>
                                 <button 
                                     onClick={handleBulkDelete}
                                     className="flex items-center gap-2 bg-white text-red-600 font-bold py-1.5 px-4 rounded-lg shadow-sm border border-red-100 hover:bg-red-50 transition"
@@ -3824,13 +3988,12 @@ const AdminCompaniesView: React.FC = () => {
 
                     {/* Table View */}
                     {viewMode === 'table' ? (
-                        <div className="bg-bg-card border border-border-default rounded-xl shadow-sm flex flex-col min-w-0">
-                            <HorizontalScrollArea className="flex flex-col min-w-0" scrollClassName="overflow-x-auto w-full min-w-0 [scrollbar-width:thin]">
-                            <table className="w-full min-w-[2400px] text-right text-sm" dir="rtl">
-                                {/* Sticky Header */}
-                                <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default sticky top-0 z-10 shadow-sm">
+                        <div className="bg-bg-card border border-border-default rounded-xl shadow-sm min-w-0">
+                            <HorizontalScrollArea pinHeader scrollClassName={ADMIN_TABLE_SCROLL_CLASS}>
+                            <table className={`w-full min-w-[2400px] text-right text-sm ${STICKY_TABLE_CLASS}`} dir="rtl">
+                                <thead className="text-text-muted font-bold text-xs uppercase border-b border-border-default">
                                     <tr>
-                                        <th className={`p-4 w-12 text-center ${COMPANY_CHECKBOX_HEADER_STICKY_CLASS}`}>
+                                        <th className={`p-4 ${COMPANY_CHECKBOX_HEADER_STICKY_CLASS}`}>
                                             <input 
                                                 type="checkbox" 
                                                 onChange={handleSelectAll} 
@@ -3844,7 +4007,7 @@ const AdminCompaniesView: React.FC = () => {
                                             return (
                                                 <th 
                                                     key={col.id}
-                                                    className={`p-4 cursor-pointer hover:bg-bg-hover bg-bg-subtle ${draggingColumn === col.id ? 'dragging' : ''} ${getCompanyTableColumnClass(col.id)}`}
+                                                    className={`p-4 cursor-pointer hover:bg-bg-hover ${draggingColumn === col.id ? 'dragging' : ''} ${getCompanyTableColumnClass(col.id)} ${stickyTableHeaderCellClass()}`}
                                                     draggable
                                                     onDragStart={() => handleDragStart(index, col.id)} 
                                                     onDragEnter={() => handleDragEnter(index)} 
@@ -3855,7 +4018,7 @@ const AdminCompaniesView: React.FC = () => {
                                                 </th>
                                             )
                                         })}
-                                        <th className="p-4 w-20 bg-bg-subtle">
+                                        <th className={`p-4 w-20 ${stickyTableHeaderCellClass()}`}>
                                             <div className="relative" ref={settingsRef}>
                                                 <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title="התאם עמודות" className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
                                                 {isSettingsOpen && (
@@ -3873,7 +4036,7 @@ const AdminCompaniesView: React.FC = () => {
                                                 )}
                                             </div>
                                         </th>
-                                        <th className={`p-4 ${COMPANY_ALIASES_COLUMN_CLASS}`}>מילים נרדפות</th>
+                                        <th className={`p-4 ${stickyTableHeaderCellClass()} ${COMPANY_ALIASES_COLUMN_CLASS}`}>מילים נרדפות</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-subtle">
@@ -3957,7 +4120,7 @@ const AdminCompaniesView: React.FC = () => {
                             </HorizontalScrollArea>
                         </div>
                     ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 flex-1 min-h-0 overflow-y-auto">
                             {filteredCompanies.map(company => (
                                 <div 
                                     key={String(company.id)} 
@@ -4036,6 +4199,126 @@ const AdminCompaniesView: React.FC = () => {
                 company={candidatesListCompany}
                 onClose={() => setCandidatesListCompany(null)}
             />
+
+            {isMergeModalOpen && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
+                    onClick={() => { if (!isMergingOrgs) resetMergeModal(); }}
+                >
+                    <div
+                        className="bg-bg-card rounded-2xl p-6 shadow-xl w-full max-w-lg text-right border border-border-default"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-start justify-between gap-3 mb-4">
+                            <div>
+                                <h2 className="text-lg font-bold text-text-default">מיזוג לחברה אחרת</h2>
+                                <p className="text-sm text-text-muted mt-1">
+                                    {selectedCompaniesForMerge.length} חברות נבחרו למיזוג לחברת יעד אחת.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => { if (!isMergingOrgs) resetMergeModal(); }}
+                                className="text-text-muted hover:text-text-default"
+                                aria-label="סגור"
+                            >
+                                <XMarkIcon className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="mb-4 rounded-xl border border-border-default bg-bg-subtle p-3">
+                            <div className="text-[10px] font-bold uppercase tracking-wider text-text-muted mb-2">
+                                חברות למיזוג
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {selectedCompaniesForMerge.map((company) => (
+                                    <span
+                                        key={String(company.id)}
+                                        className="inline-flex items-center rounded-full bg-white border border-border-default px-3 py-1 text-xs font-semibold text-text-default"
+                                    >
+                                        {company.name}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="mb-4 rounded-xl border border-primary-100 bg-primary-50/60 p-3 text-xs text-text-default space-y-1">
+                            <p className="font-bold text-primary-800">מה יעבור לחברת היעד?</p>
+                            <p>א. אליאסים שלא קיימים כבר בחברת היעד (שם, שמות נוספים וכו&apos;)</p>
+                            <p>ב. מועמדים מקושרים מהחברות שנבחרו</p>
+                        </div>
+
+                        <label className="block text-xs font-bold text-text-muted mb-1.5">חברת יעד במאגר</label>
+                        <input
+                            type="text"
+                            placeholder="חיפוש חברה..."
+                            value={mergeOrgSearch}
+                            onChange={(e) => setMergeOrgSearch(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-xl px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary-500 outline-none mb-2"
+                            autoFocus
+                            disabled={isMergingOrgs}
+                        />
+                        <div className="w-full border border-border-default rounded-xl bg-bg-subtle mb-4 max-h-48 overflow-y-auto">
+                            {mergeOrgsLoading ? (
+                                <p className="text-center text-xs text-text-muted py-4">טוען חברות...</p>
+                            ) : mergeOrgDebouncedSearch.length <= 2 ? (
+                                <p className="text-center text-xs text-text-muted py-4">הקלד לפחות 3 תווים לחיפוש חברה</p>
+                            ) : mergeOrgResults.length === 0 ? (
+                                <p className="text-center text-xs text-text-muted py-4">לא נמצאו תוצאות</p>
+                            ) : (
+                                mergeOrgResults.map((org) => (
+                                    <button
+                                        key={org.id}
+                                        type="button"
+                                        onClick={() => {
+                                            setMergeTargetId(org.id);
+                                            setMergeTargetName(org.name);
+                                        }}
+                                        className={`w-full text-right px-4 py-2 text-sm font-medium transition-colors ${
+                                            mergeTargetId === org.id
+                                                ? 'bg-primary-100 text-primary-800 font-bold'
+                                                : 'text-text-default hover:bg-bg-hover'
+                                        }`}
+                                    >
+                                        {org.name}
+                                    </button>
+                                ))
+                            )}
+                        </div>
+
+                        {mergeTargetId && mergeTargetName ? (
+                            <div className="mb-4 text-xs text-primary-700 bg-primary-50 border border-primary-100 rounded-lg px-3 py-2">
+                                ✓ {selectedCompaniesForMerge.length} חברות ימוזגו לתוך &quot;{mergeTargetName}&quot;
+                            </div>
+                        ) : null}
+
+                        {mergeError ? (
+                            <div className="mb-4 text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                                {mergeError}
+                            </div>
+                        ) : null}
+
+                        <div className="flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={() => { if (!isMergingOrgs) resetMergeModal(); }}
+                                className="px-4 py-2 text-sm font-semibold text-text-muted hover:text-text-default"
+                                disabled={isMergingOrgs}
+                            >
+                                ביטול
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => void handleConfirmOrgMerge()}
+                                disabled={!mergeTargetId || isMergingOrgs}
+                                className="px-4 py-2 text-sm font-bold rounded-lg bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
+                            >
+                                {isMergingOrgs ? 'מבצע מיזוג...' : 'אשר ובצע מיזוג'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             <CompanyModal 
                 isOpen={isModalOpen}

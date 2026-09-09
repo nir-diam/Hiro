@@ -93,6 +93,21 @@ const TagAiDecision = sequelize.define(
       type: DataTypes.TEXT,
       allowNull: true,
     },
+    agentNotes: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: 'agent_notes',
+    },
+    agentVerdict: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: 'agent_verdict',
+    },
+    userVerdict: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: 'user_verdict',
+    },
   },
   {
     tableName: 'tag_ai_decisions',

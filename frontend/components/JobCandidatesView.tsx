@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, TableCellsIcon, Squares2X2Icon,
@@ -8,6 +8,13 @@ import {
     MapPinIcon, CheckCircleIcon, FlagIcon, ChevronLeftIcon
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDismiss } from './MatchScorePopup';
+import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
+import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
+import {
+    buildJobTagMatchCategories,
+    type JobTagMatchInput,
+} from '../utils/jobTagMatchCategories';
 
 type CandidateStatus = 'חדש' | 'סינון טלפוני' | 'ראיון' | 'הצעה' | 'נדחה';
 
@@ -75,7 +82,61 @@ type JobCandidateRow = {
     >>;
 };
 
-type JobGeoSlice = { city?: string; location?: string; region?: string };
+type JobGeoSlice = {
+    city?: string;
+    location?: string;
+    region?: string;
+    title?: string;
+    client?: string;
+    role?: string;
+    field?: string;
+    description?: string;
+    requirements?: unknown;
+    skills?: unknown;
+    languages?: unknown;
+};
+
+function jobRecordToTagMatchJob(job: JobGeoSlice | null): JobTagMatchInput {
+    const req = job?.requirements;
+    const requirements = Array.isArray(req) ? req.map((r) => String(r ?? '').trim()).filter(Boolean) : [];
+    return {
+        title: typeof job?.title === 'string' ? job.title : undefined,
+        role: typeof job?.role === 'string' ? job.role : undefined,
+        field: typeof job?.field === 'string' ? job.field : undefined,
+        skills: Array.isArray(job?.skills) ? (job.skills as JobTagMatchInput['skills']) : undefined,
+        languages: Array.isArray(job?.languages) ? (job.languages as JobTagMatchInput['languages']) : undefined,
+        requirements,
+    };
+}
+
+function stripGapChipLabel(label: string): string {
+    return label
+        .replace(/\s*\(חובה\)\s*$/u, '')
+        .replace(/\s*\(שלילי\)\s*$/u, '')
+        .trim();
+}
+
+function isNegativeGapChipLabel(label: string): boolean {
+    return /\(\s*שלילי\s*\)\s*$/u.test(label.trim());
+}
+
+function jobCandidateGapChipLabels(
+    categories: TagMatchCategory[],
+    parameterMatches: JobCandidateRow['parameterMatches'],
+    max = 8,
+): string[] {
+    const hideMandatoryGaps = parameterMatches?.mandatory_skill === 'match';
+    const out: string[] = [];
+    for (const cat of categories) {
+        for (const ch of cat.chips) {
+            if (ch.state !== 'gap' || ch.satisfiesRequirement) continue;
+            const negativeGap = isNegativeGapChipLabel(ch.label);
+            if (hideMandatoryGaps && !negativeGap) continue;
+            out.push(stripGapChipLabel(ch.label));
+        }
+    }
+    return out.slice(0, max);
+}
 
 const GEO_COORD_CACHE = new Map<string, { lat: number; lon: number } | null>();
 
@@ -239,91 +300,37 @@ const CandidateMatchSummaryLine: React.FC<{ candidate: JobCandidateRow }> = ({ c
     );
 };
 
-// --- AI MATCH POPUP COMPONENT ---
-const MatchAnalysisPopover: React.FC<{ 
-    candidate: any; 
-    onClose: () => void; 
-    onRecalculate: () => Promise<void>; 
-    lastAnalyzed: string; 
-}> = ({ candidate, onClose, onRecalculate, lastAnalyzed }) => {
-    const { t } = useLanguage();
-    const [isLoading, setIsLoading] = useState(false);
-
-    const handleRecalculate = async (e: React.MouseEvent) => {
-        e.stopPropagation();
-        setIsLoading(true);
-        await onRecalculate();
-        setIsLoading(false);
-    };
+const JobCandidateTagGapsBanner: React.FC<{
+    candidate: JobCandidateRow & Record<string, unknown>;
+    tagJobModel: JobTagMatchInput;
+    tagLoadingId: string | null;
+    onOpenTagPanel: (candidate: JobCandidateRow & Record<string, unknown>) => void;
+    t: (key: string, opts?: Record<string, string | number>) => string;
+}> = ({ candidate, tagJobModel, tagLoadingId, onOpenTagPanel, t }) => {
+    const cid = candidate.id != null ? String(candidate.id) : '';
+    const categories = buildJobTagMatchCategories(tagJobModel, candidate);
+    const gaps = jobCandidateGapChipLabels(categories, candidate.parameterMatches);
+    if (!gaps.length) return null;
 
     return (
-        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-80 bg-white rounded-2xl shadow-[0_20px_50px_rgba(0,0,0,0.3)] border border-border-default z-[200] p-5 text-right animate-fade-in" style={{ direction: 'rtl' }}>
-            <div className="absolute left-1/2 -translate-x-1/2 bottom-0 w-4 h-4 transform rotate-45 -mb-2 bg-white border-b border-r border-border-default"></div>
-            
-            <div className="flex justify-between items-center mb-4">
-                <div className="flex items-center gap-2">
-                    <div className="p-1.5 bg-primary-50 rounded-lg">
-                        <SparklesIcon className="w-5 h-5 text-primary-600" />
-                    </div>
-                    <h4 className="font-extrabold text-text-default text-base">{t('job_candidates.ai_analysis')}</h4>
-                </div>
-                <button onClick={(e) => { e.stopPropagation(); onClose(); }} className="p-1.5 rounded-full hover:bg-bg-hover transition-colors">
-                    <XMarkIcon className="w-4 h-4 text-text-muted" />
-                </button>
+        <div
+            className="mt-3 flex flex-wrap items-center justify-between gap-2 bg-red-50 p-2.5 rounded-lg border border-red-100 cursor-pointer"
+            onClick={(e) => e.stopPropagation()}
+        >
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+                <span className="font-bold text-red-600 text-[11px] shrink-0">
+                    {t('job.sonar.gaps_tags_heading')}
+                </span>
+                <span className="text-red-700 text-[11px]">{gaps.join(', ')}</span>
             </div>
-            
-            <div className="space-y-4">
-                {candidate.scoreBreakdown && typeof candidate.scoreBreakdown === 'object' && (
-                    <div className="space-y-2 text-xs">
-                        {[
-                            { label: 'סמנטי', val: candidate.scoreBreakdown.semanticScore ?? candidate.scoreBreakdown.vector, color: 'bg-purple-500' },
-                            { label: 'תגיות', val: candidate.scoreBreakdown.tagsScore ?? candidate.scoreBreakdown.tags, color: 'bg-blue-500' },
-                            { label: 'מיקום', val: candidate.scoreBreakdown.geoScore ?? candidate.scoreBreakdown.geo, color: 'bg-emerald-500' },
-                            { label: 'זיקה', val: candidate.scoreBreakdown.intentScore ?? candidate.scoreBreakdown.intent, color: 'bg-amber-500' },
-                        ].map((row) => typeof row.val === 'number' && (
-                            <div key={row.label} className="flex items-center gap-2">
-                                <span className="w-14 text-text-muted font-semibold">{row.label}</span>
-                                <div className="flex-1 h-1.5 bg-bg-subtle rounded-full overflow-hidden">
-                                    <div className={`h-full ${row.color} rounded-full`} style={{ width: `${Math.min(100, row.val)}%` }} />
-                                </div>
-                                <span className="w-8 text-left font-bold">{Math.round(row.val)}%</span>
-                            </div>
-                        ))}
-                        {(candidate.scoreBreakdown.penaltyReasons as { label: string; amount: number }[] | undefined)?.map((pr, i) => (
-                            <div key={i} className="flex justify-between text-rose-700 bg-rose-50 px-2 py-1 rounded font-semibold">
-                                <span>{pr.label}</span>
-                                <span>-{pr.amount}</span>
-                            </div>
-                        ))}
-                    </div>
-                )}
-                <p className="text-sm text-text-default leading-relaxed font-medium">
-                    ציון התאמה: <strong>{candidate.matchScore}%</strong>
-                    {candidate.scoreBreakdown?.coreScore != null && (
-                        <span className="text-text-muted"> (לפני קנסות: {Math.round(Number(candidate.scoreBreakdown.coreScore))}%)</span>
-                    )}
-                </p>
-                
-                <div className="pt-3 border-t border-border-subtle flex justify-between items-center">
-                    <div className="flex items-center gap-1.5 text-text-subtle">
-                         <FlagIcon className="w-3.5 h-3.5" />
-                         <span className="text-[10px] font-bold uppercase tracking-tight">{t('job_candidates.analyzed_at')} {lastAnalyzed}</span>
-                    </div>
-                </div>
-
-                <button 
-                    onClick={handleRecalculate}
-                    disabled={isLoading}
-                    className="w-full flex items-center justify-center gap-2 text-white bg-primary-600 py-2.5 px-4 rounded-xl hover:bg-primary-700 transition-all font-bold text-sm disabled:opacity-50 shadow-md shadow-primary-500/20"
-                >
-                    {isLoading ? (
-                        <ArrowPathIcon className="w-4 h-4 animate-spin" />
-                    ) : (
-                        <ArrowPathIcon className="w-4 h-4" />
-                    )}
-                    <span>{t('job_candidates.recalculate')}</span>
-                </button>
-            </div>
+            <button
+                type="button"
+                disabled={tagLoadingId === cid}
+                onClick={() => void onOpenTagPanel(candidate)}
+                className="text-[10px] font-bold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md bg-white border border-border-default shadow-sm hover:border-primary-200 transition-colors shrink-0 whitespace-nowrap"
+            >
+                {tagLoadingId === cid ? t('job.sonar.loading_tags') : t('job.sonar.gaps_more_details')}
+            </button>
         </div>
     );
 };
@@ -347,8 +354,63 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
     const [statusFilter, setStatusFilter] = useState('הכל');
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [returnMonths, setReturnMonths] = useState(3);
-    const [activePopoverId, setActivePopoverId] = useState<string | null>(null);
+    const [activeMatchPopup, setActiveMatchPopup] = useState<{ id: string; x: number; y: number } | null>(null);
+    const [tagPanelCategories, setTagPanelCategories] = useState<TagMatchCategory[] | null>(null);
+    const [tagPanelTitle, setTagPanelTitle] = useState('');
+    const [tagLoadingId, setTagLoadingId] = useState<string | null>(null);
     const clientGeoRunRef = useRef(0);
+
+    const tagJobModel = useMemo(() => jobRecordToTagMatchJob(job), [job]);
+
+    const authHeaders = useCallback((): HeadersInit => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: HeadersInit = { 'Content-Type': 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        return headers;
+    }, []);
+
+    const enrichCandidateForTags = useCallback(
+        async (c: Record<string, unknown>): Promise<Record<string, unknown>> => {
+            const cid = c.id != null ? String(c.id) : '';
+            const hasDetails = Array.isArray(c.tagDetails) && (c.tagDetails as unknown[]).length > 0;
+            if (!apiBase || !cid || hasDetails) return c;
+            try {
+                const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(cid)}`, {
+                    headers: authHeaders(),
+                    cache: 'no-store',
+                });
+                if (!res.ok) return c;
+                const full = await res.json();
+                return full && typeof full === 'object' ? { ...c, ...full } : c;
+            } catch {
+                return c;
+            }
+        },
+        [apiBase, authHeaders],
+    );
+
+    const openTagPanel = useCallback(
+        async (candidate: JobCandidateRow & Record<string, unknown>) => {
+            const cid = candidate.id != null ? String(candidate.id) : '';
+            const name = String(candidate.name ?? '').trim() || cid;
+            setTagPanelTitle(name);
+            setTagLoadingId(cid);
+            setTagPanelCategories(null);
+            try {
+                const cand = await enrichCandidateForTags(candidate);
+                const categories = buildJobTagMatchCategories(tagJobModel, cand);
+                setTagPanelCategories(categories);
+            } finally {
+                setTagLoadingId(null);
+            }
+        },
+        [enrichCandidateForTags, tagJobModel],
+    );
+
+    const closeTagPanel = useCallback(() => {
+        setTagPanelCategories(null);
+        setTagPanelTitle('');
+    }, []);
 
     useEffect(() => {
         if (!apiBase || !jobId) return;
@@ -371,6 +433,14 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                     city: payload.job?.city,
                     location: payload.job?.location,
                     region: payload.job?.region,
+                    title: payload.job?.title,
+                    client: payload.job?.client,
+                    role: payload.job?.role,
+                    field: payload.job?.field,
+                    description: payload.job?.description,
+                    requirements: payload.job?.requirements,
+                    skills: payload.job?.skills,
+                    languages: payload.job?.languages,
                 });
                 setCandidates(Array.isArray(payload.candidates) ? payload.candidates : []);
                 const rm = Number(payload.returnMonths);
@@ -421,8 +491,25 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
 
     const handleScoreClick = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
-        setActivePopoverId(activePopoverId === id ? null : id);
+        if (activeMatchPopup?.id === id) {
+            setActiveMatchPopup(null);
+            return;
+        }
+        setActiveMatchPopup({ id, ...matchScorePopupPositionFromEvent(e) });
     };
+
+    useMatchScorePopupDismiss(Boolean(activeMatchPopup), () => setActiveMatchPopup(null));
+
+    const topMatchCandidate = useMemo(() => {
+        if (!filteredCandidates.length) return null;
+        return [...filteredCandidates].sort(
+            (a, b) => (Number(b.matchScore) || 0) - (Number(a.matchScore) || 0),
+        )[0];
+    }, [filteredCandidates]);
+
+    const activePopupCandidate = activeMatchPopup
+        ? filteredCandidates.find((c) => String(c.id) === activeMatchPopup.id)
+        : null;
 
     const jobGeoQuery = useMemo(() => buildJobGeoQuery(job), [job]);
     const jobHasGeoTarget = Boolean(jobGeoQuery.trim());
@@ -497,6 +584,18 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                         <MapPinIcon className="w-3 h-3" />
                         {t('job_candidates.location')} {jobAddress}
                     </span>
+                    {topMatchCandidate ? (
+                        <button
+                            type="button"
+                            data-match-score-trigger
+                            onClick={(e) => handleScoreClick(e, String(topMatchCandidate.id))}
+                            className="inline-flex items-center gap-1.5 text-xs font-bold text-purple-700 bg-purple-50 hover:bg-purple-100 border border-purple-100 px-2.5 py-1 rounded-full transition-colors"
+                            title={t('job_candidates.col_match')}
+                        >
+                            <SparklesIcon className="w-3.5 h-3.5" />
+                            {topMatchCandidate.matchScore}%
+                        </button>
+                    ) : null}
                 </div>
 
                 <div className="flex items-center gap-3">
@@ -630,8 +729,10 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                             <div className="relative flex flex-col gap-1 min-w-[140px]">
                                                 <div className="flex items-center gap-2">
                                                 <button 
+                                                    type="button"
+                                                    data-match-score-trigger
                                                     className="flex items-center gap-2 group/score outline-none"
-                                                    onClick={(e) => handleScoreClick(e, c.id)}
+                                                    onClick={(e) => handleScoreClick(e, String(c.id))}
                                                 >
                                                     <div
                                                         className={`w-16 h-1.5 rounded-full overflow-hidden ${dupGrey ? 'bg-neutral-200' : 'bg-gray-100'}`}
@@ -643,16 +744,15 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                                     </div>
                                                     <span className={`font-bold text-xs ${dupGrey ? 'text-neutral-400' : ''}`}>{c.matchScore}%</span>
                                                 </button>
-                                                {activePopoverId === c.id && (
-                                                    <MatchAnalysisPopover 
-                                                        candidate={c} 
-                                                        lastAnalyzed="28/07/2025"
-                                                        onClose={() => setActivePopoverId(null)}
-                                                        onRecalculate={async () => { await new Promise(r => setTimeout(r, 1000)); }}
-                                                    />
-                                                )}
                                                 </div>
                                                 <CandidateMatchSummaryLine candidate={c} />
+                                                <JobCandidateTagGapsBanner
+                                                    candidate={c}
+                                                    tagJobModel={tagJobModel}
+                                                    tagLoadingId={tagLoadingId}
+                                                    onOpenTagPanel={openTagPanel}
+                                                    t={t}
+                                                />
                                             </div>
                                         </td>
                                         <td className={`p-4 text-xs ${dupGrey ? 'text-neutral-400' : 'text-text-muted'}`}>{c.source}</td>
@@ -719,24 +819,18 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                         </div>
                                         <div className="relative">
                                             <button 
+                                                type="button"
+                                                data-match-score-trigger
                                                 className={
                                                     dupGrey
                                                         ? 'bg-neutral-200/80 text-neutral-400 font-black text-xs px-2 py-1 rounded-lg border border-neutral-300 flex items-center gap-1 hover:bg-neutral-200 transition-colors'
                                                         : 'bg-primary-50 text-primary-700 font-black text-xs px-2 py-1 rounded-lg border border-primary-100 flex items-center gap-1 hover:bg-primary-100 transition-colors'
                                                 }
-                                                onClick={(e) => handleScoreClick(e, c.id)}
+                                                onClick={(e) => handleScoreClick(e, String(c.id))}
                                             >
                                                 <SparklesIcon className="w-3 h-3"/>
                                                 {c.matchScore}%
                                             </button>
-                                            {activePopoverId === c.id && (
-                                                <MatchAnalysisPopover 
-                                                    candidate={c} 
-                                                    lastAnalyzed="28/07/2025"
-                                                    onClose={() => setActivePopoverId(null)}
-                                                    onRecalculate={async () => { await new Promise(r => setTimeout(r, 1000)); }}
-                                                />
-                                            )}
                                         </div>
                                     </div>
                                     
@@ -761,6 +855,14 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                     </div>
 
                                     <CandidateMatchSummaryLine candidate={c} />
+
+                                    <JobCandidateTagGapsBanner
+                                        candidate={c}
+                                        tagJobModel={tagJobModel}
+                                        tagLoadingId={tagLoadingId}
+                                        onOpenTagPanel={openTagPanel}
+                                        t={t}
+                                    />
 
                                     <div
                                         className={`flex items-center justify-between mt-6 pt-4 border-t ${dupGrey ? 'border-neutral-200' : 'border-border-subtle'}`}
@@ -796,6 +898,32 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                     </div>
                 )}
             </main>
+
+            {activeMatchPopup && activePopupCandidate ? (
+                <MatchScorePopup
+                    position={{ x: activeMatchPopup.x, y: activeMatchPopup.y }}
+                    onClose={() => setActiveMatchPopup(null)}
+                    matchScore={Number(activePopupCandidate.matchScore) || 0}
+                    jobTitle={job?.title || null}
+                    scoreBreakdown={(activePopupCandidate.scoreBreakdown as MatchScoreBreakdownData | null) ?? null}
+                    parameterMatches={activePopupCandidate.parameterMatches ?? null}
+                    job={(job as Record<string, unknown> | null) ?? null}
+                    candidate={activePopupCandidate}
+                    candidateName={activePopupCandidate.name || null}
+                    candidateTitle={activePopupCandidate.title || null}
+                    professionalSummary={activePopupCandidate.professionalSummary || null}
+                />
+            ) : null}
+
+            {tagPanelCategories ? (
+                <TagMatchPanel
+                    isOpen
+                    onClose={closeTagPanel}
+                    title={tagPanelTitle}
+                    subtitle={job?.client || undefined}
+                    categories={tagPanelCategories}
+                />
+            ) : null}
         </div>
     );
 };

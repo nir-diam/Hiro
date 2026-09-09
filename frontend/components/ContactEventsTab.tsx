@@ -8,6 +8,10 @@ type Props = {
   organizationName?: string | null;
   contactId?: string;
   contactName?: string;
+  contactProcessPipelineId?: string | null;
+  contactProcessStageId?: string | null;
+  defaultActionPipelineId?: string | null;
+  defaultProcessStageId?: string | null;
 };
 
 const ContactEventsTab: React.FC<Props> = ({
@@ -17,6 +21,10 @@ const ContactEventsTab: React.FC<Props> = ({
   organizationName = null,
   contactId,
   contactName,
+  contactProcessPipelineId = null,
+  contactProcessStageId = null,
+  defaultActionPipelineId = null,
+  defaultProcessStageId = null,
 }) => {
   const scopedOrganizationName =
     (organizationName && String(organizationName).trim())
@@ -42,6 +50,11 @@ const ContactEventsTab: React.FC<Props> = ({
       scopeContactName={contactName}
       hideFilters
       alwaysShowDetails
+      contactProcessPipelineId={contactProcessPipelineId}
+      contactProcessStageId={contactProcessStageId}
+      defaultActionPipelineId={defaultActionPipelineId}
+      defaultProcessStageId={defaultProcessStageId}
+      autoSelectFirstEvent={Boolean(defaultActionPipelineId)}
     />
   );
 };

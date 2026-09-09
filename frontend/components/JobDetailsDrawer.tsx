@@ -7,6 +7,7 @@ import {
     SparklesIcon, EnvelopeIcon, DocumentTextIcon
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { jobStatusApiToDisplay } from '../utils/jobStatusLabels';
 import {
     normalizeJobEventFromApi,
     type JobEvent,
@@ -63,6 +64,9 @@ const DetailsContent: React.FC<{ job: Job }> = ({ job }) => {
         if (!min && !max) return 'לא צוין';
         return `${(min/1000)}k - ${(max/1000)}k ₪`;
     };
+
+    const displayStatus = jobStatusApiToDisplay(job.status);
+    const isOpenStatus = job.status === 'פתוחה' || job.status === 'פעילה';
 
     // Calculate days open
     const daysOpen = Math.floor((new Date().getTime() - new Date(job.openDate).getTime()) / (1000 * 60 * 60 * 24));
@@ -144,7 +148,7 @@ const DetailsContent: React.FC<{ job: Job }> = ({ job }) => {
                          <span className="text-[10px] font-bold text-text-muted uppercase tracking-wider mb-0.5">סטטוס</span>
                          <div className="flex items-center gap-1.5 font-semibold text-sm text-text-default">
                              <ClockIcon className="w-4 h-4 text-amber-500"/>
-                             <span>פתוחה {daysOpen} ימים</span>
+                             <span>{displayStatus}{isOpenStatus ? ` · ${daysOpen} ימים` : ''}</span>
                          </div>
                     </div>
                 </div>

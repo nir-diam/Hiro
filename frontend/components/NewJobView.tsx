@@ -15,10 +15,12 @@ import TagSelectorModal, { TagOption as GlobalTagOption } from './TagSelectorMod
 import { GoogleGenAI, Type } from '@google/genai';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
+import SearchableSelect from './SearchableSelect';
 import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
+import { jobStatusApiToForm, jobStatusFormToApi } from '../utils/jobStatusLabels';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
 import { saveJobPublication, patchJobBoardSources } from '../services/publishingApi';
 import type { DuplicatePublicationSeed } from '../utils/duplicateJob';
@@ -1087,18 +1089,31 @@ const DoubleRangeSlider: React.FC<{
     );
 };
 
-// Same categories/colors as CandidateProfile - border + text only, no background fill
-const SMART_TAG_TYPE_STYLES: Record<SmartTagType, string> = {
-    role: "bg-transparent text-primary-600 border-primary-400 font-bold",
-    seniority: "bg-transparent text-primary-600 border-primary-300 font-bold",
-    skill: "bg-transparent text-sky-700 border-sky-200 font-semibold",
-    tool: "bg-transparent text-gray-700 border-gray-300 font-semibold",
-    soft: "bg-transparent text-slate-600 border-slate-200 italic font-medium",
-    industry: "bg-transparent text-emerald-700 border-emerald-200 font-bold",
-    certification: "bg-transparent text-orange-700 border-orange-200 font-bold",
-    language: "bg-transparent text-pink-600 border-pink-200 font-medium",
-    degree: "bg-transparent text-orange-700 border-orange-200 font-bold",
-    education: "bg-transparent text-orange-700 border-orange-200 font-bold",
+// Same categories/colors as CandidateProfile - text + default border; mode overrides border color
+const SMART_TAG_TYPE_TEXT_STYLES: Record<SmartTagType, string> = {
+    role: "text-primary-600 font-bold",
+    seniority: "text-primary-600 font-bold",
+    skill: "text-sky-700 font-semibold",
+    tool: "text-gray-700 font-semibold",
+    soft: "text-slate-600 italic font-medium",
+    industry: "text-emerald-700 font-bold",
+    certification: "text-orange-700 font-bold",
+    language: "text-pink-600 font-medium",
+    degree: "text-orange-700 font-bold",
+    education: "text-orange-700 font-bold",
+};
+
+const SMART_TAG_TYPE_BORDER_STYLES: Record<SmartTagType, string> = {
+    role: "border-primary-400",
+    seniority: "border-primary-300",
+    skill: "border-sky-200",
+    tool: "border-gray-300",
+    soft: "border-slate-200",
+    industry: "border-emerald-200",
+    certification: "border-orange-200",
+    language: "border-pink-200",
+    degree: "border-orange-200",
+    education: "border-orange-200",
 };
 
 const SMART_TAG_TYPE_LABELS: Record<SmartTagType, string> = {
@@ -1129,21 +1144,99 @@ const mapLlmModeToTagMode = (m: unknown): TagMode => {
     return 'normal';
 };
 
+/** User-facing chip mode (green/red border) — distinct from LLM aiMode (explicit/predicted). */
+function normalizeTagModeFromApi(raw: unknown): TagMode {
+    const s = String(raw ?? '').trim().toLowerCase();
+    if (s === 'mandatory' || s === 'required') return 'mandatory';
+    if (s === 'negative' || s === 'exclusion') return 'negative';
+    if (s === 'normal') return 'normal';
+    return mapLlmModeToTagMode(raw);
+}
+
+function mapApiSkillRowToJobSkill(s: any, index: number): JobSkill {
+    const llmModeRaw =
+        s?.aiMode ??
+        s?.raw_type_reason ??
+        s?.rawTypeReason ??
+        (typeof s?.mode === 'string' &&
+        !['mandatory', 'negative', 'normal', 'required', 'exclusion'].includes(String(s.mode).toLowerCase())
+            ? s.mode
+            : undefined);
+    return {
+        id: String(s?.id ?? `loaded-${index}`),
+        name: String(s?.name ?? ''),
+        key: typeof s?.key === 'string' && s.key.trim() ? s.key.trim() : undefined,
+        mode: normalizeTagModeFromApi(s?.mode),
+        source: (s?.source as TagSource) || 'manual',
+        tagType: (() => {
+            const t = String(s?.tagType || s?.tag_type || s?.raw_type || 'skill');
+            if (t === 'soft_skill') return 'soft';
+            if (t === 'degree' || t === 'education') return 'certification';
+            return t;
+        })() as SmartTagType | undefined,
+        tag_reason: typeof s?.tag_reason === 'string' ? s.tag_reason : undefined,
+        quote: typeof s?.quote === 'string' && s.quote.trim() ? s.quote : undefined,
+        relevance_score:
+            typeof s?.relevance_score === 'number'
+                ? s.relevance_score
+                : s?.relevance_score != null
+                  ? Number(s.relevance_score)
+                  : s?.confidence_score != null
+                    ? Number(s.confidence_score)
+                    : undefined,
+        aiMode: llmModeRaw != null && String(llmModeRaw).trim() ? String(llmModeRaw).trim() : undefined,
+    };
+}
+
+function serializeSkillsForJobApi(skills: JobSkill[] | undefined): JobSkill[] {
+    return (Array.isArray(skills) ? skills : []).map((s) => ({
+        id: s.id,
+        name: String(s.name || '').trim(),
+        key: String(s.key || s.name || '').trim(),
+        mode: normalizeTagModeFromApi(s.mode),
+        source: s.source || 'manual',
+        tagType: s.tagType,
+        tag_reason: s.tag_reason,
+        quote: s.quote,
+        relevance_score: s.relevance_score,
+        aiMode: s.aiMode,
+    }));
+}
+
+/** After save, prefer persisted mandatory/negative from API; keep local toggle if API still says normal. */
+function mergeJobSkillsWithLocalModes(fromApi: JobSkill[], local: JobSkill[]): JobSkill[] {
+    const localByKey = new Map(local.map((t) => [String(t.key || t.name), t]));
+    return fromApi.map((apiTag) => {
+        const k = String(apiTag.key || apiTag.name);
+        const prev = localByKey.get(k);
+        if (!prev) return apiTag;
+        const apiMode = normalizeTagModeFromApi(apiTag.mode);
+        const localMode = normalizeTagModeFromApi(prev.mode);
+        const mode =
+            apiMode === 'mandatory' || apiMode === 'negative'
+                ? apiMode
+                : localMode === 'mandatory' || localMode === 'negative'
+                  ? localMode
+                  : 'normal';
+        return { ...apiTag, mode, id: prev.id || apiTag.id };
+    });
+}
+
 const SmartTag: React.FC<{ 
     tag: JobSkill; 
     onToggle: (id: string) => void; 
     onRemove: (id: string) => void; 
 }> = ({ tag, onToggle, onRemove }) => {
     const type = tag.tagType ?? 'skill';
-    const styleByType = SMART_TAG_TYPE_STYLES[type];
+    const textStyle = SMART_TAG_TYPE_TEXT_STYLES[type];
     const titleText = SMART_TAG_TYPE_LABELS[type];
 
-    const modeBorderClass =
+    const borderClass =
         tag.mode === 'mandatory'
             ? 'border-green-500'
             : tag.mode === 'negative'
                 ? 'border-red-500'
-                : '';
+                : SMART_TAG_TYPE_BORDER_STYLES[type];
 
     type TooltipLine =
         | { kind: 'header'; text: string }
@@ -1152,6 +1245,11 @@ const SmartTag: React.FC<{
 
     const tooltipLines: TooltipLine[] = [
         { kind: 'header' as const, text: titleText },
+        tag.mode === 'mandatory'
+            ? { kind: 'meta' as const, text: 'סינון קשה: רק מועמדים עם התגית' }
+            : tag.mode === 'negative'
+              ? { kind: 'meta' as const, text: 'סינון קשה: מסיר מועמדים עם התגית' }
+              : { kind: 'meta' as const, text: 'ציון רך: משפיע על התאמת תגיות' },
         tag.aiMode ? { kind: 'meta' as const, text: `מצב מקור: ${tag.aiMode}` } : null,
         tag.relevance_score != null && tag.relevance_score !== undefined
             ? { kind: 'meta' as const, text: `ציון רלוונטיות: ${tag.relevance_score}/10` }
@@ -1168,7 +1266,7 @@ const SmartTag: React.FC<{
     return (
         <div className="relative inline-flex group">
             <div
-                className={`inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-pointer select-none border whitespace-nowrap hover:shadow-md ${styleByType} ${modeBorderClass}`}
+                className={`inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-pointer select-none border whitespace-nowrap hover:shadow-md bg-transparent ${textStyle} ${borderClass}`}
                 onClick={() => onToggle(tag.id)}
                 title={tooltipLines.length ? undefined : `${titleText} - לחץ לשינוי מצב`}
                 aria-label={tooltipLines.length ? ariaLabel : undefined}
@@ -1687,21 +1785,6 @@ const formatJobFieldLabel = (jobField: SelectedJobField | null | undefined): str
 const isJobFieldComplete = (jobField: SelectedJobField | null | undefined): boolean =>
     Boolean(jobField?.category?.trim() && jobField?.role?.trim());
 
-/** DB ENUM + UI label: פעילה in the form maps to פתוחה in the API (see Job model). */
-const jobStatusApiToForm = (status: string | undefined | null): string => {
-    const s = String(status ?? '').trim();
-    if (s === 'פתוחה') return 'פעילה';
-    if (s === 'טיוטה' || s === 'מוקפאת' || s === 'מאוישת') return s;
-    return 'טיוטה';
-};
-
-const jobStatusFormToApi = (status: string | undefined | null): string => {
-    const s = String(status ?? '').trim();
-    if (s === 'פעילה') return 'פתוחה';
-    if (s === 'טיוטה' || s === 'מוקפאת' || s === 'מאוישת' || s === 'פתוחה') return s;
-    return 'טיוטה';
-};
-
 const sections = [
     { id: 'general-info', titleKey: 'new_job.section_general', icon: <BriefcaseIcon className="w-5 h-5"/> },
     { id: 'description-content', titleKey: 'new_job.section_description', icon: <PencilIcon className="w-5 h-5"/> },
@@ -1835,6 +1918,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     // filteredOrgOptions: self-name is already excluded at fetch time; alias for clarity.
     const filteredOrgOptions = orgOptions;
 
+    const orgSearchableOptions = useMemo(
+        () => filteredOrgOptions.map((o) => ({ id: o.id, label: o.label })),
+        [filteredOrgOptions],
+    );
+
     // When org options load and we already have a selectedOrg.orgId (from an existing job),
     // sync formData.clientName to the org's actual name from the options list.
     useEffect(() => {
@@ -1877,6 +1965,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const navRef = useRef<HTMLDivElement>(null);
     const formDataRef = useRef(formData);
     formDataRef.current = formData;
+    const loadedJobKeyRef = useRef<string>('');
     const drivingLicensePicklistRef = useRef<PicklistValueRow[]>(
         sortDrivingLicensePicklistRows(DRIVING_LICENSE_FALLBACK),
     );
@@ -1919,31 +2008,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
              const candidateLocations = deriveLocationsFromJob(sourceJob);
              const contactsFromJob = jobContactsToKeys(sourceJob.contacts);
             const hydratedSkills: JobSkill[] = Array.isArray(sourceJob.skills)
-                ? sourceJob.skills.map((s: any, i: number) => ({
-                      id: String(s.id ?? `loaded-${i}`),
-                      name: String(s.name ?? ''),
-                      key: s.key,
-                      mode: ['mandatory', 'negative', 'normal'].includes(s.mode)
-                          ? (s.mode as TagMode)
-                          : mapLlmModeToTagMode(s.mode),
-                      source: (s.source as TagSource) || 'manual',
-                      tagType: (() => {
-                          const t = String(s.tagType || 'skill');
-                          if (t === 'soft_skill') return 'soft';
-                          if (t === 'degree' || t === 'education') return 'certification';
-                          return t;
-                      })() as SmartTagType | undefined,
-                      tag_reason: typeof s.tag_reason === 'string' ? s.tag_reason : undefined,
-                      quote: typeof s.quote === 'string' && s.quote.trim() ? s.quote : undefined,
-                      relevance_score:
-                          typeof s.relevance_score === 'number'
-                              ? s.relevance_score
-                              : s.relevance_score != null
-                                ? Number(s.relevance_score)
-                                : undefined,
-                      aiMode: s.aiMode != null ? String(s.aiMode) : s.mode != null ? String(s.mode) : undefined,
-                  }))
+                ? sourceJob.skills.map((s: any, i: number) => mapApiSkillRowToJobSkill(s, i))
                 : [];
+            const jobKey = sourceJob.id != null ? String(sourceJob.id) : '';
+            const sameJobReload = Boolean(jobKey && loadedJobKeyRef.current === jobKey);
+
+            if (sameJobReload && hydratedSkills.length) {
+                setFormData((prev) => ({
+                    ...prev,
+                    skills: mergeJobSkillsWithLocalModes(hydratedSkills, prev.skills || []),
+                }));
+                return;
+            }
+            if (jobKey) loadedJobKeyRef.current = jobKey;
 
             const loadedField = sourceJob.field != null ? String(sourceJob.field).trim() : '';
             const loadedRole = sourceJob.role != null ? String(sourceJob.role).trim() : '';
@@ -2351,6 +2428,21 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             }
         },
         [orgOptions, isTenantUser, user?.clientId, apiBase],
+    );
+
+    const handleOrgSelect = useCallback(
+        (orgId: string | number | null) => {
+            if (orgId == null) {
+                setFormData((prev) => ({ ...prev, clientName: '' }));
+                applyOrgSelectionFromLabel('');
+                return;
+            }
+            const match = orgOptions.find((o) => String(o.id) === String(orgId));
+            if (!match) return;
+            setFormData((prev) => ({ ...prev, clientName: match.label }));
+            applyOrgSelectionFromLabel(match.label);
+        },
+        [orgOptions, applyOrgSelectionFromLabel],
     );
 
     useEffect(() => {
@@ -2990,13 +3082,6 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         setFormData(prev => ({ ...prev, [name]: processedValue }));
     };
 
-    // Dedicated handler for the organization dropdown — also resolves orgId + clientId.
-    const handleOrgChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const orgLabel = e.target.value;
-        setFormData(prev => ({ ...prev, clientName: orgLabel }));
-        applyOrgSelectionFromLabel(orgLabel);
-    };
-
     const handleSliderChange = (name: string, value: number) => {
         setFormData(prev => ({ ...prev, [name]: value }));
     };
@@ -3085,13 +3170,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         setFormData(prev => ({
             ...prev,
             skills: prev.skills.map(tag => {
-                if (tag.id === id) {
-                    const nextMode: TagMode = 
-                        tag.mode === 'normal' ? 'mandatory' : 
-                        tag.mode === 'mandatory' ? 'negative' : 'normal';
-                    return { ...tag, mode: nextMode };
-                }
-                return tag;
+                if (String(tag.id) !== String(id)) return tag;
+                const current = normalizeTagModeFromApi(tag.mode);
+                const nextMode: TagMode =
+                    current === 'normal' ? 'mandatory' :
+                    current === 'mandatory' ? 'negative' : 'normal';
+                return { ...tag, mode: nextMode };
             })
         }));
     };
@@ -3425,12 +3509,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             telephoneQuestions: data.telephoneQuestions,
             digitalQuestions: data.digitalQuestions,
             languages: data.languages,
-            skills: Array.isArray(data.skills)
-                ? data.skills.map((s) => ({
-                      ...s,
-                      key: s.key || (typeof s.name === 'string' ? s.name.trim() : ''),
-                  }))
-                : [],
+            skills: serializeSkillsForJobApi(data.skills),
         };
     };
 
@@ -3704,20 +3783,15 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                             ) : (
                                 <div className="flex items-center gap-2">
                                     <div className="relative flex-grow">
-                                        <select
-                                            name="clientName"
-                                            value={formData.clientName}
-                                            onChange={handleOrgChange}
+                                        <SearchableSelect
+                                            options={orgSearchableOptions}
+                                            value={selectedOrg.orgId}
+                                            onChange={handleOrgSelect}
+                                            placeholder={orgOptionsLoading ? 'טוען חברות...' : 'בחר חברה...'}
                                             disabled={orgOptionsLoading}
-                                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm disabled:opacity-60"
-                                        >
-                                            <option value="">
-                                                {orgOptionsLoading ? 'טוען חברות...' : 'בחר חברה...'}
-                                            </option>
-                                            {filteredOrgOptions.map((o) => (
-                                                <option key={o.id} value={o.label}>{o.label}</option>
-                                            ))}
-                                        </select>
+                                            icon={<BuildingOffice2Icon className="w-4 h-4" />}
+                                            className="w-full"
+                                        />
                                         {orgOptionsLoading && (
                                             <div className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin pointer-events-none" />
                                         )}
@@ -3822,7 +3896,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                 <option value="טיוטה">טיוטה</option>
                                 <option value="פעילה">פעילה</option>
                                 <option value="מוקפאת">מוקפאת</option>
-                                <option value="מאוישת">מאוישת</option>
+                                <option value="סגורה">סגורה</option>
                             </select>
                        </div>
 

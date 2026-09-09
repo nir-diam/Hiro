@@ -8,7 +8,9 @@ import {
     ChevronUpIcon, ChevronDownIcon, CalendarIcon,
     NoSymbolIcon, ArrowPathIcon, ArrowUturnLeftIcon,
     ArrowDownTrayIcon,
+    ClockIcon,
 } from './Icons';
+import AgentDecisionHistoryDrawer from './AgentDecisionHistoryDrawer';
 import { useLanguage } from '../context/LanguageContext';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
 import JobDetailsDrawer from './JobDetailsDrawer';
@@ -19,11 +21,17 @@ import {
     saveTagCorrectionAgentEnabled,
     approveTagAiDecision,
     updateTagAiDecisionComments,
+    updateTagAiDecisionFields,
     type TagAiDecisionDto,
     type TagManualApprovalStatus,
     type CandidateTagMatchDto,
 } from '../services/tagCorrectionsApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+    STICKY_TABLE_CLASS,
+    ADMIN_TABLE_SCROLL_CLASS,
+    stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
 import DateRangeSelector, { type DateRange } from './DateRangeSelector';
 
 function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: string } {
@@ -72,6 +80,7 @@ function formatTagHesitationForExport(r: TagAiDecisionDto): string {
 }
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 import DebouncedCommentsTextarea from './DebouncedCommentsTextarea';
+import { AI_DECISION_USER_NOTES_FIELD_PROPS } from '../utils/agentDecisionNotes';
 
 const TAG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -272,6 +281,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
     const [listTotalPages, setListTotalPages] = useState(1);
     const [listLoading, setListLoading] = useState(false);
     const [globalStats, setGlobalStats] = useState<{ totalPending: number; pendingUsageSum: number } | null>(null);
+    const [historyDecision, setHistoryDecision] = useState<{ id: string; label: string } | null>(null);
 
     // State
     const [unmatched, setUnmatched] = useState<UnmatchedTag[]>([]);
@@ -569,7 +579,10 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                         label: 'הקשר רחב בבסיס הנתונים',
                         getValue: (r) => formatCandidateTagsFromDbForExport(r.candidateTagsFromDB),
                     },
-                    { key: 'comments', label: 'הערות', getValue: (r) => r.comments || '' },
+                    { key: 'agentNotes', label: 'הערות סוכן', getValue: (r) => r.agentNotes || '' },
+                    { key: 'agentVerdict', label: 'פסיקת סוכן', getValue: (r) => r.agentVerdict || '' },
+                    { key: 'comments', label: 'הערות משתמש', getValue: (r) => r.comments || '' },
+                    { key: 'userVerdict', label: 'פסיקת משתמש', getValue: (r) => r.userVerdict || '' },
                     { key: 'reviewStatus', label: 'סטטוס ביקורת' },
                     {
                         key: 'manualApprovalStatus',
@@ -1034,7 +1047,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
 
     return (
         <>
-        <div ref={topRef} className="space-y-6 h-full flex flex-col pb-6 relative">
+        <div ref={topRef} className="flex flex-col pb-6 relative">
 
             {/* Header */}
             {!isBlacklistOnly && (
@@ -1297,8 +1310,8 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
 
             {/* AI Review tab */}
             {!isBlacklistOnly && activeTab === 'ai' && (
-                <div className="flex flex-col flex-1 min-h-0 bg-bg-card rounded-2xl border border-border-default shadow-sm overflow-hidden animate-fade-in">
-                    <div className="p-4 border-b border-border-default space-y-3 relative z-20">
+                <div className="flex flex-col bg-bg-card rounded-2xl border border-border-default shadow-sm animate-fade-in">
+                    <div className="p-4 border-b border-border-default space-y-3 relative z-20 flex-shrink-0">
                         {/* Status tabs */}
                         <div className="flex items-center gap-1 bg-bg-surface rounded-xl p-1 border border-border-subtle">
                             {([
@@ -1469,12 +1482,12 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                         )}
                     </div>
 
-                    <HorizontalScrollArea className="flex flex-col flex-1 min-h-0 min-w-0" scrollClassName="overflow-x-auto flex-1 min-h-0 min-w-0 w-full [scrollbar-width:thin]">
-                        <table className="w-full min-w-[1200px] text-right text-sm" dir="rtl">
-                            <thead className="bg-bg-subtle text-text-muted font-semibold text-xs border-b border-border-subtle sticky top-0 z-10">
+                    <HorizontalScrollArea pinHeader scrollClassName={ADMIN_TABLE_SCROLL_CLASS}>
+                        <table className={`w-full min-w-[1680px] text-right text-sm ${STICKY_TABLE_CLASS}`} dir="rtl">
+                            <thead className="border-b border-border-subtle">
                                 <tr>
                                     {isMultiSelectMode && (
-                                        <th className="p-4 w-[5%]">
+                                        <th className={`p-4 w-[5%] ${stickyTableHeaderCellClass()}`}>
                                             <input type="checkbox"
                                                 onChange={(e) => { if (e.target.checked) setSelectedDecisions(new Set(paginatedAiDecisions.map((d) => d.id))); else setSelectedDecisions(new Set()); }}
                                                 checked={selectedDecisions.size === paginatedAiDecisions.length && paginatedAiDecisions.length > 0}
@@ -1482,21 +1495,24 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                             />
                                         </th>
                                     )}
-                                    <th className={`p-4 ${isMultiSelectMode ? 'w-[13%]' : 'w-[14%]'}`}>מונח מקורי</th>
-                                    <th className="p-4 w-[9%]">תאריך פעולה</th>
-                                    <th className="p-4 w-[12%]">קונטקסט</th>
-                                    <th className="p-4 w-[17%]">החלטת מודל והסבר</th>
-                                    <th className="p-4 w-[14%]">מדד התלבטות AI</th>
-                                    <th className="p-4 w-[14%]">הקשר רחב בבסיס הנתונים</th>
-                                    <th className="p-4 w-[10%]">הערות</th>
-                                    <th className="p-4 w-[11%]">פעולה</th>
+                                    <th className={`p-4 ${stickyTableHeaderCellClass(isMultiSelectMode ? 'w-[11%]' : 'w-[12%]')}`}>מונח מקורי</th>
+                                    <th className={`p-4 w-[8%] ${stickyTableHeaderCellClass()}`}>תאריך פעולה</th>
+                                    <th className={`p-4 w-[10%] ${stickyTableHeaderCellClass()}`}>קונטקסט</th>
+                                    <th className={`p-4 w-[14%] ${stickyTableHeaderCellClass()}`}>החלטת מודל והסבר</th>
+                                    <th className={`p-4 w-[12%] ${stickyTableHeaderCellClass()}`}>מדד התלבטות AI</th>
+                                    <th className={`p-4 w-[12%] ${stickyTableHeaderCellClass()}`}>הקשר רחב בבסיס הנתונים</th>
+                                    <th className={`p-4 min-w-[180px] ${stickyTableHeaderCellClass()}`}>הערות סוכן</th>
+                                    <th className={`p-4 min-w-[220px] ${stickyTableHeaderCellClass()}`}>פסיקת סוכן</th>
+                                    <th className={`p-4 min-w-[220px] ${stickyTableHeaderCellClass()}`}>הערות משתמש</th>
+                                    <th className={`p-4 min-w-[220px] ${stickyTableHeaderCellClass()}`}>פסיקת משתמש</th>
+                                    <th className={`p-4 min-w-[220px] w-[14%] ${stickyTableHeaderCellClass()}`}>פעולה</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
                                 {aiDecisionsLoading ? (
-                                    <tr><td colSpan={isMultiSelectMode ? 9 : 8} className="p-8 text-center text-text-muted">טוען החלטות סוכן…</td></tr>
+                                    <tr><td colSpan={isMultiSelectMode ? 12 : 11} className="p-8 text-center text-text-muted">טוען החלטות סוכן…</td></tr>
                                 ) : paginatedAiDecisions.length === 0 ? (
-                                    <tr><td colSpan={isMultiSelectMode ? 9 : 8} className="p-8 text-center text-text-muted">לא נמצאו תוצאות לסינון הנוכחי.</td></tr>
+                                    <tr><td colSpan={isMultiSelectMode ? 12 : 11} className="p-8 text-center text-text-muted">לא נמצאו תוצאות לסינון הנוכחי.</td></tr>
                                 ) : (
                                     paginatedAiDecisions.map((decision) => (
                                         <tr key={decision.id} className={`hover:bg-bg-hover transition-all duration-500 ${
@@ -1526,6 +1542,15 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                     >
                                                         <UserIcon className="w-3 h-3" />
                                                         קורות חיים
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setHistoryDecision({ id: decision.id, label: decision.originalTerm })}
+                                                        className="text-[10px] font-bold bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full flex-shrink-0 hover:bg-violet-100 transition-colors flex items-center gap-1 border border-violet-200/60"
+                                                        title="היסטוריית שינויים"
+                                                    >
+                                                        <ClockIcon className="w-3 h-3" />
+                                                        היסטוריה
                                                     </button>
                                                 </div>
                                                 <span className={`inline-block px-1.5 py-0.5 rounded uppercase font-bold border text-[10px] ${
@@ -1584,7 +1609,6 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                         );
                                                     })()}
                                                 </div>
-                                                <p className="text-xs text-text-muted leading-tight">{decision.aiReasoning}</p>
                                             </td>
                                             {/* Hesitation / Dilemma column */}
                                             <td className="p-4 align-top w-[16%]">
@@ -1670,6 +1694,35 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                             </td>
                                             <td className="p-4 align-top">
                                                 <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                    value={decision.agentNotes}
+                                                    onSave={async (agentNotes) => {
+                                                        const res = await updateTagAiDecisionFields(decision.id, { agentNotes });
+                                                        setAiDecisions((prev) =>
+                                                            prev.map((d) =>
+                                                                d.id === decision.id ? { ...d, agentNotes: res.agentNotes } : d,
+                                                            ),
+                                                        );
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="p-4 align-top">
+                                                <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                    value={decision.agentVerdict}
+                                                    onSave={async (agentVerdict) => {
+                                                        const res = await updateTagAiDecisionFields(decision.id, { agentVerdict });
+                                                        setAiDecisions((prev) =>
+                                                            prev.map((d) =>
+                                                                d.id === decision.id ? { ...d, agentVerdict: res.agentVerdict } : d,
+                                                            ),
+                                                        );
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="p-4 align-top">
+                                                <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
                                                     value={decision.comments}
                                                     onSave={async (comments) => {
                                                         const res = await updateTagAiDecisionComments(decision.id, comments);
@@ -1682,6 +1735,20 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                 />
                                             </td>
                                             <td className="p-4 align-top">
+                                                <DebouncedCommentsTextarea
+                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                    value={decision.userVerdict}
+                                                    onSave={async (userVerdict) => {
+                                                        const res = await updateTagAiDecisionFields(decision.id, { userVerdict });
+                                                        setAiDecisions((prev) =>
+                                                            prev.map((d) =>
+                                                                d.id === decision.id ? { ...d, userVerdict: res.userVerdict } : d,
+                                                            ),
+                                                        );
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="p-4 align-top min-w-[220px]">
                                                 {/* Approval status */}
                                                 {(() => {
                                                     const raw = localApprovalStatus.get(decision.id) ?? (decision.manualApprovalStatus || 'pending');
@@ -1848,10 +1915,10 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
         </div>
 
         {/* ========== BLACKLIST TAB ========== */}
-        {(isBlacklistOnly || activeTab === 'blacklist') && (
-            <div className="flex-1 min-h-0 overflow-hidden flex flex-col gap-4">
+            {(isBlacklistOnly || activeTab === 'blacklist') && (
+            <div className="flex flex-col gap-4">
                 {/* Header bar */}
-                <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm overflow-hidden">
+                <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm">
                     <div className="p-4 border-b border-border-default flex items-center justify-between gap-4">
                         <div className="flex items-center gap-3">
                             <div className="w-9 h-9 rounded-xl bg-red-100 flex items-center justify-center">
@@ -1873,7 +1940,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                     </div>
 
                     {/* Search + filter bar */}
-                    <div className="p-4 border-b border-border-default flex gap-3 items-center">
+                    <div className="p-4 border-b border-border-default flex gap-3 items-center flex-shrink-0">
                         <div className="relative flex-1">
                             <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                             <input
@@ -1917,16 +1984,16 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                     </div>
 
                     {/* Table */}
-                    <HorizontalScrollArea scrollClassName="overflow-x-auto overflow-y-auto min-w-0 w-full [scrollbar-width:thin]">
-                        <table className="w-full min-w-[900px] text-right text-sm" dir="rtl">
-                            <thead className="bg-bg-subtle text-text-muted text-xs border-b border-border-subtle sticky top-0">
+                    <HorizontalScrollArea pinHeader scrollClassName={ADMIN_TABLE_SCROLL_CLASS}>
+                        <table className={`w-full min-w-[900px] text-right text-sm ${STICKY_TABLE_CLASS}`} dir="rtl">
+                            <thead className="border-b border-border-subtle">
                                 <tr>
-                                    <th className="p-4 w-[22%]">מונח מקורי</th>
-                                    <th className="p-4 w-[10%]">סוג</th>
-                                    <th className="p-4 w-[18%]">קונטקסט</th>
-                                    <th className="p-4 w-[20%]">החלטת AI מקורית</th>
-                                    <th className="p-4 w-[15%]">תאריך הוספה לרשימה</th>
-                                    <th className="p-4 w-[15%]">פעולה</th>
+                                    <th className={`p-4 w-[22%] ${stickyTableHeaderCellClass()}`}>מונח מקורי</th>
+                                    <th className={`p-4 w-[10%] ${stickyTableHeaderCellClass()}`}>סוג</th>
+                                    <th className={`p-4 w-[18%] ${stickyTableHeaderCellClass()}`}>קונטקסט</th>
+                                    <th className={`p-4 w-[20%] ${stickyTableHeaderCellClass()}`}>החלטת AI מקורית</th>
+                                    <th className={`p-4 w-[15%] ${stickyTableHeaderCellClass()}`}>תאריך הוספה לרשימה</th>
+                                    <th className={`p-4 w-[15%] ${stickyTableHeaderCellClass()}`}>פעולה</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
@@ -1972,6 +2039,15 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                                 title="חפש בתגיות"
                                                             >
                                                                 {decision.originalTerm}
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setHistoryDecision({ id: decision.id, label: decision.originalTerm })}
+                                                                className="mt-1 text-[10px] font-bold bg-violet-50 text-violet-700 px-2 py-0.5 rounded-full inline-flex items-center gap-1 border border-violet-200/60 hover:bg-violet-100"
+                                                                title="היסטוריית שינויים"
+                                                            >
+                                                                <ClockIcon className="w-3 h-3" />
+                                                                היסטוריה
                                                             </button>
                                                         </td>
                                                         <td className="p-4 align-top">
@@ -2289,6 +2365,13 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                 </div>
             </div>
         )}
+        <AgentDecisionHistoryDrawer
+            isOpen={Boolean(historyDecision)}
+            onClose={() => setHistoryDecision(null)}
+            decisionId={historyDecision?.id ?? null}
+            entityKind="tag-ai-decision"
+            decisionLabel={historyDecision?.label}
+        />
         </>
     );
 };

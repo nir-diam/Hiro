@@ -51,8 +51,7 @@ const normalizeEventRow = (event) => {
 };
 
 const list = async (req, res) => {
-  const candidate = await candidateService.getById(req.params.id);
-  const rows = Array.isArray(candidate.events) ? candidate.events : [];
+  const rows = await candidateService.listMergedEventsForCandidate(req.params.id);
   res.json(rows.map(normalizeEventRow));
 };
 
@@ -66,6 +65,10 @@ const create = async (req, res) => {
     const candidate = await candidateService.getById(req.params.id);
     const prev = Array.isArray(candidate.events) ? candidate.events : [];
     const payload = req.body || {};
+    const profileLabel =
+      String(candidate.title || '').trim() ||
+      String(candidate.fullName || '').trim() ||
+      'מועמד';
     const event = {
       id: payload.id || uuidv4(),
       type: normalizeTypes(payload.type),
@@ -77,6 +80,8 @@ const create = async (req, res) => {
       description: payload.description || '',
       notes: payload.notes || '',
       history: mapHistoryUserLabel(payload.history, displayName),
+      sourceProfileId: String(req.params.id),
+      sourceProfileName: profileLabel,
     };
     const next = [event, ...prev];
     await candidateService.update(req.params.id, { events: next });

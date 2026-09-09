@@ -76,6 +76,24 @@ function apiRoot(): string {
     return (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
 }
 
+async function loadCandidatePlaceholderBundle(
+    root: string,
+    cid: string,
+    init: RequestInit,
+): Promise<{ cand: Record<string, unknown> | null; linked: unknown[] }> {
+    const { fetchStaffCandidateById } = await import('../utils/staffCandidateApi');
+    const [candResult, ljRes] = await Promise.all([
+        fetchStaffCandidateById(cid).catch(() => null),
+        fetch(`${root}/api/candidates/${encodeURIComponent(cid)}/linked-jobs`, init),
+    ]);
+    let linked: unknown[] = [];
+    if (ljRes.ok) {
+        const j = (await ljRes.json()) as unknown;
+        linked = Array.isArray(j) ? j : [];
+    }
+    return { cand: candResult, linked };
+}
+
 function splitFullName(fullName: string): { first: string; last: string } {
     const s = String(fullName || '').trim();
     if (!s) return { first: '', last: '' };
@@ -160,19 +178,9 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
 
     try {
         if (cid) {
-            const cUrl = `${root}/api/candidates/${encodeURIComponent(cid)}`;
-            const [cRes, ljRes] = await Promise.all([
-                fetch(cUrl, init),
-                fetch(`${root}/api/candidates/${encodeURIComponent(cid)}/linked-jobs`, init),
-            ]);
-            if (cRes.ok) {
-                const j = (await cRes.json()) as unknown;
-                cand = j && typeof j === 'object' ? (j as Record<string, unknown>) : null;
-            }
-            if (ljRes.ok) {
-                const j = (await ljRes.json()) as unknown;
-                linked = Array.isArray(j) ? j : [];
-            }
+            const bundle = await loadCandidatePlaceholderBundle(root, cid, init);
+            cand = bundle.cand;
+            linked = bundle.linked;
         }
     } catch {
         /* keep fallbacks */

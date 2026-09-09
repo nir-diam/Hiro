@@ -44,6 +44,7 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
   onJobUpdated,
   clientId: clientIdProp,
   candidatePipelineId,
+  pipelineStageId,
   onPipelineStageChanged,
 }) => {
   const { user } = useAuth();
@@ -320,9 +321,16 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
   const jobTitleLabel = localJob.jobTitle && localJob.jobTitle !== '—' ? localJob.jobTitle : null;
 
   return (
-    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
-      <div className="bg-bg-card w-full max-w-6xl h-[85vh] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-slide-up">
-        <header className="p-5 border-b border-border-default flex items-center justify-between bg-white relative z-10 shrink-0">
+    <>
+      <style>{`
+        .process-modal-scroll .custom-scrollbar::-webkit-scrollbar { width: 8px; height: 8px; }
+        .process-modal-scroll .custom-scrollbar::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
+        .process-modal-scroll .custom-scrollbar::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 4px; }
+        .process-modal-scroll .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #64748b; }
+      `}</style>
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[70] flex items-center justify-center p-4 process-modal-scroll">
+      <div className="bg-bg-card w-full max-w-6xl h-[90vh] max-h-[900px] rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-slide-up">
+        <header className="p-4 md:p-5 border-b border-border-default flex items-start justify-between gap-3 bg-white relative z-10 shrink-0">
           <div>
             <h2 className="text-xl font-bold text-text-default flex items-center gap-2 flex-wrap">
               <ClockIcon className="w-6 h-6 text-primary-600 shrink-0" />
@@ -383,7 +391,7 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
 
         <div className="flex-1 min-h-0 overflow-hidden flex flex-col bg-bg-subtle/30">
           {clientIdLoading ? (
-            <div className="flex-1 flex items-center justify-center text-sm text-text-muted p-8">
+            <div className="flex-1 flex items-center justify-center text-sm text-text-muted p-8 overflow-y-auto">
               טוען יומן אירועים...
             </div>
           ) : localJob.linkId ? (
@@ -402,6 +410,7 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
               scopeJobCompany={localJob.company}
               embeddedInModal
               defaultActionPipelineId={candidatePipelineId}
+              defaultProcessStageId={pipelineStageId}
               autoSelectFirstEvent
               onEventsChanged={() => void syncJobFromJournal()}
             />
@@ -434,6 +443,7 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
         overlayZIndexClass="z-[80]"
       />
     </div>
+    </>
   );
 };
 

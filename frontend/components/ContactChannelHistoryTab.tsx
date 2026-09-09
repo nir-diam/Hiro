@@ -92,6 +92,7 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
   const openComposer = () => {
     openMessageModal({
       mode: channel,
+      recipientType: 'client_contact',
       candidateName: contactName,
       candidatePhone: contactPhone,
       candidateEmail: contactEmail,

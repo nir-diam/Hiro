@@ -1,6 +1,9 @@
 
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, InformationCircleIcon, CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon, TargetIcon, SparklesIcon, XMarkIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
+import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, InformationCircleIcon, CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon, TargetIcon, SparklesIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
+import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDismiss } from './MatchScorePopup';
+import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
+import { fetchCandidate } from '../utils/candidateJobMatchingApi';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import FieldInterestJobPickerModal, { type FieldInterestPreviewJob } from './FieldInterestJobPickerModal';
 import UpdateStatusModal from './UpdateStatusModal';
@@ -218,75 +221,6 @@ const MatchScore: React.FC<{ score: number; title?: string }> = ({ score, title 
     );
 };
 
-const MatchScorePopover: React.FC<{
-    details: MatchDetails;
-    onClose: () => void;
-    onRecalculate: () => Promise<void>;
-    lastAnalyzed: string;
-    labels: {
-        title: string;
-        recalc: string;
-        recalcLoading: string;
-        last: string;
-    };
-}> = ({ details, onClose, onRecalculate, lastAnalyzed, labels }) => {
-    const [isLoading, setIsLoading] = useState(false);
-
-    const handleButtonClick = async () => {
-        setIsLoading(true);
-        try {
-            await onRecalculate();
-        } catch (error) {
-            console.error("Recalculation failed", error);
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    return (
-        <div className="absolute bottom-full right-1/2 translate-x-1/2 mb-2 w-80 bg-bg-card rounded-xl shadow-2xl border border-border-default z-30 p-4 transition-opacity duration-200" style={{'--tw-shadow': '0 25px 50px -12px rgba(0, 0, 0, 0.25)'} as React.CSSProperties}>
-             <div className="absolute left-1/2 -translate-x-1/2 bottom-0 w-4 h-4 transform rotate-45 -mb-2 bg-bg-card border-b border-r border-border-default"></div>
-            <div className="flex justify-between items-center mb-3">
-                <h4 className="font-bold text-text-default text-sm flex items-center gap-2">
-                    <SparklesIcon className="w-5 h-5 text-purple-500" />
-                    {labels.title}
-                </h4>
-                <button onClick={onClose} className="p-1 rounded-full hover:bg-bg-hover" aria-label="סגור">
-                    <XMarkIcon className="w-4 h-4 text-text-muted" />
-                </button>
-            </div>
-             <div className="space-y-2">
-                <p className="text-sm text-text-default">{details.summary}</p>
-            </div>
-            <div className="mt-3 pt-3 border-t border-border-default text-center">
-                 <p className="text-xs text-text-subtle mb-3">
-                    {labels.last} {lastAnalyzed}
-                </p>
-                 <button 
-                    onClick={handleButtonClick} 
-                    disabled={isLoading}
-                    className="w-full flex items-center justify-center gap-2 text-sm font-semibold text-purple-600 bg-purple-100/70 py-2 px-4 rounded-lg hover:bg-purple-200 transition disabled:bg-bg-subtle disabled:text-text-muted disabled:cursor-wait"
-                >
-                    {isLoading ? (
-                         <>
-                            <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                            </svg>
-                            <span>{labels.recalcLoading}</span>
-                        </>
-                    ) : (
-                        <>
-                            <ArrowPathIcon className="w-4 h-4"/>
-                            <span>{labels.recalc}</span>
-                        </>
-                    )}
-                </button>
-            </div>
-        </div>
-    );
-};
-
 const INTEREST_TABLE_SKELETON_ROWS = 6;
 
 const InterestTableSkeletonRows: React.FC<{ columnCount: number }> = ({ columnCount }) => (
@@ -424,8 +358,8 @@ const InterestedInJobs: React.FC<{
     const showCandidateColumn = aggregatedProfiles.length > 1;
     const [linkedJobsLoading, setLinkedJobsLoading] = useState(false);
     const [linkedJobsError, setLinkedJobsError] = useState<string | null>(null);
-    const [activePopoverId, setActivePopoverId] = useState<string | null>(null);
-    const popoverRef = useRef<HTMLDivElement>(null);
+    const [activeMatchPopup, setActiveMatchPopup] = useState<{ id: string; x: number; y: number } | null>(null);
+    const [candidateRecord, setCandidateRecord] = useState<Record<string, unknown> | null>(null);
     const [recalculatingId, setRecalculatingId] = useState<string | null>(null);
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     const [fieldInterestSaving, setFieldInterestSaving] = useState(false);
@@ -695,14 +629,30 @@ const InterestedInJobs: React.FC<{
           if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
             setIsSettingsOpen(false);
           }
-          const target = event.target as Node;
-          if (popoverRef.current && !popoverRef.current.contains(target) && !(target as HTMLElement).closest('[data-popover-trigger]')) {
-              setActivePopoverId(null);
-          }
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    useEffect(() => {
+        if (!candidateId) {
+            setCandidateRecord(null);
+            return;
+        }
+        let cancelled = false;
+        fetchCandidate(candidateId)
+            .then((row) => {
+                if (!cancelled) setCandidateRecord(row);
+            })
+            .catch(() => {
+                if (!cancelled) setCandidateRecord({ id: candidateId });
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [candidateId]);
+
+    useMatchScorePopupDismiss(Boolean(activeMatchPopup), () => setActiveMatchPopup(null));
 
     const handleColumnToggle = (columnId: string) => {
         if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
@@ -723,7 +673,11 @@ const InterestedInJobs: React.FC<{
     // Existing component logic
     const handleScoreClick = (e: React.MouseEvent, linkId: string) => {
         e.stopPropagation();
-        setActivePopoverId((currentId) => (currentId === linkId ? null : linkId));
+        if (activeMatchPopup?.id === linkId) {
+            setActiveMatchPopup(null);
+            return;
+        }
+        setActiveMatchPopup({ id: linkId, ...matchScorePopupPositionFromEvent(e) });
     };
 
     const handleRecalculateMatch = async (linkId: string) => {
@@ -734,9 +688,11 @@ const InterestedInJobs: React.FC<{
             console.error('[InterestedInJobs] recalculate linked jobs failed', e);
         } finally {
             setRecalculatingId(null);
-            setActivePopoverId(null);
+            setActiveMatchPopup(null);
         }
     };
+
+    const activeMatchJob = activeMatchPopup ? jobs.find((j) => j.linkId === activeMatchPopup.id) : null;
 
     const fieldInterestAuthHeaders = useCallback((): Record<string, string> => {
         const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -1018,8 +974,13 @@ const InterestedInJobs: React.FC<{
                 );
             case 'matchScore':
                 return (
-                    <div className="relative" data-popover-trigger>
-                        <button onClick={(e) => handleScoreClick(e, job.linkId)} disabled={recalculatingId === job.linkId}>
+                    <div className="relative">
+                        <button
+                            type="button"
+                            data-match-score-trigger
+                            onClick={(e) => handleScoreClick(e, job.linkId)}
+                            disabled={recalculatingId === job.linkId}
+                        >
                             {recalculatingId === job.linkId ? (
                                 <div className="w-10 h-10 flex items-center justify-center">
                                     <svg className="animate-spin h-5 w-5 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
@@ -1031,22 +992,6 @@ const InterestedInJobs: React.FC<{
                                 <MatchScore score={job.matchScore} title={t('interested_jobs.match_ring_title')} />
                             )}
                         </button>
-                        {activePopoverId === job.linkId && (
-                            <div ref={popoverRef}>
-                                <MatchScorePopover
-                                    details={job.matchDetails}
-                                    onClose={() => setActivePopoverId(null)}
-                                    onRecalculate={() => handleRecalculateMatch(job.linkId)}
-                                    lastAnalyzed={job.lastAnalyzed}
-                                    labels={{
-                                        title: t('interested_jobs.popover_title'),
-                                        recalc: t('interested_jobs.popover_recalc'),
-                                        recalcLoading: t('interested_jobs.popover_recalc_loading'),
-                                        last: t('interested_jobs.popover_last'),
-                                    }}
-                                />
-                            </div>
-                        )}
                     </div>
                 );
             default:
@@ -1373,6 +1318,28 @@ const InterestedInJobs: React.FC<{
                                 : prev,
                         );
                     }}
+                />
+            ) : null}
+
+            {activeMatchPopup && activeMatchJob ? (
+                <MatchScorePopup
+                    position={{ x: activeMatchPopup.x, y: activeMatchPopup.y }}
+                    onClose={() => setActiveMatchPopup(null)}
+                    matchScore={activeMatchJob.matchScore}
+                    jobTitle={activeMatchJob.jobTitle}
+                    scoreBreakdown={(activeMatchJob.scoreBreakdown as MatchScoreBreakdownData | null) ?? null}
+                    job={{
+                        title: activeMatchJob.jobTitle,
+                        client: activeMatchJob.company,
+                        field: activeMatchJob.industry,
+                        role: activeMatchJob.role,
+                    }}
+                    candidate={
+                        candidateRecord ||
+                        (activeMatchJob.candidateId ? { id: activeMatchJob.candidateId } : candidateId ? { id: candidateId } : null)
+                    }
+                    candidateName={activeMatchJob.candidateLabel || candidateName || null}
+                    professionalSummary={activeMatchJob.matchDetails.summary || null}
                 />
             ) : null}
         </div>

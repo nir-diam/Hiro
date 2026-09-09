@@ -310,6 +310,14 @@ const update = async (id, payload) => {
     if (v === undefined) continue;
     clean[k] = v;
   }
+  if (Object.prototype.hasOwnProperty.call(payload || {}, 'logoUrl')) {
+    const logo = coerceString(payload.logoUrl);
+    clean.logoUrl = logo !== undefined ? logo || null : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload || {}, 'primaryColor')) {
+    const pc = coerceString(payload.primaryColor);
+    clean.primaryColor = pc !== undefined ? pc || null : null;
+  }
   await client.update(clean);
   return client.reload();
 };

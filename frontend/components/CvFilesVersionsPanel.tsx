@@ -1,8 +1,17 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ChevronDownIcon, ChevronUpIcon, ClockIcon, DocumentTextIcon } from './Icons';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronDownIcon, ChevronUpIcon, ClockIcon, DocumentTextIcon, TrashIcon } from './Icons';
 import { ParsedSearchTextWithTags } from './ParsedSearchTextWithTags';
+import { RichTextArea, normalizeValueForEditor, type RichTextAreaHandle } from './RichTextArea';
 import type { TagDetailForHighlight } from '../utils/parsedSearchTextSpans';
 import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
+import {
+    htmlToPlainText,
+    isRichHtmlContent,
+    sanitizeRichHtml,
+} from '../utils/parsedSearchTextHtml';
+import { fetchLoggedInClientLogoForExport } from '../utils/exportImagePayload';
+import { downloadOriginalDocumentWithLogo } from '../utils/originalDocumentExport';
+import { invalidateStaffCandidateCache } from '../utils/staffCandidateApi';
 import {
     downloadParsedSearchTextAsDocx,
     parsedSearchTextDocxFilename,
@@ -27,7 +36,15 @@ type ParsedTextVersion = {
     sublabel: string;
     isLatest: boolean;
     savedAt?: string | null;
+    historyIndex?: number;
 };
+
+const INITIAL_PARSED_LABEL = 'טקסט מפורסר ראשוני';
+
+function canDeleteParsedTextVersion(ver: ParsedTextVersion): boolean {
+    if (ver.key === 'current' || ver.label === INITIAL_PARSED_LABEL) return false;
+    return ver.historyIndex != null && Number.isInteger(ver.historyIndex);
+}
 
 function formatVersionDate(value?: string | null): string {
     if (!value) return '—';
@@ -70,7 +87,7 @@ function buildParsedTextVersions(
         versions.push({
             key: 'current',
             text: current,
-            label: 'טקסט מפורסר ראשוני',
+            label: INITIAL_PARSED_LABEL,
             sublabel: 'AI',
             isLatest: true,
             savedAt: currentSavedAt ?? null,
@@ -87,13 +104,30 @@ function buildParsedTextVersions(
         versions.push({
             key: `hist-${i}`,
             text: hist[i].text,
-            label: hist.length === 1 && !current ? 'טקסט מפורסר ראשוני' : `גרסת טקסט ${n}`,
+            label: hist.length === 1 && !current ? INITIAL_PARSED_LABEL : `גרסה קודמת ${n}`,
             sublabel: 'עריכה',
             isLatest: false,
             savedAt: hist[i].savedAt,
+            historyIndex: i,
         });
     }
     return versions;
+}
+
+function renderParsedTextBody(text: string): React.ReactNode {
+    const raw = String(text ?? '').trim();
+    if (!raw) return '—';
+    if (isRichHtmlContent(raw)) {
+        return (
+            <div
+                className="leading-[2.5] text-[15px] parsed-search-rich-text break-words [&_p]:mb-4 [&_p:last-child]:mb-0"
+                dangerouslySetInnerHTML={{ __html: sanitizeRichHtml(raw) }}
+            />
+        );
+    }
+    return (
+        <div className="leading-[2.5] text-[15px] whitespace-pre-wrap break-words">{raw}</div>
+    );
 }
 
 export const CvFilesVersionsPanel: React.FC<{
@@ -134,14 +168,41 @@ export const CvFilesVersionsPanel: React.FC<{
     const [versionTab, setVersionTab] = useState<CvFilesVersionTab>(initialTab);
     const [selectedTextKey, setSelectedTextKey] = useState('current');
     const [editingText, setEditingText] = useState(false);
-    const [draftText, setDraftText] = useState('');
+    const [draftHtml, setDraftHtml] = useState('');
     const [saving, setSaving] = useState(false);
+    const [deletingKey, setDeletingKey] = useState<string | null>(null);
     const [saveError, setSaveError] = useState<string | null>(null);
     const [docViewerHeight, setDocViewerHeight] = useState(DOC_VIEWER_HEIGHT_DEFAULT);
     const [docViewerZoom, setDocViewerZoom] = useState(DOC_VIEWER_ZOOM_DEFAULT);
+    const editorRef = useRef<RichTextAreaHandle>(null);
+    const draftHtmlRef = useRef('');
+    const [parsedTextOverride, setParsedTextOverride] = useState<{
+        searchText: string;
+        originalText?: unknown;
+        searchTextSavedAt?: string | null;
+    } | null>(null);
 
     const url = String(resumeUrl ?? '').trim();
-    const plainSearch = normalizeSearchTextLineBreaks(searchText);
+    const rawSearchText = String(parsedTextOverride?.searchText ?? searchText ?? '');
+    const plainSearch = isRichHtmlContent(rawSearchText)
+        ? rawSearchText
+        : normalizeSearchTextLineBreaks(rawSearchText);
+
+    useEffect(() => {
+        setParsedTextOverride(null);
+        draftHtmlRef.current = '';
+    }, [candidateId]);
+
+    useEffect(() => {
+        if (!parsedTextOverride) return;
+        if (String(searchText ?? '') === parsedTextOverride.searchText) {
+            setParsedTextOverride(null);
+        }
+    }, [searchText, parsedTextOverride]);
+
+    const effectiveOriginalText = parsedTextOverride?.originalText ?? originalText;
+    const effectiveSearchTextSavedAt =
+        parsedTextOverride?.searchTextSavedAt ?? searchTextSavedAt;
     const isDocx = /\.(doc|docx)$/i.test(url);
     const docxViewerUrl = isDocx ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}` : '';
     const isImage = /\.(png|jpe?g|gif|webp)$/i.test(url);
@@ -151,12 +212,12 @@ export const CvFilesVersionsPanel: React.FC<{
     );
 
     const historyEntries = useMemo(
-        () => normalizeOriginalTextHistory(originalText),
-        [originalText],
+        () => normalizeOriginalTextHistory(effectiveOriginalText),
+        [effectiveOriginalText],
     );
 
     const currentSavedAt =
-        searchTextSavedAt ?? updatedAt ?? createdAt ?? null;
+        effectiveSearchTextSavedAt ?? updatedAt ?? createdAt ?? null;
 
     const textVersions = useMemo(
         () => buildParsedTextVersions(plainSearch, historyEntries, currentSavedAt),
@@ -182,29 +243,55 @@ export const CvFilesVersionsPanel: React.FC<{
         async (format: 'pdf' | 'docx') => {
             if (versionTab === 'original') {
                 if (!url) throw new Error('no_file');
-                window.open(url, '_blank');
+                const clientLogo = await fetchLoggedInClientLogoForExport();
+                try {
+                    await downloadOriginalDocumentWithLogo(url, pdfFilenameBase, format, {
+                        candidateName: pdfFilenameBase,
+                        clientLogo,
+                    });
+                } catch (e) {
+                    const code = e instanceof Error ? e.message : '';
+                    if (code === 'fetch_failed' || code === 'unsupported_format') {
+                        window.open(url, '_blank');
+                        return;
+                    }
+                    throw e;
+                }
                 return;
             }
-            const text = String(activeDisplayText ?? '').trim();
+            const text = normalizeSearchTextLineBreaks(
+                htmlToPlainText(String(activeDisplayText ?? '')),
+            );
             if (!text) throw new Error('empty_text');
             const versionSlug = activeTextVersion?.isLatest
                 ? 'parsed'
                 : activeTextVersion?.label?.replace(/\s+/g, '_') || 'version';
+            const clientLogo = await fetchLoggedInClientLogoForExport();
+            const exportOptions = {
+                candidateName: pdfFilenameBase,
+                clientLogo,
+            };
             if (format === 'pdf') {
                 await downloadParsedSearchTextAsPdf(
                     text,
                     parsedSearchTextPdfFilename(pdfFilenameBase, versionSlug),
-                    { candidateName: pdfFilenameBase },
+                    exportOptions,
                 );
             } else {
                 await downloadParsedSearchTextAsDocx(
                     text,
                     parsedSearchTextDocxFilename(pdfFilenameBase, versionSlug),
-                    { candidateName: pdfFilenameBase },
+                    exportOptions,
                 );
             }
         },
-        [versionTab, url, activeDisplayText, activeTextVersion, pdfFilenameBase],
+        [
+            versionTab,
+            url,
+            activeDisplayText,
+            activeTextVersion,
+            pdfFilenameBase,
+        ],
     );
 
     const downloadActiveAsPdf = useCallback(() => exportParsedText('pdf'), [exportParsedText]);
@@ -217,14 +304,22 @@ export const CvFilesVersionsPanel: React.FC<{
     }, [onRegisterPdfExporter, downloadActiveAsPdf]);
 
     const openEditor = () => {
-        setDraftText(plainSearch);
+        const initial = normalizeValueForEditor(rawSearchText);
+        draftHtmlRef.current = initial;
+        setDraftHtml(initial);
         setSaveError(null);
         setEditingText(true);
     };
 
+    const handleDraftChange = useCallback((html: string) => {
+        draftHtmlRef.current = html;
+        setDraftHtml(html);
+    }, []);
+
     const handleSave = useCallback(async () => {
-        const trimmed = draftText.trim();
-        if (!trimmed) {
+        const rawHtml = (editorRef.current?.getHtml() ?? draftHtmlRef.current ?? draftHtml).trim();
+        const trimmedPlain = normalizeSearchTextLineBreaks(htmlToPlainText(rawHtml));
+        if (!trimmedPlain) {
             setSaveError('לא ניתן לשמור טקסט ריק');
             return;
         }
@@ -238,13 +333,22 @@ export const CvFilesVersionsPanel: React.FC<{
             const res = await fetch(`${apiBase}/api/candidates/${candidateId}/parsed-text`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json', ...(getAuthHeaders?.() ?? {}) },
-                body: JSON.stringify({ text: trimmed }),
+                body: JSON.stringify({ text: rawHtml }),
             });
             const payload = await res.json().catch(() => ({}));
             if (!res.ok) {
                 throw new Error(payload?.message || 'שמירה נכשלה');
             }
-            onCandidateUpdated?.(payload);
+            const savedText = rawHtml;
+            setParsedTextOverride({
+                searchText: savedText,
+                originalText: payload.originalText,
+                searchTextSavedAt: payload.searchTextSavedAt
+                    ? String(payload.searchTextSavedAt)
+                    : new Date().toISOString(),
+            });
+            invalidateStaffCandidateCache(candidateId);
+            onCandidateUpdated?.({ ...payload, searchText: savedText });
             setEditingText(false);
             setSelectedTextKey('current');
             setVersionTab('searchText');
@@ -253,10 +357,59 @@ export const CvFilesVersionsPanel: React.FC<{
         } finally {
             setSaving(false);
         }
-    }, [apiBase, candidateId, draftText, getAuthHeaders, onCandidateUpdated]);
+    }, [apiBase, candidateId, draftHtml, getAuthHeaders, onCandidateUpdated]);
+
+    const handleDeleteVersion = useCallback(
+        async (ver: ParsedTextVersion) => {
+            if (!candidateId || ver.historyIndex == null) return;
+            if (!window.confirm(`האם למחוק את "${ver.label}"?`)) return;
+            setDeletingKey(ver.key);
+            setSaveError(null);
+            try {
+                const res = await fetch(
+                    `${apiBase}/api/candidates/${candidateId}/parsed-text/history/${ver.historyIndex}`,
+                    {
+                        method: 'DELETE',
+                        headers: getAuthHeaders?.() ?? {},
+                    },
+                );
+                const payload = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    throw new Error(payload?.message || 'מחיקה נכשלה');
+                }
+                setParsedTextOverride({
+                    searchText: String(payload.searchText ?? plainSearch),
+                    originalText: payload.originalText,
+                    searchTextSavedAt: payload.searchTextSavedAt
+                        ? String(payload.searchTextSavedAt)
+                        : effectiveSearchTextSavedAt,
+                });
+                invalidateStaffCandidateCache(candidateId);
+                onCandidateUpdated?.(payload);
+                if (selectedTextKey === ver.key) {
+                    setSelectedTextKey('current');
+                    setVersionTab('searchText');
+                }
+            } catch (e) {
+                setSaveError(e instanceof Error ? e.message : 'מחיקה נכשלה');
+            } finally {
+                setDeletingKey(null);
+            }
+        },
+        [
+            apiBase,
+            candidateId,
+            effectiveSearchTextSavedAt,
+            getAuthHeaders,
+            onCandidateUpdated,
+            plainSearch,
+            selectedTextKey,
+        ],
+    );
 
     const versionChips = (
-        <div className="bg-bg-subtle/50 border-b border-border-default overflow-x-auto custom-scrollbar flex shrink-0 items-center justify-start p-3 gap-3">
+        <div className="shrink-0">
+            <div className="bg-bg-subtle/50 border-b border-border-default overflow-x-auto custom-scrollbar flex items-center justify-start p-3 gap-3">
             <div className="flex items-center gap-2 text-sm font-bold text-text-muted px-2 shrink-0">
                 <ClockIcon className="w-4 h-4" />
                 גרסאות:
@@ -300,53 +453,78 @@ export const CvFilesVersionsPanel: React.FC<{
                     </div>
                 </div>
             </button>
-            {textVersions.map((ver) => (
-                <button
-                    key={ver.key}
-                    type="button"
-                    onClick={() => {
-                        setEditingText(false);
-                        setVersionTab('searchText');
-                        setSelectedTextKey(ver.key);
-                    }}
-                    className={`flex items-center gap-3 px-3 py-2 rounded-xl border transition-all text-right min-w-[200px] shrink-0 ${
-                        versionTab === 'searchText' && selectedTextKey === ver.key
-                            ? 'bg-white border-primary-300 shadow-sm ring-1 ring-primary-100'
-                            : 'bg-white/50 border-border-default hover:bg-white hover:border-border-hover'
-                    }`}
-                >
+            {textVersions.map((ver) => {
+                const isActive =
+                    versionTab === 'searchText' && selectedTextKey === ver.key;
+                const deletable = canDeleteParsedTextVersion(ver) && Boolean(candidateId);
+                return (
                     <div
-                        className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                            versionTab === 'searchText' && selectedTextKey === ver.key
-                                ? 'bg-purple-100 text-purple-700'
-                                : 'bg-slate-100 text-slate-600'
+                        key={ver.key}
+                        className={`flex items-stretch rounded-xl border transition-all min-w-[200px] shrink-0 overflow-hidden ${
+                            isActive
+                                ? 'bg-white border-primary-300 shadow-sm ring-1 ring-primary-100'
+                                : 'bg-white/50 border-border-default hover:bg-white hover:border-border-hover'
                         }`}
                     >
-                        <DocumentTextIcon className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
-                            <span
-                                className={`font-bold text-sm truncate ${
-                                    versionTab === 'searchText' && selectedTextKey === ver.key
-                                        ? 'text-primary-800'
-                                        : 'text-text-default'
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setEditingText(false);
+                                setVersionTab('searchText');
+                                setSelectedTextKey(ver.key);
+                            }}
+                            className="flex items-center gap-3 px-3 py-2 text-right flex-1 min-w-0"
+                        >
+                            <div
+                                className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
+                                    isActive
+                                        ? 'bg-purple-100 text-purple-700'
+                                        : 'bg-slate-100 text-slate-600'
                                 }`}
                             >
-                                {ver.label}
-                            </span>
-                            {ver.isLatest ? (
-                                <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-primary-50 text-primary-700 font-bold shrink-0">
-                                    החדש ביותר
-                                </span>
-                            ) : null}
-                        </div>
-                        <div className="text-xs text-text-muted mt-0.5 flex gap-1 items-center truncate">
-                            {formatVersionDate(ver.savedAt)} • {ver.sublabel}
-                        </div>
+                                <DocumentTextIcon className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                    <span
+                                        className={`font-bold text-sm truncate ${
+                                            isActive ? 'text-primary-800' : 'text-text-default'
+                                        }`}
+                                    >
+                                        {ver.label}
+                                    </span>
+                                    {ver.isLatest ? (
+                                        <span className="text-[9px] px-1.5 py-0.5 rounded-md bg-primary-50 text-primary-700 font-bold shrink-0">
+                                            החדש ביותר
+                                        </span>
+                                    ) : null}
+                                </div>
+                                <div className="text-xs text-text-muted mt-0.5 flex gap-1 items-center truncate">
+                                    {formatVersionDate(ver.savedAt)} • {ver.sublabel}
+                                </div>
+                            </div>
+                        </button>
+                        {deletable ? (
+                            <button
+                                type="button"
+                                title="מחק גרסה"
+                                aria-label={`מחק ${ver.label}`}
+                                disabled={deletingKey === ver.key}
+                                onClick={() => void handleDeleteVersion(ver)}
+                                className="px-2 border-r border-border-default text-text-subtle hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                            >
+                                <TrashIcon className="w-4 h-4" />
+                            </button>
+                        ) : null}
                     </div>
-                </button>
-            ))}
+                );
+            })}
+            </div>
+            {saveError && !editingText ? (
+                <p className="px-4 py-1.5 text-xs text-red-600 font-medium border-b border-border-default bg-red-50/50">
+                    {saveError}
+                </p>
+            ) : null}
         </div>
     );
 
@@ -383,12 +561,18 @@ export const CvFilesVersionsPanel: React.FC<{
                                 </div>
                             </div>
                             {versionChips}
-                            <textarea
-                                className="flex-1 w-full p-4 text-sm font-mono resize-none border-0 focus:ring-0 custom-scrollbar min-h-0"
-                                value={draftText}
-                                onChange={(e) => setDraftText(e.target.value)}
-                                dir="rtl"
-                            />
+                            <div className="flex-1 min-h-0 p-4 overflow-auto custom-scrollbar">
+                                <RichTextArea
+                                    ref={editorRef}
+                                    value={draftHtml}
+                                    onChange={handleDraftChange}
+                                    fullToolbar
+                                    minHeight="400px"
+                                    className="border border-border-default rounded-xl bg-white h-full"
+                                    toolbarClassName="bg-bg-subtle/40 sticky top-0 z-10"
+                                    editorClassName="min-h-[360px] font-serif text-[15px] leading-relaxed"
+                                />
+                            </div>
                         </div>
                     ) : isViewingCurrent ? (
                         <ParsedSearchTextWithTags
@@ -435,10 +619,8 @@ export const CvFilesVersionsPanel: React.FC<{
                             </div>
                             {versionChips}
                             <div className="flex-1 overflow-auto p-6 relative bg-bg-subtle/30 custom-scrollbar min-h-0">
-                                <div className="max-w-4xl mx-auto min-h-full p-8 pb-32 bg-white border border-border-default rounded-xl shadow-sm text-sm text-text-default leading-relaxed font-serif whitespace-pre-wrap">
-                                    <div className="leading-[2.5] text-[15px] whitespace-pre-wrap break-words">
-                                        {activeDisplayText || '—'}
-                                    </div>
+                                <div className="max-w-4xl mx-auto min-h-full p-8 pb-32 bg-white border border-border-default rounded-xl shadow-sm text-sm text-text-default leading-relaxed font-serif">
+                                    {renderParsedTextBody(activeDisplayText)}
                                 </div>
                             </div>
                         </>
@@ -456,6 +638,25 @@ export const CvFilesVersionsPanel: React.FC<{
                                 </div>
                             </div>
                             <div className="flex items-center gap-3 shrink-0">
+                                {url ? (
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => void downloadActiveAsPdf()}
+                                            className="text-sm font-semibold text-rose-700 hover:text-rose-800 hover:underline"
+                                        >
+                                            PDF
+                                        </button>
+                                        <span className="text-text-subtle">|</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => void downloadActiveAsDocx()}
+                                            className="text-sm font-semibold text-primary-600 hover:underline"
+                                        >
+                                            Word
+                                        </button>
+                                    </div>
+                                ) : null}
                                 {url ? (
                                     <div className="flex items-center gap-1 rounded-lg border border-border-default bg-bg-subtle/50 p-1">
                                         <button

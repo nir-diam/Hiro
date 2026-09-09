@@ -15,6 +15,15 @@ const CANDIDATE_PROFILE_UNLINKED_EVENT_TYPE = 'ניתוק פרופיל מועמ�
 /** Candidate journal type when an ingest row is merged into an existing primary profile. */
 const CANDIDATE_IDENTITY_MERGED_EVENT_TYPE = 'מיזוג מועמד למועמד קיים';
 
+/** Candidate journal type when ingest reuses an existing CV file hash (no new row). */
+const CANDIDATE_RESUME_HASH_REUSED_EVENT_TYPE = 'קליטת קו"ח כפולה';
+
+const INGEST_SOURCE_LABELS = {
+  email: 'קליטה מדוא"ל',
+  'ai-upload': 'העלאה ידנית',
+  interface: 'העלאה מהממשק',
+};
+
 const trim = (v) => (v != null && v !== undefined ? String(v).trim() : '');
 
 const normalizeTypes = (raw) => {
@@ -85,7 +94,7 @@ const loadCandidateBrief = async (candidateId) => {
   const cid = trim(candidateId);
   if (!cid) return null;
   return Candidate.findByPk(cid, {
-    attributes: ['id', 'fullName', 'firstName', 'lastName', 'profileName', 'title', 'phone', 'email'],
+    attributes: ['id', 'fullName', 'firstName', 'lastName', 'title', 'phone', 'email'],
     raw: true,
   });
 };
@@ -286,10 +295,78 @@ const recordCandidateIdentityMerge = async (
   return { recorded: true, primaryCandidateId: primaryId, duplicateCandidateId: dupId };
 };
 
+/**
+ * Record duplicate CV hash ingest on the primary candidate's events journal
+ * (interface upload or email where identical file bytes already exist).
+ */
+const recordDuplicateResumeHashIngest = async (
+  req,
+  {
+    primaryCandidateId,
+    duplicateCandidateId = null,
+    source = null,
+    fileName = null,
+    actorLabel,
+  } = {},
+) => {
+  const primaryId = trim(primaryCandidateId);
+  if (!primaryId) return { recorded: false, reason: 'missing_primary_id' };
+
+  const primaryRow = await loadCandidateBrief(primaryId);
+  if (!primaryRow) return { recorded: false, reason: 'primary_not_found' };
+
+  const dupId = duplicateCandidateId != null ? trim(duplicateCandidateId) : null;
+  const duplicateRow = dupId ? await loadCandidateBrief(dupId) : null;
+  const actor = trim(actorLabel) || resolveActorLabel(req);
+  const primaryName = candidateLabel(primaryRow);
+  const duplicateName = duplicateRow ? candidateLabel(duplicateRow) : 'מועמד חדש';
+  const sourceLabel =
+    INGEST_SOURCE_LABELS[source] || (trim(source) ? trim(source) : 'העלאת קורות חיים');
+  const fileSuffix = trim(fileName) ? ` (${trim(fileName)})` : '';
+
+  const description = dupId
+    ? `${sourceLabel} עם קובץ קורות חיים זהה${fileSuffix} — לא נוצר מועמד חדש; "${duplicateName}" שויך לפרופיל "${primaryName}".`
+    : `${sourceLabel} עם קובץ קורות חיים זהה${fileSuffix} — לא נוצר מועמד חדש; השימוש בפרופיל "${primaryName}".`;
+
+  const hashEvent = buildJournalEvent({
+    type: CANDIDATE_RESUME_HASH_REUSED_EVENT_TYPE,
+    description,
+    actor,
+    linkedTo: dupId
+      ? { type: 'מועמד', id: dupId, name: duplicateName }
+      : { type: 'מועמד', id: primaryId, name: primaryName },
+    metadata: {
+      action: 'resume_hash_reused',
+      primaryCandidateId: primaryId,
+      duplicateCandidateId: dupId,
+      source: source || null,
+      fileName: trim(fileName) || null,
+    },
+  });
+  await appendCandidateJournalEvent(primaryId, hashEvent);
+
+  await systemEventEmitter.emit(req, {
+    ...SYSTEM_EVENTS.CV_DUPLICATE_HASH,
+    entityType: 'Candidate',
+    entityId: primaryId,
+    entityName: primaryName,
+    params: {
+      name: primaryName,
+      source: sourceLabel,
+      fileName: trim(fileName) || '—',
+      actor,
+    },
+  });
+
+  return { recorded: true, primaryCandidateId: primaryId, duplicateCandidateId: dupId };
+};
+
 module.exports = {
   CANDIDATE_PROFILE_LINKED_EVENT_TYPE,
   CANDIDATE_PROFILE_UNLINKED_EVENT_TYPE,
   CANDIDATE_IDENTITY_MERGED_EVENT_TYPE,
+  CANDIDATE_RESUME_HASH_REUSED_EVENT_TYPE,
   recordCanonicalCandidateLinkChange,
   recordCandidateIdentityMerge,
+  recordDuplicateResumeHashIngest,
 };

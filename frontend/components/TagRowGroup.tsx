@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import {
     BriefcaseIcon,
     AcademicCapIcon,
@@ -9,7 +9,26 @@ import {
     XMarkIcon,
     ClockIcon,
 } from './Icons';
-import { SmartTagType, SmartTagData, SmartTagTooltipPanel } from './SmartTagTypes';
+import { SmartTagType, SmartTagData, SmartTagTooltipPanel, SmartTagMode } from './SmartTagTypes';
+
+const TYPE_DEFAULT_BORDER: Record<SmartTagType, string> = {
+    role: 'border-primary-600',
+    seniority: 'border-primary-400',
+    skill: 'border-sky-200',
+    tool: 'border-gray-200',
+    soft: 'border-slate-200',
+    industry: 'border-emerald-100',
+    certification: 'border-orange-100',
+    language: 'border-pink-100',
+    degree: 'border-orange-100',
+    education: 'border-orange-100',
+};
+
+const modeBorderClass = (mode: SmartTagMode | undefined, type: SmartTagType): string => {
+    if (mode === 'mandatory') return 'border-green-500 ring-1 ring-green-500/25';
+    if (mode === 'negative') return 'border-red-500 ring-1 ring-red-500/25';
+    return TYPE_DEFAULT_BORDER[type];
+};
 
 const TYPE_LABELS_HE: Record<SmartTagType, string> = {
     role: 'תפקיד',
@@ -20,6 +39,8 @@ const TYPE_LABELS_HE: Record<SmartTagType, string> = {
     industry: 'תעשייה',
     certification: 'השכלה/הסמכה',
     language: 'שפה',
+    degree: 'השכלה',
+    education: 'השכלה',
 };
 
 function panelFromLegacyTooltip(
@@ -50,18 +71,21 @@ function panelFromLegacyTooltip(
 
 interface SmartTagBadgeProps extends SmartTagData {
     onRemove?: () => void;
+    onToggleMode?: () => void;
 }
 
 const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
     label,
     type,
+    mode = 'normal' as SmartTagMode,
     isVerified,
     isAiSuggested,
     customTooltip,
     tooltipPanel: panelProp,
     onRemove,
+    onToggleMode,
 }) => {
-    const [open, setOpen] = useState(false);
+    const [hovered, setHovered] = useState(false);
     const wrapRef = useRef<HTMLDivElement>(null);
 
     const panel = useMemo(() => {
@@ -72,34 +96,21 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
 
     const hasPopover = Boolean(panel);
     const sourceLabel = isAiSuggested ? 'AI (בינה מלאכותית)' : 'הוזן ידנית / מועמד';
-
-    useEffect(() => {
-        if (!open) return;
-        const onDoc = (e: MouseEvent) => {
-            if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setOpen(false);
-        };
-        document.addEventListener('mousedown', onDoc);
-        document.addEventListener('keydown', onKey);
-        return () => {
-            document.removeEventListener('mousedown', onDoc);
-            document.removeEventListener('keydown', onKey);
-        };
-    }, [open]);
+    const canToggleMode = Boolean(onToggleMode);
 
     const baseClasses =
-        'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all select-none border whitespace-nowrap relative group/tag';
+        'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all select-none border whitespace-nowrap relative';
     const configs: Record<SmartTagType, string> = {
-        role: 'bg-primary-600 text-white font-bold border-primary-600 shadow-sm',
-        seniority: 'bg-white border-primary-400 text-primary-700 font-bold',
-        skill: 'bg-sky-50 text-sky-800 border-sky-200 font-semibold',
-        tool: 'bg-gray-100 text-gray-800 border-gray-200 font-semibold',
-        soft: 'bg-transparent border-slate-200 text-slate-600 italic font-medium',
-        industry: 'bg-emerald-50 text-emerald-800 border-emerald-100 font-bold',
-        certification: 'bg-orange-50 text-orange-800 border-orange-100 font-bold',
-        language: 'bg-pink-50 text-pink-700 border-pink-100 font-medium',
+        role: 'bg-primary-600 text-white font-bold shadow-sm',
+        seniority: 'bg-white text-primary-700 font-bold',
+        skill: 'bg-sky-50 text-sky-800 font-semibold',
+        tool: 'bg-gray-100 text-gray-800 font-semibold',
+        soft: 'bg-transparent text-slate-600 italic font-medium',
+        industry: 'bg-emerald-50 text-emerald-800 font-bold',
+        certification: 'bg-orange-50 text-orange-800 font-bold',
+        language: 'bg-pink-50 text-pink-700 font-medium',
+        degree: 'bg-orange-50 text-orange-800 font-bold',
+        education: 'bg-orange-50 text-orange-800 font-bold',
     };
 
     const confidenceDot =
@@ -109,48 +120,44 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
               ? 'bg-slate-400'
               : 'bg-emerald-500';
 
-    const toggleOpen = (e: React.MouseEvent) => {
+    const handleBadgeClick = (e: React.MouseEvent) => {
         e.stopPropagation();
-        if (!hasPopover) return;
-        setOpen((o) => !o);
+        if (canToggleMode) {
+            onToggleMode?.();
+        }
     };
 
-    const badgeClass = `${baseClasses} ${configs[type]} ${isAiSuggested ? 'border-dashed' : 'border-solid'} ${
-        hasPopover ? 'cursor-pointer hover:shadow-md hover:-translate-y-0.5' : 'cursor-default hover:shadow-md hover:-translate-y-0.5'
-    } ${open && hasPopover ? 'ring-2 ring-primary-400/50 ring-offset-1' : ''}`;
+    const badgeClass = `${baseClasses} ${configs[type]} ${modeBorderClass(mode, type)} ${
+        isAiSuggested ? 'border-dashed' : 'border-solid'
+    } ${canToggleMode || hasPopover ? 'cursor-pointer hover:shadow-md hover:-translate-y-0.5' : 'cursor-default'}`;
 
     return (
-        <div ref={wrapRef} className="relative inline-flex group/tag">
-            {hasPopover ? (
-                <button
-                    type="button"
-                    onClick={toggleOpen}
-                    aria-expanded={open}
-                    aria-haspopup="dialog"
-                    className={badgeClass}
-                >
-                    {isAiSuggested && <SparklesIcon className="w-3 h-3 opacity-70" />}
-                    <span>{label}</span>
-                    {isVerified && <CheckCircleIcon className="w-3 h-3 text-current opacity-80" />}
-                </button>
-            ) : (
-                <div className={badgeClass} title={`${TYPE_LABELS_HE[type]} · ${sourceLabel}`}>
-                    {isAiSuggested && <SparklesIcon className="w-3 h-3 opacity-70" />}
-                    <span>{label}</span>
-                    {isVerified && <CheckCircleIcon className="w-3 h-3 text-current opacity-80" />}
-                </div>
-            )}
+        <div
+            ref={wrapRef}
+            className="relative inline-flex group/tag"
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
+        >
+            <button
+                type="button"
+                onClick={handleBadgeClick}
+                className={badgeClass}
+                title={canToggleMode ? 'לחץ לשינוי מצב (רגיל / חובה / שלילי)' : undefined}
+            >
+                {isAiSuggested && <SparklesIcon className="w-3 h-3 opacity-70" />}
+                <span>{label}</span>
+                {isVerified && <CheckCircleIcon className="w-3 h-3 text-current opacity-80" />}
+            </button>
 
             {hasPopover && panel && (
                 <div
-                    role="dialog"
+                    role="tooltip"
                     aria-label={`פרטי תגית: ${panel.title}`}
-                    className={`fixed sm:absolute bottom-4 sm:bottom-full left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:mb-3 z-[9999] transform transition-all duration-300 origin-bottom max-sm:max-h-[min(60vh,calc(100vh-2rem))] ${
-                        open
-                            ? 'opacity-100 visible translate-y-0 pointer-events-auto'
-                            : 'opacity-0 invisible translate-y-2 pointer-events-none'
+                    className={`fixed sm:absolute bottom-4 sm:bottom-full left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:mb-3 z-[9999] transform transition-all duration-200 origin-bottom max-sm:max-h-[min(60vh,calc(100vh-2rem))] pointer-events-none ${
+                        hovered
+                            ? 'opacity-100 visible translate-y-0'
+                            : 'opacity-0 invisible translate-y-2'
                     }`}
-                    onClick={(e) => e.stopPropagation()}
                 >
                     <div
                         className="flex flex-col gap-4 p-5 w-full sm:w-max sm:min-w-[340px] sm:max-w-[400px] text-right bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-200/50 dark:border-slate-700/50 relative whitespace-normal break-words max-h-[60vh] sm:max-h-[400px] overflow-y-auto custom-scrollbar pointer-events-auto"
@@ -295,13 +302,17 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
                                     {panel.footerDate || sourceLabel}
                                 </span>
                             </div>
-                            <button
-                                type="button"
-                                onClick={() => setOpen(false)}
-                                className="text-[10px] font-bold text-primary-600 hover:text-primary-700 sm:hidden"
-                            >
-                                סגור
-                            </button>
+                            <div className="flex items-center gap-3">
+                                {onRemove ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => onRemove()}
+                                        className="text-[10px] font-bold text-red-600 hover:text-red-700 pointer-events-auto"
+                                    >
+                                        הסר תגית
+                                    </button>
+                                ) : null}
+                            </div>
                         </div>
                     </div>
                     <div className="hidden sm:block absolute top-full left-1/2 -translate-x-1/2 border-[8px] border-transparent border-t-white/95 dark:border-t-slate-900/95 drop-shadow-sm pointer-events-none" />
@@ -315,7 +326,9 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
                         event.stopPropagation();
                         onRemove();
                     }}
-                    className="absolute -top-1 -right-1 w-4 h-4 rounded-full border border-white bg-white text-gray-500 flex items-center justify-center text-[10px] opacity-0 group-hover/tag:opacity-100 transition z-[1]"
+                    className={`absolute -top-1 -right-1 w-4 h-4 rounded-full border border-white bg-white text-gray-500 flex items-center justify-center text-[10px] transition z-[1] ${
+                        hovered ? 'opacity-100' : 'opacity-0 group-hover/tag:opacity-100'
+                    }`}
                     aria-label="הסר תגית"
                 >
                     <XMarkIcon className="w-3 h-3" />
@@ -421,9 +434,26 @@ interface TagRowGroupProps {
     onQualificationAdd?: () => void;
     onRowAdd?: (rowId: string) => void;
     onTagRemove?: (label: string) => void;
+    onTagToggle?: (tagKey: string) => void;
 }
 
-const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualificationAdd, onRowAdd, onTagRemove }) => {
+const renderTagBadge = (
+    tag: SmartTagData,
+    key: string,
+    onTagRemove?: (label: string) => void,
+    onTagToggle?: (tagKey: string) => void,
+) => (
+    <SmartTagBadge
+        key={key}
+        {...tag}
+        onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
+        onToggleMode={
+            onTagToggle && tag.tagKey ? () => onTagToggle(tag.tagKey!) : undefined
+        }
+    />
+);
+
+const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualificationAdd, onRowAdd, onTagRemove, onTagToggle }) => {
     const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
     const toggleHiddenTags = (rowId: string) => {
         setExpandedRows((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
@@ -481,13 +511,9 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                     {visibleSkills.length === 0 && toolTags.length === 0 && (
                                         <span className="text-[11px] text-text-subtle italic">לא קיימות תגיות</span>
                                     )}
-                                    {visibleSkills.map((tag) => (
-                                        <SmartTagBadge
-                                            key={`${row.id}-skill-${tagIdentity(tag)}`}
-                                            {...tag}
-                                            onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
-                                        />
-                                    ))}
+                                    {visibleSkills.map((tag) =>
+                                        renderTagBadge(tag, `${row.id}-skill-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                    )}
                                     {extraSkills > 0 && (
                                         <button
                                             type="button"
@@ -500,26 +526,18 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 </div>
                                 {extraSkills > 0 && expandedRows[skillExpandKey] && (
                                     <div className="flex flex-wrap gap-2">
-                                        {hiddenSkills.map((tag) => (
-                                            <SmartTagBadge
-                                                key={`${row.id}-skill-hidden-${tagIdentity(tag)}`}
-                                                {...tag}
-                                                onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
-                                            />
-                                        ))}
+                                        {hiddenSkills.map((tag) =>
+                                            renderTagBadge(tag, `${row.id}-skill-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                        )}
                                     </div>
                                 )}
                             </div>
                             {/* Row 2: Tools */}
                             <div className="space-y-1.5">
                                 <div className="flex flex-wrap items-center gap-2">
-                                    {visibleTools.map((tag) => (
-                                        <SmartTagBadge
-                                            key={`${row.id}-tool-${tagIdentity(tag)}`}
-                                            {...tag}
-                                            onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
-                                        />
-                                    ))}
+                                    {visibleTools.map((tag) =>
+                                        renderTagBadge(tag, `${row.id}-tool-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                    )}
                                     {extraTools > 0 && (
                                         <button
                                             type="button"
@@ -532,13 +550,9 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 </div>
                                 {extraTools > 0 && expandedRows[toolExpandKey] && (
                                     <div className="flex flex-wrap gap-2">
-                                        {hiddenTools.map((tag) => (
-                                            <SmartTagBadge
-                                                key={`${row.id}-tool-hidden-${tagIdentity(tag)}`}
-                                                {...tag}
-                                                onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
-                                            />
-                                        ))}
+                                        {hiddenTools.map((tag) =>
+                                            renderTagBadge(tag, `${row.id}-tool-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                        )}
                                     </div>
                                 )}
                             </div>
@@ -563,13 +577,9 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                             {visibleTags.length === 0 && (
                                 <span className="text-[11px] text-text-subtle italic">לא קיימות תגיות</span>
                             )}
-                            {visibleTags.map((tag) => (
-                                <SmartTagBadge
-                                    key={`${row.id}-${tagIdentity(tag)}`}
-                                    {...tag}
-                                    onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
-                                />
-                            ))}
+                            {visibleTags.map((tag) =>
+                                renderTagBadge(tag, `${row.id}-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                            )}
                             {extraCount > 0 && (
                                 <button
                                     type="button"
@@ -592,13 +602,9 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                         </div>
                         {extraCount > 0 && expandedRows[row.id] && (
                             <div className="flex flex-wrap gap-2 mt-1">
-                                {hiddenTags.map((tag) => (
-                                    <SmartTagBadge
-                                        key={`${row.id}-hidden-${tagIdentity(tag)}`}
-                                        {...tag}
-                                        onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
-                                    />
-                                ))}
+                                {hiddenTags.map((tag) =>
+                                    renderTagBadge(tag, `${row.id}-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                )}
                             </div>
                         )}
                     </div>

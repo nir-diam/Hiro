@@ -19,7 +19,7 @@ import {
 } from '../services/messageTemplatesApi';
 import { fetchClientOptions, type ClientOptionDto } from '../services/usersApi';
 import { messageTemplateParameters } from '../services/messageTemplatePlaceholders';
-import { formatMessageTemplateDisplayDate } from './MessageTemplatesView';
+import { formatMessageTemplateDisplayDate, AudienceBadges } from './MessageTemplatesView';
 
 interface CatalogRow {
     id: string;
@@ -34,6 +34,9 @@ interface CatalogRow {
     scope: 'admin' | 'client';
     clientId: string | null;
     clientName: string | null;
+    forCandidate: boolean;
+    forClientContact: boolean;
+    forTeamMember: boolean;
 }
 
 function dtoToRow(row: MessageTemplateCatalogDto): CatalogRow {
@@ -50,6 +53,9 @@ function dtoToRow(row: MessageTemplateCatalogDto): CatalogRow {
         scope: row.scope,
         clientId: row.clientId,
         clientName: row.clientName,
+        forCandidate: row.forCandidate !== false,
+        forClientContact: row.forClientContact !== false,
+        forTeamMember: row.forTeamMember !== false,
     };
 }
 
@@ -65,12 +71,30 @@ const CatalogTemplateForm: React.FC<{
     const [newScope, setNewScope] = useState<'admin' | 'client'>(template?.scope === 'client' ? 'client' : 'admin');
     const [newClientId, setNewClientId] = useState(template?.clientId || (clients[0]?.id ?? ''));
     const [formData, setFormData] = useState<Partial<CatalogRow>>(
-        template || { name: '', subject: '', content: '', channels: ['email'] },
+        template || {
+            name: '',
+            subject: '',
+            content: '',
+            channels: ['email'],
+            forCandidate: true,
+            forClientContact: true,
+            forTeamMember: true,
+        },
     );
     const contentRef = useRef<HTMLTextAreaElement>(null);
 
     useEffect(() => {
-        setFormData(template || { name: '', subject: '', content: '', channels: ['email'] });
+        setFormData(
+            template || {
+                name: '',
+                subject: '',
+                content: '',
+                channels: ['email'],
+                forCandidate: true,
+                forClientContact: true,
+                forTeamMember: true,
+            },
+        );
         setNewScope(template?.scope === 'client' ? 'client' : 'admin');
         setNewClientId(template?.clientId || (clients[0]?.id ?? ''));
     }, [template, clients]);
@@ -103,10 +127,18 @@ const CatalogTemplateForm: React.FC<{
         }, 0);
     };
 
+    const handleAudienceChange = (key: 'forCandidate' | 'forClientContact' | 'forTeamMember', checked: boolean) => {
+        setFormData((prev) => ({ ...prev, [key]: checked }));
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         const len = formData.content?.length ?? 0;
         if (len > 5000) return;
+        if (!formData.forCandidate && !formData.forClientContact && !formData.forTeamMember) {
+            window.alert(t('templates.audience_required'));
+            return;
+        }
         await onSave({
             ...formData,
             ...(isEdit ? {} : { newScope, newClientId: newScope === 'client' ? newClientId : undefined }),
@@ -216,6 +248,39 @@ const CatalogTemplateForm: React.FC<{
                                 </button>
                             ))}
                         </div>
+                    </div>
+                </div>
+                <div>
+                    <label className="block text-sm font-semibold text-text-muted mb-2">{t('templates.audience_title')}</label>
+                    <p className="text-xs text-text-subtle mb-3">{t('templates.audience_hint')}</p>
+                    <div className="flex flex-wrap gap-4">
+                        <label className="inline-flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={Boolean(formData.forCandidate)}
+                                onChange={(e) => handleAudienceChange('forCandidate', e.target.checked)}
+                                className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-500"
+                            />
+                            <span className="text-sm font-medium text-text-default">{t('templates.audience_candidate')}</span>
+                        </label>
+                        <label className="inline-flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={Boolean(formData.forClientContact)}
+                                onChange={(e) => handleAudienceChange('forClientContact', e.target.checked)}
+                                className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-500"
+                            />
+                            <span className="text-sm font-medium text-text-default">{t('templates.audience_client_contact')}</span>
+                        </label>
+                        <label className="inline-flex items-center gap-2 cursor-pointer">
+                            <input
+                                type="checkbox"
+                                checked={Boolean(formData.forTeamMember)}
+                                onChange={(e) => handleAudienceChange('forTeamMember', e.target.checked)}
+                                className="w-4 h-4 text-primary-600 rounded border-border-default focus:ring-primary-500"
+                            />
+                            <span className="text-sm font-medium text-text-default">{t('templates.audience_team_member')}</span>
+                        </label>
                     </div>
                 </div>
                 <div>
@@ -347,6 +412,9 @@ const AdminMessageTemplatesView: React.FC = () => {
                 subject: data.subject ?? '',
                 content: data.content ?? '',
                 channels: data.channels,
+                forCandidate: data.forCandidate !== false,
+                forClientContact: data.forClientContact !== false,
+                forTeamMember: data.forTeamMember !== false,
             };
             if (data.id) {
                 const updated = await updateMessageTemplateCatalog(data.id, payload);
@@ -483,6 +551,7 @@ const AdminMessageTemplatesView: React.FC = () => {
                                         <th className="p-3">סוג</th>
                                         <th className="p-3">חברה</th>
                                         <th className="p-3">{t('templates.col_name')}</th>
+                                        <th className="p-3">{t('templates.col_audience')}</th>
                                         <th className="p-3">{t('templates.col_content')}</th>
                                         <th className="p-3">{t('templates.col_last_updated')}</th>
                                         <th className="p-3">{t('templates.col_updated_by')}</th>
@@ -505,6 +574,13 @@ const AdminMessageTemplatesView: React.FC = () => {
                                                 {r.scope === 'admin' ? '—' : r.clientName || r.clientId || '—'}
                                             </td>
                                             <td className="p-3 font-semibold text-primary-700">{r.name}</td>
+                                            <td className="p-3">
+                                                <AudienceBadges
+                                                    forCandidate={r.forCandidate}
+                                                    forClientContact={r.forClientContact}
+                                                    forTeamMember={r.forTeamMember}
+                                                />
+                                            </td>
                                             <td className="p-3 text-text-muted max-w-xs truncate" title={r.content}>
                                                 {r.content}
                                             </td>

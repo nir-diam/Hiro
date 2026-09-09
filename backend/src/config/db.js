@@ -162,6 +162,11 @@ const connectDb = async () => {
   `).catch(() => {});
 
   await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "staffProfileCopy" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+
+  await sequelize.query(`
     ALTER TABLE email_uploads
       ADD COLUMN IF NOT EXISTS user_notes TEXT NULL;
   `).catch(() => {});
@@ -196,6 +201,16 @@ const connectDb = async () => {
     ALTER TABLE client_contacts
       ADD COLUMN IF NOT EXISTS "pipelineId" UUID NULL,
       ADD COLUMN IF NOT EXISTS "processStage" VARCHAR(255) NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_contacts
+      ADD COLUMN IF NOT EXISTS "firstName" VARCHAR(255) NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS "lastName" VARCHAR(255) NULL DEFAULT '',
+      ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS "distributionEmail" BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS "distributionSms" BOOLEAN NOT NULL DEFAULT true,
+      ADD COLUMN IF NOT EXISTS "distributionWhatsapp" BOOLEAN NOT NULL DEFAULT true;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -585,6 +600,13 @@ const connectDb = async () => {
   `).catch(() => {});
 
   await sequelize.query(`
+    ALTER TABLE message_templates
+      ADD COLUMN IF NOT EXISTS for_candidate BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS for_client_contact BOOLEAN NOT NULL DEFAULT TRUE,
+      ADD COLUMN IF NOT EXISTS for_team_member BOOLEAN NOT NULL DEFAULT TRUE;
+  `).catch(() => {});
+
+  await sequelize.query(`
     UPDATE jobs j
     SET client_id = c.id
     FROM clients c
@@ -665,6 +687,25 @@ const connectDb = async () => {
     ALTER TABLE login_email_codes
       ADD COLUMN IF NOT EXISTS delivery_channel VARCHAR(16) NOT NULL DEFAULT 'email';
   `).catch(() => {});
+
+  try {
+    const [clearedRows] = await sequelize.query(`
+      UPDATE candidates
+      SET "ingestPending" = false, "updatedAt" = NOW()
+      WHERE "ingestPending" = true
+        AND (
+          "updatedAt" < NOW() - INTERVAL '5 minutes'
+          OR (
+            length(trim(coalesce("fullName", ''))) > 2
+            AND length(trim(coalesce("professionalSummary", ''))) > 10
+          )
+        )
+      RETURNING id;
+    `);
+    if (clearedRows?.length) {
+      console.log('[startup] cleared stale ingestPending on', clearedRows.length, 'candidate(s)');
+    }
+  } catch (_) { /* non-fatal */ }
 
   console.log('PostgreSQL connected & models synced');
 };

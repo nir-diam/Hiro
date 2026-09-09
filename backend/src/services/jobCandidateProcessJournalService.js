@@ -11,6 +11,22 @@ const clientUsageSettingService = require('./clientUsageSettingService');
 const JOURNAL_CAP = 200;
 
 const { EVENT_CLOSED_SUMMARY, EVENT_REOPENED_SUMMARY } = require('../utils/clientEventHistory');
+const {
+  CANDIDATE_MISSING_DETAILS_COMPLETED_EVENT_TYPE,
+} = require('../utils/candidateMissingDetailsCompletedEvent');
+
+const PROFILE_ONLY_JOURNAL_STATUSES = new Set([
+  CANDIDATE_MISSING_DETAILS_COMPLETED_EVENT_TYPE,
+  'אישור הפרופיל על ידי המועמד',
+]);
+
+const isProfileOnlyJournalEntry = (row) => {
+  const status = String(row?.status || '').trim();
+  if (PROFILE_ONLY_JOURNAL_STATUSES.has(status)) return true;
+  const meta = row?.metadata;
+  if (meta?.missingDetailsCompletedCandidate || meta?.profileApprovedByCandidate) return true;
+  return false;
+};
 
 const displayNameFromUser = (u) => {
   if (!u) return 'מערכת';
@@ -178,11 +194,13 @@ function normalizeJournalEntry(raw, tagMap) {
           if (!u || typeof u !== 'object') return null;
           const title = String(u.title || u.summary || '').trim();
           if (!title) return null;
+          const comment = u.comment != null ? String(u.comment).trim() : '';
           return {
             id: String(u.id || `u-${i}`),
             title,
             date: String(u.date || u.timestamp || ''),
             creator: String(u.creator || u.user || ''),
+            ...(comment ? { comment } : {}),
           };
         })
         .filter(Boolean)
@@ -268,7 +286,8 @@ async function getProcessJournal(jobCandidateId) {
   const wm = await materializeStatusJournal(jc, tagMap);
   const entries = (Array.isArray(wm.statusJournal) ? wm.statusJournal : [])
     .map((row) => normalizeJournalEntry(row, tagMap))
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter((row) => !isProfileOnlyJournalEntry(row));
 
   return {
     jobCandidateId: jc.id,
@@ -310,6 +329,7 @@ async function materializeStatusJournal(jc, tagMap) {
             title: update.title,
             date: update.date,
             creator: update.creator,
+            ...(update.comment ? { comment: update.comment } : {}),
           }))
         : [],
     }))
@@ -349,6 +369,28 @@ async function patchJournalEntry(jobCandidateId, entryId, body, actor) {
 
   const actorName = actor || 'מערכת';
   let entry = { ...journal[idx] };
+  if (body.title !== undefined) {
+    const nextTitle = body.title == null ? '' : String(body.title).trim();
+    if (nextTitle) entry.status = nextTitle;
+  }
+  if (Array.isArray(body.updates)) {
+    entry.updates = body.updates
+      .map((u) => {
+        if (!u || typeof u !== 'object') return null;
+        const title = String(u.title || u.summary || '').trim();
+        if (!title) return null;
+        const comment = u.comment != null ? String(u.comment).trim() : '';
+        return {
+          id: String(u.id || uuidv4()),
+          title,
+          date: String(u.date || u.timestamp || new Date().toISOString()),
+          creator: String(u.creator || u.user || actorName).trim() || actorName,
+          ...(comment ? { comment } : {}),
+        };
+      })
+      .filter(Boolean)
+      .slice(0, 50);
+  }
   if (body.description !== undefined) {
     entry.description = body.description == null ? '' : String(body.description).trim();
   }
@@ -375,7 +417,7 @@ async function patchJournalEntry(jobCandidateId, entryId, body, actor) {
   }
   const nextStageTitle =
     body.nextStageTitle != null ? String(body.nextStageTitle).trim() : '';
-  if (nextStageTitle) {
+  if (nextStageTitle && !Array.isArray(body.updates)) {
     const updates = Array.isArray(entry.updates) ? [...entry.updates] : [];
     updates.unshift({
       id: uuidv4(),

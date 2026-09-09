@@ -30,8 +30,7 @@ const organizationContactService = require('../services/organizationContactServi
 const CandidateOrganization = require('../models/CandidateOrganization');
 const Candidate = require('../models/Candidate');
 const Organization = require('../models/Organization');
-const OrganizationChangeHistory = require('../models/OrganizationChangeHistory');
-const User = require('../models/User');
+const organizationHistoryService = require('../services/organizationHistoryService');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
 const Client = require('../models/Client');
 
@@ -60,24 +59,6 @@ const resolveOrganizationActor = (req) => {
     };
   }
   return { actingUser: 'system', actorName: null, actorEmail: null };
-};
-
-const resolveHistoryActorDisplay = (plain, userMap) => {
-  const actor = plain.actor;
-  const changes = plain.changes || {};
-  const user = userMap.get(String(actor));
-
-  if (user?.name) return user.name;
-  if (user?.email) return user.email;
-  if (changes.actorName) return changes.actorName;
-  if (changes.actorEmail) return changes.actorEmail;
-
-  if (actor && typeof actor === 'string' && !UUID_RE.test(actor) && actor !== 'system') {
-    return actor;
-  }
-
-  if (actor && actor !== 'system') return null;
-  return null;
 };
 
 
@@ -308,6 +289,28 @@ const remove = async (req, res) => {
   }
 };
 
+const mergeOrganizations = async (req, res) => {
+  try {
+    const actor = resolveOrganizationActor(req);
+    const sourceOrganizationIds = Array.isArray(req.body?.sourceOrganizationIds)
+      ? req.body.sourceOrganizationIds
+      : [];
+    const targetOrganizationId = req.body?.targetOrganizationId;
+    const result = await organizationService.mergeOrganizations(
+      { sourceIds: sourceOrganizationIds, targetId: targetOrganizationId },
+      {
+        actingUser: actor.actingUser,
+        actorName: actor.actorName,
+        actorEmail: actor.actorEmail,
+      },
+    );
+    res.json(result);
+  } catch (err) {
+    console.error('[organizationController.mergeOrganizations]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Merge failed' });
+  }
+};
+
 const getHistory = async (req, res) => {
   const organizationId = req.params.id;
   if (!organizationId) {
@@ -315,52 +318,11 @@ const getHistory = async (req, res) => {
   }
 
   try {
-    const entries = await OrganizationChangeHistory.findAll({
-      where: { organizationId },
-      order: [['created_at', 'DESC']],
-    });
-
-    const actorIds = [
-      ...new Set(
-        entries
-          .map((row) => row.actor)
-          .filter((actor) => actor && actor !== 'system' && UUID_RE.test(String(actor))),
-      ),
-    ];
-
-    const users = actorIds.length
-      ? await User.findAll({
-          where: { id: { [Op.in]: actorIds } },
-          attributes: ['id', 'name', 'email'],
-        })
-      : [];
-    const userMap = new Map(users.map((u) => [String(u.id), u.get({ plain: true })]));
-
-    const payload = entries.map((entry) => {
-      const plain = entry.toJSON ? entry.toJSON() : entry.get({ plain: true });
-      const actor = plain.actor;
-      const user = userMap.get(String(actor));
-      const actorDisplayName = resolveHistoryActorDisplay(plain, userMap);
-      const createdAt =
-        plain.createdAt ||
-        plain.created_at ||
-        plain.updatedAt ||
-        plain.updated_at ||
-        null;
-      return {
-        ...plain,
-        createdAt,
-        created_at: createdAt,
-        actorDisplayName,
-        userName: user?.name || plain.changes?.actorName || null,
-        userEmail: user?.email || plain.changes?.actorEmail || null,
-      };
-    });
-
+    const payload = await organizationHistoryService.listOrganizationHistory(organizationId);
     res.json(payload);
   } catch (err) {
     console.error('[organizationController.getHistory]', err);
-    res.status(500).json({ message: 'Failed to load organization history' });
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load organization history' });
   }
 };
 
@@ -1040,6 +1002,7 @@ module.exports = {
   create,
   update,
   remove,
+  mergeOrganizations,
   getHistory,
   enrich,
   listCandidates,

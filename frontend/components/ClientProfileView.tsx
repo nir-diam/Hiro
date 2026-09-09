@@ -11,10 +11,12 @@ import {
     CheckBadgeIcon,
     ClockIcon,
     BanknotesIcon,
-    ClipboardDocumentCheckIcon 
+    ClipboardDocumentCheckIcon,
+    ArrowPathIcon,
 } from './Icons';
 import ClientDetailsTab from './ClientDetailsTab';
 import ClientContactsTab from './ClientContactsTab';
+import ClientContactProcessesTab from './ClientContactProcessesTab';
 import ClientJobsTab from './ClientJobsTab';
 import ClientEventsTab from './ClientEventsTab';
 import ClientDocumentsTab from './ClientDocumentsTab';
@@ -27,7 +29,7 @@ import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
 import { authHeaders } from '../utils/authHeaders';
 
-type Tab = 'details' | 'tasks' | 'contacts' | 'jobs' | 'events' | 'documents' | 'finance' | 'history'; 
+type Tab = 'details' | 'tasks' | 'contacts' | 'processes' | 'jobs' | 'events' | 'documents' | 'finance' | 'history'; 
 
 const StatCard: React.FC<{ title: string; value: string; icon: React.ReactElement; colorClass: { bg: string; text: string; } }> = ({ title, value, icon, colorClass }) => (
     <div className="bg-bg-card p-4 rounded-xl border border-border-default flex items-center gap-4 shadow-sm hover:shadow-md transition-shadow">
@@ -177,6 +179,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
         { id: 'details', label: t('client_profile.tab_details'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
         { id: 'tasks', label: 'משימות', icon: <ClipboardDocumentCheckIcon className="w-5 h-5" /> }, 
         { id: 'contacts', label: t('client_profile.tab_contacts'), icon: <UserGroupIcon className="w-5 h-5" /> },
+        { id: 'processes', label: t('client_profile.tab_processes'), icon: <ArrowPathIcon className="w-5 h-5" /> },
         { id: 'jobs', label: t('client_profile.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
         { id: 'events', label: t('client_profile.tab_events'), icon: <CalendarDaysIcon className="w-5 h-5" /> },
         { id: 'documents', label: t('client_profile.tab_documents'), icon: <DocumentTextIcon className="w-5 h-5" /> },
@@ -206,6 +209,12 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                 );
             case 'tasks': return <ClientTasksTab clientId={clientId!} />; 
             case 'contacts': return <ClientContactsTab clientId={clientId!} onOpenMessageModal={openMessageModal} />;
+            case 'processes': return (
+                <ClientContactProcessesTab
+                    clientId={clientId!}
+                    organizationName={client.displayName || client.name}
+                />
+            );
             case 'jobs': return <ClientJobsTab clientId={clientId!} allLinkedOrganizations />;
             case 'events': return <ClientEventsTab clientId={clientId!} clientName={client.displayName || client.name} />;
             case 'documents': return <ClientDocumentsTab clientId={clientId!} clientName={client.displayName || client.name} />;

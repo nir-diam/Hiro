@@ -19,6 +19,7 @@ import { useLanguage } from './context/LanguageContext';
 import { FinanceProvider } from './context/FinanceContext';
 import { PromptProvider } from './context/PromptContext';
 import { buildBreadcrumbs } from './utils/buildBreadcrumbs';
+import { BreadcrumbProvider, useBreadcrumbContext } from './context/BreadcrumbContext';
 import StaffPageGate from './components/StaffPageGate';
 
 
@@ -29,6 +30,7 @@ const AppContent: React.FC = () => {
     const navigate = useNavigate();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
     const { t } = useLanguage();
+    const { contactProfileParent } = useBreadcrumbContext();
     
     // ... (keep existing state hooks) ...
     const { 
@@ -68,8 +70,9 @@ const AppContent: React.FC = () => {
                 search: location.search,
                 savedSearches,
                 t,
+                contactProfileParent,
             }),
-        [location.pathname, location.search, savedSearches, t],
+        [location.pathname, location.search, savedSearches, t, contactProfileParent],
     );
 
     const handleViewFullProfileFromDrawer = (candidateId: number) => {
@@ -181,6 +184,7 @@ const AppContent: React.FC = () => {
                         linkedClientId={messageModalConfig.linkedClientId}
                         linkedOrganizationId={messageModalConfig.linkedOrganizationId}
                         linkedContactId={messageModalConfig.linkedContactId}
+                        recipientType={messageModalConfig.recipientType}
                     />
                 )}
             </div>
@@ -270,6 +274,7 @@ const AppContent: React.FC = () => {
                         linkedClientId={messageModalConfig.linkedClientId}
                         linkedOrganizationId={messageModalConfig.linkedOrganizationId}
                         linkedContactId={messageModalConfig.linkedContactId}
+                        recipientType={messageModalConfig.recipientType}
                     />
                 )}
                 <CreateJobAlertModal
@@ -286,7 +291,9 @@ const AppContent: React.FC = () => {
 
 const App: React.FC = () => {
     return (
-        <AppContent />
+        <BreadcrumbProvider>
+            <AppContent />
+        </BreadcrumbProvider>
     );
 }
 

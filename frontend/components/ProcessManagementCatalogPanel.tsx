@@ -9,12 +9,13 @@ import {
   togglePipelineGroupSelection,
   type EnrichedPipeline,
   type StageOutcomeOption,
+  type SystemEventCatalogGroup,
 } from '../utils/processManagementCatalog';
 
 type Props = {
   clientPipelines: EnrichedPipeline[];
   candidatePipelines: EnrichedPipeline[];
-  systemEventGroups: Array<{ label: string; events: Array<{ value: string; label: string }> }>;
+  systemEventGroups: SystemEventCatalogGroup[];
   selectedPipelineIds: Set<string>;
   onSelectedPipelineIdsChange: (next: Set<string>) => void;
   selectedSystemEventIds: Set<string>;
@@ -71,6 +72,7 @@ const ProcessManagementCatalogPanel: React.FC<Props> = ({
   const [pipelineOpen, setPipelineOpen] = useState(false);
   const [systemOpen, setSystemOpen] = useState(false);
   const [stageOpen, setStageOpen] = useState(false);
+  const [systemEventSearch, setSystemEventSearch] = useState('');
   const pipelineRef = useRef<HTMLDivElement>(null);
   const systemRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -83,6 +85,24 @@ const ProcessManagementCatalogPanel: React.FC<Props> = ({
     }
     return map;
   }, [stageOutcomeOptions]);
+
+  const filteredSystemEventGroups = useMemo(() => {
+    const q = systemEventSearch.trim().toLowerCase();
+    if (!q) return systemEventGroups;
+    return systemEventGroups
+      .map((group) => {
+        const groupMatches = group.label.toLowerCase().includes(q);
+        const events = group.events.filter(
+          (ev) =>
+            groupMatches
+            || ev.label.toLowerCase().includes(q)
+            || ev.triggerName.toLowerCase().includes(q)
+            || `${ev.triggerName}.${ev.eventName}`.toLowerCase().includes(q),
+        );
+        return events.length > 0 ? { ...group, events } : null;
+      })
+      .filter((group): group is SystemEventCatalogGroup => group != null);
+  }, [systemEventGroups, systemEventSearch]);
 
   return (
     <>
@@ -218,24 +238,35 @@ const ProcessManagementCatalogPanel: React.FC<Props> = ({
         </button>
         {systemOpen ? (
           <div className="absolute top-full mt-1 right-0 w-72 bg-white border border-border-default shadow-xl rounded-xl p-2 z-50 max-h-72 overflow-y-auto">
-            {systemEventGroups.map((group) => (
-              <div key={group.label} className="mb-2">
-                <p className="text-[10px] font-bold text-gray-500 px-2 py-1">{group.label}</p>
-                {group.events.map((ev) => (
-                  <label key={ev.value} className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selectedSystemEventIds.has(ev.value)}
-                      onChange={() =>
-                        toggleSet(onSelectedSystemEventIdsChange, selectedSystemEventIds, ev.value)
-                      }
-                      className="rounded border-border-default text-primary-600 w-4 h-4"
-                    />
-                    <span className="text-sm font-medium">{ev.label}</span>
-                  </label>
-                ))}
-              </div>
-            ))}
+            <input
+              type="search"
+              value={systemEventSearch}
+              onChange={(e) => setSystemEventSearch(e.target.value)}
+              placeholder="חיפוש אירוע מערכת…"
+              className="w-full mb-2 bg-bg-input border border-border-default rounded-lg py-1.5 px-2 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+            />
+            {filteredSystemEventGroups.length === 0 ? (
+              <p className="text-xs text-text-muted px-2 py-3 text-center">לא נמצאו אירועים</p>
+            ) : (
+              filteredSystemEventGroups.map((group) => (
+                <div key={group.label} className="mb-2">
+                  <p className="text-[10px] font-bold text-gray-500 px-2 py-1">{group.label}</p>
+                  {group.events.map((ev) => (
+                    <label key={ev.value} className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded-lg cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedSystemEventIds.has(ev.value)}
+                        onChange={() =>
+                          toggleSet(onSelectedSystemEventIdsChange, selectedSystemEventIds, ev.value)
+                        }
+                        className="rounded border-border-default text-primary-600 w-4 h-4"
+                      />
+                      <span className="text-sm font-medium">{ev.label}</span>
+                    </label>
+                  ))}
+                </div>
+              ))
+            )}
           </div>
         ) : null}
       </div>

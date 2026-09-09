@@ -215,9 +215,7 @@ const recordMissingDetailsClientJournal = async (
     const event = {
       id: uuidv4(),
       title: `השלמת פרטים: ${label}`.slice(0, 240),
-      type: ['שלמות נתוני מועמד', CANDIDATE_MISSING_DETAILS_COMPLETED_EVENT_TYPE],
-      process: 'שלמות נתוני מועמד',
-      stage: CANDIDATE_MISSING_DETAILS_COMPLETED_EVENT_TYPE,
+      type: ['יומן מועמד', 'שלמות נתוני מועמד', CANDIDATE_MISSING_DETAILS_COMPLETED_EVENT_TYPE],
       date: now,
       coordinator: actor,
       creator: actor,
@@ -237,8 +235,9 @@ const recordMissingDetailsClientJournal = async (
         missingDetailsCompletedCandidate: cid,
         candidateId: cid,
         resolvedFields: fieldsLine,
+        profileCompletenessOnly: true,
       },
-      isActive: true,
+      isActive: false,
     };
 
     await clientService.update(clientId, { events: [event, ...prevEvents] });
@@ -282,6 +281,7 @@ const recordMissingDetailsCompleted = async (
       entityType: 'Candidate',
       entityId: cid,
       entityName: label,
+      skipPipelineDispatch: true,
       params: {
         name: label,
         actor,
@@ -295,14 +295,9 @@ const recordMissingDetailsCompleted = async (
     actorLabel: actor,
     resolvedFields,
   });
-  const jobLinkResult = await recordMissingDetailsJobLinkJournals(cid, {
-    candidateRow: candidate,
-    actorLabel: actor,
-    resolvedFields,
-  });
 
   const recorded =
-    candidateRecorded || clientResult.recorded || (jobLinkResult.recorded || 0) > 0;
+    candidateRecorded || clientResult.recorded;
   if (!recorded && alreadyOnCandidate) {
     return { recorded: false, reason: 'already_recorded' };
   }
@@ -311,7 +306,7 @@ const recordMissingDetailsCompleted = async (
     recorded,
     candidateRecorded,
     clientRecorded: clientResult.recorded,
-    jobLinksRecorded: jobLinkResult.recorded || 0,
+    jobLinksRecorded: 0,
   };
 };
 

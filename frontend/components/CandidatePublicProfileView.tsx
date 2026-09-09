@@ -34,6 +34,7 @@ import {
     ValidatedSuggestionItem,
 } from '../services/profileSuggestionValidation';
 import { buildCandidateFullName, syncCandidateNameFields } from '../utils/candidateName';
+import { buildCandidateChatContext } from '../utils/candidateChatContext';
 import { educationEntryToDisplayLine, normalizeDrivingLicensesForPrint, normalizeLanguagesForPrintRows, splitWorkExperienceForPrint } from '../utils/printableResumeFormatting';
 import CityEditableField from './CityEditableField';
 import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
@@ -1543,24 +1544,49 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         if (category === 'tool') return 'tool';
         return category;
     };
+    const normalizeCatalogType = (typeRaw?: string): string => {
+        const raw = String(typeRaw || '').toLowerCase().trim();
+        if (raw === 'soft' || raw === 'soft_skill') return 'soft_skill';
+        if (raw === 'hard_skill') return 'skill';
+        if (raw === 'education') return 'degree';
+        return raw || 'skill';
+    };
+    const catalogTypesEquivalent = (a?: string, b?: string): boolean => {
+        const left = normalizeCatalogType(a);
+        const right = normalizeCatalogType(b);
+        return Boolean(left && right && left === right);
+    };
+    const resolveTagIdForCategory = (tag: TagOption, category: TagCategory): string | undefined => {
+        const catalogId = String(tag.id || '').trim();
+        if (!catalogId || catalogId.startsWith('custom-')) return undefined;
+        const requested = mapCategoryToRawType(category);
+        const catalogType = normalizeCatalogType(tag.rawType || tag.category);
+        return catalogTypesEquivalent(catalogType, requested) ? catalogId : undefined;
+    };
     const authHeaders = useCallback(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         return token ? { Authorization: `Bearer ${token}` } : {};
     }, []);
 
+    const resolveTagKey = (tag: TagOption): string =>
+        String(tag.tagKey || tag.nameHe || tag.nameEn || tag.id || '').trim();
+
     const persistCandidateTag = async (tag: TagOption) => {
         if (!candidateId) return;
         try {
-            await fetch(`${apiBase}/api/admin/candidate-tags`, {
+            const res = await fetch(`${apiBase}/api/admin/candidate-tags`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
                 body: JSON.stringify({
                     candidate_id: candidateId,
-                    tagKey: tag.nameHe,
-                    displayNameHe: tag.nameHe,
+                    tag_id: resolveTagIdForCategory(tag, tag.category) || undefined,
+                    tagKey: resolveTagKey(tag),
+                    displayNameHe: tag.nameHe || resolveTagKey(tag),
+                    displayNameEn: tag.nameEn || tag.nameHe || resolveTagKey(tag),
                     raw_type: mapCategoryToRawType(tag.category),
                 }),
             });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
         } catch (err) {
             console.error('Failed to persist tag', err);
         }
@@ -1570,18 +1596,25 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         if (!candidateId || !tags.length) return;
         try {
             const payload = tags.map((tag) => ({
-                tagKey: getTagLabel(tag),
-                displayNameHe: tag.nameHe || getTagLabel(tag),
-                displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
+                tag_id: resolveTagIdForCategory(tag, tag.category) || undefined,
+                tagKey: resolveTagKey(tag),
+                displayNameHe: tag.nameHe || resolveTagKey(tag),
+                displayNameEn: tag.nameEn || tag.nameHe || resolveTagKey(tag),
                 raw_type: mapCategoryToRawType(tag.category),
             }));
-            await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
+            const res = await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
                 body: JSON.stringify({ candidate_id: candidateId, tags: payload }),
             });
+            if (!res.ok) {
+                const body = await res.text().catch(() => '');
+                throw new Error(body || `HTTP ${res.status}`);
+            }
+            return await res.json();
         } catch (err) {
             console.error('Failed to persist tags batch', err);
+            throw err;
         }
     };
 
@@ -1689,10 +1722,13 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     );
 
     const chatContextData = useMemo(
-        () => ({
-            ...formData,
-            tagDetails: [...ensureArray(formData.tagDetails), ...localTagDetails],
-        }),
+        () => {
+            const base = buildCandidateChatContext({
+                ...formData,
+                tagDetails: [...ensureArray(formData.tagDetails), ...localTagDetails],
+            });
+            return base;
+        },
         [formData, localTagDetails],
     );
 
@@ -1729,14 +1765,15 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         if (newTags.length) {
             const merged = Array.from(new Set([...existingTags, ...newTags]));
             const existingDetails = ensureArray(formData.tagDetails);
-            const addedDetails = selected
-                .filter((tag) => newTags.includes(getTagLabel(tag)))
-                .map((tag) => ({
+            const addedTags = selected.filter((tag) => newTags.includes(getTagLabel(tag)));
+            const selectorCategory = tagSelectorCategory === 'all' ? 'skill' : tagSelectorCategory;
+            const addedDetails = addedTags.map((tag) => ({
                     id: `local-${Date.now()}-${tag.id || tag.nameHe}`,
-                    tagKey: getTagLabel(tag),
+                    tagId: resolveTagIdForCategory(tag, selectorCategory),
+                    tagKey: resolveTagKey(tag),
                     displayNameHe: tag.nameHe || getTagLabel(tag),
                     displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
-                    rawType: mapCategoryToRawType(tag.category),
+                    rawType: mapCategoryToRawType(selectorCategory),
                     context: null,
                     isCurrent: true,
                     isInSummary: true,
@@ -1747,7 +1784,13 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 tagDetails: [...existingDetails, ...addedDetails],
             });
             setLocalTagDetails((prev) => [...prev, ...addedDetails]);
-            await persistCandidateTagsBatch(selected.filter((tag) => newTags.includes(getTagLabel(tag))));
+            try {
+                await persistCandidateTagsBatch(
+                    addedTags.map((tag) => ({ ...tag, category: selectorCategory })),
+                );
+            } catch {
+                // PUT autosave will retry via tagDetails sync.
+            }
         }
         setIsTagSelectorOpen(false);
         await loadCandidateRef.current?.();
@@ -3453,40 +3496,8 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
                 chatType="candidate-profile"
+                promptId="candidate_profile_chat"
                 userId={candidateId || formData.id?.toString()}
-                systemPrompt={`You are Hiro, an expert AI Career Coach and Recruitment Assistant for "${formData.fullName}".
-                **Goal:** Help the candidate create a "winning profile" to maximize their chances of getting hired.
-                **Language:** Respond ONLY in Hebrew. Be proactive, encouraging, and professional.
-
-                **Operational Rule (DYNAMIC UPDATES):** When the user asks to change profile data OR you suggest concrete profile improvements (summary text, skills to add, work experience, salary, preferences), you MUST include a JSON array at the end of your response so the user can approve the change via a popup.
-
-                **When NOT to include JSON:** Pure coaching answers with no profile change — e.g. interview tips, mock interview Q&A, salary market overview, career advice, gap explanations, profile strength analysis. Answer thoroughly in Hebrew without JSON unless you also propose a specific profile edit.
-
-                **Query-type guidelines:**
-                1. **Profile/CV upgrade** (summary, CV improvement, skills for management roles, English CV translation): Give actionable advice based on the candidate's current profile context. When you draft or recommend specific text/skills/experience, include JSON proposals.
-                2. **Interview prep** (common questions, mock interview, questions for interviewer, employment gap): Provide detailed, role-relevant coaching. Run mock interviews interactively when asked. No JSON unless updating profile.
-                3. **Job fit & career** (profile strength for a role, salary ranges in Israeli hi-tech, alternative career paths): Analyze using profile context. Salary: give realistic monthly gross ranges in NIS for Israel hi-tech. If asked about open job listings matching their experience, explain this feature is coming soon (בקרוב) — do not invent job listings.
-                4. **Quick data updates** (add work experience, update salary expectations, change work preferences): Confirm briefly in Hebrew, then ALWAYS include JSON with exact updates.
-                   - workExperience: add ONLY the new entry as {title, company, description, startDate, endDate}. Infer reasonable dates if user gives duration (e.g. "שנה" = ~12 months ending recently).
-                   - salaryMin/salaryMax: parse formats like 25K-27K as 25000-27000 NIS monthly gross. Accept adjustments within ±2000 NIS of stated values.
-                   - preferences: array of strings e.g. ["היברידי", "מרכז", "משרות במרכז"] for hybrid/location preferences.
-
-                **JSON Format:**
-                \`\`\`json
-                [
-                  { "field": "fieldName", "value": "newValue", "reason": "brief reason in Hebrew" }
-                ]
-                \`\`\`
-
-                **Supported Fields:**
-                - fullName, title, professionalSummary (Hebrew), location (City), age (Number/String), phone, email
-                - tags (Array of strings), softSkills (Array), techSkills (Array of objects: {name, level})
-                - workExperience (Array of ONLY the new/updated objects: {title, company, description, startDate, endDate}. Do not repeat existing items unless editing them.)
-                - education (Array/string describing degrees, certifications)
-                - salaryMin, salaryMax, availability, desiredRoles (Array), preferences (Array of strings), interests (Array)
-                - candidateNotes (string for CV English translation drafts or notes)
-
-                If info is missing (like summary or age), ask for it and then suggest the update via JSON when appropriate.`}
                 contextData={chatContextData}
                 onProfileUpdate={(patch, meta) => void saveNow(patch, meta)}
             />
