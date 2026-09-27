@@ -2504,28 +2504,122 @@ const listProfileVersionsForCandidate = async (candidateId) => {
   return unique.map((r) => mapCandidateWithTags(r));
 };
 
+const DUPLICATE_PROFILE_NAME_SUFFIX_RE = /_duplicate\d*$/i;
+
+const stripDuplicateProfileNameSuffix = (value) =>
+  String(value || '')
+    .trim()
+    .replace(DUPLICATE_PROFILE_NAME_SUFFIX_RE, '')
+    .trim();
+
+/** Promote a staff shadow copy (צור העתק) to a candidate-visible portal profile version. */
+const shareStaffProfileWithCandidate = async (candidateId) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) {
+    const err = new Error('Candidate id is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const row = await fetchInstanceById(cid);
+  if (!row || row.isDeleted) {
+    const err = new Error('Candidate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const canonicalId =
+    row.canonicalCandidateId != null ? String(row.canonicalCandidateId).trim() : '';
+  if (!canonicalId || canonicalId === cid) {
+    const err = new Error('Profile is not a staff duplicate copy');
+    err.status = 400;
+    throw err;
+  }
+  const looksLikeStaffShadow =
+    row.staffProfileCopy === true ||
+    DUPLICATE_PROFILE_NAME_SUFFIX_RE.test(String(row.fullName || row.title || row.profileName || ''));
+  if (!looksLikeStaffShadow) {
+    const err = new Error('Profile is already shared with the candidate');
+    err.status = 400;
+    throw err;
+  }
+
+  const primary = await Candidate.findByPk(canonicalId, {
+    attributes: ['id', 'userId'],
+    raw: true,
+  });
+  if (!primary) {
+    const err = new Error('Primary candidate profile not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const patch = { staffProfileCopy: false };
+  if (primary.userId && !row.userId) {
+    patch.userId = primary.userId;
+  }
+
+  for (const field of ['fullName', 'title', 'profileName']) {
+    const current = row[field];
+    if (typeof current === 'string' && DUPLICATE_PROFILE_NAME_SUFFIX_RE.test(current.trim())) {
+      const stripped = stripDuplicateProfileNameSuffix(current);
+      if (stripped) patch[field] = stripped;
+    }
+  }
+
+  await row.update(patch);
+  await cacheDel(cid);
+  return mapCandidateWithTags(await fetchInstanceById(cid));
+};
+
 /** All portal profiles for a user: primary rows and linked versions (canonicalCandidateId). */
 const listByUserId = async (userId) => {
   const uid = String(userId || '').trim();
   if (!uid) return [];
 
-  const primaries = await Candidate.findAll({
+  const userRows = await Candidate.findAll({
     where: { userId: uid, isDeleted: false },
-    attributes: ['id'],
+    attributes: ['id', 'canonicalCandidateId'],
     raw: true,
   });
-  const primaryIds = primaries.map((r) => r.id);
-  if (!primaryIds.length) return [];
+  if (!userRows.length) return [];
+
+  const familyRootIds = new Set();
+  for (const row of userRows) {
+    const canon =
+      row.canonicalCandidateId != null ? String(row.canonicalCandidateId).trim() : '';
+    if (canon && canon !== String(row.id)) {
+      familyRootIds.add(canon);
+    } else {
+      familyRootIds.add(String(row.id));
+    }
+  }
+
+  const rootIdList = [...familyRootIds];
+  const orConditions = [{ userId: uid }];
+  if (rootIdList.length) {
+    orConditions.push({ id: { [Op.in]: rootIdList } });
+    orConditions.push({ canonicalCandidateId: { [Op.in]: rootIdList } });
+  }
 
   const rows = await Candidate.findAll({
     where: {
       isDeleted: false,
-      [Op.or]: [{ userId: uid }, { canonicalCandidateId: { [Op.in]: primaryIds } }],
+      [Op.or]: orConditions,
     },
     include: includeCandidateTags,
     order: [['createdAt', 'ASC']],
   });
-  return rows.map((r) => mapCandidateWithTags(r));
+
+  const seen = new Set();
+  const unique = [];
+  for (const row of rows) {
+    const id = String(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    unique.push(row);
+  }
+  return unique.map((r) => mapCandidateWithTags(r));
 };
 
 /** Fix orphans / partial links: attach to portal primary, set canonicalCandidateId, clear magic-link tokens. */
@@ -3087,6 +3181,20 @@ const update = async (id, payload, options = {}) => {
   delete cleanPayload.backendId;
   delete cleanPayload.id;
 
+  const rowCanon =
+    candidate.canonicalCandidateId != null ? String(candidate.canonicalCandidateId).trim() : '';
+  const isPrimaryRow = !rowCanon || rowCanon === String(id);
+  if (isPrimaryRow) {
+    delete cleanPayload.canonicalCandidateId;
+    if (Object.prototype.hasOwnProperty.call(cleanPayload, 'staffProfileCopy')) {
+      delete cleanPayload.staffProfileCopy;
+    }
+    // Repair legacy rows where migration flagged the primary because of a _duplicate suffix.
+    if (candidate.staffProfileCopy === true) {
+      cleanPayload.staffProfileCopy = false;
+    }
+  }
+
   const strArr = (a) =>
     Array.isArray(a) ? a.map((x) => String(x || '').trim()).filter(Boolean) : undefined;
 
@@ -3430,6 +3538,7 @@ module.exports = {
   getByUserId,
   listByUserId,
   listProfileVersionsForCandidate,
+  shareStaffProfileWithCandidate,
   listMergedEventsForCandidate,
   fetchCanonicalSiblingRows,
   listRelatedCandidates,

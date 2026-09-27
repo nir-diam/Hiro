@@ -52,6 +52,12 @@ router.post(
   attachDbUser,
   candidateController.approveDataCorrections,
 );
+router.post(
+  '/:id/share-with-candidate',
+  authMiddleware,
+  attachDbUser,
+  candidateController.shareProfileWithCandidate,
+);
 router.post('/:id/approve-profile', candidateController.approveProfileByCandidate);
 
 router.get('/:id/documents', candidateDocumentController.list);

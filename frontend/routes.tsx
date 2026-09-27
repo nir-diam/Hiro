@@ -39,6 +39,9 @@ import {
     buildDuplicateProfileName,
     buildProfileDuplicatePayload,
     buildTagEntriesFromSource,
+    buildCandidateSavePayload,
+    hasCandidateFormChanges,
+    resolveCandidatePortalPreviewId,
     sanitizeProfileDuplicatePayload,
 } from './utils/candidateProfileDuplicate';
 import PipelineSettingsView from './components/PipelineSettingsView';
@@ -242,6 +245,8 @@ const normalizeCandidatePayload = (payload: any) => {
         recruitmentSourceId: payload?.recruitmentSourceId ?? null,
         recruitmentSourceCreatedAt: payload?.recruitmentSourceCreatedAt ?? null,
         recruitmentSourceUpdatedAt: payload?.recruitmentSourceUpdatedAt ?? null,
+        canonicalCandidateId: payload?.canonicalCandidateId ?? null,
+        staffProfileCopy: payload?.staffProfileCopy === true,
         distributionEmail: isBlockedStatus ? false : payload?.distributionEmail !== false,
         distributionSms: isBlockedStatus ? false : payload?.distributionSms !== false,
         distributionWhatsapp: isBlockedStatus ? false : payload?.distributionWhatsapp !== false,
@@ -317,9 +322,11 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const [candidateFetchError, setCandidateFetchError] = useState<string | null>(null);
     const [isUpdatingCandidate, setIsUpdatingCandidate] = useState(false);
     const [isDuplicatingProfile, setIsDuplicatingProfile] = useState(false);
+    const [isSharingProfileWithCandidate, setIsSharingProfileWithCandidate] = useState(false);
     const [candidateUpdateMessage, setCandidateUpdateMessage] = useState<string | null>(null);
     const [approveCorrectionsLoading, setApproveCorrectionsLoading] = useState(false);
     const [candidateList, setCandidateList] = useState<{ id: string }[]>([]);
+    const [savedFormBaseline, setSavedFormBaseline] = useState<Record<string, unknown> | null>(null);
 
     const authHeaders = useCallback(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
@@ -411,11 +418,13 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 const localId = deriveLocalCandidateId(String(payload.id ?? payload.userId ?? ''), 0);
 
             if (!signal?.aborted) {
-                setFormData({
+                const nextFormData = {
                     ...normalized,
                     id: localId,
                     backendId: payload.id, // Keep the real UUID
-                });
+                };
+                setFormData(nextFormData);
+                setSavedFormBaseline(nextFormData);
                 setActiveProfileId(payload.id ?? payload.backendId ?? normalized.backendId ?? null);
             }
 
@@ -430,6 +439,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 }
             }
     }, [apiBase, loadProfileVersionsForCandidate, urlId]);
+
+    useEffect(() => {
+        setSavedFormBaseline(null);
+    }, [urlId]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -459,12 +472,20 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     }, [fetchCandidate, urlId]);
 
     const handleSaveCandidate = useCallback(async () => {
-        if (!urlId) {
+        const saveTargetId = String(formData.backendId || urlId || '').trim();
+        if (!saveTargetId) {
             setCandidateUpdateMessage('מזהה המועמד חסר.');
+            return;
+        }
+        if (urlId && formData.backendId && String(urlId) !== String(formData.backendId)) {
+            setCandidateUpdateMessage('פרופיל לא מסונכרן — רענן את הדף לפני שמירה.');
             return;
         }
         if (!apiBase) {
             setCandidateUpdateMessage('כתובת ה-API לא מוגדרת.');
+            return;
+        }
+        if (!hasCandidateFormChanges(formData, savedFormBaseline)) {
             return;
         }
 
@@ -476,10 +497,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 formData,
                 resolveProfileDisplayAge(formData),
             );
-            const response = await fetch(`${apiBase}/api/candidates/${urlId}`, {
+            const response = await fetch(`${apiBase}/api/candidates/${saveTargetId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(formData),
+                body: JSON.stringify(buildCandidateSavePayload(formData)),
             });
             if (!response.ok) {
                 const errBody = await response.json().catch(() => null);
@@ -489,7 +510,9 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             const payload = await response.json();
             const normalized = normalizeCandidatePayload(payload);
             const localId = deriveLocalCandidateId(payload.id ?? payload.userId, formData.id);
-            setFormData({ ...normalized, id: localId, backendId: payload.id });
+            const nextFormData = { ...normalized, id: localId, backendId: payload.id };
+            setFormData(nextFormData);
+            setSavedFormBaseline(nextFormData);
             const nextMissing = buildMissingProfileFieldLabels(
                 normalized,
                 resolveProfileDisplayAge(normalized),
@@ -511,7 +534,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         } finally {
             setIsUpdatingCandidate(false);
         }
-    }, [apiBase, urlId, formData, authHeaders, loadProfileVersionsForCandidate]);
+    }, [apiBase, urlId, formData, savedFormBaseline, authHeaders, loadProfileVersionsForCandidate]);
 
     const mockResumeData = {
         name: formData.fullName,
@@ -553,7 +576,9 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             if (!res.ok) throw new Error(typeof body?.message === 'string' ? body.message : 'אישור נכשל');
             const normalized = normalizeCandidatePayload(body);
             const localId = deriveLocalCandidateId(body.id ?? body.userId, formData.id);
-            setFormData({ ...normalized, id: localId, backendId: body.id });
+            const nextFormData = { ...normalized, id: localId, backendId: body.id };
+            setFormData(nextFormData);
+            setSavedFormBaseline(nextFormData);
             setCandidateUpdateMessage('המועמד אושר והועבר למצב פעיל.');
             window.dispatchEvent(new CustomEvent('candidate-data-refreshed', { detail: { backendId: id } }));
         } catch (err: unknown) {
@@ -708,6 +733,59 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             setIsDuplicatingProfile(false);
         }
     }, [apiBase, authHeaders, formData, loadProfileVersionsForCandidate, navigate, profiles, urlId]);
+
+    const handleShareProfileWithCandidate = useCallback(async () => {
+        const targetId = String(formData.backendId || urlId || '').trim();
+        if (!targetId) {
+            setCandidateUpdateMessage('מזהה המועמד חסר.');
+            return;
+        }
+        if (!apiBase) {
+            setCandidateUpdateMessage('כתובת ה-API לא מוגדרת.');
+            return;
+        }
+        const confirmed = window.confirm(
+            'לשתף את הפרופיל עם המועמד? הוא יוכל לראות ולערוך אותו באזור האישי.',
+        );
+        if (!confirmed) return;
+
+        setIsSharingProfileWithCandidate(true);
+        setCandidateUpdateMessage(null);
+        try {
+            const res = await fetch(
+                `${apiBase}/api/candidates/${encodeURIComponent(targetId)}/share-with-candidate`,
+                {
+                    method: 'POST',
+                    headers: { ...authHeaders() },
+                },
+            );
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(typeof body?.message === 'string' ? body.message : 'שיתוף הפרופיל נכשל.');
+            }
+            const normalized = normalizeCandidatePayload(body);
+            const localId = deriveLocalCandidateId(body.id ?? body.userId, formData.id);
+            setFormData({ ...normalized, id: localId, backendId: body.id });
+            setProfiles((prev) =>
+                prev.map((profile) =>
+                    String(profile.backendId || profile.id) === String(body.id)
+                        ? { ...profile, ...normalized, backendId: body.id, staffProfileCopy: false }
+                        : profile,
+                ),
+            );
+            void loadProfileVersionsForCandidate(
+                normalized.canonicalCandidateId || formData.canonicalCandidateId || targetId,
+            );
+            window.dispatchEvent(
+                new CustomEvent('candidate-data-refreshed', { detail: { backendId: body.id } }),
+            );
+            setCandidateUpdateMessage('הפרופיל שותף עם המועמד.');
+        } catch (err: unknown) {
+            setCandidateUpdateMessage(err instanceof Error ? err.message : 'שיתוף הפרופיל נכשל.');
+        } finally {
+            setIsSharingProfileWithCandidate(false);
+        }
+    }, [apiBase, authHeaders, formData, loadProfileVersionsForCandidate, urlId]);
 
     const profileOptions = useMemo(() => {
         const list =
@@ -959,12 +1037,12 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                  <CandidateNav
                     activeView={props.activeView}
                     setActiveView={handleNavClick}
-                    candidateId={String(formData.backendId || urlId || '')}
+                    candidateId={resolveCandidatePortalPreviewId(formData, formData.backendId || urlId)}
                 />
             </div>
 
              <CandidateProfile 
-                candidateData={formData} 
+                candidateData={formData}
                 onMatchJobsClick={props.handleMatchingClick}
                 onScreenCandidateClick={props.handleScreeningClick}
                 onOpenMessageModal={props.openMessageModal}
@@ -975,6 +1053,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 hideActions={props.isMatchingJobs || props.isScreening}
                 isSaving={isUpdatingCandidate}
                 onSaveCandidate={handleSaveCandidate}
+                savedCandidateBaseline={savedFormBaseline}
                 saveStatusMessage={candidateUpdateMessage}
                 profiles={profileOptions}
                 activeProfileId={activeProfileId ?? formData.backendId ?? formData.id}
@@ -982,6 +1061,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 onAddProfile={handleAddProfile}
                 onDuplicateProfile={handleDuplicateProfile}
                 isDuplicatingProfile={isDuplicatingProfile}
+                onShareProfileWithCandidate={handleShareProfileWithCandidate}
+                isSharingProfileWithCandidate={isSharingProfileWithCandidate}
                 candidateList={candidateList}
                 onNavigateCandidate={(id) => {
                     const search = location.search || '';
@@ -1051,7 +1132,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/clients/:clientId/contacts/:contactId', element: <ContactProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/notifications', element: <NotificationCenter onOpenCandidateSummary={props.openSummaryDrawer} /> },
         { path: '/communications', element: <CommunicationCenterView onOpenCandidateSummary={props.openSummaryDrawer} /> },
-        { path: '/events-management', element: <ClientEventsManagementView /> },
+        { path: '/events-management', element: <ClientEventsManagementView openMessageModal={props.openMessageModal} /> },
         
         // --- FINANCE ROUTES ---
         { 

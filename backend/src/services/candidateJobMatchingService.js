@@ -21,6 +21,11 @@ const {
   buildLinkedInfoFromJobCandidate,
   buildIntentScoreOptions,
 } = require('./matchingScoreService');
+const {
+  candidateHasTagFilters,
+  candidateTagFiltersMatch,
+} = require('./matchingPenaltyService');
+const { loadTagAliasIndex } = require('./tagAliasIndexService');
 const { hydrateJobSkills, assignJobSkills } = require('./candidateTagService');
 const { findOpenJobsForFieldSelection } = require('./jobTaxonomyResolver');
 const redisService = require('./redisService');
@@ -128,6 +133,12 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
     lap(`candidate embedding ready (dim=${candidateEmb?.length ?? 0})`);
   }
   candidate.embedding = candidateEmb; // inject normalised version so computeFullMatchScore uses it
+
+  const hasCandidateTagFilters = candidateHasTagFilters(candidate);
+  const candidateTagFilterAliasIndex = hasCandidateTagFilters ? await loadTagAliasIndex() : null;
+  if (hasCandidateTagFilters) {
+    lap('candidate tag filters active (green/red tag modes)');
+  }
 
   // 3. Load existing links (intent + per-job linkedInfo) — Redis-cached for 30 sec
   let linkedRows;
@@ -285,6 +296,11 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
     timings.score = Date.now() - tScore;
 
     if (scoreResult.matchScore < minScore) return { row: null, timings };
+
+    if (hasCandidateTagFilters) {
+      const tagFilter = candidateTagFiltersMatch(jobPlain, candidate, candidateTagFilterAliasIndex);
+      if (!tagFilter.ok) return { row: null, timings };
+    }
 
     const tHard = Date.now();
     let requirementsMet = true;
@@ -561,9 +577,20 @@ async function clearJobMatchIgnore(candidateId, jobId) {
   return { ok: true, candidateId: String(candidateId), jobId: String(jobId) };
 }
 
+async function invalidateCandidateMatchCache(candidateId) {
+  const id = String(candidateId || '').trim();
+  if (!id) return;
+  try {
+    await redisService.del(candidateCacheKey(id));
+  } catch {
+    // ignore cache errors
+  }
+}
+
 module.exports = {
   computeMatchesForCandidate,
   enrichLinkedJobsRowsWithScores,
   listJobMatchIgnores,
   clearJobMatchIgnore,
+  invalidateCandidateMatchCache,
 };

@@ -40,15 +40,20 @@ const displayNameFromUser = (u) => {
 
 const mapUpdateRows = (rows, max = 20) => {
   const list = Array.isArray(rows) ? rows : [];
-  const slice = list.length > max ? list.slice(-max) : list;
+  // Updates/history are stored newest-first — keep the leading rows when capping.
+  const slice = list.length > max ? list.slice(0, max) : list;
   return slice
     .filter((u) => u && (u.title || u.summary))
-    .map((u, i) => ({
-      id: u.id || `u-${i}`,
-      title: u.title || u.summary || '',
-      date: u.date || u.timestamp || '',
-      creator: u.creator || u.user || '',
-    }));
+    .map((u, i) => {
+      const comment = u.comment != null ? String(u.comment).trim() : '';
+      return {
+        id: u.id || `u-${i}`,
+        title: u.title || u.summary || '',
+        date: u.date || u.timestamp || '',
+        creator: u.creator || u.user || '',
+        ...(comment ? { comment } : {}),
+      };
+    });
 };
 
 /** Build journal updates — full merge for detail, capped/light for list endpoints. */
@@ -73,7 +78,7 @@ const buildEventUpdates = (event, { summary = false } = {}) => {
       merged.push(h);
     }
   }
-  return merged.length > max ? merged.slice(-max) : merged;
+  return merged.length > max ? merged.slice(0, max) : merged;
 };
 
 const mapClientEventToJournalRow = (event, clientId, clientName, options = {}) => {

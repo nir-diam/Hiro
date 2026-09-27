@@ -3,10 +3,14 @@ import { PlusIcon, TrashIcon, StarIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import {
   ContactFormState,
+  ContactAddressEntry,
   ContactEmailEntry,
+  ContactLinkEntry,
   ContactPhoneEntry,
   newContactEntryId,
+  setPrimaryAddress,
   setPrimaryEmail,
+  setPrimaryLink,
   setPrimaryPhone,
   syncContactName,
 } from '../utils/contactFormModel';
@@ -19,18 +23,25 @@ interface ContactFormFieldsProps {
 }
 
 const inputClass =
-  'w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3 transition-all outline-none hover:border-border-strong shadow-sm';
+  'w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block py-1.5 px-2.5 transition-all outline-none hover:border-border-strong';
 
-const Section: React.FC<{ title: string; subtitle?: string; children: React.ReactNode }> = ({
+const labelClass = 'block text-[11px] font-semibold text-text-muted mb-0.5';
+
+const iconBtnClass = 'shrink-0 p-1 rounded-md border transition-colors';
+const starActiveClass = 'border-amber-300 bg-amber-50 text-amber-600';
+const starIdleClass =
+  'border-border-default text-text-subtle hover:border-amber-200 hover:text-amber-500';
+const trashBtnClass = 'shrink-0 p-1 rounded-md text-text-subtle hover:bg-red-50 hover:text-red-600';
+
+const Section: React.FC<{ title: string; children: React.ReactNode; className?: string }> = ({
   title,
-  subtitle,
   children,
+  className = '',
 }) => (
-  <section className="rounded-2xl border border-border-default bg-bg-card/80 p-5 space-y-4 shadow-sm">
-    <div>
-      <h3 className="text-sm font-bold text-text-default">{title}</h3>
-      {subtitle ? <p className="text-xs text-text-muted mt-0.5">{subtitle}</p> : null}
-    </div>
+  <section
+    className={`rounded-xl border border-border-default/80 bg-bg-card/60 p-3 space-y-2.5 ${className}`}
+  >
+    <h3 className="text-xs font-bold text-text-default uppercase tracking-wide">{title}</h3>
     {children}
   </section>
 );
@@ -49,28 +60,23 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
 
   const updateEmails = (emails: ContactEmailEntry[]) => patch({ emails });
   const updatePhones = (phones: ContactPhoneEntry[]) => patch({ phones });
+  const updateLinks = (links: ContactLinkEntry[]) => patch({ links });
+  const updateAddresses = (addresses: ContactAddressEntry[]) => patch({ addresses });
 
   const officePhones = formData.phones.filter((p) => p.kind === 'office');
   const mobilePhones = formData.phones.filter((p) => p.kind === 'mobile');
 
   const renderEmailRows = () => (
-    <div className="space-y-2">
-      {formData.emails.length === 0 ? (
-        <p className="text-xs text-text-muted">אין כתובות — לחץ + להוספה</p>
-      ) : null}
+    <div className="space-y-1.5">
       {formData.emails.map((entry) => (
-        <div key={entry.id} className="flex items-center gap-2">
+        <div key={entry.id} className="flex items-center gap-1.5">
           <button
             type="button"
             title={entry.isPrimary ? 'דוא״ל ראשי' : 'סמן כראשי'}
             onClick={() => updateEmails(setPrimaryEmail(formData.emails, entry.id))}
-            className={`shrink-0 p-2 rounded-lg border transition-colors ${
-              entry.isPrimary
-                ? 'border-amber-300 bg-amber-50 text-amber-600'
-                : 'border-border-default text-text-subtle hover:border-amber-200 hover:text-amber-500'
-            }`}
+            className={`${iconBtnClass} ${entry.isPrimary ? starActiveClass : starIdleClass}`}
           >
-            <StarIcon className={`w-4 h-4 ${entry.isPrimary ? 'fill-current' : ''}`} />
+            <StarIcon className={`w-3.5 h-3.5 ${entry.isPrimary ? 'fill-current' : ''}`} />
           </button>
           <input
             type="email"
@@ -84,15 +90,15 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
             }
             placeholder="name@company.com"
             dir="ltr"
-            className={`${inputClass} flex-1`}
+            className={`${inputClass} flex-1 min-w-0`}
           />
           <button
             type="button"
             onClick={() => updateEmails(formData.emails.filter((row) => row.id !== entry.id))}
-            className="shrink-0 p-2 rounded-lg text-text-subtle hover:bg-red-50 hover:text-red-600"
+            className={trashBtnClass}
             aria-label="הסר"
           >
-            <TrashIcon className="w-4 h-4" />
+            <TrashIcon className="w-3.5 h-3.5" />
           </button>
         </div>
       ))}
@@ -108,18 +114,18 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
             },
           ])
         }
-        className="inline-flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:text-primary-700"
+        className="inline-flex items-center gap-1 text-[11px] font-bold text-primary-600 hover:text-primary-700"
       >
-        <PlusIcon className="w-4 h-4" />
+        <PlusIcon className="w-3.5 h-3.5" />
         הוסף דוא״ל
       </button>
     </div>
   );
 
   const renderPhoneRows = (kind: 'office' | 'mobile', rows: ContactPhoneEntry[], label: string) => (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <label className="text-sm font-semibold text-text-muted">{label}</label>
+    <div className="space-y-1.5 min-w-0">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-[11px] font-semibold text-text-muted">{label}</label>
         <button
           type="button"
           onClick={() =>
@@ -133,28 +139,21 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
               },
             ])
           }
-          className="inline-flex items-center gap-1 text-xs font-bold text-primary-600 hover:text-primary-700"
+          className="inline-flex items-center gap-0.5 text-[11px] font-bold text-primary-600 hover:text-primary-700 shrink-0"
         >
-          <PlusIcon className="w-3.5 h-3.5" />
+          <PlusIcon className="w-3 h-3" />
           הוסף
         </button>
       </div>
-      {rows.length === 0 ? (
-        <p className="text-xs text-text-muted">לא הוזן {label.toLowerCase()}</p>
-      ) : null}
       {rows.map((entry) => (
-        <div key={entry.id} className="flex items-center gap-2">
+        <div key={entry.id} className="flex items-center gap-1.5">
           <button
             type="button"
             title={entry.isPrimary ? 'מספר ראשי' : 'סמן כראשי'}
             onClick={() => updatePhones(setPrimaryPhone(formData.phones, entry.id, kind))}
-            className={`shrink-0 p-2 rounded-lg border transition-colors ${
-              entry.isPrimary
-                ? 'border-amber-300 bg-amber-50 text-amber-600'
-                : 'border-border-default text-text-subtle hover:border-amber-200 hover:text-amber-500'
-            }`}
+            className={`${iconBtnClass} ${entry.isPrimary ? starActiveClass : starIdleClass}`}
           >
-            <StarIcon className={`w-4 h-4 ${entry.isPrimary ? 'fill-current' : ''}`} />
+            <StarIcon className={`w-3.5 h-3.5 ${entry.isPrimary ? 'fill-current' : ''}`} />
           </button>
           <input
             type="tel"
@@ -167,33 +166,158 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
               )
             }
             dir="ltr"
-            className={`${inputClass} flex-1`}
+            className={`${inputClass} flex-1 min-w-0`}
           />
           <button
             type="button"
             onClick={() => updatePhones(formData.phones.filter((row) => row.id !== entry.id))}
-            className="shrink-0 p-2 rounded-lg text-text-subtle hover:bg-red-50 hover:text-red-600"
+            className={trashBtnClass}
             aria-label="הסר"
           >
-            <TrashIcon className="w-4 h-4" />
+            <TrashIcon className="w-3.5 h-3.5" />
           </button>
         </div>
       ))}
     </div>
   );
 
+  const renderLinkRows = () => (
+    <div className="space-y-1.5">
+      {formData.links.map((entry) => (
+        <div key={entry.id} className="flex items-center gap-1.5">
+          <button
+            type="button"
+            title={entry.isPrimary ? 'קישור ראשי' : 'סמן כראשי'}
+            onClick={() => updateLinks(setPrimaryLink(formData.links, entry.id))}
+            className={`${iconBtnClass} ${entry.isPrimary ? starActiveClass : starIdleClass}`}
+          >
+            <StarIcon className={`w-3.5 h-3.5 ${entry.isPrimary ? 'fill-current' : ''}`} />
+          </button>
+          <input
+            type="text"
+            value={entry.label}
+            onChange={(e) =>
+              updateLinks(
+                formData.links.map((row) =>
+                  row.id === entry.id ? { ...row, label: e.target.value } : row,
+                ),
+              )
+            }
+            placeholder="שם"
+            className={`${inputClass} w-[28%] min-w-[4.5rem] shrink-0`}
+          />
+          <input
+            type="url"
+            value={entry.url}
+            onChange={(e) =>
+              updateLinks(
+                formData.links.map((row) =>
+                  row.id === entry.id ? { ...row, url: e.target.value } : row,
+                ),
+              )
+            }
+            placeholder="https://..."
+            dir="ltr"
+            className={`${inputClass} flex-1 min-w-0`}
+          />
+          <button
+            type="button"
+            onClick={() => updateLinks(formData.links.filter((row) => row.id !== entry.id))}
+            className={trashBtnClass}
+            aria-label="הסר"
+          >
+            <TrashIcon className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() =>
+          updateLinks([
+            ...formData.links,
+            {
+              id: newContactEntryId(),
+              label: '',
+              url: '',
+              isPrimary: formData.links.length === 0,
+            },
+          ])
+        }
+        className="inline-flex items-center gap-1 text-[11px] font-bold text-primary-600 hover:text-primary-700"
+      >
+        <PlusIcon className="w-3.5 h-3.5" />
+        הוסף קישור
+      </button>
+    </div>
+  );
+
+  const renderAddressRows = () => (
+    <div className="space-y-1.5">
+      {formData.addresses.map((entry) => (
+        <div key={entry.id} className="flex items-center gap-1.5">
+          <button
+            type="button"
+            title={entry.isPrimary ? 'כתובת ראשית' : 'סמן כראשית'}
+            onClick={() => updateAddresses(setPrimaryAddress(formData.addresses, entry.id))}
+            className={`${iconBtnClass} ${entry.isPrimary ? starActiveClass : starIdleClass}`}
+          >
+            <StarIcon className={`w-3.5 h-3.5 ${entry.isPrimary ? 'fill-current' : ''}`} />
+          </button>
+          <input
+            type="text"
+            value={entry.value}
+            onChange={(e) =>
+              updateAddresses(
+                formData.addresses.map((row) =>
+                  row.id === entry.id ? { ...row, value: e.target.value } : row,
+                ),
+              )
+            }
+            placeholder="רחוב, עיר, מיקוד..."
+            className={`${inputClass} flex-1 min-w-0`}
+          />
+          <button
+            type="button"
+            onClick={() => updateAddresses(formData.addresses.filter((row) => row.id !== entry.id))}
+            className={trashBtnClass}
+            aria-label="הסר"
+          >
+            <TrashIcon className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        onClick={() =>
+          updateAddresses([
+            ...formData.addresses,
+            {
+              id: newContactEntryId(),
+              value: '',
+              isPrimary: formData.addresses.length === 0,
+            },
+          ])
+        }
+        className="inline-flex items-center gap-1 text-[11px] font-bold text-primary-600 hover:text-primary-700"
+      >
+        <PlusIcon className="w-3.5 h-3.5" />
+        הוסף כתובת
+      </button>
+    </div>
+  );
+
   return (
-    <div className="space-y-5">
+    <div className="max-w-3xl space-y-3">
       {error ? (
-        <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-4 py-3">
+        <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
           {error}
         </div>
       ) : null}
 
-      <Section title="פרטים אישיים" subtitle="שם פרטי ושם משפחה — יוצגו יחד כשם מלא">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <Section title="פרטים אישיים">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
           <div>
-            <label className="block text-sm font-semibold text-text-muted mb-1.5">
+            <label className={labelClass}>
               שם פרטי <span className="text-red-500">*</span>
             </label>
             <input
@@ -204,7 +328,7 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
             />
           </div>
           <div>
-            <label className="block text-sm font-semibold text-text-muted mb-1.5">שם משפחה</label>
+            <label className={labelClass}>שם משפחה</label>
             <input
               type="text"
               value={formData.lastName}
@@ -212,84 +336,97 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
               className={inputClass}
             />
           </div>
-          <div className="sm:col-span-2">
-            <label className="block text-sm font-semibold text-text-muted mb-1.5">תפקיד</label>
+          <div>
+            <label className={labelClass}>תפקיד</label>
             <input
               type="text"
               value={formData.role}
               onChange={(e) => patch({ role: e.target.value })}
               className={inputClass}
-              placeholder="לדוגמה: מנהל/ת גיוס"
+              placeholder="מנהל/ת גיוס"
             />
           </div>
         </div>
         {formData.name.trim() ? (
-          <p className="text-xs text-text-muted">
-            שם מלא לתצוגה: <span className="font-semibold text-text-default">{formData.name}</span>
+          <p className="text-[11px] text-text-muted pt-0.5">
+            שם מלא: <span className="font-semibold text-text-default">{formData.name}</span>
           </p>
         ) : null}
       </Section>
 
-      <Section title="פרטי קשר" subtitle="ניתן להוסיף מספר כתובות — כוכב = ראשי">
-        <div className="space-y-5">
-          <div>
-            <label className="block text-sm font-semibold text-text-muted mb-2">דוא״ל</label>
+      <Section title="פרטי קשר">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div className="min-w-0">
+            <label className={labelClass}>דוא״ל</label>
             {renderEmailRows()}
           </div>
-          {renderPhoneRows('office', officePhones, 'טלפון משרד')}
-          {renderPhoneRows('mobile', mobilePhones, 'טלפון נייד')}
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
-            <div>
-              <label className="block text-sm font-semibold text-text-muted mb-1.5">לינקדאין</label>
-              <input
-                type="url"
-                value={formData.linkedin}
-                onChange={(e) => patch({ linkedin: e.target.value })}
-                dir="ltr"
-                placeholder="https://linkedin.com/in/..."
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-semibold text-text-muted mb-1.5">שם משתמש</label>
-              <input
-                type="text"
-                value={formData.username}
-                onChange={(e) => patch({ username: e.target.value })}
-                className={inputClass}
-              />
-            </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2 gap-3 min-w-0">
+            {renderPhoneRows('office', officePhones, 'טלפון משרד')}
+            {renderPhoneRows('mobile', mobilePhones, 'טלפון נייד')}
           </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
+          <div>
+            <label className={labelClass}>לינקדאין</label>
+            <input
+              type="url"
+              value={formData.linkedin}
+              onChange={(e) => patch({ linkedin: e.target.value })}
+              dir="ltr"
+              placeholder="linkedin.com/in/..."
+              className={inputClass}
+            />
+          </div>
+          <div>
+            <label className={labelClass}>שם משתמש</label>
+            <input
+              type="text"
+              value={formData.username}
+              onChange={(e) => patch({ username: e.target.value })}
+              className={inputClass}
+            />
+          </div>
+        </div>
+
+        <div>
+          <label className={labelClass}>קישורים</label>
+          {renderLinkRows()}
+        </div>
+
+        <div>
+          <label className={labelClass}>כתובות</label>
+          {renderAddressRows()}
         </div>
       </Section>
 
       {showDistribution ? (
-        <Section title={t('section.distribution_channels')} subtitle="בחירת ערוצים לתקשורת המונית">
-          <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-            <label className="inline-flex items-center gap-2 text-sm font-semibold text-text-default cursor-pointer">
+        <Section title={t('section.distribution_channels')}>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+            <label className="inline-flex items-center gap-1.5 text-xs font-medium text-text-default cursor-pointer">
               <input
                 type="checkbox"
                 checked={formData.distributionEmail !== false}
                 onChange={(e) => patch({ distributionEmail: e.target.checked })}
-                className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                className="h-3.5 w-3.5 rounded border-border-default text-primary-600 focus:ring-primary-500"
               />
               <span>{t('section.distribution_email')}</span>
             </label>
-            <label className="inline-flex items-center gap-2 text-sm font-semibold text-text-default cursor-pointer">
+            <label className="inline-flex items-center gap-1.5 text-xs font-medium text-text-default cursor-pointer">
               <input
                 type="checkbox"
                 checked={formData.distributionSms !== false}
                 onChange={(e) => patch({ distributionSms: e.target.checked })}
-                className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                className="h-3.5 w-3.5 rounded border-border-default text-primary-600 focus:ring-primary-500"
               />
               <span>{t('section.distribution_sms')}</span>
             </label>
-            <label className="inline-flex items-center gap-2 text-sm font-semibold text-text-default cursor-pointer">
+            <label className="inline-flex items-center gap-1.5 text-xs font-medium text-text-default cursor-pointer">
               <input
                 type="checkbox"
                 checked={formData.distributionWhatsapp !== false}
                 onChange={(e) => patch({ distributionWhatsapp: e.target.checked })}
-                className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                className="h-3.5 w-3.5 rounded border-border-default text-primary-600 focus:ring-primary-500"
               />
               <span>{t('section.distribution_whatsapp')}</span>
             </label>
@@ -301,8 +438,8 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
         <textarea
           value={formData.notes}
           onChange={(e) => patch({ notes: e.target.value })}
-          rows={4}
-          className={`${inputClass} resize-y min-h-[96px]`}
+          rows={2}
+          className={`${inputClass} resize-y min-h-[52px]`}
           placeholder="הערות לצוות..."
         />
       </Section>

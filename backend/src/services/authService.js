@@ -12,12 +12,46 @@ const loginOtpService = require('./loginOtpService');
 const googleClientId = process.env.GOOGLE_CLIENT_ID;
 const googleClient = googleClientId ? new OAuth2Client(googleClientId) : null;
 
-const issueToken = (user) =>
-  jwt.sign(
-    { sub: user.id, email: user.email, role: user.role },
-    process.env.JWT_SECRET || 'change_me',
-    { expiresIn: process.env.JWT_EXPIRES_IN || '24h' },
-  );
+const USER_TENANT_CACHE_MS = 60_000;
+/** @type {Map<string, { at: number, clientId: string | null }>} */
+const userTenantClientCache = new Map();
+
+const issueToken = (user) => {
+  const plain = user?.get ? user.get({ plain: true }) : user;
+  const payload = {
+    sub: plain.id,
+    email: plain.email,
+    role: plain.role,
+  };
+  if (plain.clientId != null && String(plain.clientId).trim()) {
+    payload.clientId = String(plain.clientId).trim();
+  }
+  return jwt.sign(payload, process.env.JWT_SECRET || 'change_me', {
+    expiresIn: process.env.JWT_EXPIRES_IN || '24h',
+  });
+};
+
+/** Lightweight tenant client id — attributes only, cached (avoids slow User+Client include per request). */
+const resolveUserTenantClientIdCached = async (userId, role) => {
+  const uid = String(userId || '').trim();
+  if (!uid) return null;
+  if (role === 'admin' || role === 'super_admin') return null;
+
+  const hit = userTenantClientCache.get(uid);
+  if (hit && Date.now() - hit.at < USER_TENANT_CACHE_MS) {
+    return hit.clientId;
+  }
+
+  const user = await User.findByPk(uid, { attributes: ['clientId', 'role'] });
+  const clientId = user?.clientId ? String(user.clientId) : null;
+  userTenantClientCache.set(uid, { at: Date.now(), clientId });
+  return clientId;
+};
+
+const invalidateUserTenantClientCache = (userId) => {
+  const uid = String(userId || '').trim();
+  if (uid) userTenantClientCache.delete(uid);
+};
 
 /** Only enforced when the client sends an explicit `role` (legacy). Omit role to use DB role. */
 const ensureRoleMatches = (user, role) => {
@@ -287,6 +321,8 @@ module.exports = {
   verifyLoginCode,
   resendLoginCode,
   resolveEffectiveClientIdForUser,
+  resolveUserTenantClientIdCached,
+  invalidateUserTenantClientCache,
   issueToken,
   loadUserWithClientUsage,
 };

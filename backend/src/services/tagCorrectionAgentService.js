@@ -783,7 +783,9 @@ const setApprovalStatus = async (id, status = 'approved', req = null) => {
   const before = decision.get ? decision.get({ plain: true }) : { ...decision };
   await decision.update({ manualApprovalStatus: next });
   await decision.reload();
-  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision);
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision, {
+    actor: req?.user || req?.dbUser ? 'user' : 'agent',
+  });
   return { id, manualApprovalStatus: next };
 };
 
@@ -797,7 +799,9 @@ const setComments = async (id, comments, req = null) => {
   const value = normalizeOptionalText(comments);
   await decision.update({ comments: value });
   await decision.reload();
-  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision);
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision, {
+    actor: req?.user || req?.dbUser ? 'user' : 'agent',
+  });
   return { id, comments: decision.comments ?? null };
 };
 
@@ -825,7 +829,9 @@ const setDecisionFields = async (id, fields = {}, req = null) => {
   }
   await decision.update(patch);
   await decision.reload();
-  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision);
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision, {
+    actor: req?.user || req?.dbUser ? 'user' : 'agent',
+  });
   return {
     id,
     comments: decision.comments ?? null,

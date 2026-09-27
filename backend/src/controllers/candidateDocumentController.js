@@ -6,6 +6,14 @@ const { createS3Client, buildPublicUrl, buildCandidateDocumentKey } = require('.
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
+function resolveUploaderDisplayName(req) {
+  const u = req.user;
+  if (!u) return null;
+  return (
+    String(u.fullName || u.name || u.email || '').trim() || null
+  );
+}
+
 const list = async (req, res) => {
   const candidate = await candidateService.getById(req.params.id);
   res.json(Array.isArray(candidate.documents) ? candidate.documents : []);
@@ -41,7 +49,7 @@ const attach = async (req, res) => {
       name: payload.name,
       type: payload.type,
       uploadDate: payload.uploadDate || new Date().toISOString(),
-      uploadedBy: payload.uploadedBy || 'מערכת',
+      uploadedBy: resolveUploaderDisplayName(req) || payload.uploadedBy || 'מערכת',
       notes: payload.notes || '',
       fileSize: payload.fileSize || 0,
       key: payload.key,
@@ -75,7 +83,8 @@ const update = async (req, res) => {
     const prev = Array.isArray(candidate.documents) ? candidate.documents : [];
     const docId = String(req.params.docId);
     const payload = req.body || {};
-    const next = prev.map((d) => (String(d.id) === docId ? { ...d, ...payload, id: d.id } : d));
+    const { uploadedBy: _ignoredUploader, ...metadataPatch } = payload;
+    const next = prev.map((d) => (String(d.id) === docId ? { ...d, ...metadataPatch, id: d.id } : d));
     await candidateService.update(req.params.id, { documents: next });
     const updatedDoc = next.find((d) => String(d.id) === docId);
     if (!updatedDoc) return res.status(404).json({ message: 'Document not found' });

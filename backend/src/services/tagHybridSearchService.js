@@ -3,9 +3,13 @@ const Tag = require('../models/Tag');
 const { sequelize } = require('../config/db');
 const { embedText } = require('./embeddingService');
 const candidateTagService = require('./candidateTagService');
-
-const VECTOR_LIMIT = 7;
-const FUZZY_LIMIT = 3;
+const {
+  VECTOR_LIMIT,
+  VECTOR_MIN_SCORE,
+  FUZZY_LIMIT,
+  FUZZY_FETCH_LIMIT,
+  mergeHybridCandidateHits,
+} = require('../utils/tagHybridCandidateMerge');
 
 const cosineSimilarity = (a = [], b = []) => {
   if (!a.length || !b.length || a.length !== b.length) return -1;
@@ -93,13 +97,14 @@ const findHybridCandidates = async (originalTerm, contextSample = '', options = 
         const score = cosineSimilarity(queryEmbedding, emb);
         return { tag: plain, score };
       })
-      .filter((row) => row.score > 0)
+      .filter((row) => row.score >= VECTOR_MIN_SCORE)
       .sort((a, b) => b.score - a.score)
       .slice(0, VECTOR_LIMIT);
 
     for (const row of scored) {
       vectorHits.push({
         name: displayLabel(row.tag),
+        tagKey: row.tag.tagKey || null,
         source: 'vector',
         score: row.score,
         tagId: row.tag.id,
@@ -123,27 +128,19 @@ const findHybridCandidates = async (originalTerm, contextSample = '', options = 
         OR tag_key ILIKE ${escaped}
       )
     ORDER BY usage_count DESC NULLS LAST
-    LIMIT ${FUZZY_LIMIT}
+    LIMIT ${FUZZY_FETCH_LIMIT}
     `,
     { type: QueryTypes.SELECT },
   );
 
   const fuzzyHits = (fuzzyRows || []).map((row) => ({
     name: String(row.display_name_he || row.display_name_en || row.tag_key || '').trim(),
+    tagKey: row.tag_key || null,
     source: 'fuzzy',
     tagId: row.id,
   }));
 
-  const seen = new Set();
-  const merged = [];
-  for (const hit of [...vectorHits, ...fuzzyHits]) {
-    const key = (hit.name || '').toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    merged.push(hit);
-    if (merged.length >= VECTOR_LIMIT + FUZZY_LIMIT) break;
-  }
-  return merged;
+  return mergeHybridCandidateHits(vectorHits, fuzzyHits, FUZZY_LIMIT);
 };
 
 const resolveTargetTagIdByName = async (name, options = {}) => {
@@ -160,7 +157,11 @@ const resolveTargetTagIdByName = async (name, options = {}) => {
 };
 
 module.exports = {
+  VECTOR_LIMIT,
+  VECTOR_MIN_SCORE,
+  FUZZY_LIMIT,
   findHybridCandidates,
+  mergeHybridCandidateHits,
   resolveTargetTagIdByName,
   displayLabel,
   buildTypeFilter,

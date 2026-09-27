@@ -1,10 +1,28 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { XMarkIcon } from './Icons';
 import SlaDurationInput from './SlaDurationInput';
+import { FormMultiSelect } from './FormMultiSelect';
 import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
 import { fetchCandidatePipelines } from '../services/candidatePipelinesApi';
+import { fetchStaffUsers } from '../services/usersApi';
+import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import { normalizeSlaUnit, slaFieldLabel, type SlaUnit } from '../utils/slaDuration';
+
+const ASSIGNEE_LIST_SPLIT_RE = /[,;|\n]+/;
+
+const parseAssigneeList = (raw: string | null | undefined): string[] => {
+  const parts = String(raw || '')
+    .split(ASSIGNEE_LIST_SPLIT_RE)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? Array.from(new Set(parts)) : [];
+};
+
+const formatAssigneeList = (names: string[]): string => {
+  const unique = Array.from(new Set(names.map((name) => String(name || '').trim()).filter(Boolean)));
+  return unique.join(', ');
+};
 
 type PipelineWithKind = PipelineDto & { kind: 'client' | 'candidate' };
 
@@ -31,10 +49,13 @@ type ContactOption = { id: string; name: string };
 interface ProcessEventModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (eventData: ProcessEventSavePayload) => void | Promise<void>;
+  /** Return `false` to keep the modal open (e.g. duplicate-process confirmation). */
+  onSave: (eventData: ProcessEventSavePayload) => void | Promise<void | false>;
   clientId: string;
   /** Linked organization under a tenant client — scopes contact list */
   organizationId?: string | null;
+  /** Pending linked org (metadata.organizationTmpId) — scopes contact list when organizationId is absent */
+  organizationTmpId?: string | null;
   /** Display label for organization/client (preferred over clientName when org-scoped) */
   organizationName?: string;
   clientName?: string;
@@ -52,6 +73,8 @@ interface ProcessEventModalProps {
   /** Read-only linked entity shown instead of contact picker (e.g. candidate name) */
   linkedEntityName?: string;
   linkedEntityLabel?: string;
+  /** When true, never load unscoped contacts — only org-filtered list (org / contact profile). */
+  restrictContactsToOrganization?: boolean;
 }
 
 const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
@@ -60,6 +83,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
   onSave,
   clientId,
   organizationId = null,
+  organizationTmpId = null,
   organizationName = '',
   clientName = '',
   contactId = null,
@@ -71,15 +95,23 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
   candidatePipelines: candidatePipelinesProp,
   linkedEntityName = '',
   linkedEntityLabel = 'מועמד',
+  restrictContactsToOrganization = false,
 }) => {
+  const { user } = useAuth();
   const apiBase = import.meta.env.VITE_API_BASE || '';
   const [clientPipelines, setClientPipelines] = useState<PipelineDto[]>([]);
   const [candidatePipelines, setCandidatePipelines] = useState<PipelineDto[]>([]);
   const [contacts, setContacts] = useState<ContactOption[]>([]);
+  const [assigneeOptions, setAssigneeOptions] = useState<string[]>(['אני']);
   const [loadingMeta, setLoadingMeta] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fetchedOrganizationName, setFetchedOrganizationName] = useState('');
+  const defaultAssigneeName = useMemo(
+    () => user?.name?.trim() || 'אני',
+    [user?.name],
+  );
+  const staffClientId = pipelineClientId || clientId;
 
   const displayClientName = useMemo(() => {
     const fromOrgProp = String(organizationName || '').trim();
@@ -91,8 +123,15 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     return plainClient;
   }, [organizationName, fetchedOrganizationName, clientName, organizationId]);
 
+  const contactsOrganizationId = String(organizationId || '').trim();
+  const contactsOrganizationTmpId = contactsOrganizationId
+    ? ''
+    : String(organizationTmpId || '').trim();
+
   const isOrganizationScoped = Boolean(
-    String(organizationId || '').trim() || String(organizationName || '').trim(),
+    contactsOrganizationId
+    || contactsOrganizationTmpId
+    || String(organizationName || '').trim(),
   );
 
   useEffect(() => {
@@ -131,7 +170,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     contactId: contactId || '',
     contactName: contactName || '',
     clientName: clientName || '',
-    assignee: 'אני',
+    assigneeValues: [defaultAssigneeName],
     priority: 'medium' as 'high' | 'medium' | 'low',
     slaValue: 3,
     slaUnit: 'days' as SlaUnit,
@@ -149,14 +188,41 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
       clientName: isOrganizationScoped
         ? displayClientName
         : displayClientName || '',
-      assignee: initialData?.assignee || 'אני',
+      assigneeValues: (() => {
+        const parsed = parseAssigneeList(initialData?.assignee);
+        return parsed.length > 0 ? parsed : [defaultAssigneeName];
+      })(),
       priority: initialData?.priority || 'medium',
       slaValue: initialData?.slaValue ?? initialData?.slaDays ?? 3,
       slaUnit: normalizeSlaUnit(initialData?.slaUnit),
       description: initialData?.description || '',
     });
     setError(null);
-  }, [isOpen, initialData, displayClientName, contactId, contactName, isOrganizationScoped]);
+  }, [isOpen, initialData, displayClientName, contactId, contactName, isOrganizationScoped, defaultAssigneeName]);
+
+  useEffect(() => {
+    if (!isOpen || !staffClientId) {
+      setAssigneeOptions([defaultAssigneeName, 'אני'].filter(Boolean));
+      return;
+    }
+    let cancelled = false;
+    void fetchStaffUsers(staffClientId)
+      .then((rows) => {
+        if (cancelled) return;
+        const names = rows
+          .map((u) => String(u.name || u.email || '').trim())
+          .filter(Boolean);
+        setAssigneeOptions(Array.from(new Set([defaultAssigneeName, 'אני', ...names])));
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAssigneeOptions(Array.from(new Set([defaultAssigneeName, 'אני'].filter(Boolean))));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, staffClientId, defaultAssigneeName]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -216,7 +282,10 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
   );
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setContacts([]);
+      return;
+    }
     const settingsClientId = pipelineClientId || clientId;
     if (!settingsClientId || !apiBase) return;
 
@@ -225,16 +294,22 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
 
     let cancelled = false;
 
-    const loadContacts = (): Promise<ContactOption[]> =>
-      pipelineKind === 'candidate'
-        ? Promise.resolve([] as ContactOption[])
-        : fetch(
-            `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts${
-              organizationId
-                ? `?organizationId=${encodeURIComponent(String(organizationId))}`
-                : ''
-            }`,
-            {
+    const contactsQuery = (() => {
+      if (contactsOrganizationId) {
+        return `?organizationId=${encodeURIComponent(contactsOrganizationId)}`;
+      }
+      if (contactsOrganizationTmpId) {
+        return `?organizationTmpId=${encodeURIComponent(contactsOrganizationTmpId)}`;
+      }
+      return '';
+    })();
+
+    const loadContacts = (): Promise<ContactOption[]> => {
+      if (pipelineKind === 'candidate') return Promise.resolve([] as ContactOption[]);
+      if (restrictContactsToOrganization && !contactsQuery) {
+        return Promise.resolve([] as ContactOption[]);
+      }
+      return fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts${contactsQuery}`, {
             credentials: 'include',
             headers: authHeaders(),
           })
@@ -246,9 +321,13 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                   id: String(c.id || ''),
                   name: String(c.name || '').trim(),
                 }))
-                .filter((c: ContactOption) => c.id && c.name);
+                .filter((c: ContactOption) => c.id && c.name)
+                .sort((a, b) =>
+                  a.name.localeCompare(b.name, 'he', { sensitivity: 'base' }),
+                );
             })
             .catch(() => [] as ContactOption[]);
+    };
 
     if (hasPreloaded) {
       setClientPipelines(clientPipelinesProp);
@@ -292,6 +371,10 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     isOpen,
     clientId,
     organizationId,
+    organizationTmpId,
+    contactsOrganizationId,
+    contactsOrganizationTmpId,
+    restrictContactsToOrganization,
     apiBase,
     pipelineKind,
     pipelineClientId,
@@ -333,7 +416,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     setSaving(true);
     setError(null);
     try {
-      await onSave({
+      const saveResult = await onSave({
         title: formData.title.trim(),
         processId: pipeline?.id || formData.processId,
         processName: pipeline?.name || '',
@@ -342,13 +425,13 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
         contactId: formData.contactId || null,
         contactName: formData.contactName,
         clientName: formData.clientName || displayClientName,
-        assignee: formData.assignee || 'אני',
+        assignee: formatAssigneeList(formData.assigneeValues) || defaultAssigneeName,
         priority: formData.priority,
         slaValue: formData.slaValue,
         slaUnit,
         description: formData.description,
       });
-      onClose();
+      if (saveResult !== false) onClose();
     } catch (err) {
       setError((err as Error)?.message || 'שגיאה בשמירת האירוע');
     } finally {
@@ -511,12 +594,15 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                   <div>
-                    <label className="block text-sm font-bold text-text-default mb-2">הקצאה ל-</label>
-                    <input
-                      type="text"
-                      value={formData.assignee}
-                      onChange={(e) => setFormData({ ...formData, assignee: e.target.value })}
-                      className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
+                    <FormMultiSelect
+                      label="הקצאה ל-"
+                      options={assigneeOptions.map((name) => ({ value: name, label: name }))}
+                      value={formData.assigneeValues}
+                      onChange={(assigneeValues) => setFormData({ ...formData, assigneeValues })}
+                      placeholder="בחר אנשים לטיפול"
+                      searchable
+                      searchPlaceholder="חיפוש שם…"
+                      className="[&>span]:text-sm [&>span]:font-bold [&>span]:text-text-default [&>span]:mb-2 [&>div]:rounded-xl [&>div]:p-3.5"
                     />
                   </div>
                   <div>

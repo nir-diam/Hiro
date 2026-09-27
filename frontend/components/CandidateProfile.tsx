@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, useId, useLayoutEffect } from 'react';
-import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon, VideoCameraIcon } from './Icons';
+import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon, VideoCameraIcon, ShareIcon } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
@@ -20,10 +20,17 @@ import {
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 import {
     isStaffDuplicateProfile,
+    isNonPrimaryCandidateProfile,
+    isCanonicalPrimaryCandidateProfile,
+    originalPrimaryCandidateProfileCardClass,
     buildDuplicateProfileName,
     buildProfileDuplicatePayload,
     sanitizeProfileDuplicatePayload,
     shouldSaveCandidateProfileDirectly,
+    hasCandidateFormChanges,
+    hasCandidateCvFormChanges,
+    canShareStaffProfileWithCandidate,
+    mergeCandidateProfileIdentity,
 } from '../utils/candidateProfileDuplicate';
 import { createPortal } from 'react-dom';
 
@@ -387,6 +394,8 @@ interface CandidateProfileProps {
     hideActions?: boolean;
     isSaving?: boolean;
     onSaveCandidate?: () => void;
+    /** Last persisted candidate snapshot — used to detect unsaved edits. */
+    savedCandidateBaseline?: Record<string, unknown> | null;
     saveStatusMessage?: string | null;
     profiles?: MultiProfileOption[];
     activeProfileId?: string | number;
@@ -394,6 +403,8 @@ interface CandidateProfileProps {
     onAddProfile?: () => void;
     onDuplicateProfile?: () => void;
     isDuplicatingProfile?: boolean;
+    onShareProfileWithCandidate?: () => void | Promise<void>;
+    isSharingProfileWithCandidate?: boolean;
     candidateList?: CandidateListItem[];
     onNavigateCandidate?: (candidateId: string) => void;
     onGenerateExperienceSummary?: () => void;
@@ -757,6 +768,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   hideActions = false,
   isSaving = false,
   onSaveCandidate,
+  savedCandidateBaseline = null,
   saveStatusMessage,
   profiles = [],
   activeProfileId,
@@ -764,6 +776,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   onAddProfile,
   onDuplicateProfile,
   isDuplicatingProfile = false,
+  onShareProfileWithCandidate,
+  isSharingProfileWithCandidate = false,
   candidateList = [],
   onNavigateCandidate,
   onGenerateExperienceSummary,
@@ -795,7 +809,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const canUseDistributionWhatsapp = !isBlockedStatus && candidateData.distributionWhatsapp !== false;
   const canUseDistributionSms = !isBlockedStatus && candidateData.distributionSms !== false;
 
-  const currentProfileId = activeProfileId ?? candidateData.id;
+  const currentProfileId = String(
+    activeProfileId ?? candidateData.backendId ?? candidateData.id ?? '',
+  ).trim();
   const [fetchedProfiles, setFetchedProfiles] = useState<MultiProfileOption[]>([]);
   const profileList = useMemo(() => {
     const merged = new Map<string, MultiProfileOption>();
@@ -807,13 +823,35 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     if (merged.size > 0) return Array.from(merged.values());
     return [];
   }, [profiles, fetchedProfiles]);
-  const activeProfileOption = profileList.find((p) => p.id === currentProfileId) || profileList[0];
+  const activeProfileOption =
+    profileList.find((p) => String(p.id ?? '') === currentProfileId) || profileList[0];
   const showProfileSwitcher = profileList.length > 0;
   const showDuplicateProfileButton = Boolean(onDuplicateProfile);
-  const duplicateProfileBusy = isSaving || isDuplicatingProfile;
+  const duplicateProfileBusy = isSaving || isDuplicatingProfile || isSharingProfileWithCandidate;
   const [duplicateSaveConfirmOpen, setDuplicateSaveConfirmOpen] = useState(false);
-  const isEditingDuplicateProfile = useMemo(
-    () => shouldSaveCandidateProfileDirectly(candidateData as Record<string, unknown>),
+  const profileForSaveDecision = useMemo(
+    () =>
+      mergeCandidateProfileIdentity(
+        candidateData as Record<string, unknown>,
+        activeProfileOption as Record<string, unknown> | undefined,
+        currentProfileId,
+      ),
+    [candidateData, currentProfileId, activeProfileOption],
+  );
+  const isStaffShadowProfile = useMemo(
+    () => shouldSaveCandidateProfileDirectly(profileForSaveDecision),
+    [profileForSaveDecision],
+  );
+  const isViewingOriginalPrimaryProfile = useMemo(
+    () => isCanonicalPrimaryCandidateProfile(profileForSaveDecision),
+    [profileForSaveDecision],
+  );
+  const canShareWithCandidate = useMemo(
+    () => canShareStaffProfileWithCandidate(profileForSaveDecision),
+    [profileForSaveDecision],
+  );
+  const canEditTagsInPlace = useMemo(
+    () => isNonPrimaryCandidateProfile(candidateData as Record<string, unknown>),
     [candidateData],
   );
   const [tagModes, setTagModes] = useState<Record<string, SmartTagMode>>({});
@@ -1201,18 +1239,47 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     return base;
   }, [candidateData.tags, candidateData.skills, candidateData.languages, candidateData.workExperience, tagDetailLookup, getTagTooltip, tagModes]);
 
-  const handleTagModeToggle = useCallback((tagKey: string) => {
-    let nextMode: SmartTagMode = 'normal';
-    setTagModes((prev) => {
-      const current = prev[tagKey] || 'normal';
-      nextMode = cycleTagMode(current);
-      return { ...prev, [tagKey]: nextMode };
-    });
-    onFormChange((formPrev: any) => ({
-      ...formPrev,
-      tagDetails: applyTagModeToDetails(formPrev?.tagDetails, tagKey, nextMode),
-    }));
-  }, [onFormChange]);
+  const persistTagMode = useCallback(
+    async (tagKey: string, nextMode: SmartTagMode) => {
+      if (!candidateId) return;
+      const details = Array.isArray(candidateData.tagDetails) ? candidateData.tagDetails : [];
+      const match = details.find((raw) => {
+        const detail = normalizeTagDetail(raw);
+        return tagDetailToSmartTagKey(detail) === tagKey;
+      });
+      const rowId =
+        match && typeof match === 'object' ? String((match as CandidateTagDetail).id || '').trim() : '';
+      if (!rowId || rowId.startsWith('local-')) return;
+      try {
+        const res = await fetch(`${apiBase}/api/admin/candidate-tags/${encodeURIComponent(rowId)}`, {
+          method: 'PUT',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: nextMode === 'normal' ? null : nextMode }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch (err) {
+        console.error('Failed to persist tag mode', err);
+      }
+    },
+    [apiBase, candidateId, candidateData.tagDetails],
+  );
+
+  const handleTagModeToggle = useCallback(
+    (tagKey: string) => {
+      let nextMode: SmartTagMode = 'normal';
+      setTagModes((prev) => {
+        const current = prev[tagKey] || 'normal';
+        nextMode = cycleTagMode(current);
+        return { ...prev, [tagKey]: nextMode };
+      });
+      onFormChange((formPrev: any) => ({
+        ...formPrev,
+        tagDetails: applyTagModeToDetails(formPrev?.tagDetails, tagKey, nextMode),
+      }));
+      void persistTagMode(tagKey, nextMode);
+    },
+    [onFormChange, persistTagMode],
+  );
 
   const handleRowTagSelectorOpen = (rowId: string) => {
     const category = ROW_CATEGORY_MAP[rowId] || 'role';
@@ -1238,7 +1305,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   };
 
   const handleTagRemove = (label: string) => {
-    if (!isEditingDuplicateProfile) return;
+    if (!canEditTagsInPlace) return;
 
     const trimmed = String(label || '').trim();
     if (!trimmed) return;
@@ -1581,6 +1648,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             updatedAt: item.updatedAt,
             canonicalCandidateId: item.canonicalCandidateId ?? null,
             staffProfileCopy: Boolean(item.staffProfileCopy),
+            backendId: item.id,
           }))
           .filter(Boolean);
         setFetchedProfiles(options);
@@ -1647,6 +1715,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   }, [candidateData.id, candidateData.backendId]);
 
   useEffect(() => {
+    setDuplicateSaveConfirmOpen(false);
+  }, [candidateData.backendId, candidateData.id]);
+
+  useEffect(() => {
     setTagModes(buildTagModesFromDetails(candidateData.tagDetails || []));
   }, [candidateData.id, candidateData.backendId, candidateData.tagDetails]);
 
@@ -1683,8 +1755,33 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     );
   };
 
+  const renderShareWithCandidateButton = (compact = false) => {
+    if (!onShareProfileWithCandidate || !canShareWithCandidate) return null;
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          void onShareProfileWithCandidate();
+        }}
+        disabled={duplicateProfileBusy}
+        title="שיתוף עם מועמד — הפרופיל יופיע באזור האישי של המועמד"
+        className={
+          compact
+            ? 'inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-primary-700 bg-primary-50 border border-primary-200 rounded-full hover:bg-primary-100 transition-colors shadow-sm disabled:opacity-60 disabled:cursor-not-allowed'
+            : 'shrink-0 inline-flex items-center gap-2 bg-primary-50 border border-primary-200 text-primary-800 font-bold py-2.5 px-6 rounded-xl hover:bg-primary-100 transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed'
+        }
+      >
+        <ShareIcon className="w-4 h-4 shrink-0" />
+        {isSharingProfileWithCandidate ? 'משתף/ת...' : 'שיתוף עם מועמד'}
+      </button>
+    );
+  };
+
     const renderProfileSwitcher = () => {
-    if (!showProfileSwitcher && !showDuplicateProfileButton) return null;
+    if (!showProfileSwitcher && !showDuplicateProfileButton && !(canShareWithCandidate && onShareProfileWithCandidate)) {
+      return null;
+    }
     const dateLabel = showProfileSwitcher
       ? getProfileDateLabel(activeProfileOption || profileList[0])
       : null;
@@ -1735,6 +1832,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         </button>
         ) : null}
         {renderDuplicateProfileButton(true)}
+        {renderShareWithCandidateButton(true)}
 
         {showProfileSwitcher && isSwitcherOpen && (
           <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-border-default z-50 overflow-hidden animate-fade-in origin-top-left">
@@ -1823,20 +1921,34 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const missingDetailsBannerLine = `פרטים חסרים: ${missingProfileLabels.join(', ')}`;
 
   const showSaveFooter = Boolean(!hideActions && onSaveCandidate);
+  const hasUnsavedFormChanges = useMemo(
+    () => hasCandidateFormChanges(candidateData, savedCandidateBaseline),
+    [candidateData, savedCandidateBaseline],
+  );
+  const hasUnsavedCvFormChanges = useMemo(
+    () => hasCandidateCvFormChanges(candidateData, savedCandidateBaseline),
+    [candidateData, savedCandidateBaseline],
+  );
 
   const handleSaveCandidateClick = useCallback(() => {
-    if (!onSaveCandidate || isSaving) return;
-    if (!isEditingDuplicateProfile) {
-      setDuplicateSaveConfirmOpen(true);
+    if (!onSaveCandidate || isSaving || !hasUnsavedFormChanges) return;
+    if (isStaffShadowProfile || !hasUnsavedCvFormChanges) {
+      onSaveCandidate();
       return;
     }
-    onSaveCandidate();
-  }, [onSaveCandidate, isEditingDuplicateProfile, isSaving]);
+    setDuplicateSaveConfirmOpen(true);
+  }, [onSaveCandidate, isStaffShadowProfile, isSaving, hasUnsavedFormChanges, hasUnsavedCvFormChanges]);
 
   const handleConfirmDuplicateSave = useCallback(() => {
     setDuplicateSaveConfirmOpen(false);
     onSaveCandidate?.();
   }, [onSaveCandidate]);
+
+  const handleSaveAsShadowCopy = useCallback(() => {
+    if (!onDuplicateProfile || duplicateProfileBusy) return;
+    setDuplicateSaveConfirmOpen(false);
+    onDuplicateProfile();
+  }, [onDuplicateProfile, duplicateProfileBusy]);
 
   const renderProfileVideo = (className = '') =>
       profileVideoUrl ? (
@@ -1885,7 +1997,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         <div className="float-left max-w-full">{renderProfileSwitcher()}</div>
       </div>
 
-      <div className="candidate-profile-card clear-both flex flex-col bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border border-border-subtle">
+      <div
+        className={`candidate-profile-card clear-both flex flex-col bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border ${originalPrimaryCandidateProfileCardClass(isViewingOriginalPrimaryProfile)}`}
+      >
          {/* Favorite Button */}
          <button 
             onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }} 
@@ -2170,7 +2284,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                               }
                           }}
                           onRowAdd={handleRowTagSelectorOpen}
-                          onTagRemove={isEditingDuplicateProfile ? handleTagRemove : undefined}
+                          onTagRemove={canEditTagsInPlace ? handleTagRemove : undefined}
                           onTagToggle={handleTagModeToggle}
                       />
 
@@ -2436,15 +2550,16 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                     </div>
                     <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
                         {renderDuplicateProfileButton()}
+                        {renderShareWithCandidateButton()}
                         <button
                             type="button"
                             onClick={(e) => {
                                 e.stopPropagation();
                                 handleSaveCandidateClick();
                             }}
-                            disabled={isSaving}
+                            disabled={isSaving || !hasUnsavedFormChanges}
                             className={`shrink-0 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${
-                                isSaving ? 'opacity-60 cursor-not-allowed' : ''
+                                isSaving || !hasUnsavedFormChanges ? 'opacity-60 cursor-not-allowed' : ''
                             }`}
                         >
                             {isSaving ? 'שומר/ת...' : 'שמירת פרטים'}
@@ -2478,11 +2593,11 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                         שמירה על מקור
                       </h3>
                       <p className="text-sm text-text-muted mt-1 leading-relaxed">
-                        האם ברצונך לשמור על עותק חי של המועמד?
+                        ניתן לשמור על המקור, או ליצור עותק צל עם השינויים הנוכחיים בלי לעדכן את הפרופיל המקורי.
                       </p>
                     </div>
                   </div>
-                  <div className="flex gap-2 p-4 border-t border-border-default bg-bg-subtle/20">
+                  <div className="flex flex-col sm:flex-row gap-2 p-4 border-t border-border-default bg-bg-subtle/20">
                     <button
                       type="button"
                       onClick={() => setDuplicateSaveConfirmOpen(false)}
@@ -2490,13 +2605,23 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                     >
                       ביטול
                     </button>
+                    {onDuplicateProfile ? (
+                      <button
+                        type="button"
+                        onClick={handleSaveAsShadowCopy}
+                        disabled={duplicateProfileBusy}
+                        className="flex-1 py-2.5 rounded-xl border border-primary-200 bg-primary-50 font-bold text-primary-700 hover:bg-primary-100 disabled:opacity-60"
+                      >
+                        {isDuplicatingProfile ? 'יוצר/ת עותק...' : 'שמירה בעותק צל'}
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={handleConfirmDuplicateSave}
                       disabled={isSaving}
                       className="flex-1 py-2.5 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 disabled:opacity-60"
                     >
-                      {isSaving ? 'שומר/ת...' : 'שמירה'}
+                      {isSaving ? 'שומר/ת...' : 'שמירה על המקור'}
                     </button>
                   </div>
                 </div>

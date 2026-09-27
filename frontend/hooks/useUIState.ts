@@ -44,6 +44,8 @@ export interface MessageModalConfig {
     /** CRM context when sending without recipientOptions (single contact / profile). */
     linkedClientId?: string | null;
     linkedOrganizationId?: string | null;
+    /** Organization / company display name for proposal placeholders ({company_name}). */
+    linkedOrganizationName?: string | null;
     linkedContactId?: string | null;
 }
 

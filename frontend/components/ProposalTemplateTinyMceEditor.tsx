@@ -47,8 +47,8 @@ const CENTERED_LOGO_TABLE = `
 <table style="width:100%;border-collapse:collapse;border:none;margin:0 auto 16px;">
   <tbody>
     <tr>
-      <td style="border:none;text-align:center;padding:12px 0;">
-        <p style="margin:0;text-align:center;"><img src="" alt="לוגו" style="max-height:96px;width:auto;display:inline-block;" /></p>
+      <td style="border:none;text-align:center;padding:12px 0;width:100%;">
+        <p style="margin:0;text-align:center;">{company_logo}</p>
       </td>
     </tr>
   </tbody>
@@ -161,6 +161,27 @@ const ProposalTemplateTinyMceEditor = forwardRef<ProposalTemplateEditorHandle, P
                         border: 1px solid #d1d5db;
                     }
                     img { max-width: 100%; height: auto; }
+                    ol, ul {
+                        direction: rtl;
+                        text-align: right;
+                        padding-left: 0;
+                        margin-right: 0;
+                    }
+                    ol {
+                        list-style-type: decimal;
+                        list-style-position: outside;
+                        padding-right: 1.75em;
+                    }
+                    ul {
+                        list-style-type: disc;
+                        list-style-position: outside;
+                        padding-right: 1.5em;
+                    }
+                    li {
+                        display: list-item;
+                        direction: rtl;
+                        text-align: right;
+                    }
                 `,
                 setup: (editor) => {
                     editor.ui.registry.addButton('hiroimage', {

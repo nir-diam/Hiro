@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDownIcon } from './Icons';
 import {
   buildStageOutcomeOptions,
@@ -104,15 +104,52 @@ const ProcessManagementCatalogPanel: React.FC<Props> = ({
       .filter((group): group is SystemEventCatalogGroup => group != null);
   }, [systemEventGroups, systemEventSearch]);
 
+  useEffect(() => {
+    const onDocMouseDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      const insidePipeline = pipelineRef.current?.contains(t);
+      const insideStage = stageRef.current?.contains(t);
+      const insideSystem = systemRef.current?.contains(t);
+      if (!insidePipeline) setPipelineOpen(false);
+      if (!insideStage) setStageOpen(false);
+      if (!insideSystem) {
+        setSystemOpen(false);
+        setSystemEventSearch('');
+      }
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, []);
+
+  const openPipelineDropdown = () => {
+    setStageOpen(false);
+    setSystemOpen(false);
+    setSystemEventSearch('');
+    setPipelineOpen((v) => !v);
+  };
+
+  const openStageDropdown = () => {
+    setPipelineOpen(false);
+    setSystemOpen(false);
+    setSystemEventSearch('');
+    setStageOpen((v) => !v);
+  };
+
+  const openSystemDropdown = () => {
+    setPipelineOpen(false);
+    setStageOpen(false);
+    setSystemOpen((v) => !v);
+  };
+
   return (
     <>
-      <div className="flex flex-col gap-1 relative" ref={pipelineRef}>
-        <label className="text-xs font-semibold text-text-muted">תהליך</label>
+      <div className="flex flex-col gap-0.5 relative min-w-[130px] flex-1" ref={pipelineRef}>
+        <label className="text-[11px] font-semibold text-text-muted leading-none">תהליך</label>
         <button
           type="button"
           disabled={disabled}
-          onClick={() => setPipelineOpen((v) => !v)}
-          className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[170px]"
+          onClick={openPipelineDropdown}
+          className="w-full bg-white border border-border-default rounded-lg py-1.5 px-2.5 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between gap-2 min-h-[34px] min-w-0 shadow-sm"
         >
           <span className="truncate">
             {selectedPipelineGroupCount === 0
@@ -173,13 +210,13 @@ const ProcessManagementCatalogPanel: React.FC<Props> = ({
         ) : null}
       </div>
 
-      <div className="flex flex-col gap-1 relative" ref={stageRef}>
-        <label className="text-xs font-semibold text-text-muted">שלב / תוצאה</label>
+      <div className="flex flex-col gap-0.5 relative min-w-[130px] flex-1" ref={stageRef}>
+        <label className="text-[11px] font-semibold text-text-muted leading-none">שלב / תוצאה</label>
         <button
           type="button"
           disabled={disabled || selectedPipelineGroupCount === 0}
-          onClick={() => setStageOpen((v) => !v)}
-          className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[170px] disabled:opacity-50"
+          onClick={openStageDropdown}
+          className="w-full bg-white border border-border-default rounded-lg py-1.5 px-2.5 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between gap-2 min-h-[34px] min-w-0 shadow-sm disabled:opacity-50"
         >
           <span className="truncate">
             {selectedPipelineGroupCount === 0
@@ -221,17 +258,17 @@ const ProcessManagementCatalogPanel: React.FC<Props> = ({
         ) : null}
       </div>
 
-      <div className="flex flex-col gap-1 relative" ref={systemRef}>
-        <label className="text-xs font-semibold text-text-muted">אירוע מערכת</label>
+      <div className="flex flex-col gap-0.5 relative min-w-[130px] flex-1" ref={systemRef}>
+        <label className="text-[11px] font-semibold text-text-muted leading-none">אירוע מערכת</label>
         <button
           type="button"
           disabled={disabled}
-          onClick={() => setSystemOpen((v) => !v)}
-          className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[170px]"
+          onClick={openSystemDropdown}
+          className="w-full bg-white border border-border-default rounded-lg py-1.5 px-2.5 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between gap-2 min-h-[34px] min-w-0 shadow-sm"
         >
           <span className="truncate">
             {selectedSystemEventIds.size === 0
-              ? 'כל אירועי המערכת'
+              ? 'כל המערכת'
               : `${selectedSystemEventIds.size} אירועים`}
           </span>
           <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2 shrink-0" />

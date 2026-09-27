@@ -5,6 +5,7 @@ import {
     EXPORT_FONT,
     type ParsedSearchTextExportOptions,
 } from './parsedSearchTextExportHtml';
+import { PDF_PARSED_CV_LOGO_SCALE, scaleLogoPayload } from './exportImagePayload';
 
 const PDF_PAGE_WIDTH_PX = 794;
 const PDF_PADDING_PX = 32;
@@ -239,6 +240,14 @@ async function captureHtmlToCanvas(
 /**
  * Export plain parsed searchText to a multi-page A4 PDF (line-aware page breaks).
  */
+function withPdfLogoScale(options?: ParsedSearchTextPdfOptions): ParsedSearchTextPdfOptions | undefined {
+    if (!options?.clientLogo) return options;
+    return {
+        ...options,
+        clientLogo: scaleLogoPayload(options.clientLogo, PDF_PARSED_CV_LOGO_SCALE),
+    };
+}
+
 export async function downloadParsedSearchTextAsPdf(
     text: string,
     filename: string,
@@ -247,7 +256,8 @@ export async function downloadParsedSearchTextAsPdf(
     const trimmed = String(text || '').trim();
     if (!trimmed) throw new Error('empty_text');
 
-    const pageLineGroups = paginateTextLines(trimmed, options);
+    const pdfOptions = withPdfLogoScale(options);
+    const pageLineGroups = paginateTextLines(trimmed, pdfOptions);
     const html2canvas = (await import('html2canvas')).default;
     const { jsPDF } = await import('jspdf');
 
@@ -257,7 +267,7 @@ export async function downloadParsedSearchTextAsPdf(
     const usableW = pageW - PDF_MARGIN_MM * 2;
     const usableH = pageH - PDF_MARGIN_MM * 2;
 
-    const titleHtml = buildParsedCvTitleHtml(options);
+    const titleHtml = buildParsedCvTitleHtml(pdfOptions);
 
     for (let i = 0; i < pageLineGroups.length; i += 1) {
         if (i > 0) pdf.addPage();

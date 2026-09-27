@@ -169,12 +169,18 @@ export async function clearJobMatchIgnore(candidateId: string, jobId: string): P
 export async function assignCandidateToJob(
   candidateId: string,
   jobId: string,
+  opts?: { source?: string; status?: string },
 ): Promise<{ ok: boolean }> {
   const base = apiBase();
   const res = await fetch(`${base}/api/candidates/${encodeURIComponent(candidateId)}/linked-jobs`, {
     method: 'POST',
     headers: authHeaders(),
-    body: JSON.stringify({ jobId, source: 'job_matching', manualOverride: true, status: 'חדש' }),
+    body: JSON.stringify({
+      jobId,
+      source: opts?.source ?? 'job_matching',
+      manualOverride: true,
+      status: opts?.status ?? 'חדש',
+    }),
   });
   return handleResponse<{ ok: boolean }>(res);
 }

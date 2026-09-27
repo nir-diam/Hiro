@@ -1524,7 +1524,7 @@ const normalizeProposalSuggestion = (proposal: any) => {
                                 הצעות לשיפור הפרופיל
                             </h3>
                             {profileIntent && (
-                                <p className="text-xs text-text-muted">
+                            <p className="text-xs text-text-muted">
                                     {profileIntent === 'createOrganization' && 'יצירת חברה חדשה'}
                                     {profileIntent === 'update' && 'עדכון חברה קיימת'}
                                 </p>

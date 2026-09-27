@@ -41,6 +41,7 @@ const parameters = [
     { label: "אימייל איש קשר", value: "{contact_email}" },
     { label: "ת.ז. איש קשר", value: "{contact_id}" },
     { label: "שם חברה", value: "{company_name}" },
+    { label: "לוגו חברה (ממורכז)", value: "{company_logo}" },
     { label: "ח.פ חברה", value: "{company_id}" },
     { label: "כתובת חברה", value: "{company_address}" },
     { label: "עיר חברה", value: "{company_city}" },

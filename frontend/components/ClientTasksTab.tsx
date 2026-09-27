@@ -30,6 +30,7 @@ type ContactOption = {
     id: string;
     name: string;
     organizationId?: string;
+    organizationTmpId?: string;
 };
 
 const contactDisplayName = (row: { name?: string; firstName?: string; lastName?: string }) => {
@@ -45,6 +46,9 @@ const mapContactRows = (rows: unknown[]): ContactOption[] =>
             id: String(row.id),
             name: contactDisplayName(row),
             organizationId: row.organizationId ? String(row.organizationId) : undefined,
+            organizationTmpId: row.metadata?.organizationTmpId
+                ? String(row.metadata.organizationTmpId)
+                : undefined,
         }))
         .filter((row) => row.id && row.name);
 
@@ -68,6 +72,7 @@ export interface ClientTask {
     clientName?: string;
     clientId?: string; // Added for navigation
     organizationId?: string;
+    organizationTmpId?: string;
     organizationName?: string;
     contactName?: string;
     /** Transient form id — persisted via assignee (contact name). */
@@ -106,6 +111,7 @@ interface TaskFormModalProps {
     contactOptions: ContactOption[];
     /** When set, limit contact picker to this organization (tenant org profile). */
     scopeOrganizationId?: string;
+    scopeOrganizationTmpId?: string;
     pipelines: PipelineOption[];
     /** When creating a task across all clients, user must pick which client it belongs to. */
     aggregateMode?: boolean;
@@ -138,6 +144,7 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
     defaultContactId,
     defaultAssignee,
     scopeOrganizationId,
+    scopeOrganizationTmpId,
 }) => {
     const orgPickerMode = !aggregateMode && organizationPickerOptions.length > 0;
     const defaultPipelineId = pipelines[0]?.id || '';
@@ -150,13 +157,24 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
             || '',
     ).trim();
 
+    const scopedOrganizationTmpId = String(
+        taskToEdit?.organizationTmpId
+            || scopeOrganizationTmpId
+            || '',
+    ).trim();
+
     /** Client CRM contacts, optionally scoped to a linked organization. */
     const visibleContactOptions = useMemo(() => {
+        if (scopedOrganizationTmpId) {
+            return contactOptions.filter(
+                (c) => !c.organizationTmpId || c.organizationTmpId === scopedOrganizationTmpId,
+            );
+        }
         if (!scopedOrganizationId) return contactOptions;
         return contactOptions.filter(
             (c) => !c.organizationId || c.organizationId === scopedOrganizationId,
         );
-    }, [contactOptions, scopedOrganizationId]);
+    }, [contactOptions, scopedOrganizationId, scopedOrganizationTmpId]);
 
     const resolveContactId = (assignee?: string, explicitId?: string) => {
         if (explicitId && visibleContactOptions.some((c) => c.id === explicitId)) return explicitId;
@@ -471,6 +489,8 @@ const TaskCard: React.FC<{
         e.stopPropagation();
         if (task.organizationId) {
             navigate(`/organizations/${task.organizationId}`);
+        } else if (task.organizationTmpId) {
+            navigate(`/organizations/tmp/${task.organizationTmpId}`);
         } else if (task.clientId) {
             navigate(`/clients/${task.clientId}`);
         }
@@ -627,15 +647,20 @@ function mapTaskRow(
     row: Record<string, unknown>,
     clientId: string | undefined,
     orgNameById: Map<string, string>,
+    fallbackOrganizationName?: string,
 ): ClientTask {
     const cli = row.client as Record<string, unknown> | undefined;
     const org = row.organization as Record<string, unknown> | undefined;
+    const orgTmp = row.organizationTmp as Record<string, unknown> | undefined;
     const resolvedClientId = String(row.clientId || clientId || cli?.id || '');
     const clientName = cli ? String(cli.displayName || cli.name || '').trim() : '';
     const resolvedOrgId = row.organizationId ? String(row.organizationId) : '';
+    const resolvedOrgTmpId = row.organizationTmpId ? String(row.organizationTmpId) : '';
     const organizationName = org
         ? String(org.name || '').trim()
-        : (resolvedOrgId ? (orgNameById.get(resolvedOrgId) || '') : '');
+        : orgTmp
+          ? String(orgTmp.name || '').trim()
+          : (resolvedOrgId ? (orgNameById.get(resolvedOrgId) || '') : (fallbackOrganizationName || ''));
     const task: ClientTask = {
         id: String(row.id),
         type: String(row.type || ''),
@@ -648,6 +673,7 @@ function mapTaskRow(
         clientId: resolvedClientId,
         clientName,
         organizationId: resolvedOrgId || undefined,
+        organizationTmpId: resolvedOrgTmpId || undefined,
         organizationName: organizationName || undefined,
         contactName: row.contactName ? String(row.contactName) : row.assignee ? String(row.assignee) : undefined,
         processStage: String(row.processStage || ''),
@@ -666,6 +692,10 @@ interface ClientTasksTabProps {
     clientId?: string;
     /** When set, list/create tasks for this organization only (tenant org profile). */
     organizationId?: string;
+    /** When set, list/create tasks for this pending organization only. */
+    organizationTmpId?: string;
+    /** Display name for pending org tasks (when join is unavailable). */
+    organizationName?: string;
     /** When set, show only tasks assigned to this contact (by assignee name). */
     contactName?: string;
     /** Used when `clientId` is omitted — required to create new tasks (pick target client). */
@@ -678,6 +708,8 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     showPipeline = true,
     clientId,
     organizationId,
+    organizationTmpId,
+    organizationName,
     contactName,
     clientPickerOptions = EMPTY_PICKER_OPTIONS,
     organizationPickerOptions = EMPTY_PICKER_OPTIONS,
@@ -725,7 +757,9 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     }, []);
 
     const aggregateMode = !clientId;
-    const orgPickerMode = Boolean(clientId && !organizationId && organizationPickerOptions.length > 0);
+    const orgPickerMode = Boolean(
+        clientId && !organizationId && !organizationTmpId && organizationPickerOptions.length > 0,
+    );
     // Content key (not array identity) — parents often pass inline `.map()` arrays each render.
     const orgPickerKey = organizationPickerOptions.map((o) => `${o.id}\0${o.name}`).join('\n');
     const orgNameById = useMemo(() => {
@@ -770,7 +804,12 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
             return;
         }
         let active = true;
-        fetch(`${apiBase}/api/clients/${encodeURIComponent(contactsLookupClientId)}/contacts`, {
+        const contactsQs = organizationTmpId
+            ? `?organizationTmpId=${encodeURIComponent(organizationTmpId)}`
+            : organizationId
+              ? `?organizationId=${encodeURIComponent(organizationId)}`
+              : '';
+        fetch(`${apiBase}/api/clients/${encodeURIComponent(contactsLookupClientId)}/contacts${contactsQs}`, {
             headers: authHeaders(true),
         })
             .then((r) => (r.ok ? r.json() : Promise.reject(new Error('Failed to load contacts'))))
@@ -785,7 +824,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
         return () => {
             active = false;
         };
-    }, [apiBase, contactsLookupClientId, editingTask?.clientId]);
+    }, [apiBase, contactsLookupClientId, editingTask?.clientId, organizationId, organizationTmpId]);
 
     const loadTasks = useCallback(
         async (opts?: { silent?: boolean }) => {
@@ -795,9 +834,11 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 setIsLoading(true);
                 setError(null);
             }
-            const orgQs = organizationId
-                ? `?organizationId=${encodeURIComponent(organizationId)}`
-                : '';
+            const orgQs = organizationTmpId
+                ? `?organizationTmpId=${encodeURIComponent(organizationTmpId)}`
+                : organizationId
+                  ? `?organizationId=${encodeURIComponent(organizationId)}`
+                  : '';
             const tasksUrl = aggregateMode
                 ? `${apiBase}/api/clients/all-tasks`
                 : `${apiBase}/api/clients/${clientId}/tasks${orgQs}`;
@@ -807,7 +848,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 const tasksData = await res.json();
                 const list = Array.isArray(tasksData) ? tasksData : (tasksData?.data ?? []);
                 const mapped = list.map((row: Record<string, unknown>) =>
-                    mapTaskRow(row, clientId, orgNameById),
+                    mapTaskRow(row, clientId, orgNameById, organizationName),
                 );
                 setTasks(mapped);
             } catch (e: unknown) {
@@ -819,7 +860,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 if (!opts?.silent) setIsLoading(false);
             }
         },
-        [apiBase, clientId, organizationId, aggregateMode, orgNameById],
+        [apiBase, clientId, organizationId, organizationTmpId, organizationName, aggregateMode, orgNameById],
     );
 
     useEffect(() => {
@@ -997,6 +1038,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                     { ...saved, clientId: saveClientId, client: { displayName: task.clientName } },
                     saveClientId,
                     orgNameById,
+                    organizationName,
                 );
                 setTasks((prev) => prev.map((t) => (t.id === task.id ? merged : t)));
             } catch (_e) {
@@ -1014,7 +1056,8 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 processStage: task.processStage,
                 history: task.history || [{ date: new Date().toISOString(), user: 'אני', action: 'יצירת משימה' }],
             };
-            if (organizationId) createPayload.organizationId = organizationId;
+            if (organizationTmpId) createPayload.organizationTmpId = organizationTmpId;
+            else if (organizationId) createPayload.organizationId = organizationId;
             else if (task.organizationId) createPayload.organizationId = task.organizationId;
             else if (pickedOrganizationIdForNewTask) createPayload.organizationId = pickedOrganizationIdForNewTask;
             try {
@@ -1258,6 +1301,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                     organizationId
                     || (orgPickerMode ? pickedOrganizationIdForNewTask : undefined)
                 }
+                scopeOrganizationTmpId={organizationTmpId}
             />
         </div>
     );

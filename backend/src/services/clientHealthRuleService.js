@@ -339,8 +339,74 @@ async function syncHealthRules(clientId, organizationIdRaw, incomingRules, pipel
   });
 }
 
+/** Read-only batch load for pulse — no seeding/transactions (hot path for many linked orgs). */
+async function listRulesForPulseBatch(clientId, organizationIds, pipelineIdRaw = null) {
+  const orgIds = [...new Set((organizationIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  let pipelineId = normalizePipelineId(pipelineIdRaw);
+  if (!pipelineId) {
+    pipelineId = await resolveDefaultPipelineId(clientId);
+  }
+  if (!pipelineId) {
+    return { pipelineId: null, rulesByOrg: new Map() };
+  }
+
+  const rows = orgIds.length
+    ? await ClientHealthRule.findAll({
+      where: {
+        clientId,
+        pipelineId,
+        [Op.or]: [
+          { organizationId: { [Op.in]: orgIds } },
+          { organizationId: { [Op.is]: null } },
+        ],
+      },
+      order: [
+        ['sortIndex', 'ASC'],
+        ['createdAt', 'ASC'],
+      ],
+    })
+    : [];
+
+  const rulesByOrg = new Map();
+  const clientDefaults = [];
+  for (const row of rows) {
+    const dto = ruleToDto(row);
+    if (!dto.organizationId) {
+      clientDefaults.push(dto);
+      continue;
+    }
+    const orgId = String(dto.organizationId);
+    if (!rulesByOrg.has(orgId)) rulesByOrg.set(orgId, []);
+    rulesByOrg.get(orgId).push(dto);
+  }
+
+  const fallback = clientDefaults.length
+    ? clientDefaults
+    : DEFAULT_RULES.map((def, index) => ({
+      id: null,
+      clientId,
+      organizationId: null,
+      pipelineId,
+      color: def.color,
+      condition: def.condition,
+      operator: def.operator,
+      value: def.value,
+      enabled: def.enabled,
+      sortIndex: index,
+    }));
+
+  for (const orgId of orgIds) {
+    if (!rulesByOrg.has(orgId) || rulesByOrg.get(orgId).length === 0) {
+      rulesByOrg.set(orgId, fallback);
+    }
+  }
+
+  return { pipelineId, rulesByOrg };
+}
+
 module.exports = {
   listOrSeedByScope,
+  listRulesForPulseBatch,
   syncHealthRules,
   resolveDefaultPipelineId,
   DEFAULT_RULES,

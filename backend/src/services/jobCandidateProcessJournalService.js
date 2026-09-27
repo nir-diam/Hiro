@@ -11,12 +11,10 @@ const clientUsageSettingService = require('./clientUsageSettingService');
 const JOURNAL_CAP = 200;
 
 const { EVENT_CLOSED_SUMMARY, EVENT_REOPENED_SUMMARY } = require('../utils/clientEventHistory');
-const {
-  CANDIDATE_MISSING_DETAILS_COMPLETED_EVENT_TYPE,
-} = require('../utils/candidateMissingDetailsCompletedEvent');
 
+/** Keep in sync with candidateMissingDetailsCompletedEvent — inlined to avoid circular require at boot. */
 const PROFILE_ONLY_JOURNAL_STATUSES = new Set([
-  CANDIDATE_MISSING_DETAILS_COMPLETED_EVENT_TYPE,
+  'השלמת פרטים חסרים',
   'אישור הפרופיל על ידי המועמד',
 ]);
 

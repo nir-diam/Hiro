@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { BriefcaseIcon } from './Icons';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+  STICKY_TABLE_CLASS,
+  ADMIN_TABLE_SCROLL_CLASS,
+  stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
 
 // ─── types ────────────────────────────────────────────────────────────────────
 
@@ -557,88 +563,92 @@ const AdminJobTagsView: React.FC = () => {
       ) : (
         <>
           {paged.length > 0 ? (
-            <div className="overflow-x-auto bg-bg-card border border-border-default rounded-2xl shadow-sm">
-              <table className="w-full text-sm text-right">
-                <thead className="bg-bg-subtle text-text-muted uppercase text-xs font-semibold border-b border-border-default">
+            <HorizontalScrollArea
+              pinHeader
+              className="bg-bg-card border border-border-default rounded-2xl shadow-sm"
+              scrollClassName={ADMIN_TABLE_SCROLL_CLASS}
+            >
+              <table className={`w-full min-w-[1200px] text-sm text-right ${STICKY_TABLE_CLASS}`} dir="rtl">
+                <thead className="border-b border-border-default text-text-muted uppercase text-xs font-semibold">
                   <tr>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('jobTitle')}
                       aria-sort={sortConfig?.key === 'jobTitle' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">משרה{sortIndicator('jobTitle')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('client')}
                       aria-sort={sortConfig?.key === 'client' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">לקוח{sortIndicator('client')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('key')}
                       aria-sort={sortConfig?.key === 'key' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">Tag Key{sortIndicator('key')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('name')}
                       aria-sort={sortConfig?.key === 'name' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">שם{sortIndicator('name')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('mode')}
                       aria-sort={sortConfig?.key === 'mode' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">Mode{sortIndicator('mode')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('tagType')}
                       aria-sort={sortConfig?.key === 'tagType' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">Type{sortIndicator('tagType')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('source')}
                       aria-sort={sortConfig?.key === 'source' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">Source{sortIndicator('source')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('tag_reason')}
                       aria-sort={sortConfig?.key === 'tag_reason' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">Reason{sortIndicator('tag_reason')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('relevance_score')}
                       aria-sort={sortConfig?.key === 'relevance_score' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">Score{sortIndicator('relevance_score')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('status')}
                       aria-sort={sortConfig?.key === 'status' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">Status{sortIndicator('status')}</span>
                     </th>
                     <th
-                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none whitespace-nowrap"
+                      className={`p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none whitespace-nowrap ${stickyTableHeaderCellClass()}`}
                       onClick={() => requestSort('createdAt')}
                       aria-sort={sortConfig?.key === 'createdAt' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
                       <span className="inline-flex items-center">תאריך יצירה{sortIndicator('createdAt')}</span>
                     </th>
-                    <th className="p-3 text-center">פעולות</th>
+                    <th className={`p-3 text-center ${stickyTableHeaderCellClass()}`}>פעולות</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-default">
@@ -707,7 +717,7 @@ const AdminJobTagsView: React.FC = () => {
                   })}
                 </tbody>
               </table>
-            </div>
+            </HorizontalScrollArea>
           ) : (
             <div className="rounded-xl border border-border-default bg-white/80 p-6 text-sm text-text-muted text-center">
               לא נמצאו רשומות.

@@ -28,6 +28,7 @@ router.patch('/ai-decisions/:id/fields', organizationAiDecisionController.update
 router.post('/merge', ...orgWrite, organizationController.mergeOrganizations);
 
 router.get('/:id/history', organizationController.getHistory);
+router.get('/:id/profile', optionalAuth, organizationController.getProfile);
 router.get('/:id/primary-client', organizationController.getPrimaryClient);
 router.get('/:id/insights', organizationController.getInsights);
 router.get('/:id/candidates', organizationController.listCandidates);

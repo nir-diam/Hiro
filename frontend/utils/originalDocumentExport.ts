@@ -1,8 +1,9 @@
-import JSZip from 'jszip';
 import {
     type ExportImagePayload,
     EXPORT_LOGO_LEFT_MM,
     EXPORT_LOGO_MAX_WIDTH_MM,
+    EXPORT_LOGO_MAX_WIDTH_PX,
+    EXPORT_LOGO_RIGHT_MM,
     EXPORT_LOGO_TOP_MM,
     exportImageToDataUrl,
     exportLogoHeightMm,
@@ -12,21 +13,42 @@ import { downloadBlobAsFile } from './downloadBlobAsFile';
 import { sanitizePdfFilename } from './resumeViewerPdfExport';
 import { downloadParsedSearchTextAsPdf } from './parsedSearchTextPdfExport';
 import { downloadParsedSearchTextAsDocx } from './parsedSearchTextDocxExport';
+import { injectLogoIntoDocx, type DocxLogoAlign } from './docxLogoInject';
 
 type OriginalFileKind = 'pdf' | 'docx' | 'image' | 'unknown';
+
+export type ExportLogoAlign = DocxLogoAlign;
 
 export type OriginalDocumentExportOptions = {
     candidateName?: string;
     clientLogo?: ExportImagePayload | null;
 };
 
-function detectKind(url: string, contentType?: string): OriginalFileKind {
-    const lower = url.toLowerCase();
+function detectKindFromNameAndType(name: string, contentType?: string): OriginalFileKind {
+    const lower = String(name || '').toLowerCase();
     const ct = String(contentType ?? '').toLowerCase();
     if (/\.pdf(\?|$)/.test(lower) || ct.includes('pdf')) return 'pdf';
-    if (/\.docx?(\?|$)/.test(lower) || ct.includes('wordprocessingml')) return 'docx';
-    if (/\.(png|jpe?g|gif|webp)(\?|$)/.test(lower) || ct.startsWith('image/')) return 'image';
+    if (/\.docx(\?|$)/.test(lower) || ct.includes('wordprocessingml')) return 'docx';
+    if (/\.(png|jpe?g|gif|webp|bmp)(\?|$)/.test(lower) || ct.startsWith('image/')) return 'image';
     return 'unknown';
+}
+
+function detectKind(url: string, contentType?: string): OriginalFileKind {
+    return detectKindFromNameAndType(url, contentType);
+}
+
+function pdfLogoLeftPt(pageWidthPt: number, drawWpt: number, align: ExportLogoAlign): number {
+    if (align === 'right') {
+        return pageWidthPt - mmToPt(EXPORT_LOGO_RIGHT_MM) - drawWpt;
+    }
+    return mmToPt(EXPORT_LOGO_LEFT_MM);
+}
+
+function jsPdfLogoLeftMm(pageWidthMm: number, drawWmm: number, align: ExportLogoAlign): number {
+    if (align === 'right') {
+        return pageWidthMm - EXPORT_LOGO_RIGHT_MM - drawWmm;
+    }
+    return EXPORT_LOGO_LEFT_MM;
 }
 
 function mmToPt(mm: number): number {
@@ -77,7 +99,11 @@ async function logoAsEmbeddable(logo: ExportImagePayload): Promise<{ bytes: Uint
     return { bytes: await logoAsPngBytes(logo), type: 'png' };
 }
 
-async function stampPdfWithLogo(pdfBytes: ArrayBuffer, logo: ExportImagePayload): Promise<Uint8Array> {
+async function stampPdfWithLogo(
+    pdfBytes: ArrayBuffer,
+    logo: ExportImagePayload,
+    align: ExportLogoAlign = 'left',
+): Promise<Uint8Array> {
     const { PDFDocument } = await import('pdf-lib');
     const pdfDoc = await PDFDocument.load(pdfBytes);
     const { bytes, type } = await logoAsEmbeddable(logo);
@@ -85,13 +111,12 @@ async function stampPdfWithLogo(pdfBytes: ArrayBuffer, logo: ExportImagePayload)
 
     const drawWpt = mmToPt(EXPORT_LOGO_MAX_WIDTH_MM);
     const drawHpt = Math.max(8, (logo.height / Math.max(logo.width, 1)) * drawWpt);
-    const leftPt = mmToPt(EXPORT_LOGO_LEFT_MM);
     const topPt = mmToPt(EXPORT_LOGO_TOP_MM);
 
     for (const page of pdfDoc.getPages()) {
-        const { height } = page.getSize();
+        const { width, height } = page.getSize();
         page.drawImage(embedded, {
-            x: leftPt,
+            x: pdfLogoLeftPt(width, drawWpt, align),
             y: height - topPt - drawHpt,
             width: drawWpt,
             height: drawHpt,
@@ -104,6 +129,7 @@ async function imageToPdfWithLogo(
     imageBytes: ArrayBuffer,
     contentType: string,
     logo: ExportImagePayload | null,
+    align: ExportLogoAlign = 'left',
 ): Promise<Uint8Array> {
     const blob = new Blob([imageBytes], { type: contentType || 'image/png' });
     const blobUrl = URL.createObjectURL(blob);
@@ -131,7 +157,7 @@ async function imageToPdfWithLogo(
             pdf.addImage(
                 exportImageToDataUrl(logo),
                 jsPdfImageFormat(logo),
-                EXPORT_LOGO_LEFT_MM,
+                jsPdfLogoLeftMm(pageW, drawWmm, align),
                 EXPORT_LOGO_TOP_MM,
                 drawWmm,
                 drawHmm,
@@ -167,82 +193,111 @@ async function imageToPdfWithLogo(
     }
 }
 
-function nextRelationshipId(relsXml: string): string {
-    const matches = [...relsXml.matchAll(/Id="rId(\d+)"/g)];
-    const max = matches.reduce((acc, m) => Math.max(acc, Number(m[1] || 0)), 0);
-    return `rId${max + 1}`;
+async function stampImageBytesWithLogo(
+    imageBytes: ArrayBuffer,
+    contentType: string,
+    logo: ExportImagePayload,
+    align: ExportLogoAlign = 'right',
+): Promise<{ bytes: Uint8Array; contentType: string }> {
+    const blob = new Blob([imageBytes], { type: contentType || 'image/png' });
+    const blobUrl = URL.createObjectURL(blob);
+    try {
+        const img = await loadImage(blobUrl);
+        const logoImg = await loadImage(exportImageToDataUrl(logo));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, img.naturalWidth);
+        canvas.height = Math.max(1, img.naturalHeight);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('canvas2d');
+        ctx.drawImage(img, 0, 0);
+
+        const maxLogoW = Math.min(
+            EXPORT_LOGO_MAX_WIDTH_PX,
+            Math.max(48, Math.round(canvas.width * 0.22)),
+        );
+        const scale = maxLogoW / Math.max(logo.width, 1);
+        const drawW = Math.max(1, Math.round(logo.width * scale));
+        const drawH = Math.max(1, Math.round(logo.height * scale));
+        const margin = Math.max(8, Math.round(canvas.width * 0.02));
+        const x =
+            align === 'right'
+                ? canvas.width - margin - drawW
+                : margin;
+        const y = margin;
+        ctx.drawImage(logoImg, x, y, drawW, drawH);
+
+        const preferJpeg = /jpe?g/i.test(contentType) || /\.jpe?g/i.test(contentType);
+        const outType = preferJpeg ? 'image/jpeg' : 'image/png';
+        const outBlob = await new Promise<Blob>((resolve, reject) => {
+            canvas.toBlob(
+                (b) => (b ? resolve(b) : reject(new Error('image_encode_failed'))),
+                outType,
+                preferJpeg ? 0.92 : undefined,
+            );
+        });
+        return {
+            bytes: new Uint8Array(await outBlob.arrayBuffer()),
+            contentType: outType,
+        };
+    } finally {
+        URL.revokeObjectURL(blobUrl);
+    }
 }
 
-function ensureContentType(contentTypesXml: string, extension: string, contentType: string): string {
-    if (contentTypesXml.includes(`Extension="${extension}"`)) return contentTypesXml;
-    return contentTypesXml.replace(
-        '</Types>',
-        `  <Default Extension="${extension}" ContentType="${contentType}"/>\n</Types>`,
-    );
-}
+export type StampedBinaryAttachment = {
+    bytes: Uint8Array;
+    filename: string;
+    contentType: string;
+};
 
-function buildLogoParagraphXml(relId: string, widthEmu: number, heightEmu: number): string {
-    return `<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <w:pPr><w:jc w:val="left"/></w:pPr>
-  <w:r>
-    <w:drawing>
-      <wp:inline distT="0" distB="0" distL="0" distR="0">
-        <wp:extent cx="${widthEmu}" cy="${heightEmu}"/>
-        <wp:effectExtent l="0" t="0" r="0" b="0"/>
-        <wp:docPr id="9001" name="Client Logo"/>
-        <wp:cNvGraphicFramePr><a:graphicFrameLocks noChangeAspect="1"/></wp:cNvGraphicFramePr>
-        <a:graphic>
-          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
-            <pic:pic>
-              <pic:nvPicPr><pic:cNvPr id="9002" name="Client Logo"/><pic:cNvPicPr/></pic:nvPicPr>
-              <pic:blipFill><a:blip r:embed="${relId}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>
-              <pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${widthEmu}" cy="${heightEmu}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>
-            </pic:pic>
-          </a:graphicData>
-        </a:graphic>
-      </wp:inline>
-    </w:drawing>
-  </w:r>
-</w:p>`;
-}
+/** Stamp PDF/DOCX/image bytes with the tenant logo (for outbound email attachments). */
+export async function stampBinaryAttachmentWithClientLogo(
+    input: { bytes: ArrayBuffer | Uint8Array; filename: string; contentType?: string },
+    logo: ExportImagePayload,
+    options?: { align?: ExportLogoAlign },
+): Promise<StampedBinaryAttachment> {
+    const align = options?.align ?? 'right';
+    const filename = String(input.filename || 'attachment');
+    const contentType = String(input.contentType || '').trim();
+    const buffer =
+        input.bytes instanceof Uint8Array
+            ? input.bytes.buffer.slice(input.bytes.byteOffset, input.bytes.byteOffset + input.bytes.byteLength)
+            : input.bytes;
+    const kind = detectKindFromNameAndType(filename, contentType);
 
-async function injectLogoIntoDocx(docxBytes: ArrayBuffer, logo: ExportImagePayload): Promise<Uint8Array> {
-    const zip = await JSZip.loadAsync(docxBytes);
-    const pngBytes = await logoAsPngBytes(logo);
-    const mediaPath = 'word/media/hiro_export_logo.png';
-    zip.file(mediaPath, pngBytes);
+    if (kind === 'pdf') {
+        const stamped = await stampPdfWithLogo(buffer, logo, align);
+        return {
+            bytes: stamped,
+            filename,
+            contentType: 'application/pdf',
+        };
+    }
 
-    const relsPath = 'word/_rels/document.xml.rels';
-    let relsXml = await zip.file(relsPath)?.async('string');
-    if (!relsXml) throw new Error('docx_rels_missing');
-    const relId = nextRelationshipId(relsXml);
-    relsXml = relsXml.replace(
-        '</Relationships>',
-        `<Relationship Id="${relId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/hiro_export_logo.png"/></Relationships>`,
-    );
-    zip.file(relsPath, relsXml);
+    if (kind === 'docx') {
+        const stamped = await injectLogoIntoDocx(buffer, logo, align);
+        return {
+            bytes: stamped,
+            filename: /\.docx$/i.test(filename) ? filename : `${filename.replace(/\.[^.]+$/, '')}.docx`,
+            contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        };
+    }
 
-    const ctPath = '[Content_Types].xml';
-    let contentTypesXml = await zip.file(ctPath)?.async('string');
-    if (!contentTypesXml) throw new Error('docx_content_types_missing');
-    contentTypesXml = ensureContentType(
-        contentTypesXml,
-        'png',
-        'image/png',
-    );
-    zip.file(ctPath, contentTypesXml);
+    if (kind === 'image') {
+        const stamped = await stampImageBytesWithLogo(buffer, contentType, logo, align);
+        return {
+            bytes: stamped.bytes,
+            filename,
+            contentType: stamped.contentType,
+        };
+    }
 
-    const docPath = 'word/document.xml';
-    let documentXml = await zip.file(docPath)?.async('string');
-    if (!documentXml) throw new Error('docx_document_missing');
-
-    const widthEmu = Math.round((logo.width / 96) * 914400);
-    const heightEmu = Math.round((logo.height / 96) * 914400);
-    const logoParagraph = buildLogoParagraphXml(relId, widthEmu, heightEmu);
-    documentXml = documentXml.replace(/<w:body>/, `<w:body>${logoParagraph}`);
-    zip.file(docPath, documentXml);
-
-    return zip.generateAsync({ type: 'uint8array' });
+    return {
+        bytes: input.bytes instanceof Uint8Array ? input.bytes : new Uint8Array(buffer),
+        filename,
+        contentType: contentType || 'application/octet-stream',
+    };
 }
 
 async function docxToPlainText(docxBytes: ArrayBuffer): Promise<string> {

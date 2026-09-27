@@ -59,6 +59,11 @@ const jobPublicationController = require('./controllers/jobPublicationController
 app.get('/jobs/:clientHint/public/board', jobPublicationController.getBoardSharePreview);
 app.get('/jobs/:clientHint/public/:slug', jobPublicationController.getSharePreview);
 
+app.use('/api/agent/auth', require('./routes/agentAuthRoutes'));
+app.use('/api/agent', require('./routes/agentRoutes'));
+
+app.use('/api', require('./middleware/rejectAgentTokenMiddleware'));
+
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/clients', clientRoutes);

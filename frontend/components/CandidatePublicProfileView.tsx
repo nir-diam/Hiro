@@ -41,14 +41,25 @@ import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi
 import CandidateProfileVideoModal from './CandidateProfileVideoModal';
 import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
 import { startCandidatePortalRecording, stopCandidatePortalRecording } from '../utils/candidatePortalPosthog';
-import { fetchJobMatches, type JobMatchResult } from '../utils/candidateJobMatchingApi';
+import { assignCandidateToJob, fetchJobMatches, type JobMatchResult } from '../utils/candidateJobMatchingApi';
+import {
+    buildCandidateMatchPresentation,
+    candidateMatchTierBadgeClass,
+    resolvePortalMatchScore,
+    type CandidateMatchTier,
+    type CandidateProfileMatchContext,
+} from '../utils/candidateJobMatchExplanation';
 import {
     computeCandidateProfileCompleteness,
     PROFILE_COMPLETENESS_LABELS,
     scrollToProfileCompletenessTarget,
     type ProfileCompletenessFieldId,
 } from '../utils/candidateProfileCompleteness';
-import { isStaffDuplicateProfile } from '../utils/candidateProfileDuplicate';
+import {
+    filterCandidatePortalProfiles,
+    filterProfilesInSameFamily,
+    resolveCandidatePortalDisplayProfile,
+} from '../utils/candidateProfileDuplicate';
 
 // --- AI TOOLS DEFINITIONS ---
 const updateCandidateFieldFunctionDeclaration: FunctionDeclaration = {
@@ -563,7 +574,7 @@ const CandidateSidebar: React.FC<{
 
                 {/* Profile Switcher */}
                 <div className="p-4 border-b border-border-default flex-shrink-0">
-                    <div className="relative">
+                    <div className="relative space-y-2">
                         <button 
                             onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
                             className="w-full flex items-center gap-3 p-3 bg-bg-subtle rounded-xl border border-border-default hover:border-primary-300 transition-all text-right group"
@@ -581,11 +592,26 @@ const CandidateSidebar: React.FC<{
                             </div>
                             <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform ${isProfileMenuOpen ? 'rotate-180' : ''}`} />
                         </button>
+                        {profiles.length > 1 ? (
+                            <span
+                                className="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-2.5 py-1 text-[11px] font-bold text-primary-700 tabular-nums shadow-sm"
+                                title={`${profiles.length} פרופילים קיימים`}
+                            >
+                                {profiles.length} {profiles.length === 1 ? 'פרופיל' : 'פרופילים'}
+                            </span>
+                        ) : null}
 
                         {isProfileMenuOpen && (
                             <div className="absolute top-full left-0 right-0 mt-2 bg-white rounded-xl shadow-xl border border-border-default z-50 overflow-hidden animate-fade-in">
                                 <div className="p-2 space-y-1">
-                                    <p className="px-3 py-2 text-xs font-bold text-text-muted uppercase tracking-wider">הפרופילים שלי</p>
+                                    <div className="px-3 py-2 flex items-center justify-between gap-2">
+                                        <p className="text-xs font-bold text-text-muted uppercase tracking-wider">הפרופילים שלי</p>
+                                        {profiles.length > 1 ? (
+                                            <span className="text-[10px] text-primary-600 bg-primary-50 px-1.5 py-0.5 rounded border border-primary-100 tabular-nums shrink-0">
+                                                {profiles.length} פרופילים
+                                            </span>
+                                        ) : null}
+                                    </div>
                                     {profiles.map(p => {
                                         const isDeleted = Boolean(p.isDeleted);
                                         const isActive = p.id === activeProfileId;
@@ -737,43 +763,26 @@ const AVAILABILITY_OPTIONS = [
     { value: '🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).', label: '🔴 לא רלוונטי כרגע' },
 ] as const;
 
-const CANDIDATE_MATCH_PARAM_LABELS: Partial<Record<keyof JobMatchResult['parameterMatches'], string>> = {
-    mandatory_skill: 'כישורי חובה',
-    license: 'רישיון נהיגה',
-    mobility: 'ניידות',
-    scope: 'היקף משרה',
-    work_hours: 'שעות עבודה',
-    availability: 'זמינות',
-    mandatory_language: 'שפות נדרשות',
-    salary: 'התאמת שכר',
-    age: 'טווח גיל',
-};
-
-function buildCandidateMatchTooltip(job: JobMatchResult): string {
-    const matched: string[] = [];
-    const pm = job.parameterMatches;
-    if (pm) {
-        for (const [key, label] of Object.entries(CANDIDATE_MATCH_PARAM_LABELS)) {
-            if (pm[key as keyof typeof pm] === 'match' && label) matched.push(label);
-        }
-    }
-    const bd = job.scoreBreakdown;
-    const layer = (score: unknown, text: string) => {
-        if (typeof score === 'number' && Number.isFinite(score) && score >= 70) matched.push(text);
+function profileMatchContextFromForm(formData: Record<string, unknown>): CandidateProfileMatchContext {
+    return {
+        title: String(formData.title || '').trim() || undefined,
+        desiredRoles: Array.isArray(formData.desiredRoles)
+            ? formData.desiredRoles.map((r) => String(r || '').trim()).filter(Boolean)
+            : [],
+        techSkills: Array.isArray(formData.techSkills)
+            ? formData.techSkills.map((s) => String(s || '').trim()).filter(Boolean)
+            : [],
+        softSkills: Array.isArray(formData.softSkills)
+            ? formData.softSkills.map((s) => String(s || '').trim()).filter(Boolean)
+            : [],
+        location: String(formData.location || formData.address || '').trim() || undefined,
     };
-    layer(bd?.semanticScore ?? bd?.vector, 'התאמה מקצועית לתיאור המשרה');
-    layer(bd?.tagsScore ?? bd?.tags, 'התאמת כישורים מקצועיים');
-    layer(bd?.geoScore ?? bd?.geo, 'מיקום גיאוגרפי');
-    layer(bd?.intentScore ?? bd?.intent, 'התאמת העדפות עבודה');
-    layer(bd?.experienceScore ?? bd?.experience, 'התאמת ניסיון תעסוקתי');
-    const unique = [...new Set(matched)];
-    if (!unique.length) return 'התאמה גבוהה לפרופיל שלך ביחס לדרישות המשרה';
-    return `עמדת ב: ${unique.join(' · ')}`;
 }
 
-function mapJobMatchToPortalCard(job: JobMatchResult) {
+function mapJobMatchToPortalCard(job: JobMatchResult, profile: CandidateProfileMatchContext) {
     const jobTypes = Array.isArray(job.jobType) ? job.jobType.filter(Boolean) : [];
     const analyzed = job.lastAnalyzed ? new Date(job.lastAnalyzed) : null;
+    const match = buildCandidateMatchPresentation(job, profile);
     return {
         id: job.id,
         title: job.title || '—',
@@ -786,7 +795,10 @@ function mapJobMatchToPortalCard(job: JobMatchResult) {
                 : '—',
         description: typeof job.description === 'string' ? job.description : '',
         logo: null as string | null,
-        matchTooltip: buildCandidateMatchTooltip(job),
+        matchScore: match.score,
+        matchTier: match.tier,
+        matchTierLabel: match.tierLabel,
+        matchExplanation: match.explanation,
     };
 }
 
@@ -800,13 +812,27 @@ const JobCard: React.FC<{
         date: string;
         description: string;
         logo?: string | null;
-        matchTooltip?: string;
+        matchScore?: number;
+        matchTier?: CandidateMatchTier;
+        matchTierLabel?: string;
+        matchExplanation?: string;
     };
     onApply: () => void;
     isFavorite: boolean;
     toggleFavorite: () => void;
-}> = ({ job, onApply, isFavorite, toggleFavorite }) => {
+    isApplied?: boolean;
+    isApplying?: boolean;
+    applySuccess?: boolean;
+    applyError?: string | null;
+}> = ({ job, onApply, isFavorite, toggleFavorite, isApplied, isApplying, applySuccess, applyError }) => {
     const [isExpanded, setIsExpanded] = useState(false);
+    const tierBadgeClass = candidateMatchTierBadgeClass(job.matchTier || 'high');
+    const tierIcon =
+        job.matchTier === 'exact' || job.matchTier === 'high' ? (
+            <CheckCircleIcon className="w-3.5 h-3.5" />
+        ) : (
+            <BookmarkIcon className="w-3.5 h-3.5" />
+        );
 
     return (
         <div className="bg-bg-card rounded-xl border border-border-default hover:border-primary-300 hover:shadow-md transition-all group relative overflow-hidden flex flex-col h-full">
@@ -824,22 +850,22 @@ const JobCard: React.FC<{
                 onClick={() => setIsExpanded(!isExpanded)}
             >
                 <div className="flex justify-between items-start mb-3">
-                     <div className="w-12 h-12 rounded-lg bg-white border border-border-default flex items-center justify-center p-1 shadow-sm">
+                    {job.matchTierLabel ? (
+                        <div
+                            className={`inline-flex items-center gap-1.5 text-xs font-bold border px-2.5 py-1 rounded-full ${tierBadgeClass}`}
+                            title={typeof job.matchScore === 'number' ? `${job.matchScore}% התאמה` : undefined}
+                        >
+                            {tierIcon}
+                            {job.matchTierLabel}
+                        </div>
+                    ) : null}
+                     <div className="w-12 h-12 rounded-lg bg-white border border-border-default flex items-center justify-center p-1 shadow-sm mr-auto">
                         {job.logo ? <img src={job.logo} alt={job.company} className="max-w-full max-h-full object-contain" /> : <BriefcaseIcon className="w-6 h-6 text-gray-400" />}
                     </div>
                 </div>
                 
                 <h3 className="font-bold text-text-default text-lg mb-1 group-hover:text-primary-700 transition-colors leading-tight">{job.title}</h3>
                 <p className="text-sm text-text-muted mb-2 font-medium">{job.company}</p>
-                {job.matchTooltip ? (
-                    <div
-                        className="inline-flex items-center gap-1.5 mb-3 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full cursor-help"
-                        title={job.matchTooltip}
-                    >
-                        <SparklesIcon className="w-3.5 h-3.5" />
-                        התאמה גבוהה
-                    </div>
-                ) : null}
                 
                 <div className="flex flex-wrap gap-2 mb-4 mt-auto">
                     <span className="text-xs bg-bg-subtle text-text-muted px-2.5 py-1 rounded-md border border-border-default flex items-center gap-1">
@@ -861,16 +887,53 @@ const JobCard: React.FC<{
             
             {isExpanded && (
                 <div className="p-5 bg-bg-subtle/30 border-t border-border-default animate-fade-in">
+                    {job.matchExplanation ? (
+                        <div className="mb-5 rounded-xl border border-primary-100 bg-primary-50/60 p-4">
+                            <div className="flex items-start gap-2 mb-2">
+                                <SparklesIcon className="w-5 h-5 text-primary-600 shrink-0 mt-0.5" />
+                                <p className="text-sm font-bold text-primary-900">מדוע משרה זו מתאימה לך?</p>
+                            </div>
+                            <p className="text-sm text-text-default leading-relaxed pr-7">{job.matchExplanation}</p>
+                        </div>
+                    ) : null}
+                    <p className="text-sm font-bold text-text-default mb-2">תיאור המשרה</p>
                      <div 
                         className="text-sm text-text-default mb-5 leading-relaxed prose prose-sm max-w-none [&>ul]:list-disc [&>ul]:pr-5 [&>strong]:text-primary-800"
                         dangerouslySetInnerHTML={{ __html: job.description }} 
                      />
-                     <button 
-                        onClick={(e) => { e.stopPropagation(); onApply(); }} 
-                        className="w-full bg-primary-600 text-white font-bold py-2.5 px-4 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 flex items-center justify-center gap-2"
+                     {applyError ? (
+                        <p className="mb-3 text-sm text-red-600 text-center">{applyError}</p>
+                     ) : null}
+                     <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); onApply(); }}
+                        disabled={isApplied || isApplying || applySuccess}
+                        className={`w-full font-bold py-2.5 px-4 rounded-xl transition flex items-center justify-center gap-2 ${
+                            applySuccess
+                                ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
+                                : isApplied
+                                    ? 'bg-gray-200 text-text-muted cursor-not-allowed'
+                                    : 'bg-primary-600 text-white hover:bg-primary-700 shadow-lg shadow-primary-500/20 disabled:opacity-70'
+                        }`}
                     >
-                        <PaperAirplaneIcon className="w-5 h-5 transform rotate-180" />
-                        הגש מועמדות
+                        {applySuccess ? (
+                            <>
+                                <CheckCircleIcon className="w-5 h-5" />
+                                הוגשה בהצלחה
+                            </>
+                        ) : isApplying ? (
+                            <>שולח מועמדות…</>
+                        ) : isApplied ? (
+                            <>
+                                <CheckCircleIcon className="w-5 h-5" />
+                                כבר הוגשה
+                            </>
+                        ) : (
+                            <>
+                                <PaperAirplaneIcon className="w-5 h-5 transform rotate-180" />
+                                הגש מועמדות
+                            </>
+                        )}
                     </button>
                 </div>
             )}
@@ -1155,7 +1218,7 @@ export const PrintableResume: React.FC<{
             {/* Summary — always default typography */}
             {data.professionalSummary && (
                 <section className="printable-resume-section mb-6">
-                    <h3 className={`printable-resume-section-title ${executiveSummaryHeadingCls}`}>תמצית מנהלים</h3>
+                    <h3 className={`printable-resume-section-title ${executiveSummaryHeadingCls}`}>תמצית </h3>
                     <p className={`printable-resume-entry-desc ${executiveSummaryBodyCls}`}>{data.professionalSummary}</p>
                 </section>
             )}
@@ -1488,27 +1551,26 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
 
     const filterVisibleProfiles = (items: any[]) => items.filter((item) => !item.isDeleted);
 
-    // Derived Active Profile
+    // Derived Active Profile — never a staff shadow copy in the portal
     const activeProfile = useMemo(() => {
         if (!profiles.length) return undefined;
-        return profiles.find((p) => p.id === activeProfileId) || profiles[0];
+        return resolveCandidatePortalDisplayProfile(profiles, activeProfileId);
     }, [activeProfileId, profiles]);
 
-    /** Profile versions for the logged-in user only (same userId as active profile). */
-    const userProfiles = useMemo(() => {
-        const anchorUserId = activeProfile?.userId ?? profiles[0]?.userId;
-        if (!anchorUserId) return profiles;
-        return profiles.filter((p) => String(p.userId) === String(anchorUserId));
-    }, [profiles, activeProfile?.userId]);
+    /** Profile versions in the same candidate family (primary + shared linked versions). */
+    const userProfiles = useMemo(
+        () => filterProfilesInSameFamily(profiles, activeProfile || profiles[0]),
+        [profiles, activeProfile],
+    );
 
-    /** Portal switcher list — hide staff duplicate copies only. */
+    /** Portal switcher + prev/next — hide staff shadow copies. */
     const portalSwitcherProfiles = useMemo(
-        () => userProfiles.filter((p) => !isStaffDuplicateProfile(p)),
+        () => filterCandidatePortalProfiles(userProfiles),
         [userProfiles],
     );
 
     const navigableProfiles = useMemo(
-        () => filterVisibleProfiles(userProfiles),
+        () => filterCandidatePortalProfiles(filterVisibleProfiles(userProfiles)),
         [userProfiles],
     );
 
@@ -1525,6 +1587,11 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const [joinCandidatePool, setJoinCandidatePool] = useState(false);
     const [matchedJobs, setMatchedJobs] = useState<JobMatchResult[]>([]);
     const [matchedJobsLoading, setMatchedJobsLoading] = useState(false);
+    const [matchedJobsError, setMatchedJobsError] = useState<string | null>(null);
+    const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
+    const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
+    const [applySuccessJobId, setApplySuccessJobId] = useState<string | null>(null);
+    const [applyError, setApplyError] = useState<{ jobId: string; message: string } | null>(null);
     const [expandedSections, setExpandedSections] = useState<Set<SmartTagType>>(new Set());
     const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
     const [tagSelectorCategory, setTagSelectorCategory] = useState<TagCategory>('role');
@@ -1849,16 +1916,23 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     useEffect(() => {
         if (!formData.consentToJobOffers || !candidateId) {
             setMatchedJobs([]);
+            setMatchedJobsError(null);
             return;
         }
         let cancelled = false;
         setMatchedJobsLoading(true);
-        void fetchJobMatches(String(candidateId), { minScore: 70, limit: 100 })
+        setMatchedJobsError(null);
+        void fetchJobMatches(String(candidateId), { minScore: 0, limit: 100 })
             .then((rows) => {
                 if (!cancelled) setMatchedJobs(Array.isArray(rows) ? rows : []);
             })
-            .catch(() => {
-                if (!cancelled) setMatchedJobs([]);
+            .catch((err: unknown) => {
+                if (!cancelled) {
+                    setMatchedJobs([]);
+                    setMatchedJobsError(
+                        err instanceof Error ? err.message : 'טעינת משרות רלוונטיות נכשלה',
+                    );
+                }
             })
             .finally(() => {
                 if (!cancelled) setMatchedJobsLoading(false);
@@ -1868,10 +1942,61 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         };
     }, [formData.consentToJobOffers, candidateId]);
 
-    const portalJobs = useMemo(
-        () => matchedJobs.map(mapJobMatchToPortalCard),
-        [matchedJobs],
+    useEffect(() => {
+        setAppliedJobIds(
+            new Set(
+                matchedJobs
+                    .filter((job) => job.matchType === 'application')
+                    .map((job) => job.id),
+            ),
+        );
+    }, [matchedJobs]);
+
+    const handleApplyToJob = useCallback(async (jobId: string) => {
+        if (!candidateId || appliedJobIds.has(jobId) || applyingJobId === jobId) return;
+        setApplyingJobId(jobId);
+        setApplyError(null);
+        setApplySuccessJobId(null);
+        try {
+            await assignCandidateToJob(String(candidateId), jobId, {
+                source: 'candidate_portal',
+                status: 'חדש',
+            });
+            setAppliedJobIds((prev) => new Set(prev).add(jobId));
+            setMatchedJobs((prev) =>
+                prev.map((job) =>
+                    job.id === jobId ? { ...job, matchType: 'application' as const } : job,
+                ),
+            );
+            setApplySuccessJobId(jobId);
+            window.setTimeout(() => {
+                setApplySuccessJobId((current) => (current === jobId ? null : current));
+            }, 2500);
+        } catch (err: unknown) {
+            setApplyError({
+                jobId,
+                message: err instanceof Error ? err.message : 'הגשת המועמדות נכשלה',
+            });
+            window.setTimeout(() => {
+                setApplyError((current) => (current?.jobId === jobId ? null : current));
+            }, 5000);
+        } finally {
+            setApplyingJobId(null);
+        }
+    }, [candidateId, appliedJobIds, applyingJobId]);
+
+    const profileMatchContext = useMemo(
+        () => profileMatchContextFromForm(formData),
+        [formData.title, formData.desiredRoles, formData.techSkills, formData.softSkills, formData.location, formData.address],
     );
+
+    const portalJobs = useMemo(() => {
+        const MIN_PORTAL_SCORE = 40;
+        return matchedJobs
+            .filter((job) => resolvePortalMatchScore(job) >= MIN_PORTAL_SCORE)
+            .map((job) => mapJobMatchToPortalCard(job, profileMatchContext))
+            .sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
+    }, [matchedJobs, profileMatchContext]);
 
     // Toggle Favorite
     const toggleFavoriteJob = (jobId: string) => {
@@ -1901,6 +2026,19 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const favoriteJobsList = useMemo(
         () => portalJobs.filter((job) => favoriteJobIds.has(job.id)),
         [portalJobs, favoriteJobIds],
+    );
+
+    const renderPortalJobCard = (job: ReturnType<typeof mapJobMatchToPortalCard>) => (
+        <JobCard
+            job={job}
+            onApply={() => void handleApplyToJob(job.id)}
+            isFavorite={favoriteJobIds.has(job.id)}
+            toggleFavorite={() => toggleFavoriteJob(job.id)}
+            isApplied={appliedJobIds.has(job.id)}
+            isApplying={applyingJobId === job.id}
+            applySuccess={applySuccessJobId === job.id}
+            applyError={applyError?.jobId === job.id ? applyError.message : null}
+        />
     );
 
     const sanitizePayload = (data: any) => {
@@ -1993,34 +2131,50 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                     setLoadError('לא ניתן לטעון את פרופיל המועמד.');
                     return;
                 }
-                const primary = normalizeCandidateData(await previewRes.json());
-                if (primary.isDeleted) {
+                const seed = normalizeCandidateData(await previewRes.json());
+                if (seed.isDeleted) {
                     setLoadError('פרופיל המועמד לא נמצא.');
                     return;
                 }
 
-                let sorted = [primary];
-                const linkedUserId = primary.userId;
-                if (linkedUserId) {
-                    const byUserRes = await fetch(`${base}/api/candidates/by-user/${encodeURIComponent(String(linkedUserId))}`, {
-                        headers: { ...authHeaders() },
-                    });
-                    if (byUserRes.ok) {
-                        const byUserPayload = await byUserRes.json();
-                        if (Array.isArray(byUserPayload) && byUserPayload.length > 0) {
-                            sorted = byUserPayload.map(normalizeCandidateData).slice().sort((a, b) => {
-                                const aTime = new Date(a.createdAt || a.updatedAt || 0).getTime();
-                                const bTime = new Date(b.createdAt || b.updatedAt || 0).getTime();
-                                return aTime - bTime;
-                            });
+                let sorted = [seed];
+                const versionsRes = await fetch(
+                    `${base}/api/candidates/${encodeURIComponent(staffPreviewCandidateId)}/profile-versions`,
+                    { headers: { ...authHeaders() } },
+                );
+                if (versionsRes.ok) {
+                    const versionsPayload = await versionsRes.json();
+                    if (Array.isArray(versionsPayload) && versionsPayload.length > 0) {
+                        sorted = versionsPayload.map(normalizeCandidateData).slice().sort((a, b) => {
+                            const aTime = new Date(a.createdAt || a.updatedAt || 0).getTime();
+                            const bTime = new Date(b.createdAt || b.updatedAt || 0).getTime();
+                            return aTime - bTime;
+                        });
+                    }
+                } else {
+                    const linkedUserId = seed.userId;
+                    if (linkedUserId) {
+                        const byUserRes = await fetch(
+                            `${base}/api/candidates/by-user/${encodeURIComponent(String(linkedUserId))}`,
+                            { headers: { ...authHeaders() } },
+                        );
+                        if (byUserRes.ok) {
+                            const byUserPayload = await byUserRes.json();
+                            if (Array.isArray(byUserPayload) && byUserPayload.length > 0) {
+                                sorted = byUserPayload.map(normalizeCandidateData).slice().sort((a, b) => {
+                                    const aTime = new Date(a.createdAt || a.updatedAt || 0).getTime();
+                                    const bTime = new Date(b.createdAt || b.updatedAt || 0).getTime();
+                                    return aTime - bTime;
+                                });
+                            }
                         }
                     }
                 }
 
-                const visible = filterVisibleProfiles(sorted);
-                const display = visible.find((p) => String(p.id) === staffPreviewCandidateId)
-                    || visible[0]
-                    || primary;
+                const display =
+                    resolveCandidatePortalDisplayProfile(sorted, staffPreviewCandidateId) ||
+                    resolveCandidatePortalDisplayProfile(sorted) ||
+                    seed;
                 setProfiles(sorted);
                 setCandidateId(display?.id || null);
                 setActiveProfileId(display?.id ?? null);
@@ -2051,10 +2205,11 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                     const bTime = new Date(b.createdAt || b.updatedAt || 0).getTime();
                     return aTime - bTime;
                 });
-                const visible = filterVisibleProfiles(sorted);
-                const primary = visible[0] || sorted[0];
                 if (sorted.length) {
-                    const display = primary || sorted[0];
+                    const display =
+                        resolveCandidatePortalDisplayProfile(sorted) ||
+                        filterVisibleProfiles(sorted)[0] ||
+                        sorted[0];
                     setCandidateId(display?.id || null);
                     setProfiles(sorted);
                     setActiveProfileId(display?.id ?? null);
@@ -2275,7 +2430,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         if (!activeProfile) return;
         setFormData(activeProfile);
         setCandidateId(activeProfile.id || null);
-    }, [activeProfile]);
+        if (activeProfile.id != null && String(activeProfileId) !== String(activeProfile.id)) {
+            setActiveProfileId(activeProfile.id);
+        }
+    }, [activeProfile, activeProfileId]);
 
     useEffect(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
@@ -3281,12 +3439,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     {favoriteJobsList.map((job) => (
                          <div key={job.id} className="relative">
-                             <JobCard 
-                                job={job} 
-                                onApply={() => alert(`Applying to ${job.title}...`)} 
-                                isFavorite={true}
-                                toggleFavorite={() => toggleFavoriteJob(job.id)}
-                             />
+                             {renderPortalJobCard(job)}
                          </div>
                      ))}
                 </div>
@@ -3337,23 +3490,23 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             <h2 className="text-xl font-bold text-text-default mb-4">
                 {matchedJobsLoading
                     ? 'טוען משרות מתאימות...'
+                    : matchedJobsError
+                        ? 'שגיאה בטעינת משרות'
                     : filteredJobs.length > 0
                         ? 'משרות רלוונטיות עבורך'
                         : 'לא נמצאו משרות מתאימות'}
             </h2>
 
+            {matchedJobsError && !matchedJobsLoading ? (
+                <div className="text-center py-8 text-red-600 text-sm">{matchedJobsError}</div>
+            ) : null}
+
             {matchedJobsLoading ? (
-                <div className="text-center py-12 text-text-muted">מחפש משרות עם התאמה גבוהה...</div>
+                <div className="text-center py-12 text-text-muted">מחפש משרות רלוונטיות...</div>
             ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {filteredJobs.map((job) => (
-                    <JobCard 
-                        key={job.id} 
-                        job={job} 
-                        onApply={() => alert(`Applying to ${job.title}...`)}
-                        isFavorite={favoriteJobIds.has(job.id)}
-                        toggleFavorite={() => toggleFavoriteJob(job.id)}
-                    />
+                    <div key={job.id}>{renderPortalJobCard(job)}</div>
                 ))}
             </div>
             )}

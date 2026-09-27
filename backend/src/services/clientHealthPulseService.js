@@ -1,14 +1,18 @@
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
+const { sequelize } = require('../config/db');
 const Client = require('../models/Client');
 const ClientContact = require('../models/ClientContact');
 const ClientTask = require('../models/ClientTask');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
-const Job = require('../models/Job');
 const clientHealthRuleService = require('./clientHealthRuleService');
 
 const DAY_MS = 86_400_000;
+const PULSE_CACHE_MS = 45_000;
 
 const OPEN_JOB_STATUSES = ['פתוחה'];
+
+/** @type {Map<string, { at: number, data: Record<string, unknown> }>} */
+const pulseCache = new Map();
 
 function toTrafficLight(color) {
   const c = String(color || 'gray');
@@ -121,25 +125,37 @@ function maxDate(...vals) {
   return best;
 }
 
-async function computeOrgMetrics(clientId, organizationId, linkCreatedAt) {
-  const [contacts, tasks, openOpportunities, client] = await Promise.all([
-    ClientContact.findAll({
-      where: { clientId, organizationId },
-      attributes: ['updatedAt', 'createdAt'],
-    }),
-    ClientTask.findAll({
-      where: { clientId, organizationId },
-      attributes: ['updatedAt', 'createdAt', 'dueDate', 'status', 'history'],
-    }),
-    Job.count({
-      where: {
-        organizationId,
-        status: { [Op.in]: OPEN_JOB_STATUSES },
-      },
-    }),
-    Client.findByPk(clientId, { attributes: ['id', 'events'] }),
-  ]);
+function groupRowsByOrganizationId(rows) {
+  const map = new Map();
+  for (const row of rows) {
+    const plain = row?.toJSON ? row.toJSON() : row;
+    const organizationId = String(plain?.organizationId || '').trim();
+    if (!organizationId) continue;
+    if (!map.has(organizationId)) map.set(organizationId, []);
+    map.get(organizationId).push(plain);
+  }
+  return map;
+}
 
+function indexEventsByOrganizationId(events) {
+  const map = new Map();
+  for (const ev of events) {
+    const organizationId = String(ev?.organizationId || '').trim();
+    if (!organizationId) continue;
+    if (!map.has(organizationId)) map.set(organizationId, []);
+    map.get(organizationId).push(ev);
+  }
+  return map;
+}
+
+function computeMetricsFromPrepared({
+  contacts,
+  tasks,
+  openOpportunities,
+  orgEvents,
+  organizationId,
+  linkCreatedAt,
+}) {
   let lastTouch = null;
   for (const c of contacts) {
     lastTouch = maxDate(lastTouch, c.updatedAt, c.createdAt);
@@ -152,13 +168,11 @@ async function computeOrgMetrics(clientId, organizationId, linkCreatedAt) {
     }
   }
 
-  const events = Array.isArray(client?.events) ? client.events : [];
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   let hasFuture = false;
 
-  for (const ev of events) {
-    if (String(ev?.organizationId || '') !== String(organizationId)) continue;
+  for (const ev of orgEvents) {
     lastTouch = maxDate(lastTouch, ev.date, ev.start, ev.createdAt, ev.updatedAt);
     const ed = ev.date || ev.start;
     if (ed) {
@@ -174,7 +188,6 @@ async function computeOrgMetrics(clientId, organizationId, linkCreatedAt) {
     if (!Number.isNaN(d.getTime()) && d >= today) hasFuture = true;
   }
 
-  // Never contacted → count days since the org was linked (or "now" if unknown).
   if (!lastTouch) {
     lastTouch = linkCreatedAt ? new Date(linkCreatedAt) : new Date(0);
   }
@@ -193,46 +206,136 @@ async function computeOrgMetrics(clientId, organizationId, linkCreatedAt) {
   };
 }
 
+async function loadSharedPulseData(clientId, orgIds) {
+  if (!orgIds.length) {
+    return {
+      events: [],
+      contactsByOrg: new Map(),
+      tasksByOrg: new Map(),
+      jobCountByOrg: new Map(),
+    };
+  }
+
+  const [clientRow, contacts, tasks, jobCountRows] = await Promise.all([
+    Client.findByPk(clientId, { attributes: ['id', 'events'] }),
+    ClientContact.findAll({
+      where: { clientId, organizationId: { [Op.in]: orgIds } },
+      attributes: ['organizationId', 'updatedAt', 'createdAt'],
+    }),
+    ClientTask.findAll({
+      where: { clientId, organizationId: { [Op.in]: orgIds } },
+      attributes: ['organizationId', 'updatedAt', 'createdAt', 'dueDate', 'status', 'history'],
+    }),
+    sequelize.query(
+      `SELECT organization_id AS "organizationId", COUNT(*)::int AS count
+       FROM jobs
+       WHERE organization_id IN (:orgIds)
+         AND status IN (:statuses)
+       GROUP BY organization_id`,
+      {
+        replacements: { orgIds, statuses: OPEN_JOB_STATUSES },
+        type: QueryTypes.SELECT,
+      },
+    ),
+  ]);
+
+  const jobCountByOrg = new Map(
+    (jobCountRows || []).map((row) => [String(row.organizationId), Number(row.count) || 0]),
+  );
+
+  const events = Array.isArray(clientRow?.events) ? clientRow.events : [];
+  return {
+    events,
+    eventsByOrg: indexEventsByOrganizationId(events),
+    contactsByOrg: groupRowsByOrganizationId(contacts),
+    tasksByOrg: groupRowsByOrganizationId(tasks),
+    jobCountByOrg,
+  };
+}
+
+function computeOrgMetricsFromShared(organizationId, linkCreatedAt, shared) {
+  const orgId = String(organizationId);
+  return computeMetricsFromPrepared({
+    contacts: shared.contactsByOrg.get(orgId) || [],
+    tasks: shared.tasksByOrg.get(orgId) || [],
+    openOpportunities: shared.jobCountByOrg.get(orgId) || 0,
+    orgEvents: shared.eventsByOrg.get(orgId) || [],
+    organizationId: orgId,
+    linkCreatedAt,
+  });
+}
+
+async function computeOrgMetrics(clientId, organizationId, linkCreatedAt) {
+  const orgId = String(organizationId);
+  const loaded = await loadSharedPulseData(clientId, [orgId]);
+  return computeMetricsFromPrepared({
+    contacts: loaded.contactsByOrg.get(orgId) || [],
+    tasks: loaded.tasksByOrg.get(orgId) || [],
+    openOpportunities: loaded.jobCountByOrg.get(orgId) || 0,
+    orgEvents: loaded.eventsByOrg.get(orgId) || [],
+    organizationId: orgId,
+    linkCreatedAt,
+  });
+}
+
 /**
  * Evaluate pulse for all approved linked orgs of a client.
  * Returns { [organizationId]: { level, message, pulse, color, metrics } }
  */
 async function evaluatePulseForClient(clientId, pipelineId = null) {
+  const cacheKey = `${clientId}:${pipelineId || 'default'}`;
+  const hit = pulseCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < PULSE_CACHE_MS) {
+    return hit.data;
+  }
+
   const links = await ClientOrganizationLink.findAll({
     where: {
       clientId,
       organizationId: { [Op.ne]: null },
     },
+    attributes: ['organizationId', 'created_at'],
   });
 
-  const byOrganizationId = {};
-  await Promise.all(
-    links.map(async (link) => {
-      const organizationId = String(link.organizationId);
-      try {
-        const linkCreatedAt = link.createdAt || link.get?.('created_at') || link.created_at;
-        const [rules, metrics] = await Promise.all([
-          clientHealthRuleService.listOrSeedByScope(clientId, organizationId, pipelineId),
-          computeOrgMetrics(clientId, organizationId, linkCreatedAt),
-        ]);
-        byOrganizationId[organizationId] = evaluateRules(rules, metrics);
-      } catch (err) {
-        byOrganizationId[organizationId] = {
-          level: 'yellow',
-          color: 'yellow',
-          message: err.message || 'שגיאה בחישוב דופק',
-          pulse: false,
-          matchedRuleId: null,
-          metrics: null,
-        };
-      }
-    }),
-  );
+  const orgIds = [...new Set(links.map((link) => String(link.organizationId)).filter(Boolean))];
+  const linkByOrg = new Map(links.map((link) => [String(link.organizationId), link]));
 
+  const [shared, { rulesByOrg }] = await Promise.all([
+    loadSharedPulseData(clientId, orgIds),
+    clientHealthRuleService.listRulesForPulseBatch(clientId, orgIds, pipelineId),
+  ]);
+
+  const byOrganizationId = {};
+  for (const organizationId of orgIds) {
+    try {
+      const link = linkByOrg.get(organizationId);
+      const linkCreatedAt = link?.createdAt || link?.get?.('created_at') || link?.created_at;
+      const rules = rulesByOrg.get(organizationId) || [];
+      const metrics = computeOrgMetricsFromShared(organizationId, linkCreatedAt, shared);
+      byOrganizationId[organizationId] = evaluateRules(rules, metrics);
+    } catch (err) {
+      byOrganizationId[organizationId] = {
+        level: 'yellow',
+        color: 'yellow',
+        message: err.message || 'שגיאה בחישוב דופק',
+        pulse: false,
+        matchedRuleId: null,
+        metrics: null,
+      };
+    }
+  }
+
+  pulseCache.set(cacheKey, { at: Date.now(), data: byOrganizationId });
   return byOrganizationId;
 }
 
 async function evaluatePulseForOrganization(clientId, organizationId, pipelineId = null) {
+  const cacheKey = `${clientId}:${organizationId}:${pipelineId || 'default'}`;
+  const hit = pulseCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < PULSE_CACHE_MS) {
+    return hit.data;
+  }
+
   const link = await ClientOrganizationLink.findOne({
     where: { clientId, organizationId },
   });
@@ -242,11 +345,16 @@ async function evaluatePulseForOrganization(clientId, organizationId, pipelineId
     throw err;
   }
   const linkCreatedAt = link.createdAt || link.get?.('created_at') || link.created_at;
-  const [rules, metrics] = await Promise.all([
-    clientHealthRuleService.listOrSeedByScope(clientId, organizationId, pipelineId),
-    computeOrgMetrics(clientId, organizationId, linkCreatedAt),
-  ]);
-  return evaluateRules(rules, metrics);
+  const { rulesByOrg } = await clientHealthRuleService.listRulesForPulseBatch(
+    clientId,
+    [String(organizationId)],
+    pipelineId,
+  );
+  const rules = rulesByOrg.get(String(organizationId)) || [];
+  const metrics = await computeOrgMetrics(clientId, organizationId, linkCreatedAt);
+  const result = evaluateRules(rules, metrics);
+  pulseCache.set(cacheKey, { at: Date.now(), data: result });
+  return result;
 }
 
 module.exports = {

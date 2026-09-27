@@ -5,6 +5,13 @@ export type ContactPhoneEntry = {
   kind: 'office' | 'mobile';
   isPrimary: boolean;
 };
+export type ContactLinkEntry = {
+  id: string;
+  label: string;
+  url: string;
+  isPrimary: boolean;
+};
+export type ContactAddressEntry = { id: string; value: string; isPrimary: boolean };
 
 export interface ContactFormState {
   id: string;
@@ -14,6 +21,8 @@ export interface ContactFormState {
   role: string;
   emails: ContactEmailEntry[];
   phones: ContactPhoneEntry[];
+  links: ContactLinkEntry[];
+  addresses: ContactAddressEntry[];
   linkedin: string;
   username: string;
   isActive: boolean;
@@ -34,6 +43,22 @@ export const newContactEntryId = (): string => {
 
 export const buildFullName = (firstName: string, lastName: string): string =>
   [firstName, lastName].map((s) => String(s || '').trim()).filter(Boolean).join(' ');
+
+/** Pending linked org id stored on contact metadata when organizationId is not set yet. */
+export const contactOrganizationTmpId = (
+  row: { organizationTmpId?: string | null; metadata?: unknown } | null | undefined,
+): string | null => {
+  if (!row) return null;
+  if (row.organizationTmpId != null && String(row.organizationTmpId).trim()) {
+    return String(row.organizationTmpId).trim();
+  }
+  const meta = row.metadata;
+  if (meta && typeof meta === 'object' && meta !== null && 'organizationTmpId' in meta) {
+    const value = (meta as { organizationTmpId?: unknown }).organizationTmpId;
+    if (value != null && String(value).trim()) return String(value).trim();
+  }
+  return null;
+};
 
 export const splitFullName = (name: string): { firstName: string; lastName: string } => {
   const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
@@ -85,6 +110,33 @@ const normalizePhoneEntries = (
   return entries;
 };
 
+const normalizeLinkEntries = (raw: unknown): ContactLinkEntry[] => {
+  if (!Array.isArray(raw) || !raw.length) return [];
+  const entries = raw
+    .map((e: any) => ({
+      id: String(e?.id || newContactEntryId()),
+      label: String(e?.label || '').trim(),
+      url: String(e?.url || e?.value || '').trim(),
+      isPrimary: Boolean(e?.isPrimary),
+    }))
+    .filter((e) => e.url);
+  if (entries.length && !entries.some((e) => e.isPrimary)) entries[0].isPrimary = true;
+  return entries;
+};
+
+const normalizeAddressEntries = (raw: unknown): ContactAddressEntry[] => {
+  if (!Array.isArray(raw) || !raw.length) return [];
+  const entries = raw
+    .map((e: any) => ({
+      id: String(e?.id || newContactEntryId()),
+      value: String(e?.value || '').trim(),
+      isPrimary: Boolean(e?.isPrimary),
+    }))
+    .filter((e) => e.value);
+  if (entries.length && !entries.some((e) => e.isPrimary)) entries[0].isPrimary = true;
+  return entries;
+};
+
 export const emptyContactForm = (partial: Partial<ContactFormState> = {}): ContactFormState => ({
   id: partial.id || 'tmp-new',
   firstName: partial.firstName || '',
@@ -93,6 +145,8 @@ export const emptyContactForm = (partial: Partial<ContactFormState> = {}): Conta
   role: partial.role || '',
   emails: partial.emails || [],
   phones: partial.phones || [],
+  links: partial.links || [],
+  addresses: partial.addresses || [],
   linkedin: partial.linkedin || '',
   username: partial.username || '',
   isActive: partial.isActive ?? true,
@@ -122,6 +176,8 @@ export const contactFromApi = (row: Record<string, unknown>): ContactFormState =
       phone: String(row.phone || ''),
       mobilePhone: String(row.mobilePhone || ''),
     }),
+    links: normalizeLinkEntries(meta.links ?? row.links),
+    addresses: normalizeAddressEntries(meta.addresses ?? row.addresses),
     linkedin: String(row.linkedin || ''),
     username: String(row.username || ''),
     isActive: Boolean(row.isActive ?? true),
@@ -142,6 +198,10 @@ export const contactToApiPayload = (form: ContactFormState): Record<string, unkn
   const name = buildFullName(firstName, lastName);
   const emails = form.emails.map((e) => ({ ...e, value: e.value.trim() })).filter((e) => e.value);
   const phones = form.phones.map((p) => ({ ...p, value: p.value.trim() })).filter((p) => p.value);
+  const links = form.links
+    .map((l) => ({ ...l, label: l.label.trim(), url: l.url.trim() }))
+    .filter((l) => l.url);
+  const addresses = form.addresses.map((a) => ({ ...a, value: a.value.trim() })).filter((a) => a.value);
   const primaryEmail = emails.find((e) => e.isPrimary)?.value || emails[0]?.value || '';
   const primaryOffice = phones.find((p) => p.kind === 'office' && p.isPrimary)?.value
     || phones.find((p) => p.kind === 'office')?.value
@@ -160,6 +220,8 @@ export const contactToApiPayload = (form: ContactFormState): Record<string, unkn
     mobilePhone: primaryMobile,
     emails,
     phones,
+    links,
+    addresses,
     linkedin: form.linkedin,
     username: form.username,
     isActive: form.isActive,
@@ -186,6 +248,12 @@ export const setPrimaryPhone = (phones: ContactPhoneEntry[], id: string, kind: '
     ...e,
     isPrimary: e.kind === kind ? e.id === id : e.isPrimary,
   }));
+
+export const setPrimaryLink = (links: ContactLinkEntry[], id: string): ContactLinkEntry[] =>
+  links.map((e) => ({ ...e, isPrimary: e.id === id }));
+
+export const setPrimaryAddress = (addresses: ContactAddressEntry[], id: string): ContactAddressEntry[] =>
+  addresses.map((e) => ({ ...e, isPrimary: e.id === id }));
 
 export const primaryEmail = (form: ContactFormState): string =>
   form.emails.find((e) => e.isPrimary)?.value || form.emails[0]?.value || '';

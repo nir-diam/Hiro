@@ -20,13 +20,15 @@ import { FinanceProvider } from './context/FinanceContext';
 import { PromptProvider } from './context/PromptContext';
 import { buildBreadcrumbs } from './utils/buildBreadcrumbs';
 import { BreadcrumbProvider, useBreadcrumbContext } from './context/BreadcrumbContext';
+import { NewTaskLinkedProvider, useNewTaskLinkedContext } from './context/NewTaskLinkedContext';
 import StaffPageGate from './components/StaffPageGate';
 
 
 export type PageType = 'list' | 'profile' | 'new' | 'login' | 'jobs' | 'new-job' | 'clients' | 'new-client' | 'notifications' | 'company-settings' | 'coordinators-settings' | 'coordinator-profile' | 'admin-dashboard' | 'admin-client-form' | 'message-templates' | 'event-types-settings' | 'candidate-pool' | 'job-board' | 'finance';
 
-const AppContent: React.FC = () => {
+const AppContentInner: React.FC = () => {
     const location = useLocation();
+    const { linkedOverride } = useNewTaskLinkedContext();
     const navigate = useNavigate();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
     const { t } = useLanguage();
@@ -183,6 +185,7 @@ const AppContent: React.FC = () => {
                         initialRecipientIds={messageModalConfig.initialRecipientIds}
                         linkedClientId={messageModalConfig.linkedClientId}
                         linkedOrganizationId={messageModalConfig.linkedOrganizationId}
+                        linkedOrganizationName={messageModalConfig.linkedOrganizationName}
                         linkedContactId={messageModalConfig.linkedContactId}
                         recipientType={messageModalConfig.recipientType}
                     />
@@ -247,6 +250,7 @@ const AppContent: React.FC = () => {
                     onSave={handleSaveTask}
                     onOpenCandidateSummary={openSummaryDrawer}
                     pathname={location.pathname}
+                    linkedOverride={linkedOverride}
                 />
                 <CandidateSummaryDrawer
                     isOpen={isSummaryDrawerOpen}
@@ -273,6 +277,7 @@ const AppContent: React.FC = () => {
                         initialRecipientIds={messageModalConfig.initialRecipientIds}
                         linkedClientId={messageModalConfig.linkedClientId}
                         linkedOrganizationId={messageModalConfig.linkedOrganizationId}
+                        linkedOrganizationName={messageModalConfig.linkedOrganizationName}
                         linkedContactId={messageModalConfig.linkedContactId}
                         recipientType={messageModalConfig.recipientType}
                     />
@@ -288,6 +293,12 @@ const AppContent: React.FC = () => {
         </FinanceProvider>
     );
 };
+
+const AppContent: React.FC = () => (
+    <NewTaskLinkedProvider>
+        <AppContentInner />
+    </NewTaskLinkedProvider>
+);
 
 const App: React.FC = () => {
     return (

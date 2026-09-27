@@ -14,6 +14,7 @@ import {
   PencilIcon,
   CheckIcon,
   UserIcon,
+  UserGroupIcon,
   ArrowPathIcon,
   BriefcaseIcon,
   MagnifyingGlassIcon,
@@ -21,7 +22,13 @@ import {
   TrashIcon,
 } from './Icons';
 import ProcessEventModal, { type ProcessEventSavePayload } from './ProcessEventModal';
+import { FormMultiSelect } from './FormMultiSelect';
+import SearchableSelect from './SearchableSelect';
+import DuplicateProcessPromptModal, {
+  type DuplicateProcessSummary,
+} from './DuplicateProcessPromptModal';
 import ProcessManagementCatalogPanel from './ProcessManagementCatalogPanel';
+import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import ContactDrawer from './ContactDrawer';
@@ -29,8 +36,15 @@ import OrganizationPreviewDrawer, {
   type OrganizationPreviewDrawerTarget,
 } from './OrganizationPreviewDrawer';
 import type { Contact } from './ClientsListView';
+import type { MessageModalConfig } from '../hooks/useUIState';
 import type { Candidate } from './CandidatesListView';
 import { authHeaders } from '../utils/authHeaders';
+import {
+  buildEventsJournalFilterStorageKey,
+  clearEventsJournalFilters,
+  loadEventsJournalFilters,
+  saveEventsJournalFilters,
+} from '../utils/eventsJournalFilterPersistence';
 import { fetchPipelines, type PipelineDto, type PipelineStageDto } from '../services/pipelinesApi';
 import { fetchCandidatePipelines, patchCandidatePipelineStage } from '../services/candidatePipelinesApi';
 import { fetchStaffUsers } from '../services/usersApi';
@@ -40,7 +54,10 @@ import {
   buildSystemEventPipelineMatches,
   eventMatchesPipelineFilters,
   eventMatchesSystemEventFilters,
+  mergeSystemEventCatalogGroups,
   filterOutcomesByStageSelection,
+  parseStageOutcomeKey,
+  resolveSystemEventEntry,
   type EnrichedPipeline,
   type SystemEventCatalogGroup,
 } from '../utils/processManagementCatalog';
@@ -63,6 +80,8 @@ import {
   resolveStageIdFromMoveTargetLabel,
 } from '../utils/pipelineMoveTargets';
 import { useAuth } from '../context/AuthContext';
+import { useNewTaskLinkedContext } from '../context/NewTaskLinkedContext';
+import type { NewTaskLinkedOverride } from '../utils/newTaskLinkedContext';
 import {
   buildCandidateDrawerStub,
   buildContactDrawerStub,
@@ -71,6 +90,7 @@ import {
   hydrateJobForDrawer,
   type JobDrawerJob,
 } from '../utils/processEntityDrawers';
+import { contactFromApi, primaryEmail, primaryPhone } from '../utils/contactFormModel';
 
 export type JournalEvent = {
   id: string;
@@ -80,6 +100,7 @@ export type JournalEvent = {
   description: string;
   date: string;
   creator: string;
+  coordinator?: string | null;
   dueDate: string | null;
   status: string;
   contactId: string | null;
@@ -112,6 +133,14 @@ type ActionOutcome = {
   automations?: unknown[];
 };
 
+/** Built-in free-form note — always appended at the bottom of "פעולות אפשריות". */
+const GENERAL_OUTCOME_ID = '__journal_general_note__';
+const GENERAL_OUTCOME_ACTION: ActionOutcome = {
+  id: GENERAL_OUTCOME_ID,
+  title: 'כללי',
+  actionType: 'stay',
+};
+
 const SYSTEM_EVENT_GROUPS_FALLBACK: SystemEventCatalogGroup[] = [
   {
     label: 'פורטל מועמד',
@@ -122,6 +151,25 @@ const SYSTEM_EVENT_GROUPS_FALLBACK: SystemEventCatalogGroup[] = [
       eventName: 'אישור הפרופיל על ידי המועמד',
       rowIds: [],
     }],
+  },
+  {
+    label: 'דיוור ודיווח',
+    events: [
+      {
+        value: 'staff_email_sent',
+        label: 'נשלח מייל',
+        triggerName: 'דיוור ודיווח',
+        eventName: 'נשלח מייל',
+        rowIds: [],
+      },
+      {
+        value: 'proposal_sent',
+        label: 'הצעת מחיר',
+        triggerName: 'דיוור ודיווח',
+        eventName: 'הצעת מחיר',
+        rowIds: [],
+      },
+    ],
   },
   {
     label: 'אישורי הגעה',
@@ -198,7 +246,94 @@ const resolveCandidateIdFromEvent = (event: JournalEvent): string | null => {
   return null;
 };
 
-type ContactLookupRow = { id: string; name: string; organizationId?: string | null };
+type ContactLookupRow = {
+  id: string;
+  name: string;
+  organizationId?: string | null;
+  phone?: string;
+  email?: string;
+};
+
+type EventLinkedContact = { id: string; name: string };
+
+const parseEventLinkedContacts = (event: JournalEvent): EventLinkedContact[] => {
+  const meta = event.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+  const raw = meta.linkedContacts;
+  if (Array.isArray(raw) && raw.length) {
+    const parsed = raw
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object') return null;
+        const row = entry as Record<string, unknown>;
+        const id = String(row.id || '').trim();
+        const name = String(row.name || '').trim();
+        if (!id || !name) return null;
+        return { id, name };
+      })
+      .filter(Boolean) as EventLinkedContact[];
+    if (parsed.length) return parsed;
+  }
+  const linkedType = String(event.linkedToType || '').trim();
+  if (linkedType === 'איש קשר' && event.contactId && event.contactName) {
+    return [{ id: String(event.contactId), name: String(event.contactName).trim() }];
+  }
+  return [];
+};
+
+const canEditEventLinkedContacts = (
+  event: JournalEvent,
+  opts: {
+    embeddedInModal?: boolean;
+    scopeJobLinkId?: string | null;
+    scopeCandidateId?: string | null;
+  },
+): boolean => {
+  if (opts.embeddedInModal && opts.scopeJobLinkId) return false;
+  const candidateId = resolveCandidateIdFromEvent(event);
+  if (candidateId) return false;
+  if (String(event.linkedToType || '').trim() === 'מועמד') return false;
+  if (opts.scopeCandidateId && candidateId && String(candidateId) === String(opts.scopeCandidateId)) {
+    return false;
+  }
+  return true;
+};
+
+const buildEventContactLinkPatch = (
+  selectedContacts: EventLinkedContact[],
+  event: JournalEvent,
+  organizationRef: { organizationId: string; name: string } | null,
+): Record<string, unknown> => {
+  const prevMeta =
+    event.metadata && typeof event.metadata === 'object' && !Array.isArray(event.metadata)
+      ? { ...(event.metadata as Record<string, unknown>) }
+      : {};
+  const nextMeta = { ...prevMeta };
+  if (selectedContacts.length) {
+    nextMeta.linkedContacts = selectedContacts;
+  } else {
+    delete nextMeta.linkedContacts;
+  }
+
+  const orgLabel =
+    organizationRef?.name ||
+    String(event.clientName || '').trim() ||
+    String(event.contactName || '').trim();
+
+  const primary = selectedContacts[0];
+  if (primary) {
+    return {
+      linkedTo: { type: 'איש קשר', id: primary.id, name: primary.name },
+      metadata: nextMeta,
+    };
+  }
+
+  return {
+    linkedTo: orgLabel ? { type: 'לקוח', name: orgLabel } : null,
+    metadata: nextMeta,
+  };
+};
+
+const formatLinkedContactsActivityLabel = (contacts: EventLinkedContact[]): string =>
+  contacts.map((c) => c.name).join(', ');
 
 const normalizeContactLookupName = (name: string | null | undefined): string =>
   String(name || '').trim().toLowerCase();
@@ -237,11 +372,27 @@ const lookupContactId = (
   return lookups.uniqueByName.get(nameKey) || null;
 };
 
+const resolveInitialLinkedContactIds = (
+  event: JournalEvent,
+  contactLookups?: ReturnType<typeof buildContactIdLookups>,
+): string[] => {
+  const parsed = parseEventLinkedContacts(event);
+  if (parsed.length) return parsed.map((c) => c.id);
+  const name = String(event.contactName || '').trim();
+  if (name && contactLookups) {
+    const id = lookupContactId({ ...event, contactName: name }, contactLookups);
+    if (id) return [id];
+  }
+  return [];
+};
+
 const resolveContactIdFromEvent = (
   event: JournalEvent,
   contactLookups?: ReturnType<typeof buildContactIdLookups>,
 ): string | null => {
   if (resolveCandidateIdFromEvent(event)) return null;
+  const linkedContacts = parseEventLinkedContacts(event);
+  if (linkedContacts.length) return linkedContacts[0].id;
   const linkedType = String(event.linkedToType || '').trim();
   if (linkedType === 'לקוח' || linkedType === 'מועמד') return null;
   if (event.contactId) return String(event.contactId);
@@ -279,6 +430,7 @@ const shouldShowPersonBadge = (
   event: JournalEvent,
   contactLookups?: ReturnType<typeof buildContactIdLookups>,
 ): boolean => {
+  if (parseEventLinkedContacts(event).length > 0) return true;
   const linkedType = String(event.linkedToType || '').trim();
   if (linkedType === 'לקוח') return false;
   if (linkedType === 'מועמד' || linkedType === 'איש קשר') return Boolean(event.contactName);
@@ -344,6 +496,9 @@ const buildEventJournalSearchHaystack = (
     if (name) parts.push(name);
   }
 
+  for (const linkedContact of parseEventLinkedContacts(event)) {
+    if (linkedContact.name) parts.push(linkedContact.name);
+  }
   if (linkedType === 'איש קשר' || resolveContactIdFromEvent(event)) {
     const name = String(event.contactName || '').trim();
     if (name) parts.push(name);
@@ -659,6 +814,85 @@ const getDynamicStatus = (status: string, dueDateStr: string | null) => {
   return { label: 'עתידי', color: 'bg-blue-50 text-blue-700 border border-blue-200' };
 };
 
+type OutcomePreview = {
+  status: string;
+  dueDate: string | null;
+  stage: string;
+  stageId: string | null;
+  isActive: boolean;
+  historyTitle: string;
+  historyComment?: string;
+};
+
+type PendingOutcomeDraft = {
+  eventKey: string;
+  outcomeId: string;
+  outcomeTitle: string;
+  pipelineKind: 'client' | 'candidate';
+  clientId: string;
+  pipelineId: string;
+  stageId: string;
+  context: {
+    clientEventId: string;
+    candidateId?: string;
+    jobCandidateId?: string;
+  };
+  preview: OutcomePreview;
+};
+
+function computeOutcomePreview(
+  event: JournalEvent,
+  outcome: ActionOutcome,
+  stages: PipelineStageDto[],
+): OutcomePreview {
+  let nextStageName = event.stage;
+  let nextStageId = event.stageId || null;
+  let nextStatus = event.status;
+  let nextDueDate = event.dueDate;
+  let nextIsActive = event.isActive !== false;
+  let historyTitle = outcome.title;
+
+  if (outcome.actionType === 'move' && outcome.targetStageId) {
+    const resolved = resolveMoveTarget(outcome.targetStageId, stages);
+    if (resolved) {
+      nextStageId = resolved.stageId;
+      nextStageName = resolved.stageName;
+      historyTitle = resolved.outcomeName
+        ? `${outcome.title} → ${resolved.outcomeName}`
+        : `${outcome.title} → ${resolved.stageName}`;
+    } else {
+      const target = stages.find((s) => s.id === outcome.targetStageId);
+      nextStageId = outcome.targetStageId;
+      nextStageName = target?.name || outcome.title;
+      historyTitle = target ? `${outcome.title} → ${target.name}` : outcome.title;
+    }
+    const sla = applyOutcomeDueDate(outcome, stages, event.dueDate, null);
+    if (sla.dueDate) {
+      nextDueDate = sla.dueDate;
+      nextStatus = 'עתידי';
+    }
+  } else if (outcome.actionType === 'freeze') {
+    nextStatus = 'הושלם';
+  } else if (outcome.actionType === 'close') {
+    nextIsActive = false;
+  } else {
+    const sla = applyOutcomeDueDate(outcome, stages, event.dueDate, null);
+    if (sla.dueDate) {
+      nextDueDate = sla.dueDate;
+      if (sla.resetStatusToFuture) nextStatus = 'עתידי';
+    }
+  }
+
+  return {
+    status: nextStatus,
+    dueDate: nextDueDate,
+    stage: nextStageName,
+    stageId: nextStageId,
+    isActive: nextIsActive,
+    historyTitle,
+  };
+}
+
 function patchEventFromActionResult(
   event: JournalEvent,
   actionResult: Record<string, unknown>,
@@ -698,6 +932,27 @@ function journalEventKey(event: Pick<JournalEvent, 'id' | 'clientId'>): string {
 
 function statusUpdateEditKey(event: Pick<JournalEvent, 'id' | 'clientId'>, updateId: string): string {
   return `${event.clientId}:${event.id}:${updateId}`;
+}
+
+/** Merge unsaved inline row edits into a pending outcome before commit. */
+function mergePendingOutcomeWithInlineEdit(
+  draft: PendingOutcomeDraft,
+  sourceEvent: JournalEvent | undefined,
+  editingKey: string | null,
+  editDraft: { title: string; comment: string },
+): PendingOutcomeDraft {
+  if (!sourceEvent || journalEventKey(sourceEvent) !== draft.eventKey) return draft;
+  const draftUpdateId = `draft-outcome-${draft.outcomeId}`;
+  const rowEditKey = statusUpdateEditKey(sourceEvent, draftUpdateId);
+  if (editingKey !== rowEditKey) return draft;
+  return {
+    ...draft,
+    preview: {
+      ...draft.preview,
+      historyTitle: editDraft.title.trim(),
+      historyComment: editDraft.comment.trim() || undefined,
+    },
+  };
 }
 
 function dueDateMovedForward(
@@ -770,6 +1025,241 @@ const statusUpdateTimestamp = (update: StatusUpdateRow): number => {
 const sortStatusUpdatesByDateDesc = (updates: StatusUpdateRow[]): StatusUpdateRow[] =>
   [...updates].sort((a, b) => statusUpdateTimestamp(b) - statusUpdateTimestamp(a));
 
+/** Parse journal dates reliably — date-only YYYY-MM-DD is treated as local calendar day. */
+const parseJournalEventDateValue = (raw: string | null | undefined): number | null => {
+  const value = String(raw || '').trim();
+  if (!value) return null;
+  const dateOnly = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (dateOnly) {
+    const year = Number(dateOnly[1]);
+    const month = Number(dateOnly[2]);
+    const day = Number(dateOnly[3]);
+    const ts = new Date(year, month - 1, day).getTime();
+    return Number.isFinite(ts) ? ts : null;
+  }
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : null;
+};
+
+/** Sort key prefers due date (shown on cards), then creation date. */
+const journalEventSortTimestamp = (event: JournalEvent): number | null => {
+  const dueTs = parseJournalEventDateValue(event.dueDate);
+  if (dueTs != null) return dueTs;
+  return parseJournalEventDateValue(event.date);
+};
+
+const ASSIGNEE_LIST_SPLIT_RE = /[,;|\n]+/;
+
+const parseAssigneeList = (raw: string | null | undefined): string[] => {
+  const parts = String(raw || '')
+    .split(ASSIGNEE_LIST_SPLIT_RE)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length > 0 ? Array.from(new Set(parts)) : [];
+};
+
+const JOURNAL_SELF_LABEL = 'אני';
+
+const normalizePersonNameKey = (name: string | null | undefined): string =>
+  String(name || '').trim().replace(/\s+/g, ' ');
+
+const resolveJournalActorName = (
+  user?: { name?: string | null; email?: string | null } | null,
+): string => user?.name?.trim() || user?.email?.trim() || 'משתמש';
+
+const resolveJournalPersonLabel = (
+  raw: string | null | undefined,
+  selfName?: string,
+): string => {
+  const name = normalizePersonNameKey(raw);
+  if (!name) return '—';
+  if (name === JOURNAL_SELF_LABEL) {
+    const resolved = normalizePersonNameKey(selfName);
+    return resolved || 'לא ידוע';
+  }
+  return name;
+};
+
+const formatJournalPersonList = (
+  names: string[],
+  selfName?: string,
+): string => {
+  const labels = names
+    .map((name) => resolveJournalPersonLabel(name, selfName))
+    .filter((label) => label !== '—');
+  return labels.length > 0 ? labels.join(', ') : '—';
+};
+
+const getEventHandlingAssignees = (event: JournalEvent): string[] =>
+  parseAssigneeList(event.coordinator ?? '');
+
+const formatAssigneeList = (names: string[]): string => {
+  const unique = Array.from(new Set(names.map((name) => String(name || '').trim()).filter(Boolean)));
+  return unique.join(', ');
+};
+
+const compareJournalEventsByDate = (
+  a: JournalEvent,
+  b: JournalEvent,
+  order: 'asc' | 'desc',
+): number => {
+  const dir = order === 'asc' ? 1 : -1;
+  const ta = journalEventSortTimestamp(a);
+  const tb = journalEventSortTimestamp(b);
+  if (ta == null && tb == null) return a.id.localeCompare(b.id);
+  if (ta == null) return 1;
+  if (tb == null) return -1;
+  if (ta !== tb) return dir * (ta - tb);
+  const createdA = parseJournalEventDateValue(a.date);
+  const createdB = parseJournalEventDateValue(b.date);
+  if (createdA != null && createdB != null && createdA !== createdB) {
+    return dir * (createdA - createdB);
+  }
+  return a.id.localeCompare(b.id);
+};
+
+type EditorDateRangeFilter = {
+  dateFrom: string;
+  dateTo: string;
+};
+
+const journalDateWithinRange = (
+  raw: string | null | undefined,
+  dateFrom: string,
+  dateTo: string,
+): boolean => {
+  const ts = parseJournalEventDateValue(raw);
+  if (ts == null) return !dateFrom && !dateTo;
+  if (dateFrom) {
+    const fromTs = parseJournalEventDateValue(dateFrom);
+    if (fromTs != null && ts < fromTs) return false;
+  }
+  if (dateTo) {
+    const toDay = parseJournalEventDateValue(dateTo);
+    if (toDay != null && ts > toDay + 24 * 60 * 60 * 1000 - 1) return false;
+  }
+  return true;
+};
+
+const eventEditedByPersonInRange = (
+  event: JournalEvent,
+  editorName: string,
+  range: EditorDateRangeFilter,
+): boolean => {
+  const needle = editorName.trim();
+  if (!needle) return false;
+  const creator = String(event.creator || '').trim();
+  if (creator === needle && journalDateWithinRange(event.date, range.dateFrom, range.dateTo)) {
+    return true;
+  }
+  for (const update of event.updates || []) {
+    if (String(update.creator || '').trim() !== needle) continue;
+    if (journalDateWithinRange(update.date, range.dateFrom, range.dateTo)) return true;
+  }
+  return false;
+};
+
+const eventMatchesEditorFilters = (
+  event: JournalEvent,
+  selectedEditors: Set<string>,
+  editorDateRanges: Record<string, EditorDateRangeFilter>,
+): boolean => {
+  if (selectedEditors.size === 0) return true;
+  for (const editorName of selectedEditors) {
+    const range = editorDateRanges[editorName] || { dateFrom: '', dateTo: '' };
+    if (eventEditedByPersonInRange(event, editorName, range)) return true;
+  }
+  return false;
+};
+
+const eventAssignedToCoordinator = (
+  event: JournalEvent,
+  coordinatorName: string,
+  options?: { selfCoordinatorName?: string; treatAniAsSelf?: boolean },
+): boolean => {
+  const needle = normalizePersonNameKey(coordinatorName);
+  if (!needle) return true;
+  const assignees = getEventHandlingAssignees(event);
+  if (assignees.length === 0) return false;
+
+  const selfName = normalizePersonNameKey(options?.selfCoordinatorName);
+  const matchNames = new Set<string>([needle]);
+  if (needle === JOURNAL_SELF_LABEL && selfName) matchNames.add(selfName);
+
+  return assignees.some((name) => {
+    const key = normalizePersonNameKey(name);
+    if (!key || key === JOURNAL_SELF_LABEL) {
+      if (
+        options?.treatAniAsSelf
+        && key === JOURNAL_SELF_LABEL
+        && selfName
+        && needle === selfName
+      ) {
+        return true;
+      }
+      return false;
+    }
+    return matchNames.has(key);
+  });
+};
+
+const eventMatchesHandlingCoordinatorFilter = (
+  event: JournalEvent,
+  selectedCoordinators: Set<string>,
+  selfCoordinatorName: string,
+): boolean => {
+  if (selectedCoordinators.size === 0) return true;
+  for (const name of selectedCoordinators) {
+    if (eventAssignedToCoordinator(event, name, { selfCoordinatorName })) return true;
+  }
+  return false;
+};
+
+const sortEditorsCoordinatorsFirst = (names: string[], staffNames: Set<string>): string[] => {
+  const coordinators: string[] = [];
+  const others: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of names) {
+    const name = String(raw || '').trim();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    if (staffNames.has(name)) {
+      coordinators.push(name);
+    } else {
+      others.push(name);
+    }
+  }
+  const sortHe = (a: string, b: string) => a.localeCompare(b, 'he');
+  coordinators.sort(sortHe);
+  others.sort(sortHe);
+  return [...coordinators, ...others];
+};
+
+function mergeEventWithPendingOutcome(
+  event: JournalEvent,
+  draft: PendingOutcomeDraft | null,
+  actorName: string,
+): JournalEvent {
+  if (!draft || journalEventKey(event) !== draft.eventKey) return event;
+  const draftUpdate = {
+    id: `draft-outcome-${draft.outcomeId}`,
+    title: draft.preview.historyTitle,
+    date: new Date().toISOString(),
+    creator: actorName || 'משתמש',
+    ...(draft.preview.historyComment ? { comment: draft.preview.historyComment } : {}),
+  };
+  const existingUpdates = (event.updates || []).filter((u) => !String(u.id).startsWith('draft-outcome-'));
+  return {
+    ...event,
+    status: draft.preview.status,
+    dueDate: draft.preview.dueDate,
+    stage: draft.preview.stage,
+    stageId: draft.preview.stageId || event.stageId,
+    isActive: draft.preview.isActive,
+    updates: sortStatusUpdatesByDateDesc([draftUpdate, ...existingUpdates]),
+  };
+}
+
 const resolvePreferredStageIdForEvent = (
   event: JournalEvent,
   options?: {
@@ -823,6 +1313,7 @@ const normalizeRow = (raw: Record<string, unknown>): JournalEvent => {
     description: String(raw.description || ''),
     date: String(raw.date || ''),
     creator: String(raw.creator || raw.coordinator || ''),
+    coordinator: raw.coordinator != null ? String(raw.coordinator) : null,
     dueDate: raw.dueDate ? String(raw.dueDate).slice(0, 10) : raw.date ? String(raw.date).slice(0, 10) : null,
     status: String(raw.status || 'עתידי'),
     isActive: raw.isActive !== false,
@@ -907,6 +1398,10 @@ const eventMatchesContact = (
     if (event.contactId && String(event.contactId) === String(candidateId)) return true;
   }
   if (!contactId && !contactName && !candidateId) return true;
+  if (contactId) {
+    const linked = parseEventLinkedContacts(event);
+    if (linked.some((c) => String(c.id) === String(contactId))) return true;
+  }
   if (contactId && event.contactId && String(event.contactId) === String(contactId)) return true;
   if (contactName && event.contactName && String(event.contactName).includes(contactName)) return true;
   if (contactName) {
@@ -995,6 +1490,102 @@ const pickBestProcessEvent = (rows: JournalEvent[]): JournalEvent | null => {
   return sorted.find((e) => e.isActive !== false) || sorted[0];
 };
 
+const scopeEventsForProcessLookup = (
+  events: JournalEvent[],
+  scopeContactId?: string | null,
+  scopeContactName?: string | null,
+  scopeCandidateId?: string | null,
+  scopeOrganizationId?: string | null,
+  scopeOrganizationName?: string | null,
+): JournalEvent[] =>
+  events.filter((event) => {
+    if (!eventMatchesContact(event, scopeContactId, scopeContactName, scopeCandidateId)) return false;
+    if (
+      scopeOrganizationId
+      && !eventMatchesOrganization(event, scopeOrganizationId, scopeOrganizationName)
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+const findExistingProcessEventsForPipeline = (
+  events: JournalEvent[],
+  pipelineId: string,
+  pipelines: EnrichedPipeline[],
+  scopeContactId?: string | null,
+  scopeContactName?: string | null,
+  scopeCandidateId?: string | null,
+  scopeOrganizationId?: string | null,
+  scopeOrganizationName?: string | null,
+): JournalEvent[] => {
+  const pid = String(pipelineId || '').trim();
+  if (!pid) return [];
+
+  const scoped = scopeEventsForProcessLookup(
+    events,
+    scopeContactId,
+    scopeContactName,
+    scopeCandidateId,
+    scopeOrganizationId,
+    scopeOrganizationName,
+  );
+
+  const byProcessId = scoped.filter((event) => String(event.processId || '') === pid);
+  const pipeline = pipelines.find((p) => p.id === pid);
+  const pipelineName = String(pipeline?.name || '').trim().toLowerCase();
+
+  const byName = pipelineName
+    ? scoped.filter((event) => {
+        const proc = String(event.process || '').trim().toLowerCase();
+        if (!proc) return false;
+        return proc === pipelineName
+          || pipelineName.startsWith(`${proc} (`)
+          || pipelineName.startsWith(`${proc}(`)
+          || proc.startsWith(`${pipelineName} (`)
+          || proc.startsWith(`${pipelineName}(`);
+      })
+    : [];
+
+  const merged = new Map<string, JournalEvent>();
+  for (const event of [...byProcessId, ...byName]) merged.set(event.id, event);
+
+  return [...merged.values()].sort(
+    (a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime(),
+  );
+};
+
+const findActiveProcessEventsForPipeline = (
+  events: JournalEvent[],
+  pipelineId: string,
+  pipelines: EnrichedPipeline[],
+  scopeContactId?: string | null,
+  scopeContactName?: string | null,
+  scopeCandidateId?: string | null,
+  scopeOrganizationId?: string | null,
+  scopeOrganizationName?: string | null,
+  scopeJobId?: string | null,
+  scopeJobLinkId?: string | null,
+  scopeJobTitle?: string | null,
+  scopeJobCompany?: string | null,
+): JournalEvent[] =>
+  findExistingProcessEventsForPipeline(
+    events,
+    pipelineId,
+    pipelines,
+    scopeContactId,
+    scopeContactName,
+    scopeCandidateId,
+    scopeOrganizationId,
+    scopeOrganizationName,
+  ).filter((event) => {
+    if (event.isActive === false) return false;
+    if (scopeJobId || scopeJobLinkId || scopeJobTitle || scopeJobCompany) {
+      return eventMatchesJobScope(event, scopeJobId, scopeJobLinkId, scopeJobTitle, scopeJobCompany);
+    }
+    return true;
+  });
+
 const findProcessEventForPipeline = (
   events: JournalEvent[],
   pipelineId: string,
@@ -1004,42 +1595,34 @@ const findProcessEventForPipeline = (
   scopeCandidateId?: string | null,
   scopeOrganizationId?: string | null,
   scopeOrganizationName?: string | null,
-): JournalEvent | null => {
-  const pid = String(pipelineId || '').trim();
-  if (!pid) return null;
+): JournalEvent | null =>
+  pickBestProcessEvent(
+    findExistingProcessEventsForPipeline(
+      events,
+      pipelineId,
+      pipelines,
+      scopeContactId,
+      scopeContactName,
+      scopeCandidateId,
+      scopeOrganizationId,
+      scopeOrganizationName,
+    ),
+  );
 
-  const scoped = events.filter((event) => {
-    if (!eventMatchesContact(event, scopeContactId, scopeContactName, scopeCandidateId)) return false;
-    if (
-      scopeOrganizationId
-      && !scopeContactId
-      && !scopeCandidateId
-      && !eventMatchesOrganization(event, scopeOrganizationId, scopeOrganizationName)
-    ) {
-      return false;
-    }
-    return true;
-  });
-
-  const byProcessId = scoped.filter((event) => String(event.processId || '') === pid);
-  const byIdMatch = pickBestProcessEvent(byProcessId);
-  if (byIdMatch) return byIdMatch;
-
-  const pipeline = pipelines.find((p) => p.id === pid);
-  const pipelineName = String(pipeline?.name || '').trim().toLowerCase();
-  if (!pipelineName) return null;
-
-  const byName = scoped.filter((event) => {
-    const proc = String(event.process || '').trim().toLowerCase();
-    if (!proc || !pipelineName) return false;
-    return proc === pipelineName
-      || pipelineName.startsWith(`${proc} (`)
-      || pipelineName.startsWith(`${proc}(`)
-      || proc.startsWith(`${pipelineName} (`)
-      || proc.startsWith(`${pipelineName}(`);
-  });
-  return pickBestProcessEvent(byName);
-};
+const summarizeDuplicateProcessEvent = (event: JournalEvent): DuplicateProcessSummary => ({
+  id: event.id,
+  title: event.title || event.process || 'תהליך',
+  stage: event.stage || '—',
+  status: event.status || '—',
+  owner: event.creator || '—',
+  dateLabel: event.date
+    ? new Date(event.date).toLocaleDateString('he-IL', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+      })
+    : '—',
+});
 
 const eventMatchesJobScope = (
   event: JournalEvent,
@@ -1064,7 +1647,8 @@ const eventMatchesJobScope = (
 
 /**
  * Sidebar "פעולות אפשריות" = stage.outcomes from Pipeline Settings
- * (same records configured under each stage in PipelineSettingsView).
+ * (same records configured under each stage in PipelineSettingsView),
+ * plus a built-in "כללי" row at the bottom for free-form notes.
  */
 function resolveOutcomesForStage(stage: PipelineStageDto | undefined): ActionOutcome[] {
   if (!stage) return [];
@@ -1103,15 +1687,22 @@ function resolveStagesForEvent(
   }));
 }
 
-type ClientOption = { id: string; name: string; organizationId?: string | null };
+type ClientOption = {
+  id: string;
+  name: string;
+  organizationId?: string | null;
+  organizationTmpId?: string | null;
+};
 
 type Props = {
   clientOptions?: ClientOption[];
   defaultClientId?: string | null;
   /** Linked org scope for tenant users (e.g. filtered company on clients page). */
   defaultOrganizationId?: string | null;
+  defaultOrganizationTmpId?: string | null;
   defaultOrganizationName?: string | null;
   scopeOrganizationId?: string | null;
+  scopeOrganizationTmpId?: string | null;
   scopeOrganizationName?: string | null;
   /** e.g. contacts-tab company filter label to scope new events */
   preferredOrganizationLabel?: string | null;
@@ -1143,14 +1734,17 @@ type Props = {
   /** When true, load cross-client journal via /all-events (admin). Otherwise prefer single-client API. */
   crossClientJournal?: boolean;
   onEventsChanged?: () => void;
+  openMessageModal?: (config: MessageModalConfig) => void;
 };
 
 const ClientsEventsJournalTab: React.FC<Props> = ({
   clientOptions = [],
   defaultClientId = null,
   defaultOrganizationId = null,
+  defaultOrganizationTmpId = null,
   defaultOrganizationName = null,
   scopeOrganizationId = null,
+  scopeOrganizationTmpId = null,
   scopeOrganizationName = null,
   preferredOrganizationLabel = null,
   scopeContactId = null,
@@ -1172,22 +1766,36 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   autoSelectFirstEvent = false,
   crossClientJournal = false,
   onEventsChanged,
+  openMessageModal = (_config: MessageModalConfig) => {},
 }) => {
   const { user } = useAuth();
+  const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+  const canSelectOtherCoordinators = isPlatformAdmin || user?.role === 'manager';
+  const selfCoordinatorName = resolveJournalActorName(user);
   const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
   const [events, setEvents] = useState<JournalEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [duplicateProcessPrompt, setDuplicateProcessPrompt] = useState<{
+    processName: string;
+    organizationName: string;
+    existingEvents: JournalEvent[];
+    pendingPayload: ProcessEventSavePayload | null;
+  } | null>(null);
   const [eventModalScope, setEventModalScope] = useState<{
     clientId: string;
     organizationId: string;
+    organizationTmpId: string;
     organizationName: string;
   } | null>(null);
   const [createClientId, setCreateClientId] = useState<string>(defaultClientId || clientOptions[0]?.id || '');
   const [createOrganizationId, setCreateOrganizationId] = useState<string>(
     defaultOrganizationId || scopeOrganizationId || clientOptions[0]?.organizationId || '',
+  );
+  const [createOrganizationTmpId, setCreateOrganizationTmpId] = useState<string>(
+    defaultOrganizationTmpId || scopeOrganizationTmpId || clientOptions[0]?.organizationTmpId || '',
   );
 
   useEffect(() => {
@@ -1196,7 +1804,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const tenantClientId = user?.clientId ? String(user.clientId) : '';
   const organizationOptions = useMemo(
-    () => clientOptions.filter((opt) => opt.organizationId),
+    () => clientOptions.filter((opt) => opt.organizationId || opt.organizationTmpId),
     [clientOptions],
   );
 
@@ -1220,32 +1828,67 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   );
 
   useEffect(() => {
-    const nextOrg = String(
-      preferredOrganizationOption?.organizationId || defaultOrganizationId || scopeOrganizationId || '',
-    ).trim();
-    if (nextOrg) setCreateOrganizationId(nextOrg);
-  }, [preferredOrganizationOption, defaultOrganizationId, scopeOrganizationId]);
+    const scopedOrgId = String(scopeOrganizationId || defaultOrganizationId || '').trim();
+    const scopedOrgTmpId = scopedOrgId
+      ? ''
+      : String(scopeOrganizationTmpId || defaultOrganizationTmpId || '').trim();
+    if (hideFilters || scopeContactId) {
+      if (scopedOrgId || scopedOrgTmpId) {
+        setCreateOrganizationId(scopedOrgId);
+        setCreateOrganizationTmpId(scopedOrgTmpId);
+      }
+      return;
+    }
+    const preferredOrgId = String(preferredOrganizationOption?.organizationId || '').trim();
+    const preferredOrgTmpId = preferredOrgId
+      ? ''
+      : String(preferredOrganizationOption?.organizationTmpId || '').trim();
+    if (preferredOrgId || preferredOrgTmpId) {
+      setCreateOrganizationId(preferredOrgId);
+      setCreateOrganizationTmpId(preferredOrgTmpId);
+    }
+  }, [
+    scopeOrganizationId,
+    defaultOrganizationId,
+    scopeOrganizationTmpId,
+    defaultOrganizationTmpId,
+    scopeContactId,
+    hideFilters,
+    preferredOrganizationOption,
+  ]);
 
   useEffect(() => {
     if (
       createOrganizationId
+      || createOrganizationTmpId
       || preferredOrganizationOption?.organizationId
+      || preferredOrganizationOption?.organizationTmpId
       || defaultOrganizationId
+      || defaultOrganizationTmpId
       || scopeOrganizationId
+      || scopeOrganizationTmpId
     ) {
       return;
     }
     const firstOrgOption = organizationOptions[0];
     if (firstOrgOption?.organizationId) {
       setCreateOrganizationId(String(firstOrgOption.organizationId));
+      setCreateOrganizationTmpId('');
+      if (firstOrgOption.id) setCreateClientId(String(firstOrgOption.id));
+    } else if (firstOrgOption?.organizationTmpId) {
+      setCreateOrganizationId('');
+      setCreateOrganizationTmpId(String(firstOrgOption.organizationTmpId));
       if (firstOrgOption.id) setCreateClientId(String(firstOrgOption.id));
     }
   }, [
     organizationOptions,
     createOrganizationId,
+    createOrganizationTmpId,
     preferredOrganizationOption,
     defaultOrganizationId,
+    defaultOrganizationTmpId,
     scopeOrganizationId,
+    scopeOrganizationTmpId,
   ]);
 
   const settingsClientId = useMemo(() => {
@@ -1300,24 +1943,235 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     effectiveCreateClientId,
   ]);
 
-  const [selectedPipelineIds, setSelectedPipelineIds] = useState<Set<string>>(new Set());
-  const [selectedSystemEventIds, setSelectedSystemEventIds] = useState<Set<string>>(new Set());
-  const [selectedStageOutcomeKeys, setSelectedStageOutcomeKeys] = useState<Set<string>>(new Set());
-  const [actionPipelineId, setActionPipelineId] = useState<string | null>(null);
-  const [selectedStatuses, setSelectedStatuses] = useState<Set<string>>(new Set());
-  const [selectedActiveStates, setSelectedActiveStates] = useState<Set<string>>(
-    () => new Set(['פעיל', 'לא פעיל']),
+  const effectiveCreateOrganizationTmpId = useMemo(() => {
+    if (effectiveCreateOrganizationId) return '';
+    const fromState = String(createOrganizationTmpId || '').trim();
+    if (fromState) return fromState;
+    const fromPreferred = String(preferredOrganizationOption?.organizationTmpId || '').trim();
+    if (fromPreferred) return fromPreferred;
+    const fromScope = String(scopeOrganizationTmpId || defaultOrganizationTmpId || '').trim();
+    if (fromScope) return fromScope;
+
+    const scopeLabel =
+      (preferredOrganizationLabel && preferredOrganizationLabel !== 'all'
+        ? preferredOrganizationLabel
+        : '') ||
+      (scopeJobCompany && scopeJobCompany !== '—' ? scopeJobCompany : '') ||
+      (scopeOrganizationName && scopeOrganizationName !== '—' ? scopeOrganizationName : '') ||
+      (defaultOrganizationName && defaultOrganizationName !== '—' ? defaultOrganizationName : '') ||
+      '';
+    const byName = matchOrganizationOption(scopeLabel);
+    if (byName?.organizationTmpId) return String(byName.organizationTmpId);
+
+    const matchedOption = organizationOptions.find((opt) => opt.id === effectiveCreateClientId);
+    return matchedOption?.organizationTmpId ? String(matchedOption.organizationTmpId) : '';
+  }, [
+    effectiveCreateOrganizationId,
+    createOrganizationTmpId,
+    preferredOrganizationOption,
+    scopeOrganizationTmpId,
+    defaultOrganizationTmpId,
+    preferredOrganizationLabel,
+    scopeJobCompany,
+    scopeOrganizationName,
+    defaultOrganizationName,
+    matchOrganizationOption,
+    organizationOptions,
+    effectiveCreateClientId,
+  ]);
+
+  const modalContactsOrganizationScope = useMemo(() => {
+    if (hideFilters || scopeContactId) {
+      const organizationId = String(
+        scopeOrganizationId
+          || defaultOrganizationId
+          || eventModalScope?.organizationId
+          || '',
+      ).trim();
+      const organizationTmpId = organizationId
+        ? ''
+        : String(
+            scopeOrganizationTmpId
+              || defaultOrganizationTmpId
+              || eventModalScope?.organizationTmpId
+              || '',
+          ).trim();
+      return {
+        organizationId: organizationId || null,
+        organizationTmpId: organizationTmpId || null,
+      };
+    }
+
+    const organizationId = String(
+      eventModalScope?.organizationId
+        || effectiveCreateOrganizationId
+        || scopeOrganizationId
+        || defaultOrganizationId
+        || '',
+    ).trim();
+    const organizationTmpId = organizationId
+      ? ''
+      : String(
+          eventModalScope?.organizationTmpId
+            || effectiveCreateOrganizationTmpId
+            || scopeOrganizationTmpId
+            || defaultOrganizationTmpId
+            || '',
+        ).trim();
+    return {
+      organizationId: organizationId || null,
+      organizationTmpId: organizationTmpId || null,
+    };
+  }, [
+    hideFilters,
+    scopeContactId,
+    eventModalScope,
+    effectiveCreateOrganizationId,
+    effectiveCreateOrganizationTmpId,
+    scopeOrganizationId,
+    scopeOrganizationTmpId,
+    defaultOrganizationId,
+    defaultOrganizationTmpId,
+  ]);
+
+  const processDuplicateOrganizationScope = useMemo((): {
+    organizationId: string;
+    organizationName: string;
+  } => {
+    const organizationId = String(
+      eventModalScope?.organizationId
+        || effectiveCreateOrganizationId
+        || scopeOrganizationId
+        || defaultOrganizationId
+        || '',
+    ).trim();
+    if (!organizationId) {
+      return { organizationId: '', organizationName: '' };
+    }
+    const matched = organizationOptions.find(
+      (opt) => String(opt.organizationId || '') === organizationId,
+    );
+    const organizationName = String(
+      eventModalScope?.organizationName
+        || matched?.name
+        || scopeOrganizationName
+        || defaultOrganizationName
+        || '',
+    ).trim();
+    return { organizationId, organizationName };
+  }, [
+    eventModalScope,
+    effectiveCreateOrganizationId,
+    scopeOrganizationId,
+    defaultOrganizationId,
+    organizationOptions,
+    scopeOrganizationName,
+    defaultOrganizationName,
+  ]);
+
+  const eventsJournalFilterStorageKey = useMemo(
+    () =>
+      buildEventsJournalFilterStorageKey({
+        crossClientJournal,
+        scopeOrganizationId,
+        scopeContactId,
+        scopeCandidateId,
+        scopeJobId,
+        hideFilters,
+        embeddedInModal,
+      }),
+    [
+      crossClientJournal,
+      scopeOrganizationId,
+      scopeContactId,
+      scopeCandidateId,
+      scopeJobId,
+      hideFilters,
+      embeddedInModal,
+    ],
   );
-  const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
-  const [dateFrom, setDateFrom] = useState('');
-  const [dateTo, setDateTo] = useState('');
-  const [dateSortOrder, setDateSortOrder] = useState<'asc' | 'desc'>('desc');
-  const [entitySearchQuery, setEntitySearchQuery] = useState('');
+  const restoredJournalFilters = useMemo(
+    () => loadEventsJournalFilters(eventsJournalFilterStorageKey),
+    [eventsJournalFilterStorageKey],
+  );
+
+  const [selectedPipelineIds, setSelectedPipelineIds] = useState<Set<string>>(
+    () => new Set(restoredJournalFilters?.selectedPipelineIds ?? []),
+  );
+  const [selectedSystemEventIds, setSelectedSystemEventIds] = useState<Set<string>>(
+    () => new Set(restoredJournalFilters?.selectedSystemEventIds ?? []),
+  );
+  const [selectedStageOutcomeKeys, setSelectedStageOutcomeKeys] = useState<Set<string>>(
+    () => new Set(restoredJournalFilters?.selectedStageOutcomeKeys ?? []),
+  );
+  const [actionPipelineId, setActionPipelineId] = useState<string | null>(null);
+  const [selectedStatuses, setSelectedStatuses] = useState<Set<string>>(
+    () => new Set(restoredJournalFilters?.selectedStatuses ?? []),
+  );
+  const [selectedActiveStates, setSelectedActiveStates] = useState<Set<string>>(() => {
+    const restored = restoredJournalFilters?.selectedActiveStates ?? [];
+    return new Set(restored.length > 0 ? restored : ['פעיל']);
+  });
+  const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(
+    () => new Set(restoredJournalFilters?.selectedCompanies ?? []),
+  );
+  const [selectedEditors, setSelectedEditors] = useState<Set<string>>(
+    () => new Set(restoredJournalFilters?.selectedEditors ?? []),
+  );
+  const [selectedHandlingCoordinators, setSelectedHandlingCoordinators] = useState<Set<string>>(
+    () => new Set(restoredJournalFilters?.selectedHandlingCoordinators ?? []),
+  );
+  const [editorDateRanges, setEditorDateRanges] = useState<Record<string, EditorDateRangeFilter>>(
+    () => restoredJournalFilters?.editorDateRanges ?? {},
+  );
+  const [dateFrom, setDateFrom] = useState(restoredJournalFilters?.dateFrom ?? '');
+  const [dateTo, setDateTo] = useState(restoredJournalFilters?.dateTo ?? '');
+  const [dateSortOrder, setDateSortOrder] = useState<'asc' | 'desc'>(
+    restoredJournalFilters?.dateSortOrder ?? 'desc',
+  );
+  const [entitySearchQuery, setEntitySearchQuery] = useState(
+    restoredJournalFilters?.entitySearchQuery ?? '',
+  );
   const [rescheduleHighlights, setRescheduleHighlights] = useState<
     Record<string, { label: string }>
   >({});
   const [exitingEventIds, setExitingEventIds] = useState<Set<string>>(() => new Set());
   const exitAnimationTimersRef = useRef<Record<string, number>>({});
+
+  useEffect(() => {
+    if (!eventsJournalFilterStorageKey) return;
+    saveEventsJournalFilters(eventsJournalFilterStorageKey, {
+      version: 1,
+      selectedPipelineIds: [...selectedPipelineIds],
+      selectedSystemEventIds: [...selectedSystemEventIds],
+      selectedStageOutcomeKeys: [...selectedStageOutcomeKeys],
+      selectedStatuses: [...selectedStatuses],
+      selectedActiveStates: [...selectedActiveStates],
+      selectedCompanies: [...selectedCompanies],
+      selectedEditors: [...selectedEditors],
+      selectedHandlingCoordinators: [...selectedHandlingCoordinators],
+      editorDateRanges,
+      dateFrom,
+      dateTo,
+      dateSortOrder,
+      entitySearchQuery,
+    });
+  }, [
+    eventsJournalFilterStorageKey,
+    selectedPipelineIds,
+    selectedSystemEventIds,
+    selectedStageOutcomeKeys,
+    selectedStatuses,
+    selectedActiveStates,
+    selectedCompanies,
+    selectedEditors,
+    selectedHandlingCoordinators,
+    editorDateRanges,
+    dateFrom,
+    dateTo,
+    dateSortOrder,
+    entitySearchQuery,
+  ]);
 
   const flashEventReschedule = useCallback((eventKey: string, dueDate: string) => {
     const label = `נדחה ל-${formatJournalDueDate(dueDate)}`;
@@ -1364,23 +2218,38 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [isActiveDropdownOpen, setIsActiveDropdownOpen] = useState(false);
   const [isCompanyDropdownOpen, setIsCompanyDropdownOpen] = useState(false);
   const [companyDropdownSearch, setCompanyDropdownSearch] = useState('');
+  const [isEditorDropdownOpen, setIsEditorDropdownOpen] = useState(false);
+  const [editorDropdownSearch, setEditorDropdownSearch] = useState('');
+  const [isHandlingCoordinatorDropdownOpen, setIsHandlingCoordinatorDropdownOpen] = useState(false);
+  const [handlingCoordinatorDropdownSearch, setHandlingCoordinatorDropdownSearch] = useState('');
+  const [editorDateRangeModal, setEditorDateRangeModal] = useState<{
+    editorName: string;
+    dateFrom: string;
+    dateTo: string;
+  } | null>(null);
 
   const [editingDescriptionId, setEditingDescriptionId] = useState<string | null>(null);
   const [editTitleValue, setEditTitleValue] = useState('');
   const [editDescriptionValue, setEditDescriptionValue] = useState('');
   const [editNextStageValue, setEditNextStageValue] = useState('');
-  const [editAssigneeValue, setEditAssigneeValue] = useState('אני');
+  const [editAssigneeValues, setEditAssigneeValues] = useState<string[]>([]);
   const [editDueDateValue, setEditDueDateValue] = useState('');
   const [editIsActiveValue, setEditIsActiveValue] = useState(true);
   const [editStatusUpdates, setEditStatusUpdates] = useState<
     Array<{ id: string; title: string; date: string; creator: string; comment?: string }>
   >([]);
+  const [editLinkedContactIds, setEditLinkedContactIds] = useState<string[]>([]);
+  const [editContactOptions, setEditContactOptions] = useState<Array<{ id: string; name: string }>>([]);
+  const [editContactsLoading, setEditContactsLoading] = useState(false);
+  const [contactLinkEditEventId, setContactLinkEditEventId] = useState<string | null>(null);
+  const [isSavingContactLinks, setIsSavingContactLinks] = useState(false);
   const [editingStatusUpdateKey, setEditingStatusUpdateKey] = useState<string | null>(null);
   const [statusUpdateEditDraft, setStatusUpdateEditDraft] = useState<{ title: string; comment: string }>({
     title: '',
     comment: '',
   });
-  const [assigneeOptions, setAssigneeOptions] = useState<string[]>(['אני']);
+  const [assigneeOptions, setAssigneeOptions] = useState<string[]>([]);
+  const [staffEditorNames, setStaffEditorNames] = useState<Set<string>>(() => new Set());
 
   const [pipelinesByClient, setPipelinesByClient] = useState<Record<string, PipelineDto[]>>({});
   const [candidatePipelinesByClient, setCandidatePipelinesByClient] = useState<
@@ -1405,6 +2274,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [automationInfoView, setAutomationInfoView] = useState<
     { mode: 'outcome'; outcome: ActionOutcome } | { mode: 'stage' } | null
   >(null);
+  const [pendingOutcomeDraft, setPendingOutcomeDraft] = useState<PendingOutcomeDraft | null>(null);
+  const [committingOutcome, setCommittingOutcome] = useState(false);
+  const [isSavingDescription, setIsSavingDescription] = useState(false);
+  const [savingStatusUpdateKey, setSavingStatusUpdateKey] = useState<string | null>(null);
   const [messageTemplates, setMessageTemplates] = useState<MessageTemplateDto[]>([]);
 
   const [candidateDrawer, setCandidateDrawer] = useState<Candidate | null>(null);
@@ -1419,6 +2292,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [contactLookupRows, setContactLookupRows] = useState<ContactLookupRow[]>([]);
   const fetchedCandidateLinksRef = useRef<Set<string>>(new Set());
   const fetchingCandidateLinksRef = useRef<Set<string>>(new Set());
+  const contactDrawerSessionRef = useRef(0);
 
   const loadCandidateJobLinks = useCallback(async (candidateId: string) => {
     const cid = String(candidateId || '').trim();
@@ -1443,18 +2317,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setCandidateDrawer(buildCandidateDrawerStub(candidateId, name));
     setIsCandidateDrawerOpen(true);
   }, []);
-
-  const openContactDrawer = useCallback(
-    async (contactId: string, name: string, clientId: string, clientName = '') => {
-      if (!contactId || !clientId) return;
-      const stub = buildContactDrawerStub(contactId, name, clientId, clientName);
-      setContactDrawer(stub);
-      setIsContactDrawerOpen(true);
-      const hydrated = await hydrateContactForDrawer(apiBase, clientId, contactId, stub);
-      if (hydrated) setContactDrawer(hydrated);
-    },
-    [apiBase],
-  );
 
   const openOrganizationDrawer = useCallback((ref: { organizationId: string; name: string }) => {
     if (!ref.organizationId) return;
@@ -1582,11 +2444,21 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         const list = Array.isArray(data) ? data : data?.data ?? [];
         setContactLookupRows(
           list
-            .map((row: Record<string, unknown>) => ({
-              id: String(row.id || ''),
-              name: String(row.name || '').trim(),
-              organizationId: row.organizationId ? String(row.organizationId) : null,
-            }))
+            .map((row: Record<string, unknown>) => {
+              const form = contactFromApi(row);
+              const phone =
+                primaryPhone(form, 'mobile')
+                || primaryPhone(form, 'office')
+                || String(row.mobilePhone || row.phone || '').trim();
+              const email = primaryEmail(form) || String(row.email || '').trim();
+              return {
+                id: String(row.id || ''),
+                name: String(row.name || '').trim(),
+                organizationId: row.organizationId ? String(row.organizationId) : null,
+                phone,
+                email,
+              };
+            })
             .filter((row: ContactLookupRow) => row.id && row.name),
         );
       })
@@ -1598,14 +2470,88 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     };
   }, [apiBase, crossClientJournal, contactsLookupClientId]);
 
+  useEffect(() => {
+    let active = true;
+    const clientId = crossClientJournal ? undefined : contactsLookupClientId || undefined;
+    void fetchStaffUsers(clientId)
+      .then((rows) => {
+        if (!active) return;
+        const names = new Set<string>();
+        for (const row of rows) {
+          const name = String(row.name || row.email || '').trim();
+          if (name) names.add(name);
+        }
+        const me = user?.name?.trim();
+        if (me) names.add(me);
+        names.add('מערכת');
+        setStaffEditorNames(names);
+        const coordinatorPickList = Array.from(names)
+          .filter((n) => n !== 'מערכת' && n !== JOURNAL_SELF_LABEL)
+          .sort((a, b) => a.localeCompare(b, 'he'));
+        setAssigneeOptions(coordinatorPickList);
+      })
+      .catch(() => {
+        if (active) {
+          const fallback = new Set<string>();
+          const me = user?.name?.trim();
+          if (me) fallback.add(me);
+          fallback.add('מערכת');
+          setStaffEditorNames(fallback);
+          setAssigneeOptions(me ? [me] : []);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [crossClientJournal, contactsLookupClientId, user?.name]);
+
   const contactLookups = useMemo(
     () => buildContactIdLookups(contactLookupRows),
     [contactLookupRows],
   );
 
+  const contactById = useMemo(() => {
+    const map = new Map<string, ContactLookupRow>();
+    for (const row of contactLookupRows) {
+      if (row.id) map.set(row.id, row);
+    }
+    return map;
+  }, [contactLookupRows]);
+
+  const closeContactDrawer = useCallback(() => {
+    contactDrawerSessionRef.current += 1;
+    setIsContactDrawerOpen(false);
+    setContactDrawer(null);
+  }, []);
+
+  const openContactDrawer = useCallback(
+    async (contactId: string, name: string, eventClientId: string, clientName = '') => {
+      if (!contactId) return;
+      const tenantClientId = String(
+        user?.clientId || contactsLookupClientId || eventClientId || '',
+      ).trim();
+      if (!tenantClientId) return;
+      const session = contactDrawerSessionRef.current + 1;
+      contactDrawerSessionRef.current = session;
+      const lookup = contactById.get(contactId);
+      const stub = buildContactDrawerStub(contactId, name, tenantClientId, clientName);
+      if (lookup?.phone) stub.phone = lookup.phone;
+      if (lookup?.email) stub.email = lookup.email;
+      if (lookup?.organizationId) stub.organizationId = lookup.organizationId;
+      setContactDrawer(stub);
+      setIsContactDrawerOpen(true);
+      const hydrated = await hydrateContactForDrawer(apiBase, tenantClientId, contactId, stub);
+      if (contactDrawerSessionRef.current !== session) return;
+      if (hydrated) setContactDrawer(hydrated);
+    },
+    [apiBase, user?.clientId, contactsLookupClientId, contactById],
+  );
+
   const statusDropdownRef = useRef<HTMLDivElement>(null);
   const activeDropdownRef = useRef<HTMLDivElement>(null);
   const companyDropdownRef = useRef<HTMLDivElement>(null);
+  const editorDropdownRef = useRef<HTMLDivElement>(null);
+  const handlingCoordinatorDropdownRef = useRef<HTMLDivElement>(null);
 
   const mapEventsResponse = (
     rows: unknown,
@@ -1621,6 +2567,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         clientName: clientName || 'לקוח',
       });
     });
+
+  const clientOptionsSignature = clientOptions
+    .map((o) =>
+      `${String(o.id ?? '').trim()}|${String(o.name ?? '').trim()}|${String(o.organizationId ?? '').trim()}`,
+    )
+    .sort()
+    .join(';');
 
   const load = useCallback(async (opts?: { silent?: boolean }) => {
     if (!apiBase) return;
@@ -1695,7 +2648,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     defaultClientId,
     scopeOrganizationId,
     scopeOrganizationName,
-    clientOptions,
+    clientOptionsSignature,
     scopeContactName,
     embeddedInModal,
     scopeJobLinkId,
@@ -1725,21 +2678,32 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     };
   }, [load]);
 
-  const catalogClientIds = useMemo(() => {
+  const eventClientIdsKey = useMemo(() => {
     const ids = new Set<string>();
-    if (settingsClientId) ids.add(settingsClientId);
-    if (defaultClientId) ids.add(defaultClientId);
-    if (createClientId) ids.add(createClientId);
-    for (const opt of clientOptions.slice(0, 12)) {
-      if (opt.id) ids.add(opt.id);
-    }
     for (const ev of events) {
-      if (ev.clientId) ids.add(ev.clientId);
+      if (ev.clientId) ids.add(String(ev.clientId));
     }
-    return [...ids];
-  }, [settingsClientId, defaultClientId, createClientId, clientOptions, events]);
+    return [...ids].sort().join('|');
+  }, [events]);
+
+  const catalogClientIdsKey = useMemo(() => {
+    const ids = new Set<string>();
+    if (settingsClientId) ids.add(String(settingsClientId));
+    if (defaultClientId) ids.add(String(defaultClientId));
+    if (createClientId) ids.add(String(createClientId));
+    for (const part of clientOptionsSignature.split(';')) {
+      const id = part.split('|')[0]?.trim();
+      if (id) ids.add(id);
+    }
+    for (const id of eventClientIdsKey.split('|')) {
+      if (id) ids.add(id);
+    }
+    return [...ids].sort().join('|');
+  }, [settingsClientId, defaultClientId, createClientId, clientOptionsSignature, eventClientIdsKey]);
 
   useEffect(() => {
+    if (!catalogClientIdsKey) return;
+    const catalogClientIds = catalogClientIdsKey.split('|').filter(Boolean);
     if (!catalogClientIds.length) return;
     let cancelled = false;
     setCatalogLoading(true);
@@ -1772,7 +2736,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         for (const row of candidateRows) candidateMap[row.cid] = row.rows;
         setPipelinesByClient((prev) => ({ ...prev, ...clientMap }));
         setCandidatePipelinesByClient((prev) => ({ ...prev, ...candidateMap }));
-        setSystemEventGroups(sysGroups.length > 0 ? sysGroups : SYSTEM_EVENT_GROUPS_FALLBACK);
+        setSystemEventGroups(
+          mergeSystemEventCatalogGroups(
+            sysGroups.length > 0 ? sysGroups : [],
+            SYSTEM_EVENT_GROUPS_FALLBACK,
+          ),
+        );
       })
       .finally(() => {
         if (!cancelled) setCatalogLoading(false);
@@ -1780,7 +2749,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     return () => {
       cancelled = true;
     };
-  }, [catalogClientIds, apiBase]);
+  }, [catalogClientIdsKey, apiBase]);
 
   useEffect(() => {
     if (!settingsClientId) {
@@ -1840,6 +2809,14 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         setIsCompanyDropdownOpen(false);
         setCompanyDropdownSearch('');
       }
+      if (editorDropdownRef.current && !editorDropdownRef.current.contains(t)) {
+        setIsEditorDropdownOpen(false);
+        setEditorDropdownSearch('');
+      }
+      if (handlingCoordinatorDropdownRef.current && !handlingCoordinatorDropdownRef.current.contains(t)) {
+        setIsHandlingCoordinatorDropdownOpen(false);
+        setHandlingCoordinatorDropdownSearch('');
+      }
     };
     document.addEventListener('mousedown', onDoc);
     return () => document.removeEventListener('mousedown', onDoc);
@@ -1849,6 +2826,16 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     () => events.find((e) => e.id === expandedEventId) || null,
     [events, expandedEventId],
   );
+
+  const prevExpandedEventIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (expandedEventId !== prevExpandedEventIdRef.current) {
+      if (prevExpandedEventIdRef.current != null) {
+        setPendingOutcomeDraft(null);
+      }
+      prevExpandedEventIdRef.current = expandedEventId;
+    }
+  }, [expandedEventId]);
 
   // Load pipeline stages for the selected event's client (same source as PipelineSettingsView)
   useEffect(() => {
@@ -1979,6 +2966,14 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     );
   }, [actionPipelineContext, selectedStageOutcomeKeys]);
 
+  const sidebarOutcomes = useMemo(() => {
+    const hasConfiguredGeneral = currentOutcomes.some(
+      (o) => o.title.trim() === GENERAL_OUTCOME_ACTION.title,
+    );
+    if (hasConfiguredGeneral) return currentOutcomes;
+    return [...currentOutcomes, GENERAL_OUTCOME_ACTION];
+  }, [currentOutcomes]);
+
   const currentStageLabel = useMemo(() => {
     if (!actionPipelineContext) return selectedEvent?.stage || '';
     return actionPipelineContext.stage.name || selectedEvent?.stage || '';
@@ -2010,6 +3005,73 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     return resolveEventOrganizationRef(selectedEvent, orgNameById, organizationOptions);
   }, [selectedEvent, orgNameById, organizationOptions]);
 
+  const { registerNewTaskLinkedOverride } = useNewTaskLinkedContext();
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      registerNewTaskLinkedOverride(null);
+      return;
+    }
+
+    const organizationRef = resolveEventOrganizationRef(
+      selectedEvent,
+      orgNameById,
+      organizationOptions,
+    );
+    const candidateId = resolveCandidateIdForDrawer(selectedEvent, scopeCandidateId);
+    const contactId = resolveContactIdForDrawer(
+      selectedEvent,
+      scopeContactId,
+      scopeContactName,
+      contactLookups,
+    );
+    const showPersonBadge = shouldShowPersonBadge(selectedEvent, contactLookups);
+    const { jobId, jobTitle } = resolveEventJobMeta(selectedEvent);
+
+    const override: NewTaskLinkedOverride = {
+      linkedClientId: selectedEvent.clientId,
+      linkedClientLabel: selectedEvent.clientName,
+      eventTitle: selectedEvent.title,
+      stageLabel: selectedEvent.stage || undefined,
+    };
+
+    if (!scopeContactId && !scopeOrganizationId && organizationRef?.name) {
+      override.linkedOrganizationId = organizationRef.organizationId;
+      override.linkedOrganizationLabel = organizationRef.name;
+    }
+
+    if (showPersonBadge && selectedEvent.contactName) {
+      if (candidateId) {
+        override.linkedCandidateBackendId = candidateId;
+        override.linkedCandidateLabel = selectedEvent.contactName;
+      } else if (contactId) {
+        override.linkedContactId = contactId;
+        override.linkedContactLabel = selectedEvent.contactName;
+      } else {
+        override.linkedContactLabel = selectedEvent.contactName;
+      }
+    }
+
+    if (jobId) {
+      override.linkedJobId = jobId;
+      override.linkedJobLabel = jobTitle || 'משרה';
+    }
+
+    registerNewTaskLinkedOverride(override);
+    return () => registerNewTaskLinkedOverride(null);
+  }, [
+    selectedEvent,
+    orgNameById,
+    organizationOptions,
+    scopeCandidateId,
+    scopeContactId,
+    scopeContactName,
+    scopeOrganizationId,
+    contactLookups,
+    resolveEventJobMeta,
+    registerNewTaskLinkedOverride,
+  ]);
+
   const allCompanies = useMemo(() => {
     const names = new Set<string>();
     if (preferOrganizationLabels) {
@@ -2029,8 +3091,99 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     if (!q) return allCompanies;
     return allCompanies.filter((c) => c.toLowerCase().includes(q));
   }, [allCompanies, companyDropdownSearch]);
+  const allEditors = useMemo(() => {
+    const names = new Set<string>();
+    for (const event of events) {
+      const creator = String(event.creator || '').trim();
+      if (creator) names.add(creator);
+      for (const update of event.updates || []) {
+        const editor = String(update.creator || '').trim();
+        if (editor) names.add(editor);
+      }
+    }
+    for (const name of assigneeOptions) {
+      const trimmed = String(name || '').trim();
+      if (trimmed && trimmed !== JOURNAL_SELF_LABEL) names.add(trimmed);
+    }
+    if (user?.name?.trim()) names.add(user.name.trim());
+    return sortEditorsCoordinatorsFirst(Array.from(names), staffEditorNames);
+  }, [events, assigneeOptions, user?.name, staffEditorNames]);
+  const filteredEditors = useMemo(() => {
+    const q = editorDropdownSearch.trim().toLowerCase();
+    if (!q) return allEditors;
+    return allEditors.filter((name) => name.toLowerCase().includes(q));
+  }, [allEditors, editorDropdownSearch]);
+  const handlingCoordinatorGroups = useMemo(() => {
+    const normalizedStaff = new Set<string>();
+    for (const raw of staffEditorNames) {
+      const key = normalizePersonNameKey(raw);
+      if (key) normalizedStaff.add(key);
+    }
+
+    const coordinators = new Set<string>();
+    const candidates = new Set<string>();
+    const sortHe = (a: string, b: string) => a.localeCompare(b, 'he');
+
+    for (const raw of staffEditorNames) {
+      const name = normalizePersonNameKey(raw);
+      if (name && name !== 'מערכת' && name !== JOURNAL_SELF_LABEL) coordinators.add(name);
+    }
+    for (const event of events) {
+      for (const assignee of getEventHandlingAssignees(event)) {
+        const name = normalizePersonNameKey(assignee);
+        if (!name || name === 'מערכת' || name === JOURNAL_SELF_LABEL) continue;
+        if (normalizedStaff.has(name)) {
+          coordinators.add(name);
+        } else {
+          candidates.add(name);
+        }
+      }
+    }
+
+    return {
+      coordinators: [...coordinators].sort(sortHe),
+      candidates: [...candidates].sort(sortHe),
+    };
+  }, [staffEditorNames, events]);
+  const assigneeOptionsForEdit = useMemo(() => {
+    if (canSelectOtherCoordinators) {
+      const options = assigneeOptions.length > 0 ? assigneeOptions : [selfCoordinatorName];
+      return Array.from(new Set(options.filter(Boolean)));
+    }
+    return [selfCoordinatorName];
+  }, [canSelectOtherCoordinators, assigneeOptions, selfCoordinatorName]);
+  const filteredHandlingCoordinatorGroups = useMemo(() => {
+    const q = handlingCoordinatorDropdownSearch.trim().toLowerCase();
+    const filterNames = (names: string[]) =>
+      q ? names.filter((name) => name.toLowerCase().includes(q)) : names;
+    return {
+      coordinators: filterNames(handlingCoordinatorGroups.coordinators),
+      candidates: filterNames(handlingCoordinatorGroups.candidates),
+    };
+  }, [handlingCoordinatorGroups, handlingCoordinatorDropdownSearch]);
+  const editorsWithDateRangeCount = useMemo(
+    () =>
+      [...selectedEditors].filter((name) => {
+        const range = editorDateRanges[name];
+        return Boolean(range?.dateFrom || range?.dateTo);
+      }).length,
+    [selectedEditors, editorDateRanges],
+  );
   const statusOptions = ['עתידי', 'להיום', 'באיחור', 'הושלם', 'בוטל'];
   const activeStateOptions = ['פעיל', 'לא פעיל'];
+  const defaultActiveStates = useMemo(() => new Set(['פעיל']), []);
+  const isDefaultActiveStateFilter = useCallback(
+    (states: Set<string>) =>
+      states.size === defaultActiveStates.size &&
+      [...defaultActiveStates].every((state) => states.has(state)),
+    [defaultActiveStates],
+  );
+
+  useEffect(() => {
+    if (!canSelectOtherCoordinators && selectedHandlingCoordinators.size > 0) {
+      setSelectedHandlingCoordinators(new Set());
+    }
+  }, [canSelectOtherCoordinators, selectedHandlingCoordinators.size]);
 
   const eventPassesFilters = useCallback(
     (event: JournalEvent) => {
@@ -2043,8 +3196,28 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       ) {
         return false;
       }
-      if (!embeddedInModal && !hideFilters) {
+      if (!canSelectOtherCoordinators) {
         if (
+          !eventAssignedToCoordinator(event, selfCoordinatorName, {
+            selfCoordinatorName,
+            treatAniAsSelf: true,
+          })
+        ) {
+          return false;
+        }
+      }
+      if (!embeddedInModal && !hideFilters) {
+        const matchesSelectedSystemEvent =
+          selectedSystemEventIds.size > 0 &&
+          eventMatchesSystemEventFilters(
+            event,
+            selectedSystemEventIds,
+            systemEventGroups,
+            systemEventPipelineMatches,
+            allPipelinesCatalog,
+          );
+        if (
+          !matchesSelectedSystemEvent &&
           !eventMatchesPipelineFilters(
             event,
             selectedPipelineIds,
@@ -2064,16 +3237,18 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         }
         if (selectedCompanies.size > 0 && !selectedCompanies.has(resolveCompanyLabel(event))) return false;
         if (
-          !eventMatchesSystemEventFilters(
+          canSelectOtherCoordinators
+          && selectedHandlingCoordinators.size > 0
+          && !eventMatchesHandlingCoordinatorFilter(
             event,
-            selectedSystemEventIds,
-            systemEventGroups,
-            systemEventPipelineMatches,
-            allPipelinesCatalog,
+            selectedHandlingCoordinators,
+            selfCoordinatorName,
           )
         ) {
           return false;
         }
+        if (!eventMatchesEditorFilters(event, selectedEditors, editorDateRanges)) return false;
+        if (selectedSystemEventIds.size > 0 && !matchesSelectedSystemEvent) return false;
         if (dateFrom && new Date(event.date) < new Date(dateFrom)) return false;
         if (dateTo && new Date(event.date) > new Date(`${dateTo}T23:59:59`)) return false;
         if (
@@ -2104,6 +3279,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       selectedStatuses,
       selectedActiveStates,
       selectedCompanies,
+      canSelectOtherCoordinators,
+      selfCoordinatorName,
+      selectedHandlingCoordinators,
+      selectedEditors,
+      editorDateRanges,
       resolveCompanyLabel,
       selectedSystemEventIds,
       systemEventGroups,
@@ -2132,16 +3312,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   ]);
 
   const displayEvents = useMemo(() => {
-    const dir = dateSortOrder === 'asc' ? 1 : -1;
     const visibleIds = new Set(filteredEvents.map((event) => journalEventKey(event)));
     const exitingExtras = [...exitingEventIds]
       .filter((key) => !visibleIds.has(key))
       .map((key) => events.find((event) => journalEventKey(event) === key))
       .filter((event): event is JournalEvent => Boolean(event));
     const merged = [...filteredEvents, ...exitingExtras];
-    return merged.sort(
-      (a, b) => dir * (new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()),
-    );
+    return merged.sort((a, b) => compareJournalEventsByDate(a, b, dateSortOrder));
   }, [filteredEvents, exitingEventIds, events, dateSortOrder]);
 
   const lastAutoSelectedPipelineRef = useRef<string | null>(null);
@@ -2210,6 +3387,75 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       lastAutoSelectedPipelineRef.current = null;
     }
   }, [defaultActionPipelineId]);
+
+  const openEditorDateRangeModal = (editorName: string) => {
+    const existing = editorDateRanges[editorName];
+    setEditorDateRangeModal({
+      editorName,
+      dateFrom: existing?.dateFrom ?? '',
+      dateTo: existing?.dateTo ?? '',
+    });
+    setSelectedEditors((prev) => {
+      if (prev.has(editorName)) return prev;
+      const next = new Set(prev);
+      next.add(editorName);
+      return next;
+    });
+  };
+
+  const applyEditorDateRangeModal = () => {
+    if (!editorDateRangeModal) return;
+    const { editorName, dateFrom: from, dateTo: to } = editorDateRangeModal;
+    setSelectedEditors((prev) => {
+      const next = new Set(prev);
+      next.add(editorName);
+      return next;
+    });
+    setEditorDateRanges((prev) => {
+      if (!from && !to) {
+        const next = { ...prev };
+        delete next[editorName];
+        return next;
+      }
+      return { ...prev, [editorName]: { dateFrom: from, dateTo: to } };
+    });
+    setEditorDateRangeModal(null);
+  };
+
+  const formatEditorDateRangeLabel = (range?: EditorDateRangeFilter): string | null => {
+    if (!range?.dateFrom && !range?.dateTo) return null;
+    const fmt = (value: string) =>
+      value ? new Date(value).toLocaleDateString('he-IL', { dateStyle: 'short' }) : '—';
+    if (range.dateFrom && range.dateTo) return `${fmt(range.dateFrom)} – ${fmt(range.dateTo)}`;
+    if (range.dateFrom) return `מ-${fmt(range.dateFrom)}`;
+    return `עד-${fmt(range.dateTo)}`;
+  };
+
+  const toggleHandlingCoordinatorSelection = (coordinatorName: string) => {
+    setSelectedHandlingCoordinators((prev) => {
+      const next = new Set(prev);
+      if (next.has(coordinatorName)) next.delete(coordinatorName);
+      else next.add(coordinatorName);
+      return next;
+    });
+  };
+
+  const toggleEditorSelection = (editorName: string) => {
+    setSelectedEditors((prev) => {
+      const next = new Set(prev);
+      if (next.has(editorName)) {
+        next.delete(editorName);
+        setEditorDateRanges((ranges) => {
+          const copy = { ...ranges };
+          delete copy[editorName];
+          return copy;
+        });
+      } else {
+        next.add(editorName);
+      }
+      return next;
+    });
+  };
 
   const toggleSet = (setter: React.Dispatch<React.SetStateAction<Set<string>>>, value: string) => {
     setter((prev) => {
@@ -2282,10 +3528,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     }
   };
 
-  const handleLogOutcome = async (outcome: ActionOutcome) => {
+  const handlePreviewOutcome = (outcome: ActionOutcome) => {
     if (!selectedEvent || selectedEvent.isActive === false) return;
-    if (!actionPipelineContext?.pipeline.id || !actionPipelineContext.stage.id) {
-      alert('לא נמצא תהליך או שלb לתוצאה זו');
+    const isGeneralNote = outcome.id === GENERAL_OUTCOME_ID;
+    if (!actionPipelineContext?.pipeline.id) {
+      alert('לא נמצא תהליך לתוצאה זו');
+      return;
+    }
+    if (!isGeneralNote && !actionPipelineContext.stage.id) {
+      alert('לא נמצא שלב לתוצאה זו');
       return;
     }
 
@@ -2296,45 +3547,148 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       return;
     }
 
+    const preview = computeOutcomePreview(
+      selectedEvent,
+      outcome,
+      actionPipelineContext.pipeline.stages || [],
+    );
+    const finalPreview = isGeneralNote
+      ? { ...preview, historyTitle: '', historyComment: undefined }
+      : preview;
+
+    setPendingOutcomeDraft({
+      eventKey: journalEventKey(selectedEvent),
+      outcomeId: outcome.id,
+      outcomeTitle: outcome.title,
+      pipelineKind,
+      clientId: selectedEvent.clientId,
+      pipelineId: pipeline.id,
+      stageId: stage.id || selectedEvent.stageId || '',
+      context: {
+        clientEventId: selectedEvent.id,
+        ...(pipelineKind === 'candidate' && candidateId ? { candidateId } : {}),
+        ...(scopeJobLinkId ? { jobCandidateId: scopeJobLinkId } : {}),
+      },
+      preview: finalPreview,
+    });
+
+    if (isGeneralNote) {
+      setExpandedEventId(selectedEvent.id);
+      const draftUpdateId = `draft-outcome-${GENERAL_OUTCOME_ID}`;
+      setEditingStatusUpdateKey(statusUpdateEditKey(selectedEvent, draftUpdateId));
+      setStatusUpdateEditDraft({ title: '', comment: '' });
+    }
+  };
+
+  const handleCancelPendingOutcome = () => {
+    setPendingOutcomeDraft(null);
+  };
+
+  const commitPendingOutcome = async (draft: PendingOutcomeDraft): Promise<boolean> => {
+    const sourceEvent = events.find((e) => journalEventKey(e) === draft.eventKey);
+    if (!sourceEvent) {
+      alert('לא נמצא האירוע לשמירה');
+      return false;
+    }
+
+    setCommittingOutcome(true);
     try {
+      if (draft.outcomeId === GENERAL_OUTCOME_ID) {
+        const actor = resolveJournalActorName(user);
+        const trimmedTitle = draft.preview.historyTitle.trim();
+        const trimmedComment = (draft.preview.historyComment || '').trim();
+        if (!trimmedTitle && !trimmedComment) {
+          alert('יש להזין הערה');
+          return false;
+        }
+
+        const newUpdate = {
+          id: `u-${Date.now()}`,
+          title: trimmedTitle || 'כללי',
+          date: new Date().toISOString(),
+          creator: actor,
+          ...(trimmedComment ? { comment: trimmedComment } : {}),
+        };
+        const nextUpdates = sortStatusUpdatesByDateDesc([
+          newUpdate,
+          ...(sourceEvent.updates || []).filter((u) => !String(u.id).startsWith('draft-outcome-')),
+        ]);
+        const history = nextUpdates.map((u) => ({
+          user: u.creator,
+          timestamp: u.date,
+          summary: u.title,
+          ...(u.comment ? { comment: u.comment } : {}),
+        }));
+
+        setEvents((prev) =>
+          prev.map((e) =>
+            e.id === sourceEvent.id && e.clientId === sourceEvent.clientId
+              ? { ...e, updates: nextUpdates }
+              : e,
+          ),
+        );
+
+        const patchResult = await persistEventPatch(sourceEvent, { updates: nextUpdates, history });
+        if (!patchResult.ok) {
+          alert('שמירת ההערה נכשלה');
+          void load({ silent: true });
+          return false;
+        }
+
+        setEvents((prev) =>
+          prev.map((e) =>
+            e.id === sourceEvent.id && e.clientId === sourceEvent.clientId ? patchResult.row : e,
+          ),
+        );
+        setPendingOutcomeDraft(null);
+        handleCancelEditStatusUpdate();
+        dispatchClientJournalUpdated({
+          clientEventId: sourceEvent.id,
+          clientId: sourceEvent.clientId,
+        });
+        void load({ silent: true });
+        onEventsChanged?.();
+        return true;
+      }
+
+      const historyTitle = draft.preview.historyTitle.trim();
+      const historyComment = (draft.preview.historyComment || '').trim();
       const result = await executePipelineOutcome({
-        pipelineKind,
-        clientId: selectedEvent.clientId,
-        pipelineId: pipeline.id,
-        stageId: stage.id,
-        outcomeId: outcome.id,
-        context: {
-          clientEventId: selectedEvent.id,
-          ...(pipelineKind === 'candidate' && candidateId ? { candidateId } : {}),
-          ...(scopeJobLinkId ? { jobCandidateId: scopeJobLinkId } : {}),
-        },
+        pipelineKind: draft.pipelineKind,
+        clientId: draft.clientId,
+        pipelineId: draft.pipelineId,
+        stageId: draft.stageId,
+        outcomeId: draft.outcomeId,
+        context: draft.context,
         source: 'manual',
+        ...(historyTitle ? { historyTitle } : {}),
+        ...(historyComment ? { historyComment } : {}),
       });
 
-      const patchedFromAction = patchEventFromActionResult(selectedEvent, result.actionResult);
+      const patchedFromAction = patchEventFromActionResult(sourceEvent, result.actionResult);
       const updatedEvent =
         result.actionResult?.event && typeof result.actionResult.event === 'object'
           ? normalizeRow({
               ...(result.actionResult.event as Record<string, unknown>),
-              clientId: selectedEvent.clientId,
-              clientName: selectedEvent.clientName,
+              clientId: sourceEvent.clientId,
+              clientName: sourceEvent.clientName,
             })
           : patchedFromAction
             ? normalizeRow({
                 ...patchedFromAction,
-                clientId: selectedEvent.clientId,
-                clientName: selectedEvent.clientName,
+                clientId: sourceEvent.clientId,
+                clientName: sourceEvent.clientName,
               })
             : null;
 
-      const previousDueDate = selectedEvent.dueDate;
-      const wasVisible = eventPassesFilters(selectedEvent);
-      const eventKey = journalEventKey(selectedEvent);
+      const previousDueDate = sourceEvent.dueDate;
+      const wasVisible = eventPassesFilters(sourceEvent);
+      const eventKey = draft.eventKey;
 
       if (updatedEvent) {
         setEvents((prev) =>
           prev.map((e) =>
-            e.id === selectedEvent.id && e.clientId === selectedEvent.clientId ? updatedEvent : e,
+            e.id === sourceEvent.id && e.clientId === sourceEvent.clientId ? updatedEvent : e,
           ),
         );
 
@@ -2349,17 +3703,21 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       }
 
       if (
-        pipelineKind === 'candidate' &&
-        candidateId &&
+        draft.pipelineKind === 'candidate' &&
+        draft.context.candidateId &&
         typeof window !== 'undefined'
       ) {
         const nextStageId =
           typeof result.actionResult?.nextStageId === 'string'
             ? result.actionResult.nextStageId
-            : stage.id;
+            : draft.stageId;
         window.dispatchEvent(
           new CustomEvent('hiro:candidate-pipeline-stage-moved', {
-            detail: { candidateId, pipelineId: pipeline.id, stageId: nextStageId },
+            detail: {
+              candidateId: draft.context.candidateId,
+              pipelineId: draft.pipelineId,
+              stageId: nextStageId,
+            },
           }),
         );
       }
@@ -2371,32 +3729,53 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         alert(errors.map((e) => e.message || 'שגיאת אוטומציה').join('\n'));
       } else if (pending.length) {
         setAutomationApproval({
-          pipelineKind,
-          clientId: selectedEvent.clientId,
-          pipelineId: pipeline.id,
-          stageId: stage.id,
-          outcomeId: outcome.id,
-          outcomeName: outcome.title,
-          context: {
-            clientEventId: selectedEvent.id,
-            ...(pipelineKind === 'candidate' && candidateId ? { candidateId } : {}),
-          },
+          pipelineKind: draft.pipelineKind,
+          clientId: draft.clientId,
+          pipelineId: draft.pipelineId,
+          stageId: draft.stageId,
+          outcomeId: draft.outcomeId,
+          outcomeName: draft.outcomeTitle,
+          context: draft.context,
           pending,
         });
       } else if (automationSummary) {
         alert(`הפעולה בוצעה · ${automationSummary}`);
       }
 
+      setPendingOutcomeDraft(null);
+      handleCancelEditStatusUpdate();
       dispatchClientJournalUpdated({
-        clientEventId: selectedEvent.id,
-        clientId: selectedEvent.clientId,
+        clientEventId: sourceEvent.id,
+        clientId: sourceEvent.clientId,
       });
       void load({ silent: true });
       onEventsChanged?.();
+      return true;
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'עדכון הסטטוס נכשלה');
       void load({ silent: true });
+      return false;
+    } finally {
+      setCommittingOutcome(false);
     }
+  };
+
+  const resolvePendingOutcomeDraftForCommit = (): PendingOutcomeDraft | null => {
+    if (!pendingOutcomeDraft) return null;
+    const sourceEvent = events.find((e) => journalEventKey(e) === pendingOutcomeDraft.eventKey);
+    return mergePendingOutcomeWithInlineEdit(
+      pendingOutcomeDraft,
+      sourceEvent,
+      editingStatusUpdateKey,
+      statusUpdateEditDraft,
+    );
+  };
+
+  const handleCommitPendingOutcome = async () => {
+    if (!pendingOutcomeDraft || committingOutcome) return;
+    const draftToCommit = resolvePendingOutcomeDraftForCommit();
+    if (!draftToCommit) return;
+    await commitPendingOutcome(draftToCommit);
   };
 
   const handleApproveAutomations = async (automationIds: string[]) => {
@@ -2444,20 +3823,218 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     onEventsChanged?.();
   };
 
+  const mapContactRowsToOptions = (rows: unknown): Array<{ id: string; name: string }> =>
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => {
+        if (!row || typeof row !== 'object') return null;
+        const r = row as Record<string, unknown>;
+        const id = String(r.id || '').trim();
+        const name = String(r.name || '').trim();
+        if (!id || !name) return null;
+        return { id, name };
+      })
+      .filter(Boolean) as Array<{ id: string; name: string }>;
+
+  const loadEditContactOptions = useCallback(
+    async (event: JournalEvent) => {
+      if (!apiBase || !event.clientId) {
+        setEditContactOptions([]);
+        return;
+      }
+      setEditContactsLoading(true);
+      try {
+        const orgId = String(event.organizationId || '').trim();
+        const fetchContacts = async (query = '') => {
+          const res = await fetch(
+            `${apiBase}/api/clients/${encodeURIComponent(event.clientId)}/contacts${query}`,
+            { credentials: 'include', headers: authHeaders() },
+          );
+          if (!res.ok) return [];
+          return mapContactRowsToOptions(await res.json());
+        };
+        let options = orgId
+          ? await fetchContacts(`?organizationId=${encodeURIComponent(orgId)}`)
+          : await fetchContacts();
+        if (orgId && options.length === 0) {
+          options = await fetchContacts();
+        }
+        setEditContactOptions(options);
+      } catch {
+        setEditContactOptions([]);
+      } finally {
+        setEditContactsLoading(false);
+      }
+    },
+    [apiBase],
+  );
+
+  const buildSelectedLinkedContactsForSave = useCallback(
+    (event: JournalEvent): EventLinkedContact[] => {
+      const optionMap = new Map(editContactOptions.map((c) => [c.id, c.name]));
+      const prevLinked = parseEventLinkedContacts(event);
+      const prevById = new Map(prevLinked.map((c) => [c.id, c.name]));
+      return editLinkedContactIds
+        .map((id) => {
+          const name = optionMap.get(id) || prevById.get(id) || '';
+          if (!name) return null;
+          return { id, name };
+        })
+        .filter(Boolean) as EventLinkedContact[];
+    },
+    [editContactOptions, editLinkedContactIds],
+  );
+
+  const cancelContactLinkEdit = () => {
+    setContactLinkEditEventId(null);
+    setEditLinkedContactIds([]);
+    setEditContactOptions([]);
+  };
+
+  const saveEventLinkedContacts = async (event: JournalEvent): Promise<boolean> => {
+    if (
+      !canEditEventLinkedContacts(event, {
+        embeddedInModal,
+        scopeJobLinkId,
+        scopeCandidateId,
+      })
+    ) {
+      return false;
+    }
+    if (isSavingContactLinks || isSavingDescription) return false;
+
+    setIsSavingContactLinks(true);
+    try {
+      const actor = resolveJournalActorName(user);
+      const selectedLinkedContacts = buildSelectedLinkedContactsForSave(event);
+      const orgRef = resolveEventOrganizationRef(event, orgNameById, organizationOptions);
+      const contactPatch = buildEventContactLinkPatch(selectedLinkedContacts, event, orgRef);
+      const prevLinked = parseEventLinkedContacts(event);
+      const prevKey = prevLinked
+        .map((c) => c.id)
+        .sort()
+        .join('|');
+      const nextKey = selectedLinkedContacts
+        .map((c) => c.id)
+        .sort()
+        .join('|');
+
+      let nextUpdates = [...(event.updates || [])];
+      if (prevKey !== nextKey) {
+        const label = formatLinkedContactsActivityLabel(selectedLinkedContacts);
+        const activity = {
+          id: `u-${Date.now()}-contacts`,
+          title: label
+            ? `עודכנו אנשי קשר: ${label}`
+            : 'הוסרו אנשי קשר מהאירוע',
+          date: new Date().toISOString(),
+          creator: actor,
+        };
+        nextUpdates = sortStatusUpdatesByDateDesc([activity, ...nextUpdates]);
+      }
+
+      const history = nextUpdates.map((u) => ({
+        user: u.creator,
+        timestamp: u.date,
+        summary: u.title,
+        ...(u.comment ? { comment: u.comment } : {}),
+      }));
+
+      const patch: Record<string, unknown> = {
+        ...contactPatch,
+        ...(prevKey !== nextKey ? { updates: nextUpdates, history } : {}),
+      };
+
+      const primaryLinkedContact = selectedLinkedContacts[0];
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.id === event.id && e.clientId === event.clientId
+            ? {
+                ...e,
+                contactId: primaryLinkedContact?.id || null,
+                contactName: primaryLinkedContact?.name || null,
+                linkedToType: primaryLinkedContact ? 'איש קשר' : 'לקוח',
+                updates: prevKey !== nextKey ? nextUpdates : e.updates,
+                metadata:
+                  contactPatch.metadata && typeof contactPatch.metadata === 'object'
+                    ? (contactPatch.metadata as Record<string, unknown>)
+                    : e.metadata,
+              }
+            : e,
+        ),
+      );
+
+      const result = await persistEventPatch(event, patch);
+      if (!result.ok) {
+        alert('שמירת אנשי קשר נכשלה');
+        await load({ silent: true });
+        return false;
+      }
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.id === event.id && e.clientId === event.clientId ? result.row : e,
+        ),
+      );
+      onEventsChanged?.();
+      return true;
+    } finally {
+      setIsSavingContactLinks(false);
+    }
+  };
+
+  const beginContactLinkEdit = (event: JournalEvent) => {
+    if (event.isActive === false) return;
+    const mergedEvent = mergeEventWithPendingOutcome(
+      event,
+      pendingOutcomeDraft,
+      resolveJournalActorName(user),
+    );
+    if (editingDescriptionId === event.id) {
+      return;
+    }
+    setContactLinkEditEventId(event.id);
+    setEditLinkedContactIds(resolveInitialLinkedContactIds(mergedEvent, contactLookups));
+    void loadEditContactOptions(event);
+  };
+
+  const resetEventEditDraft = () => {
+    setEditingDescriptionId(null);
+    setEditTitleValue('');
+    setEditNextStageValue('');
+    setEditStatusUpdates([]);
+    setEditLinkedContactIds([]);
+    setEditContactOptions([]);
+    setContactLinkEditEventId(null);
+    setEditingStatusUpdateKey(null);
+    setStatusUpdateEditDraft({ title: '', comment: '' });
+  };
+
   const handleEditDescription = (event: JournalEvent) => {
     if (event.isActive === false) return;
+    setContactLinkEditEventId(null);
+    const mergedEvent = mergeEventWithPendingOutcome(
+      event,
+      pendingOutcomeDraft,
+      resolveJournalActorName(user),
+    );
     setEditingStatusUpdateKey(null);
     setStatusUpdateEditDraft({ title: '', comment: '' });
     setEditingDescriptionId(event.id);
-    setEditTitleValue(event.title || '');
+    setEditTitleValue(mergedEvent.title || '');
     setEditDescriptionValue(event.description || '');
     setEditNextStageValue('');
-    setEditAssigneeValue(event.creator || user?.name || 'אני');
-    setEditDueDateValue(event.dueDate || '');
-    setEditIsActiveValue(true);
+    const assignees = canSelectOtherCoordinators
+      ? getEventHandlingAssignees(event).map((name) =>
+          name === JOURNAL_SELF_LABEL ? selfCoordinatorName : name,
+        )
+      : [selfCoordinatorName];
+    setEditAssigneeValues(
+      assignees.length > 0 ? assignees : [selfCoordinatorName],
+    );
+    setEditDueDateValue(mergedEvent.dueDate || '');
+    setEditIsActiveValue(mergedEvent.isActive !== false);
     setEditStatusUpdates(
       sortStatusUpdatesByDateDesc(
-        (event.updates || []).map((u) => ({
+        (mergedEvent.updates || []).map((u) => ({
           id: u.id,
           title: u.title,
           date: u.date,
@@ -2466,6 +4043,18 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         })),
       ),
     );
+    setEditLinkedContactIds(resolveInitialLinkedContactIds(mergedEvent, contactLookups));
+    if (
+      canEditEventLinkedContacts(event, {
+        embeddedInModal,
+        scopeJobLinkId,
+        scopeCandidateId,
+      })
+    ) {
+      void loadEditContactOptions(event);
+    } else {
+      setEditContactOptions([]);
+    }
     // Ensure pipelines (for השלב הבא options) are loaded for this client
     if (event.clientId && !pipelinesByClient[event.clientId]) {
       void fetchPipelines(event.clientId)
@@ -2477,11 +4066,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         const names = rows
           .map((u) => String(u.name || u.email || '').trim())
           .filter(Boolean);
-        const me = user?.name?.trim() || 'אני';
-        setAssigneeOptions(Array.from(new Set([me, 'אני', ...names])));
+        const me = resolveJournalActorName(user);
+        setAssigneeOptions(Array.from(new Set([me, ...names])));
       })
       .catch(() => {
-        setAssigneeOptions([user?.name?.trim() || 'אני', 'אני'].filter(Boolean));
+        setAssigneeOptions([resolveJournalActorName(user)].filter(Boolean));
       });
   };
 
@@ -2506,12 +4095,52 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     event: JournalEvent,
     updateId: string,
   ) => {
+    const rowKey = statusUpdateEditKey(event, updateId);
+    if (savingStatusUpdateKey === rowKey || committingOutcome) return;
+
     const trimmedTitle = statusUpdateEditDraft.title.trim();
-    if (!trimmedTitle) {
-      alert('יש להזין תיאור לעדכון');
+    const trimmedComment = statusUpdateEditDraft.comment.trim();
+    const isGeneralDraft =
+      String(updateId).startsWith('draft-outcome-') &&
+      pendingOutcomeDraft?.outcomeId === GENERAL_OUTCOME_ID;
+
+    if (!trimmedTitle && !(isGeneralDraft && trimmedComment)) {
+      alert(isGeneralDraft ? 'יש להזין הערה' : 'יש להזין תיאור לעדכון');
       return;
     }
-    const trimmedComment = statusUpdateEditDraft.comment.trim();
+
+    if (String(updateId).startsWith('draft-outcome-')) {
+      if (!pendingOutcomeDraft || journalEventKey(event) !== pendingOutcomeDraft.eventKey) {
+        handleCancelEditStatusUpdate();
+        return;
+      }
+      const existingTitle = pendingOutcomeDraft.preview.historyTitle.trim();
+      const existingComment = (pendingOutcomeDraft.preview.historyComment || '').trim();
+      if (trimmedTitle === existingTitle && trimmedComment === existingComment) {
+        handleCancelEditStatusUpdate();
+        return;
+      }
+      const updatedDraft: PendingOutcomeDraft = {
+        ...pendingOutcomeDraft,
+        preview: {
+          ...pendingOutcomeDraft.preview,
+          historyTitle: trimmedTitle,
+          historyComment: trimmedComment || undefined,
+        },
+      };
+      handleCancelEditStatusUpdate();
+      setPendingOutcomeDraft(updatedDraft);
+      setSavingStatusUpdateKey(rowKey);
+      try {
+        if (!committingOutcome) {
+          await commitPendingOutcome(updatedDraft);
+        }
+      } finally {
+        setSavingStatusUpdateKey(null);
+      }
+      return;
+    }
+
     const existing = (event.updates || []).find((u) => u.id === updateId);
     if (!existing) return;
     if (trimmedTitle === (existing.title || '').trim() && trimmedComment === (existing.comment || '').trim()) {
@@ -2540,23 +4169,55 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       ),
     );
 
-    const result = await persistEventPatch(event, patch);
-    if (!result.ok) {
-      alert('שמירת העדכון נכשלה');
-      await load({ silent: true });
-      return;
+    setSavingStatusUpdateKey(rowKey);
+    try {
+      const result = await persistEventPatch(event, patch);
+      if (!result.ok) {
+        alert('שמירת העדכון נכשלה');
+        await load({ silent: true });
+        return;
+      }
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.id === event.id && e.clientId === event.clientId ? result.row : e,
+        ),
+      );
+      handleCancelEditStatusUpdate();
+      onEventsChanged?.();
+    } finally {
+      setSavingStatusUpdateKey(null);
     }
-    setEvents((prev) =>
-      prev.map((e) =>
-        e.id === event.id && e.clientId === event.clientId ? result.row : e,
-      ),
-    );
-    handleCancelEditStatusUpdate();
-    onEventsChanged?.();
   };
 
   const handleSaveDescription = async (event: JournalEvent) => {
-    const actor = editAssigneeValue || user?.name || 'אני';
+    if (isSavingDescription || committingOutcome) return;
+
+    setIsSavingDescription(true);
+    try {
+    if (
+      pendingOutcomeDraft &&
+      journalEventKey(event) === pendingOutcomeDraft.eventKey
+    ) {
+      const draftToCommit = mergePendingOutcomeWithInlineEdit(
+        pendingOutcomeDraft,
+        event,
+        editingStatusUpdateKey,
+        statusUpdateEditDraft,
+      );
+      const committed = await commitPendingOutcome(draftToCommit);
+      if (!committed) return;
+      resetEventEditDraft();
+      return;
+    }
+
+    const actor = resolveJournalActorName(user);
+    const assignees = formatAssigneeList(
+      canSelectOtherCoordinators
+        ? editAssigneeValues.length > 0
+          ? editAssigneeValues
+          : [selfCoordinatorName]
+        : [selfCoordinatorName],
+    );
     const clientPipelines = pipelinesByClient[event.clientId] || [];
     const candidatePipelines = candidatePipelinesByClient[event.clientId] || [];
     const pipelineIdForEvent = event.id === selectedEvent?.id ? actionPipelineId : null;
@@ -2596,6 +4257,40 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         creator: actor,
       });
     }
+
+    const allowContactEdit = canEditEventLinkedContacts(event, {
+      embeddedInModal,
+      scopeJobLinkId,
+      scopeCandidateId,
+    });
+    let contactPatch: Record<string, unknown> = {};
+    let selectedLinkedContacts: EventLinkedContact[] = [];
+    if (allowContactEdit) {
+      selectedLinkedContacts = buildSelectedLinkedContactsForSave(event);
+      const orgRef = resolveEventOrganizationRef(event, orgNameById, organizationOptions);
+      contactPatch = buildEventContactLinkPatch(selectedLinkedContacts, event, orgRef);
+      const prevLinked = parseEventLinkedContacts(event);
+      const prevKey = prevLinked
+        .map((c) => c.id)
+        .sort()
+        .join('|');
+      const nextKey = selectedLinkedContacts
+        .map((c) => c.id)
+        .sort()
+        .join('|');
+      if (prevKey !== nextKey) {
+        const label = formatLinkedContactsActivityLabel(selectedLinkedContacts);
+        activityEntries.push({
+          id: `u-${Date.now()}-contacts`,
+          title: label
+            ? `עודכנו אנשי קשר: ${label}`
+            : 'הוסרו אנשי קשר מהאירוע',
+          date: new Date().toISOString(),
+          creator: actor,
+        });
+      }
+    }
+
     const sanitizedStatusUpdates = editStatusUpdates
       .map((u) => ({
         id: u.id,
@@ -2619,8 +4314,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     const patch = {
       title: nextTitle,
       description: editDescriptionValue,
-      coordinator: actor,
-      creator: actor,
+      coordinator: assignees,
+      creator: event.creator || actor,
       dueDate: editDueDateValue || event.dueDate,
       isActive: editIsActiveValue,
       status: event.status,
@@ -2631,8 +4326,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       ...(stageChanged && stageChange ? { nextStageTitle: stageChange.historyLabel } : {}),
       history,
       updates: nextUpdates,
+      ...contactPatch,
     };
 
+    const primaryLinkedContact = selectedLinkedContacts[0];
     setEvents((prev) =>
       prev.map((e) =>
         e.id === event.id && e.clientId === event.clientId
@@ -2640,12 +4337,23 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               ...e,
               title: nextTitle,
               description: editDescriptionValue,
-              creator: actor,
+              coordinator: assignees,
               dueDate: editDueDateValue || event.dueDate,
               isActive: editIsActiveValue,
               stage: nextStageName,
               stageId: nextStageId,
               updates: nextUpdates,
+              ...(allowContactEdit
+                ? {
+                    contactId: primaryLinkedContact?.id || null,
+                    contactName: primaryLinkedContact?.name || null,
+                    linkedToType: primaryLinkedContact ? 'איש קשר' : 'לקוח',
+                    metadata:
+                      contactPatch.metadata && typeof contactPatch.metadata === 'object'
+                        ? (contactPatch.metadata as Record<string, unknown>)
+                        : e.metadata,
+                  }
+                : {}),
             }
           : e,
       ),
@@ -2678,15 +4386,14 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         e.id === event.id && e.clientId === event.clientId ? result.row : e,
       ),
     );
-    setEditingDescriptionId(null);
-    setEditTitleValue('');
-    setEditNextStageValue('');
-    setEditStatusUpdates([]);
-    handleCancelEditStatusUpdate();
+    resetEventEditDraft();
     onEventsChanged?.();
+    } finally {
+      setIsSavingDescription(false);
+    }
   };
 
-  const handleCreateProcessEvent = async (data: ProcessEventSavePayload) => {
+  const executeCreateProcessEvent = async (data: ProcessEventSavePayload) => {
     const targetClientId = eventModalScope?.clientId || effectiveCreateClientId;
     const targetOrganizationId =
       eventModalScope?.organizationId || effectiveCreateOrganizationId || '';
@@ -2701,8 +4408,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       type: typeParts.length ? typeParts : ['תהליך'],
       date: new Date().toISOString(),
       description: data.description || '',
-      coordinator: data.assignee || user?.name || 'אני',
-      creator: data.assignee || user?.name || 'אני',
+      coordinator: data.assignee || resolveJournalActorName(user),
+      creator: data.assignee || resolveJournalActorName(user),
       status: 'עתידי',
       isActive: true,
       ...(targetOrganizationId ? { organizationId: targetOrganizationId } : {}),
@@ -2728,7 +4435,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       },
       history: [
         {
-          user: data.assignee || 'אני',
+          user: data.assignee || resolveJournalActorName(user),
           timestamp: new Date().toISOString(),
           summary: 'יצר אירוע תהליכי',
         },
@@ -2748,10 +4455,77 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     onEventsChanged?.();
   };
 
+  const handleCreateProcessEvent = async (data: ProcessEventSavePayload): Promise<void | false> => {
+    const pipelineId = String(data.processId || '').trim();
+    if (!pipelineId) {
+      await executeCreateProcessEvent(data);
+      return;
+    }
+
+    const activeExisting = findActiveProcessEventsForPipeline(
+      events,
+      pipelineId,
+      allPipelinesCatalog,
+      scopeContactId,
+      scopeContactName,
+      scopeCandidateId,
+      processDuplicateOrganizationScope.organizationId,
+      processDuplicateOrganizationScope.organizationName,
+      scopeJobId,
+      scopeJobLinkId,
+      scopeJobTitle,
+      scopeJobCompany,
+    );
+
+    if (activeExisting.length > 0) {
+      setDuplicateProcessPrompt({
+        processName: data.processName || 'תהליך',
+        organizationName: processDuplicateOrganizationScope.organizationName,
+        existingEvents: activeExisting,
+        pendingPayload: data,
+      });
+      return false;
+    }
+
+    await executeCreateProcessEvent(data);
+  };
+
+  const sortedCreateClientOptions = useMemo(
+    () =>
+      [...clientOptions].sort((a, b) =>
+        String(a.name || '').localeCompare(String(b.name || ''), 'he', { sensitivity: 'base' }),
+      ),
+    [clientOptions],
+  );
+
+  const createClientSearchOptions = useMemo(
+    () =>
+      sortedCreateClientOptions.map((c) => ({
+        id: c.organizationId
+          ? `org:${c.organizationId}`
+          : c.organizationTmpId
+            ? `tmp:${c.organizationTmpId}`
+            : c.id,
+        label: String(c.name || '').trim() || c.id,
+      })),
+    [sortedCreateClientOptions],
+  );
+
+  const createClientSearchValue = useMemo(() => {
+    if (effectiveCreateOrganizationId) return `org:${effectiveCreateOrganizationId}`;
+    if (effectiveCreateOrganizationTmpId) return `tmp:${effectiveCreateOrganizationTmpId}`;
+    return effectiveCreateClientId || null;
+  }, [effectiveCreateOrganizationId, effectiveCreateOrganizationTmpId, effectiveCreateClientId]);
+
   const selectedCreateOption = useMemo(() => {
     if (effectiveCreateOrganizationId) {
       return clientOptions.find(
         (opt) => String(opt.organizationId || '') === effectiveCreateOrganizationId,
+      );
+    }
+    if (effectiveCreateOrganizationTmpId) {
+      return clientOptions.find(
+        (opt) => String(opt.organizationTmpId || '') === effectiveCreateOrganizationTmpId,
       );
     }
     if (organizationOptions.length) {
@@ -2764,7 +4538,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       clientOptions.find((opt) => opt.id === effectiveCreateClientId && !opt.organizationId)
       || clientOptions.find((opt) => opt.id === effectiveCreateClientId)
     );
-  }, [clientOptions, organizationOptions, effectiveCreateClientId, effectiveCreateOrganizationId]);
+  }, [
+    clientOptions,
+    organizationOptions,
+    effectiveCreateClientId,
+    effectiveCreateOrganizationId,
+    effectiveCreateOrganizationTmpId,
+  ]);
 
   const createOrganizationName =
     (scopeJobCompany && scopeJobCompany !== '—' ? scopeJobCompany : '') ||
@@ -2808,33 +4588,60 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       '';
 
     let resolvedOrgId = String(
-      createOrganizationId
+      (hideFilters || scopeContactId
+        ? scopeOrganizationId || defaultOrganizationId
+        : null)
+        || createOrganizationId
         || preferredOption?.organizationId
         || scopeOrganizationId
         || defaultOrganizationId
         || '',
     ).trim();
+    let resolvedOrgTmpId = resolvedOrgId
+      ? ''
+      : String(
+          (hideFilters || scopeContactId
+            ? scopeOrganizationTmpId || defaultOrganizationTmpId
+            : null)
+            || createOrganizationTmpId
+            || preferredOption?.organizationTmpId
+            || scopeOrganizationTmpId
+            || defaultOrganizationTmpId
+            || '',
+        ).trim();
 
-    if (!resolvedOrgId && scopeLabel) {
+    if (!resolvedOrgId && !resolvedOrgTmpId && scopeLabel) {
       const match = matchOrganizationOption(scopeLabel);
       if (match?.organizationId) resolvedOrgId = String(match.organizationId);
+      else if (match?.organizationTmpId) resolvedOrgTmpId = String(match.organizationTmpId);
     }
 
-    if (!resolvedOrgId) {
+    if (!resolvedOrgId && !resolvedOrgTmpId) {
       resolvedOrgId = String(effectiveCreateOrganizationId || '').trim();
+      resolvedOrgTmpId = resolvedOrgId
+        ? ''
+        : String(effectiveCreateOrganizationTmpId || '').trim();
     }
 
     if (
       !resolvedOrgId
+      && !resolvedOrgTmpId
       && tenantClientId
       && organizationOptions.length === 1
-      && organizationOptions[0]?.organizationId
     ) {
-      resolvedOrgId = String(organizationOptions[0].organizationId);
+      if (organizationOptions[0]?.organizationId) {
+        resolvedOrgId = String(organizationOptions[0].organizationId);
+      } else if (organizationOptions[0]?.organizationTmpId) {
+        resolvedOrgTmpId = String(organizationOptions[0].organizationTmpId);
+      }
     }
 
     const matchedOption =
-      organizationOptions.find((opt) => String(opt.organizationId || '') === resolvedOrgId) ||
+      (resolvedOrgId
+        ? organizationOptions.find((opt) => String(opt.organizationId || '') === resolvedOrgId)
+        : resolvedOrgTmpId
+          ? organizationOptions.find((opt) => String(opt.organizationTmpId || '') === resolvedOrgTmpId)
+          : null) ||
       preferredOption ||
       matchOrganizationOption(scopeLabel) ||
       selectedCreateOption;
@@ -2843,17 +4650,62 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       matchedOption?.id || effectiveCreateClientId || tenantClientId || '',
     ).trim();
     const resolvedOrgName = String(
-      (matchedOption?.organizationId ? matchedOption.name : '') || scopeLabel || '',
+      (matchedOption?.organizationId || matchedOption?.organizationTmpId ? matchedOption.name : '')
+        || scopeLabel
+        || '',
     ).trim();
 
-    if (resolvedOrgId) setCreateOrganizationId(resolvedOrgId);
+    setCreateOrganizationId(resolvedOrgId);
+    setCreateOrganizationTmpId(resolvedOrgTmpId);
     if (resolvedClientId) setCreateClientId(resolvedClientId);
 
     setEventModalScope({
       clientId: resolvedClientId,
       organizationId: resolvedOrgId,
+      organizationTmpId: resolvedOrgTmpId,
       organizationName: resolvedOrgName,
     });
+
+    const duplicateOrgId = String(
+      resolvedOrgId
+        || effectiveCreateOrganizationId
+        || scopeOrganizationId
+        || defaultOrganizationId
+        || '',
+    ).trim();
+    const duplicateOrgName = String(
+      resolvedOrgName || scopeOrganizationName || defaultOrganizationName || '',
+    ).trim();
+
+    const presetPipelineId = String(defaultActionPipelineId || '').trim();
+    if (presetPipelineId) {
+      const activeExisting = findActiveProcessEventsForPipeline(
+        events,
+        presetPipelineId,
+        allPipelinesCatalog,
+        scopeContactId,
+        scopeContactName,
+        scopeCandidateId,
+        duplicateOrgId,
+        duplicateOrgName,
+        scopeJobId,
+        scopeJobLinkId,
+        scopeJobTitle,
+        scopeJobCompany,
+      );
+      if (activeExisting.length > 0) {
+        const pipelineName =
+          allPipelinesCatalog.find((p) => p.id === presetPipelineId)?.name || 'תהליך';
+        setDuplicateProcessPrompt({
+          processName: pipelineName,
+          organizationName: duplicateOrgName,
+          existingEvents: activeExisting,
+          pendingPayload: null,
+        });
+        return;
+      }
+    }
+
     setIsEventModalOpen(true);
   }, [
     matchOrganizationOption,
@@ -2863,18 +4715,49 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     defaultOrganizationName,
     selectedCreateOption,
     createOrganizationId,
+    createOrganizationTmpId,
     scopeOrganizationId,
+    scopeOrganizationTmpId,
     defaultOrganizationId,
+    defaultOrganizationTmpId,
     effectiveCreateOrganizationId,
+    effectiveCreateOrganizationTmpId,
     effectiveCreateClientId,
     tenantClientId,
     organizationOptions,
+    defaultActionPipelineId,
+    events,
+    allPipelinesCatalog,
+    scopeContactId,
+    scopeContactName,
+    scopeCandidateId,
+    scopeJobId,
+    scopeJobLinkId,
+    scopeJobTitle,
+    scopeJobCompany,
+    hideFilters,
+    scopeContactId,
   ]);
 
   const closeCreateEventModal = useCallback(() => {
     setIsEventModalOpen(false);
     setEventModalScope(null);
   }, []);
+
+  const navigateToExistingProcessEvent = useCallback((event: JournalEvent) => {
+    setDuplicateProcessPrompt(null);
+    closeCreateEventModal();
+    setExpandedEventId(event.id);
+    if (event.processId) {
+      setSelectedPipelineIds(new Set([event.processId]));
+    }
+    window.requestAnimationFrame(() => {
+      document.getElementById(`journal-event-${event.id}`)?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      });
+    });
+  }, [closeCreateEventModal]);
 
   const createEventInitialData = useMemo(
     () =>
@@ -2896,90 +4779,314 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     selectedSystemEventIds.size > 0 ||
     selectedStageOutcomeKeys.size > 0 ||
     selectedStatuses.size > 0 ||
-    selectedActiveStates.size !== activeStateOptions.length ||
-    !activeStateOptions.every((s) => selectedActiveStates.has(s)) ||
+    !isDefaultActiveStateFilter(selectedActiveStates) ||
     selectedCompanies.size > 0 ||
+    selectedEditors.size > 0 ||
+    selectedHandlingCoordinators.size > 0 ||
     !!entitySearchQuery.trim() ||
     !!dateFrom ||
     !!dateTo;
+
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (selectedPipelineIds.size > 0) count += 1;
+    if (selectedStageOutcomeKeys.size > 0) count += 1;
+    if (selectedSystemEventIds.size > 0) count += 1;
+    if (selectedCompanies.size > 0) count += 1;
+    if (selectedEditors.size > 0) count += 1;
+    if (selectedHandlingCoordinators.size > 0) count += 1;
+    if (selectedStatuses.size > 0) count += 1;
+    if (!isDefaultActiveStateFilter(selectedActiveStates)) count += 1;
+    if (dateFrom || dateTo) count += 1;
+    if (entitySearchQuery.trim()) count += 1;
+    return count;
+  }, [
+    selectedPipelineIds,
+    selectedStageOutcomeKeys,
+    selectedSystemEventIds,
+    selectedCompanies,
+    selectedEditors,
+    selectedHandlingCoordinators,
+    selectedStatuses,
+    selectedActiveStates,
+    isDefaultActiveStateFilter,
+    dateFrom,
+    dateTo,
+    entitySearchQuery,
+  ]);
+
+  const closeAllFilterDropdowns = useCallback(() => {
+    setIsStatusDropdownOpen(false);
+    setIsActiveDropdownOpen(false);
+    setIsCompanyDropdownOpen(false);
+    setCompanyDropdownSearch('');
+    setIsEditorDropdownOpen(false);
+    setEditorDropdownSearch('');
+    setIsHandlingCoordinatorDropdownOpen(false);
+    setHandlingCoordinatorDropdownSearch('');
+  }, []);
+
+  const clearAllJournalFilters = useCallback(() => {
+    setSelectedPipelineIds(new Set());
+    setSelectedSystemEventIds(new Set());
+    setSelectedStageOutcomeKeys(new Set());
+    setSelectedStatuses(new Set());
+    setSelectedActiveStates(new Set(['פעיל']));
+    setSelectedCompanies(new Set());
+    setSelectedEditors(new Set());
+    setSelectedHandlingCoordinators(new Set());
+    setEditorDateRanges({});
+    setDateFrom('');
+    setDateTo('');
+    setEntitySearchQuery('');
+    clearEventsJournalFilters(eventsJournalFilterStorageKey);
+  }, [eventsJournalFilterStorageKey]);
+
+  const removeFromSet = useCallback(
+    (setter: React.Dispatch<React.SetStateAction<Set<string>>>, value: string) => {
+      setter((prev) => {
+        const next = new Set(prev);
+        next.delete(value);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const activeFilterChips = useMemo((): ActiveFilterChip[] => {
+    const chips: ActiveFilterChip[] = [];
+    const q = entitySearchQuery.trim();
+    if (q) {
+      chips.push({
+        id: 'search',
+        group: 'חיפוש',
+        label: q,
+        onRemove: () => setEntitySearchQuery(''),
+      });
+    }
+    for (const pipelineId of selectedPipelineIds) {
+      const pipeline = allPipelinesCatalog.find((p) => p.id === pipelineId);
+      chips.push({
+        id: `pipeline:${pipelineId}`,
+        group: 'תהליך',
+        label: pipeline?.name || pipelineId,
+        onRemove: () => removeFromSet(setSelectedPipelineIds, pipelineId),
+      });
+    }
+    for (const key of selectedStageOutcomeKeys) {
+      const parsed = parseStageOutcomeKey(key);
+      let label = key;
+      if (parsed) {
+        const pipeline = allPipelinesCatalog.find((p) => p.id === parsed.pipelineId);
+        const stage = pipeline?.stages?.find((s) => s.id === parsed.stageId);
+        if (parsed.kind === 'outcome' && parsed.outcomeId) {
+          const outcome = stage?.outcomes?.find((o) => o.id === parsed.outcomeId);
+          label = outcome?.name || stage?.name || key;
+        } else {
+          label = stage?.name || key;
+        }
+      }
+      chips.push({
+        id: `stage-outcome:${key}`,
+        group: 'שלב/תוצאה',
+        label,
+        onRemove: () => removeFromSet(setSelectedStageOutcomeKeys, key),
+      });
+    }
+    for (const sysKey of selectedSystemEventIds) {
+      const entry = resolveSystemEventEntry(sysKey, systemEventGroups);
+      chips.push({
+        id: `system-event:${sysKey}`,
+        group: 'אירוע מערכת',
+        label: entry?.label || sysKey,
+        onRemove: () => removeFromSet(setSelectedSystemEventIds, sysKey),
+      });
+    }
+    for (const status of selectedStatuses) {
+      chips.push({
+        id: `status:${status}`,
+        group: 'סטטוס',
+        label: status,
+        onRemove: () => removeFromSet(setSelectedStatuses, status),
+      });
+    }
+    if (!isDefaultActiveStateFilter(selectedActiveStates)) {
+      for (const state of selectedActiveStates) {
+        chips.push({
+          id: `active:${state}`,
+          group: 'פעילות',
+          label: state,
+          onRemove: () => removeFromSet(setSelectedActiveStates, state),
+        });
+      }
+    }
+    for (const company of selectedCompanies) {
+      chips.push({
+        id: `company:${company}`,
+        group: 'חברה',
+        label: company,
+        onRemove: () => removeFromSet(setSelectedCompanies, company),
+      });
+    }
+    for (const editor of selectedEditors) {
+      const range = editorDateRanges[editor];
+      const rangeLabel =
+        range?.dateFrom || range?.dateTo
+          ? `${range.dateFrom || '…'} – ${range.dateTo || '…'}`
+          : '';
+      chips.push({
+        id: `editor:${editor}`,
+        group: 'עורך',
+        label: rangeLabel ? `${editor} (${rangeLabel})` : editor,
+        onRemove: () => {
+          removeFromSet(setSelectedEditors, editor);
+          setEditorDateRanges((prev) => {
+            const next = { ...prev };
+            delete next[editor];
+            return next;
+          });
+        },
+      });
+    }
+    for (const coordinator of selectedHandlingCoordinators) {
+      chips.push({
+        id: `coordinator:${coordinator}`,
+        group: 'לטיפול',
+        label: coordinator,
+        onRemove: () => removeFromSet(setSelectedHandlingCoordinators, coordinator),
+      });
+    }
+    if (dateFrom || dateTo) {
+      chips.push({
+        id: 'date-range',
+        group: 'תאריך יעד',
+        label: `${dateFrom || '…'} – ${dateTo || '…'}`,
+        onRemove: () => {
+          setDateFrom('');
+          setDateTo('');
+        },
+      });
+    }
+    return chips;
+  }, [
+    entitySearchQuery,
+    selectedPipelineIds,
+    allPipelinesCatalog,
+    selectedStageOutcomeKeys,
+    selectedSystemEventIds,
+    systemEventGroups,
+    selectedStatuses,
+    selectedActiveStates,
+    isDefaultActiveStateFilter,
+    selectedCompanies,
+    selectedEditors,
+    editorDateRanges,
+    selectedHandlingCoordinators,
+    dateFrom,
+    dateTo,
+    removeFromSet,
+  ]);
+
+  const filterTriggerClass =
+    'w-full bg-white border border-border-default rounded-lg py-1.5 px-2.5 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between gap-2 min-h-[34px] min-w-0 shadow-sm';
+  const filterLabelClass = 'text-[11px] font-semibold text-text-muted mb-0.5 leading-none';
 
   return (
     <div
       className={
         embeddedInModal
           ? 'flex flex-col flex-1 min-h-0 h-full overflow-hidden'
-          : 'bg-bg-subtle/30 rounded-2xl border border-border-default flex flex-col overflow-hidden min-h-[560px] md:overflow-visible'
+          : 'bg-bg-subtle/30 rounded-2xl border border-border-default flex flex-col min-h-[560px] md:min-h-[calc(100dvh-10rem)]'
       }
     >
       <div
         className={
           embeddedInModal
             ? 'flex flex-col flex-1 min-h-0 h-full overflow-hidden'
-            : 'flex flex-col h-full bg-bg-default rounded-2xl border border-border-default overflow-hidden md:overflow-visible'
+            : 'flex flex-col flex-1 min-h-0 bg-bg-default rounded-2xl border border-border-default'
         }
       >
         {/* Filters */}
         {!hideFilters && !embeddedInModal ? (
-        <div className="bg-bg-card p-4 border-b border-border-default flex flex-col gap-4 shadow-sm z-10 relative">
-          <div className="w-full flex flex-col gap-1.5">
-            <label className="text-xs font-semibold text-text-muted">חיפוש באירועים</label>
-            <div className="relative">
-              <MagnifyingGlassIcon className="w-4 h-4 text-text-muted absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+        <div className="bg-bg-card px-3 py-3 md:px-4 md:py-3 border-b border-border-default shadow-sm relative z-40 space-y-3">
+          <div className="flex flex-wrap items-center gap-2 md:gap-3">
+            <div className="relative w-full sm:w-auto sm:min-w-[220px] sm:max-w-[320px] flex-1 sm:flex-none">
+              <MagnifyingGlassIcon className="w-4 h-4 text-text-muted absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 type="search"
                 value={entitySearchQuery}
                 onChange={(e) => setEntitySearchQuery(e.target.value)}
-                placeholder="מועמד, איש קשר, שם משרה, שם חברה…"
-                className="w-full bg-bg-input border border-border-default rounded-lg py-2 pr-9 pl-9 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                placeholder="חיפוש…"
+                title="חיפוש לפי מועמד, איש קשר, משרה או חברה"
+                className="w-full bg-white border border-border-default rounded-lg py-1.5 pr-8 pl-8 text-sm focus:ring-2 focus:ring-primary-500 outline-none shadow-sm"
               />
               {entitySearchQuery.trim() ? (
                 <button
                   type="button"
                   onClick={() => setEntitySearchQuery('')}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 p-1 rounded-full text-text-muted hover:text-text-default hover:bg-bg-hover"
+                  className="absolute left-1.5 top-1/2 -translate-y-1/2 p-1 rounded-full text-text-muted hover:text-text-default hover:bg-bg-hover"
                   title="נקה חיפוש"
                   aria-label="נקה חיפוש"
                 >
-                  <XMarkIcon className="w-4 h-4" />
+                  <XMarkIcon className="w-3.5 h-3.5" />
                 </button>
               ) : null}
             </div>
-            <p className="text-[11px] text-text-muted">
-              חיפוש לפי: מועמד · איש קשר · שם משרה · שם חברה
-            </p>
+
+            {hasFilters ? (
+              <button
+                type="button"
+                onClick={clearAllJournalFilters}
+                className="text-xs font-semibold text-text-muted hover:text-red-600 flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors shrink-0"
+              >
+                <XMarkIcon className="w-3.5 h-3.5" /> נקה הכל
+              </button>
+            ) : (
+              <span className="text-[11px] text-text-muted hidden sm:inline">
+                מועמד · איש קשר · משרה · חברה
+              </span>
+            )}
           </div>
 
-          <div className="flex flex-wrap items-end gap-4">
-          <div className="flex items-center gap-2 text-primary-700 font-bold ml-2">
-            <FunnelIcon className="w-5 h-5" />
-            <span>סינון אירועים:</span>
-          </div>
+          {activeFilterChips.length > 0 ? (
+            <ActiveFilterChips chips={activeFilterChips} className="pt-0.5" />
+          ) : null}
 
-          <ProcessManagementCatalogPanel
-            variant="filters"
-            clientPipelines={clientPipelinesCatalog}
-            candidatePipelines={candidatePipelinesCatalog}
-            systemEventGroups={systemEventGroups}
-            selectedPipelineIds={selectedPipelineIds}
-            onSelectedPipelineIdsChange={setSelectedPipelineIds}
-            selectedSystemEventIds={selectedSystemEventIds}
-            onSelectedSystemEventIdsChange={setSelectedSystemEventIds}
-            selectedStageOutcomeKeys={selectedStageOutcomeKeys}
-            onSelectedStageOutcomeKeysChange={setSelectedStageOutcomeKeys}
-            disabled={catalogLoading}
-          />
+          <div className="rounded-xl border border-border-subtle bg-gray-50/60 p-2.5 md:p-3 space-y-2.5">
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-text-muted uppercase tracking-wide px-0.5">
+              <FunnelIcon className="w-3.5 h-3.5 text-primary-600" />
+              סינון תהליכים
+            </div>
 
-          <div className="flex flex-col gap-1 relative" ref={companyDropdownRef}>
-            <label className="text-xs font-semibold text-text-muted">חברה (בחירה מרובה)</label>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-2 md:gap-2.5 items-end">
+              <div className="col-span-2 sm:col-span-3 lg:col-span-4 xl:col-span-3 flex flex-wrap gap-2 md:gap-2.5 items-end">
+                <ProcessManagementCatalogPanel
+                  variant="filters"
+                  clientPipelines={clientPipelinesCatalog}
+                  candidatePipelines={candidatePipelinesCatalog}
+                  systemEventGroups={systemEventGroups}
+                  selectedPipelineIds={selectedPipelineIds}
+                  onSelectedPipelineIdsChange={setSelectedPipelineIds}
+                  selectedSystemEventIds={selectedSystemEventIds}
+                  onSelectedSystemEventIdsChange={setSelectedSystemEventIds}
+                  selectedStageOutcomeKeys={selectedStageOutcomeKeys}
+                  onSelectedStageOutcomeKeysChange={setSelectedStageOutcomeKeys}
+                  disabled={catalogLoading}
+                />
+              </div>
+
+          <div className="flex flex-col gap-0.5 relative min-w-0" ref={companyDropdownRef}>
+            <label className={filterLabelClass}>חברה</label>
             <button
               type="button"
               onClick={() => {
+                closeAllFilterDropdowns();
                 setIsCompanyDropdownOpen((v) => {
                   if (v) setCompanyDropdownSearch('');
                   return !v;
                 });
               }}
-              className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[150px]"
+              className={filterTriggerClass}
             >
               <span className="truncate">
                 {selectedCompanies.size === 0 ? 'כל החברות' : `${selectedCompanies.size} חברות נבחרו`}
@@ -2987,7 +5094,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
             </button>
             {isCompanyDropdownOpen ? (
-              <div className="absolute top-full mt-1 right-0 w-56 bg-white border border-border-default shadow-xl rounded-xl p-2 z-50 max-h-72 overflow-y-auto">
+              <div className="absolute top-full mt-1 right-0 w-56 bg-white border border-border-default shadow-xl rounded-xl p-2 z-[100] max-h-72 overflow-y-auto">
                 <input
                   type="search"
                   value={companyDropdownSearch}
@@ -3026,12 +5133,205 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             ) : null}
           </div>
 
-          <div className="flex flex-col gap-1 relative" ref={activeDropdownRef}>
-            <label className="text-xs font-semibold text-text-muted">פעילות (בחירה מרובה)</label>
+          {canSelectOtherCoordinators ? (
+          <div className="flex flex-col gap-0.5 relative min-w-0" ref={handlingCoordinatorDropdownRef}>
+            <label className={filterLabelClass}>רכז מטפל</label>
             <button
               type="button"
-              onClick={() => setIsActiveDropdownOpen((v) => !v)}
-              className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[150px]"
+              onClick={() => {
+                closeAllFilterDropdowns();
+                setIsHandlingCoordinatorDropdownOpen((v) => {
+                  if (v) setHandlingCoordinatorDropdownSearch('');
+                  return !v;
+                });
+              }}
+              className={filterTriggerClass}
+            >
+              <span className="truncate">
+                {selectedHandlingCoordinators.size === 0
+                  ? 'כל הרכזים'
+                  : `${selectedHandlingCoordinators.size} רכזים נבחרו`}
+              </span>
+              <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
+            </button>
+            {isHandlingCoordinatorDropdownOpen ? (
+              <div className="absolute top-full mt-1 right-0 w-64 bg-white border border-border-default shadow-xl rounded-xl p-2 z-[100] max-h-72 overflow-y-auto">
+                <input
+                  type="search"
+                  value={handlingCoordinatorDropdownSearch}
+                  onChange={(e) => setHandlingCoordinatorDropdownSearch(e.target.value)}
+                  placeholder="חיפוש רכז…"
+                  className="w-full mb-2 bg-bg-input border border-border-default rounded-lg py-1.5 px-2 text-sm focus:ring-2 focus:ring-primary-500 outline-none sticky top-0"
+                  autoFocus
+                />
+                {filteredHandlingCoordinatorGroups.coordinators.length === 0
+                && filteredHandlingCoordinatorGroups.candidates.length === 0 ? (
+                  <p className="text-xs text-text-muted px-2 py-3 text-center">לא נמצאו רכזים</p>
+                ) : (
+                  <>
+                    {filteredHandlingCoordinatorGroups.coordinators.length > 0 ? (
+                      <div className="mb-1">
+                        <div className="text-[10px] font-bold text-text-muted uppercase px-2 pt-1 pb-0.5">
+                          רכזים
+                        </div>
+                        {filteredHandlingCoordinatorGroups.coordinators.map((coordinatorName) => (
+                          <label
+                            key={`staff-${coordinatorName}`}
+                            className="flex items-center gap-2 p-2 hover:bg-bg-hover rounded-lg cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedHandlingCoordinators.has(coordinatorName)}
+                              onChange={() => toggleHandlingCoordinatorSelection(coordinatorName)}
+                              className="rounded border-border-default text-primary-600 w-4 h-4 shrink-0"
+                            />
+                            <span className="text-sm font-medium text-text-default truncate">
+                              {coordinatorName}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : null}
+                    {filteredHandlingCoordinatorGroups.candidates.length > 0 ? (
+                      <div className={filteredHandlingCoordinatorGroups.coordinators.length > 0 ? 'pt-1 border-t border-border-subtle' : ''}>
+                        <div className="text-[10px] font-bold text-text-muted uppercase px-2 pt-1 pb-0.5">
+                          מועמדים
+                        </div>
+                        {filteredHandlingCoordinatorGroups.candidates.map((candidateName) => (
+                          <label
+                            key={`candidate-${candidateName}`}
+                            className="flex items-center gap-2 p-2 hover:bg-bg-hover rounded-lg cursor-pointer"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selectedHandlingCoordinators.has(candidateName)}
+                              onChange={() => toggleHandlingCoordinatorSelection(candidateName)}
+                              className="rounded border-border-default text-primary-600 w-4 h-4 shrink-0"
+                            />
+                            <span className="text-sm font-medium text-text-default truncate">
+                              {candidateName}
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                )}
+                {selectedHandlingCoordinators.size > 0 ? (
+                  <div className="pt-2 mt-2 border-t border-border-subtle">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedHandlingCoordinators(new Set())}
+                      className="text-xs text-primary-600 font-semibold w-full text-right py-1"
+                    >
+                      נקה הכל
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          ) : null}
+
+          <div className="flex flex-col gap-0.5 relative min-w-0" ref={editorDropdownRef}>
+            <label className={filterLabelClass}>נערך על ידי</label>
+            <button
+              type="button"
+              onClick={() => {
+                closeAllFilterDropdowns();
+                setIsEditorDropdownOpen((v) => {
+                  if (v) setEditorDropdownSearch('');
+                  return !v;
+                });
+              }}
+              className={filterTriggerClass}
+            >
+              <span className="truncate">
+                {selectedEditors.size === 0
+                  ? 'כל העורכים'
+                  : editorsWithDateRangeCount > 0
+                    ? `${selectedEditors.size} עורכים · ${editorsWithDateRangeCount} עם טווח`
+                    : `${selectedEditors.size} עורכים נבחרו`}
+              </span>
+              <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
+            </button>
+            {isEditorDropdownOpen ? (
+              <div className="absolute top-full mt-1 right-0 w-64 bg-white border border-border-default shadow-xl rounded-xl p-2 z-[100] max-h-72 overflow-y-auto">
+                <input
+                  type="search"
+                  value={editorDropdownSearch}
+                  onChange={(e) => setEditorDropdownSearch(e.target.value)}
+                  placeholder="חיפוש שם…"
+                  className="w-full mb-2 bg-bg-input border border-border-default rounded-lg py-1.5 px-2 text-sm focus:ring-2 focus:ring-primary-500 outline-none sticky top-0"
+                  autoFocus
+                />
+                {filteredEditors.length === 0 ? (
+                  <p className="text-xs text-text-muted px-2 py-3 text-center">לא נמצאו עורכים</p>
+                ) : (
+                  filteredEditors.map((editorName) => {
+                    const rangeLabel = formatEditorDateRangeLabel(editorDateRanges[editorName]);
+                    return (
+                      <div
+                        key={editorName}
+                        className="flex items-start gap-2 p-2 hover:bg-bg-hover rounded-lg"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedEditors.has(editorName)}
+                          onChange={() => toggleEditorSelection(editorName)}
+                          className="rounded border-border-default text-primary-600 w-4 h-4 mt-0.5 shrink-0"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => openEditorDateRangeModal(editorName)}
+                          className="flex-1 min-w-0 text-right"
+                          title="הגדר טווח תאריכים לעריכות"
+                        >
+                          <span className="text-sm font-medium text-text-default hover:text-primary-700 hover:underline block truncate">
+                            {editorName}
+                          </span>
+                          {rangeLabel ? (
+                            <span className="text-[10px] text-primary-700 font-semibold flex items-center gap-1 mt-0.5">
+                              <CalendarIcon className="w-3 h-3 shrink-0" />
+                              {rangeLabel}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-text-muted mt-0.5">
+                              לחץ להגדרת טווח תאריכים
+                            </span>
+                          )}
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+                {selectedEditors.size > 0 ? (
+                  <div className="pt-2 mt-2 border-t border-border-subtle space-y-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedEditors(new Set());
+                        setEditorDateRanges({});
+                      }}
+                      className="text-xs text-primary-600 font-semibold w-full text-right py-1"
+                    >
+                      נקה הכל
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="flex flex-col gap-0.5 relative min-w-0" ref={activeDropdownRef}>
+            <label className={filterLabelClass}>פעילות</label>
+            <button
+              type="button"
+              onClick={() => {
+                closeAllFilterDropdowns();
+                setIsActiveDropdownOpen((v) => !v);
+              }}
+              className={filterTriggerClass}
             >
               <span className="truncate">
                 {selectedActiveStates.size === 0
@@ -3043,7 +5343,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
             </button>
             {isActiveDropdownOpen ? (
-              <div className="absolute top-full mt-1 right-0 w-48 bg-white border border-border-default shadow-xl rounded-xl p-2 z-50">
+              <div className="absolute top-full mt-1 right-0 w-48 bg-white border border-border-default shadow-xl rounded-xl p-2 z-[100]">
                 {activeStateOptions.map((s) => (
                   <label key={s} className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded-lg cursor-pointer">
                     <input
@@ -3059,12 +5359,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             ) : null}
           </div>
 
-          <div className="flex flex-col gap-1 relative" ref={statusDropdownRef}>
-            <label className="text-xs font-semibold text-text-muted">סטטוס</label>
+          <div className="flex flex-col gap-0.5 relative min-w-0" ref={statusDropdownRef}>
+            <label className={filterLabelClass}>סטטוס</label>
             <button
               type="button"
-              onClick={() => setIsStatusDropdownOpen((v) => !v)}
-              className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[120px]"
+              onClick={() => {
+                closeAllFilterDropdowns();
+                setIsStatusDropdownOpen((v) => !v);
+              }}
+              className={filterTriggerClass}
             >
               <span className="truncate">
                 {selectedStatuses.size === 0 ? 'הכל' : `${selectedStatuses.size} סטטוסים`}
@@ -3072,7 +5375,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
             </button>
             {isStatusDropdownOpen ? (
-              <div className="absolute top-full mt-1 right-0 w-48 bg-white border border-border-default shadow-xl rounded-xl p-2 z-50">
+              <div className="absolute top-full mt-1 right-0 w-48 bg-white border border-border-default shadow-xl rounded-xl p-2 z-[100]">
                 {statusOptions.map((s) => (
                   <label key={s} className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded-lg cursor-pointer">
                     <input
@@ -3088,57 +5391,37 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             ) : null}
           </div>
 
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-semibold text-text-muted">מ-תאריך</label>
-            <input
-              type="date"
-              value={dateFrom}
-              onChange={(e) => setDateFrom(e.target.value)}
-              className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
-            />
+          <div className="col-span-2 sm:col-span-2 lg:col-span-2 xl:col-span-2 flex flex-col gap-0.5 min-w-0">
+            <label className={filterLabelClass}>תאריך יעד</label>
+            <div className="flex gap-1.5">
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                title="מ-תאריך"
+                className="flex-1 min-w-0 bg-white border border-border-default rounded-lg py-1.5 px-2 text-[12px] focus:ring-2 focus:ring-primary-500 outline-none shadow-sm"
+              />
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                title="עד-תאריך"
+                className="flex-1 min-w-0 bg-white border border-border-default rounded-lg py-1.5 px-2 text-[12px] focus:ring-2 focus:ring-primary-500 outline-none shadow-sm"
+              />
+            </div>
           </div>
-          <div className="flex flex-col gap-1">
-            <label className="text-xs font-semibold text-text-muted">עד-תאריך</label>
-            <input
-              type="date"
-              value={dateTo}
-              onChange={(e) => setDateTo(e.target.value)}
-              className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
-            />
-          </div>
-
-          {hasFilters ? (
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedPipelineIds(new Set());
-                setSelectedSystemEventIds(new Set());
-                setSelectedStageOutcomeKeys(new Set());
-                setSelectedStatuses(new Set());
-                setSelectedActiveStates(new Set(['פעיל', 'לא פעיל']));
-                setSelectedCompanies(new Set());
-                setDateFrom('');
-                setDateTo('');
-                setEntitySearchQuery('');
-              }}
-              className="text-sm font-semibold text-text-muted hover:text-red-600 flex items-center gap-1 mb-0.5"
-            >
-              <XMarkIcon className="w-4 h-4" /> נקה סינונים
-            </button>
-          ) : null}
+            </div>
           </div>
         </div>
         ) : null}
 
         <div
           className={`flex flex-col md:flex-row gap-6 p-4 flex-1 min-h-0 bg-bg-subtle ${
-            embeddedInModal
-              ? 'overflow-hidden md:items-stretch'
-              : 'md:items-start md:overflow-visible overflow-hidden'
+            embeddedInModal ? 'overflow-hidden md:items-stretch h-full' : 'md:items-start'
           }`}
         >
           {/* Events list */}
-          <div className="flex-1 min-h-0 bg-white rounded-2xl shadow-sm border border-border-default flex flex-col overflow-hidden">
+          <div className="flex-1 min-h-0 min-w-0 bg-white rounded-2xl shadow-sm border border-border-default flex flex-col overflow-hidden md:max-h-[calc(100dvh-12rem)]">
             <div className="p-4 border-b border-border-default flex flex-wrap justify-between items-center gap-3 bg-gray-50/50">
               <h3 className="font-bold text-text-default text-lg flex items-center gap-2">
                 <ClockIcon className="w-5 h-5 text-primary-600" />
@@ -3152,7 +5435,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                   type="button"
                   onClick={() => setDateSortOrder((prev) => (prev === 'desc' ? 'asc' : 'desc'))}
                   className="flex items-center gap-1.5 bg-bg-input border border-border-default rounded-xl px-3 py-2 text-sm font-semibold text-text-default hover:bg-bg-hover transition"
-                  title={dateSortOrder === 'desc' ? 'מיון לפי תאריך: מהחדש לישן' : 'מיון לפי תאריך: מהישן לחדש'}
+                  title={
+                    dateSortOrder === 'desc'
+                      ? 'מיון לפי תאריך יעד: מהמאוחר למוקדם'
+                      : 'מיון לפי תאריך יעד: מהמוקדם למאוחר'
+                  }
                 >
                   {dateSortOrder === 'desc' ? (
                     <ChevronDownIcon className="w-4 h-4 text-primary-600" />
@@ -3162,39 +5449,43 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                   <span>{dateSortOrder === 'desc' ? 'תאריך יורד' : 'תאריך עולה'}</span>
                 </button>
                 {clientOptions.length > 1 ? (
-                  <select
-                    value={
-                      effectiveCreateOrganizationId
-                        ? `org:${effectiveCreateOrganizationId}`
-                        : effectiveCreateClientId
-                    }
-                    onChange={(e) => {
-                      const raw = e.target.value;
+                  <SearchableSelect
+                    className="min-w-[200px] w-52"
+                    options={createClientSearchOptions}
+                    value={createClientSearchValue}
+                    placeholder="חיפוש לקוח / ארגון…"
+                    icon={<MagnifyingGlassIcon className="w-4 h-4" />}
+                    onChange={(next) => {
+                      if (next == null) return;
+                      const raw = String(next);
                       if (raw.startsWith('org:')) {
                         const orgId = raw.slice(4);
                         const opt = clientOptions.find(
                           (c) => String(c.organizationId || '') === orgId,
                         );
                         setCreateOrganizationId(orgId);
+                        setCreateOrganizationTmpId('');
+                        if (opt?.id) setCreateClientId(opt.id);
+                      } else if (raw.startsWith('tmp:')) {
+                        const tmpId = raw.slice(4);
+                        const opt = clientOptions.find(
+                          (c) => String(c.organizationTmpId || '') === tmpId,
+                        );
+                        setCreateOrganizationId('');
+                        setCreateOrganizationTmpId(tmpId);
                         if (opt?.id) setCreateClientId(opt.id);
                       } else {
                         setCreateClientId(raw);
-                        const opt = clientOptions.find((c) => c.id === raw && !c.organizationId)
+                        const opt =
+                          clientOptions.find((c) => c.id === raw && !c.organizationId && !c.organizationTmpId)
                           || clientOptions.find((c) => c.id === raw);
                         setCreateOrganizationId(String(opt?.organizationId || ''));
+                        setCreateOrganizationTmpId(
+                          opt?.organizationId ? '' : String(opt?.organizationTmpId || ''),
+                        );
                       }
                     }}
-                    className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm"
-                  >
-                    {clientOptions.map((c) => (
-                      <option
-                        key={c.organizationId ? `org-${c.organizationId}` : c.id}
-                        value={c.organizationId ? `org:${c.organizationId}` : c.id}
-                      >
-                        {c.name}
-                      </option>
-                    ))}
-                  </select>
+                  />
                 ) : null}
                 <button
                   type="button"
@@ -3230,11 +5521,27 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                 <AnimatePresence initial={false} mode="popLayout">
                 {displayEvents.map((event) => {
                   const eventKey = journalEventKey(event);
+                  const displayEvent = mergeEventWithPendingOutcome(
+                    event,
+                    pendingOutcomeDraft,
+                    resolveJournalActorName(user),
+                  );
+                  const handlingAssignees = getEventHandlingAssignees(displayEvent);
+                  const handlingAssigneeLabel = formatJournalPersonList(
+                    handlingAssignees,
+                    selfCoordinatorName,
+                  );
+                  const creatorLabel = resolveJournalPersonLabel(
+                    displayEvent.creator,
+                    selfCoordinatorName,
+                  );
                   const isExiting = exitingEventIds.has(eventKey);
                   const rescheduleHighlight = rescheduleHighlights[eventKey];
                   const isSelected = expandedEventId === event.id;
                   const isExpanded = alwaysShowDetails || isSelected;
-                  const isInactive = event.isActive === false;
+                  const isInactive = displayEvent.isActive === false;
+                  const hasPendingOutcomeDraft =
+                    pendingOutcomeDraft?.eventKey === eventKey;
                   const candidateIdForDrawer = resolveCandidateIdForDrawer(event, scopeCandidateId);
                   const contactIdForDrawer = resolveContactIdForDrawer(
                     event,
@@ -3243,6 +5550,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                     contactLookups,
                   );
                   const showPersonBadge = shouldShowPersonBadge(event, contactLookups);
+                  const linkedContactsForEvent = parseEventLinkedContacts(event);
+                  const allowLinkedContactEdit = canEditEventLinkedContacts(event, {
+                    embeddedInModal,
+                    scopeJobLinkId,
+                    scopeCandidateId,
+                  });
                   const { jobId, jobTitle, jobCompany } = resolveEventJobMeta(event);
                   const organizationRef = resolveEventOrganizationRef(
                     event,
@@ -3352,45 +5665,68 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                   </span>
                                 )
                               ) : null}
-                              {showPersonBadge && event.contactName ? (
-                                candidateIdForDrawer ? (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openCandidateDrawer(candidateIdForDrawer, event.contactName || '');
-                                    }}
-                                    className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-teal-100 hover:underline transition-colors"
-                                    title="פתח דראוור מועמד"
-                                  >
-                                    <UserIcon className="w-3 h-3" />
-                                    {event.contactName}
-                                  </button>
-                                ) : contactIdForDrawer && event.clientId ? (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void openContactDrawer(
-                                        contactIdForDrawer,
-                                        event.contactName || '',
-                                        event.clientId,
-                                        resolveCompanyLabel(event),
-                                      );
-                                    }}
-                                    className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-teal-100 hover:underline transition-colors"
-                                    title="פתח דראוור איש קשר"
-                                  >
-                                    <UserIcon className="w-3 h-3" />
-                                    {event.contactName}
-                                  </button>
-                                ) : (
-                                  <span className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
-                                    <UserIcon className="w-3 h-3" />
-                                    {event.contactName}
-                                  </span>
-                                )
-                              ) : null}
+                              {linkedContactsForEvent.length > 0 && !candidateIdForDrawer
+                                ? linkedContactsForEvent.map((linkedContact) => (
+                                    <button
+                                      key={linkedContact.id}
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (event.clientId) {
+                                          void openContactDrawer(
+                                            linkedContact.id,
+                                            linkedContact.name,
+                                            event.clientId,
+                                            resolveCompanyLabel(event),
+                                          );
+                                        }
+                                      }}
+                                      className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-teal-100 hover:underline transition-colors"
+                                      title="פתח דראוור איש קשר"
+                                    >
+                                      <UserIcon className="w-3 h-3" />
+                                      {linkedContact.name}
+                                    </button>
+                                  ))
+                                : showPersonBadge && event.contactName
+                                  ? candidateIdForDrawer ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          openCandidateDrawer(candidateIdForDrawer, event.contactName || '');
+                                        }}
+                                        className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-teal-100 hover:underline transition-colors"
+                                        title="פתח דראוור מועמד"
+                                      >
+                                        <UserIcon className="w-3 h-3" />
+                                        {event.contactName}
+                                      </button>
+                                    ) : contactIdForDrawer && event.clientId ? (
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          void openContactDrawer(
+                                            contactIdForDrawer,
+                                            event.contactName || '',
+                                            event.clientId,
+                                            resolveCompanyLabel(event),
+                                          );
+                                        }}
+                                        className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-teal-100 hover:underline transition-colors"
+                                        title="פתח דראוור איש קשר"
+                                      >
+                                        <UserIcon className="w-3 h-3" />
+                                        {event.contactName}
+                                      </button>
+                                    ) : (
+                                      <span className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
+                                        <UserIcon className="w-3 h-3" />
+                                        {event.contactName}
+                                      </span>
+                                    )
+                                  : null}
                               {jobId ? (
                                 <button
                                   type="button"
@@ -3405,12 +5741,104 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                   {jobTitle || 'משרה'}
                                 </button>
                               ) : null}
-                              {event.stage ? (
+                              {displayEvent.stage ? (
                                 <span className="text-[11px] bg-amber-50 border border-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold">
-                                  {event.stage}
+                                  {displayEvent.stage}
                                 </span>
                               ) : null}
+                              {!isInactive &&
+                              allowLinkedContactEdit &&
+                              editingDescriptionId !== event.id &&
+                              contactLinkEditEventId !== event.id ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    beginContactLinkEdit(event);
+                                  }}
+                                  className="text-[11px] font-bold text-primary-700 bg-primary-50 border border-primary-200 hover:bg-primary-100 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
+                                  title="שיוך אנשי קשר לאירוע"
+                                >
+                                  <UserGroupIcon className="w-3 h-3" />
+                                  {linkedContactsForEvent.length ? 'ערוך אנשי קשר' : 'הוסף אנשי קשר'}
+                                </button>
+                              ) : null}
                             </div>
+                            {contactLinkEditEventId === event.id &&
+                            editingDescriptionId !== event.id ? (
+                              <div
+                                className="mt-3 rounded-lg border border-primary-200 bg-primary-50/40 p-3 space-y-2"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div>
+                                  <p className="text-xs font-bold text-text-default">שיוך אנשי קשר לאירוע</p>
+                                  {organizationRef?.name ? (
+                                    <p className="text-[11px] text-text-muted mt-0.5">
+                                      חברה:{' '}
+                                      <span className="font-semibold text-indigo-800">
+                                        {organizationRef.name}
+                                      </span>{' '}
+                                      (לא ניתן לשנות)
+                                    </p>
+                                  ) : null}
+                                  <p className="text-[11px] text-text-muted mt-1">
+                                    בחר איש קשר אחד או יותר מהרשימה, ואז לחץ «שמור אנשי קשר».
+                                  </p>
+                                </div>
+                                {editContactsLoading ? (
+                                  <p className="text-xs text-text-muted">טוען אנשי קשר...</p>
+                                ) : editContactOptions.length === 0 ? (
+                                  <p className="text-xs text-text-muted">
+                                    לא נמצאו אנשי קשר. הוסיפו אנשי קשר בפרופיל הלקוח/ארגון.
+                                  </p>
+                                ) : (
+                                  <FormMultiSelect
+                                    label="אנשי קשר"
+                                    options={editContactOptions.map((c) => ({
+                                      value: c.id,
+                                      label: c.name,
+                                    }))}
+                                    value={editLinkedContactIds}
+                                    onChange={setEditLinkedContactIds}
+                                    placeholder="בחר אנשי קשר..."
+                                    compact
+                                    searchable
+                                    searchPlaceholder="חיפוש איש קשר…"
+                                    className="[&_button]:border-primary-200 [&_button]:bg-white [&_button]:text-[13px] [&_button]:rounded-lg [&_button]:py-2.5"
+                                  />
+                                )}
+                                <div className="flex justify-end gap-2 pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={cancelContactLinkEdit}
+                                    disabled={isSavingContactLinks}
+                                    className="px-3 py-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 bg-white border border-gray-200 rounded-lg transition-colors disabled:opacity-50"
+                                  >
+                                    ביטול
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      void saveEventLinkedContacts(event).then((ok) => {
+                                        if (ok) cancelContactLinkEdit();
+                                      });
+                                    }}
+                                    disabled={isSavingContactLinks || editContactsLoading}
+                                    className="px-3 py-1.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
+                                  >
+                                    {isSavingContactLinks ? (
+                                      <>
+                                        <ArrowPathIcon className="w-4 h-4 animate-spin" /> שומר...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <CheckIcon className="w-4 h-4" /> שמור אנשי קשר
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">
@@ -3421,10 +5849,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                           ) : null}
                           <span
                             className={`text-[11px] px-3 py-1 rounded-full font-bold uppercase tracking-wider ${
-                              getDynamicStatus(event.status, event.dueDate).color
+                              getDynamicStatus(displayEvent.status, displayEvent.dueDate).color
                             }`}
                           >
-                            {getDynamicStatus(event.status, event.dueDate).label}
+                            {getDynamicStatus(displayEvent.status, displayEvent.dueDate).label}
                           </span>
                           {!isInactive && editingDescriptionId === event.id ? (
                             <label
@@ -3440,12 +5868,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                 className="font-mono text-gray-700 border border-gray-200 rounded px-1 text-[11px]"
                               />
                             </label>
-                          ) : event.dueDate ? (
+                          ) : displayEvent.dueDate ? (
                             <span className="text-[11px] font-semibold text-text-muted flex items-center gap-1 bg-white px-2 py-1 rounded-md border border-gray-100 shadow-sm">
                               <CalendarIcon className="w-3.5 h-3.5 text-gray-400 shrink-0" />
                               יעד:{' '}
                               <span className="font-mono text-gray-700">
-                                {new Date(event.dueDate).toLocaleDateString('he-IL')}
+                                {new Date(displayEvent.dueDate).toLocaleDateString('he-IL')}
                               </span>
                             </span>
                           ) : null}
@@ -3512,24 +5940,63 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                     ))}
                                   </select>
                                 </div>
-                                <div className="w-full sm:w-1/3">
-                                  <label className="block text-xs font-bold text-text-muted mb-1">לטיפול</label>
-                                  <select
-                                    value={editAssigneeValue}
-                                    onChange={(e) => setEditAssigneeValue(e.target.value)}
-                                    className="w-full text-[13px] border border-primary-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white"
-                                  >
-                                    {assigneeOptions.map((name) => (
-                                      <option key={name} value={name}>
-                                        {name}
-                                      </option>
-                                    ))}
-                                    {editAssigneeValue && !assigneeOptions.includes(editAssigneeValue) ? (
-                                      <option value={editAssigneeValue}>{editAssigneeValue}</option>
-                                    ) : null}
-                                  </select>
-                                </div>
+                                {canSelectOtherCoordinators ? (
+                                  <div className="w-full sm:w-1/3">
+                                    <FormMultiSelect
+                                      label="לטיפול"
+                                      options={assigneeOptionsForEdit.map((name) => ({ value: name, label: name }))}
+                                      value={editAssigneeValues}
+                                      onChange={setEditAssigneeValues}
+                                      placeholder="בחר אנשים לטיפול"
+                                      compact
+                                      searchable
+                                      searchPlaceholder="חיפוש שם…"
+                                      className="[&_button]:border-primary-200 [&_button]:bg-white [&_button]:text-[13px] [&_button]:rounded-lg [&_button]:py-2.5"
+                                    />
+                                  </div>
+                                ) : null}
                               </div>
+                              {allowLinkedContactEdit ? (
+                                <div className="rounded-lg border border-primary-100 bg-primary-50/30 p-3 space-y-2">
+                                  <div>
+                                    <p className="text-xs font-bold text-text-default">אנשי קשר</p>
+                                    {organizationRef?.name ? (
+                                      <p className="text-[11px] text-text-muted mt-0.5">
+                                        חברה:{' '}
+                                        <span className="font-semibold text-indigo-800">
+                                          {organizationRef.name}
+                                        </span>{' '}
+                                        (לא ניתן לשנות)
+                                      </p>
+                                    ) : null}
+                                    <p className="text-[11px] text-text-muted mt-1">
+                                      בחר איש קשר נוסף מהרשימה (ניתן לבחור כמה). השינוי נשמר עם «שמור» למטה.
+                                    </p>
+                                  </div>
+                                  {editContactsLoading ? (
+                                    <p className="text-xs text-text-muted">טוען אנשי קשר...</p>
+                                  ) : editContactOptions.length === 0 ? (
+                                    <p className="text-xs text-text-muted">
+                                      לא נמצאו אנשי קשר. הוסיפו אנשי קשר בפרופיל הלקוח/ארגון.
+                                    </p>
+                                  ) : (
+                                    <FormMultiSelect
+                                      label="שיוך לאירוע"
+                                      options={editContactOptions.map((c) => ({
+                                        value: c.id,
+                                        label: c.name,
+                                      }))}
+                                      value={editLinkedContactIds}
+                                      onChange={setEditLinkedContactIds}
+                                      placeholder="בחר אנשי קשר..."
+                                      compact
+                                      searchable
+                                      searchPlaceholder="חיפוש איש קשר…"
+                                      className="[&_button]:border-primary-200 [&_button]:bg-white [&_button]:text-[13px] [&_button]:rounded-lg [&_button]:py-2.5"
+                                    />
+                                  )}
+                                </div>
+                              ) : null}
                               <textarea
                                 value={editDescriptionValue}
                                 onChange={(e) => setEditDescriptionValue(e.target.value)}
@@ -3549,20 +6016,31 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    setEditingDescriptionId(null);
-                                    setEditTitleValue('');
-                                    setEditStatusUpdates([]);
+                                    resetEventEditDraft();
+                                    if (journalEventKey(event) === pendingOutcomeDraft?.eventKey) {
+                                      setPendingOutcomeDraft(null);
+                                    }
                                   }}
-                                  className="px-3 py-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors flex items-center gap-1"
+                                  disabled={isSavingDescription || committingOutcome}
+                                  className="px-3 py-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
                                 >
                                   <XMarkIcon className="w-4 h-4" /> ביטול
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => void handleSaveDescription(event)}
-                                  className="px-3 py-1.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors flex items-center gap-1"
+                                  disabled={isSavingDescription || committingOutcome}
+                                  className="px-3 py-1.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
                                 >
-                                  <CheckIcon className="w-4 h-4" /> שמור
+                                  {isSavingDescription || committingOutcome ? (
+                                    <>
+                                      <ArrowPathIcon className="w-4 h-4 animate-spin" /> שומר...
+                                    </>
+                                  ) : (
+                                    <>
+                                      <CheckIcon className="w-4 h-4" /> שמור
+                                    </>
+                                  )}
                                 </button>
                               </div>
                             </div>
@@ -3614,7 +6092,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                               <button
                                 type="button"
                                 onClick={() => {
-                                  const actor = editAssigneeValue || user?.name || 'אני';
+                                  const actor = resolveJournalActorName(user);
                                   setEditStatusUpdates((prev) => [
                                     {
                                       id: `u-${Date.now()}`,
@@ -3690,22 +6168,25 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                 ))}
                               </div>
                             )
-                          ) : (event.updates || []).length === 0 ? (
+                          ) : (displayEvent.updates || []).length === 0 ? (
                             <div className="text-sm text-text-muted italic bg-gray-50 border border-dashed border-border-default rounded-lg p-3">
                               אין עדכוני סטטוס עדיין. בחר פעולה מהפאנל או עדכן דרך עריכת התיאור.
                             </div>
                           ) : (
                             <div className="space-y-2">
-                              {sortStatusUpdatesByDateDesc(event.updates || []).map((update) => {
+                              {sortStatusUpdatesByDateDesc(displayEvent.updates || []).map((update) => {
                                 const rowEditKey = statusUpdateEditKey(event, update.id);
                                 const isEditingRow = editingStatusUpdateKey === rowEditKey;
+                                const isDraftUpdate = String(update.id).startsWith('draft-outcome-');
                                 return (
                                 <div
                                   key={update.id}
                                   className={`bg-gray-50 border rounded-lg p-3 ${
                                     isEditingRow
                                       ? 'border-primary-200 space-y-2'
-                                      : 'group border-border-subtle flex justify-between items-start gap-3'
+                                      : isDraftUpdate
+                                        ? 'group border-amber-200 bg-amber-50/40 flex justify-between items-start gap-3'
+                                        : 'group border-border-subtle flex justify-between items-start gap-3'
                                   }`}
                                 >
                                   {isEditingRow ? (
@@ -3735,7 +6216,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                         placeholder="הערה / פירוט (אופציונלי)"
                                       />
                                       <p className="text-[10px] text-text-subtle">
-                                        {update.creator || '—'}
+                                        {resolveJournalPersonLabel(update.creator, selfCoordinatorName)}
                                         {update.date
                                           ? ` · ${new Date(update.date).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}`
                                           : ''}
@@ -3744,16 +6225,26 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                         <button
                                           type="button"
                                           onClick={handleCancelEditStatusUpdate}
-                                          className="px-3 py-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors flex items-center gap-1"
+                                          disabled={savingStatusUpdateKey === rowEditKey || committingOutcome}
+                                          className="px-3 py-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
                                         >
                                           <XMarkIcon className="w-4 h-4" /> ביטול
                                         </button>
                                         <button
                                           type="button"
                                           onClick={() => void handleSaveStatusUpdateRow(event, update.id)}
-                                          className="px-3 py-1.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors flex items-center gap-1"
+                                          disabled={savingStatusUpdateKey === rowEditKey || committingOutcome}
+                                          className="px-3 py-1.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
                                         >
-                                          <CheckIcon className="w-4 h-4" /> שמור
+                                          {savingStatusUpdateKey === rowEditKey || committingOutcome ? (
+                                            <>
+                                              <ArrowPathIcon className="w-4 h-4 animate-spin" /> שומר...
+                                            </>
+                                          ) : (
+                                            <>
+                                              <CheckIcon className="w-4 h-4" /> שמור
+                                            </>
+                                          )}
                                         </button>
                                       </div>
                                     </>
@@ -3771,11 +6262,17 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                             </p>
                                           ) : null}
                                           <p className="text-[11px] text-text-muted mt-0.5">
-                                            עודכן ע&quot;י: {update.creator || '—'}
+                                            עודכן ע&quot;י:{' '}
+                                            {resolveJournalPersonLabel(update.creator, selfCoordinatorName)}
                                           </p>
                                         </div>
                                       </div>
                                       <div className="flex items-center gap-1.5 shrink-0">
+                                        {isDraftUpdate ? (
+                                          <span className="text-[10px] font-bold text-amber-800 bg-amber-100 border border-amber-200 px-2 py-0.5 rounded">
+                                            טיוטה
+                                          </span>
+                                        ) : null}
                                         {!isInactive ? (
                                           <button
                                             type="button"
@@ -3805,6 +6302,48 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                           )}
                         </div>
 
+                        {hasPendingOutcomeDraft && isExpanded && !isInactive ? (
+                          <div
+                            className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl flex flex-wrap items-center justify-between gap-3"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span className="text-sm font-semibold text-amber-900">
+                              יש שינוי שלא נשמר —{' '}
+                              {pendingOutcomeDraft?.outcomeId === GENERAL_OUTCOME_ID
+                                ? pendingOutcomeDraft.preview.historyComment?.trim() ||
+                                  pendingOutcomeDraft.preview.historyTitle ||
+                                  'הערה חופשית'
+                                : pendingOutcomeDraft?.preview.historyTitle}
+                            </span>
+                            <div className="flex gap-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={handleCancelPendingOutcome}
+                                disabled={committingOutcome || isSavingDescription}
+                                className="px-3 py-1.5 text-sm font-semibold text-gray-600 hover:text-gray-800 bg-white hover:bg-gray-50 border border-gray-200 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
+                              >
+                                <XMarkIcon className="w-4 h-4" /> ביטול
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => void handleCommitPendingOutcome()}
+                                disabled={committingOutcome || isSavingDescription}
+                                className="px-3 py-1.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
+                              >
+                                {committingOutcome || isSavingDescription ? (
+                                  <>
+                                    <ArrowPathIcon className="w-4 h-4 animate-spin" /> שומר...
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckIcon className="w-4 h-4" /> שמור
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+
                         <div
                           className="flex flex-wrap items-center gap-6 text-xs text-text-muted border-t border-border-subtle pt-4"
                           onClick={(e) => e.stopPropagation()}
@@ -3832,19 +6371,30 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                               ) : (
                                 <span className="font-mono text-gray-700">
                                   {' '}
-                                  {event.dueDate ? new Date(event.dueDate).toLocaleDateString('he-IL') : '-'}
+                                  {displayEvent.dueDate
+                                    ? new Date(displayEvent.dueDate).toLocaleDateString('he-IL')
+                                    : '-'}
                                 </span>
                               )}
                             </span>
                           </div>
                           <div className="flex items-center gap-2 bg-white px-2 py-1 rounded shadow-sm border border-gray-100">
                             <div className="w-5 h-5 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center font-bold text-[10px]">
-                              {(event.creator || '?').charAt(0)}
+                              {(creatorLabel || '?').charAt(0)}
                             </div>
                             <span className="font-semibold">
-                              נפתח ע&quot;י: <span className="text-gray-700">{event.creator || '—'}</span>
+                              נפתח ע&quot;י: <span className="text-gray-700">{creatorLabel}</span>
                             </span>
                           </div>
+                          {handlingAssigneeLabel !== '—' ? (
+                            <div className="flex items-center gap-2 bg-white px-2 py-1 rounded shadow-sm border border-gray-100">
+                              <UserIcon className="w-4 h-4 text-gray-400" />
+                              <span className="font-semibold">
+                                לטיפול:{' '}
+                                <span className="text-gray-700">{handlingAssigneeLabel}</span>
+                              </span>
+                            </div>
+                          ) : null}
                         </div>
                       </div>
                     </div>
@@ -3861,7 +6411,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             className={`w-full md:w-72 shrink-0 min-h-0 bg-white rounded-2xl shadow-sm border border-border-default flex flex-col overflow-hidden ${
               embeddedInModal
                 ? 'md:self-stretch'
-                : 'self-start md:sticky md:top-4 md:max-h-[calc(100vh-5rem)] z-10'
+                : 'self-start sticky top-4 z-20 max-h-[calc(100dvh-5rem)]'
             }`}
           >
             <div className="p-4 border-b border-border-default bg-primary-600 text-white">
@@ -3985,7 +6535,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                     </p>
                   </div>
                   {currentOutcomes.length === 0 ? (
-                    <div className="px-1 space-y-3">
+                    <div className="px-1 space-y-3 mb-3">
                       <p className="text-sm text-text-muted leading-relaxed">
                         {isGenericStageName(String(currentStageLabel || '')) ? (
                           <>
@@ -4012,17 +6562,26 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                         מה אפשר לעשות בשלב זה?
                       </button>
                     </div>
-                  ) : (
-                    currentOutcomes.map((outcome) => (
+                  ) : null}
+                  {sidebarOutcomes.map((outcome) => {
+                      const isGeneralNote = outcome.id === GENERAL_OUTCOME_ID;
+                      const isDraftOutcome =
+                        pendingOutcomeDraft?.eventKey === journalEventKey(selectedEvent) &&
+                        pendingOutcomeDraft.outcomeId === outcome.id;
+                      return (
                       <div
                         key={outcome.id}
-                        className="flex items-start w-full rounded-xl overflow-hidden shadow-sm bg-white hover:bg-primary-50 border border-transparent hover:border-primary-100 transition-all group"
+                        className={`flex items-start w-full rounded-xl overflow-hidden shadow-sm transition-all group ${
+                          isDraftOutcome
+                            ? 'bg-primary-50 border-2 border-primary-300'
+                            : 'bg-white hover:bg-primary-50 border border-transparent hover:border-primary-100'
+                        }`}
                       >
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            void handleLogOutcome(outcome);
+                            handlePreviewOutcome(outcome);
                           }}
                           className="flex-1 min-w-0 text-right px-4 py-3 text-[13px] font-bold text-gray-700 group-hover:text-primary-800 transition-colors flex items-start justify-between gap-3 bg-transparent border-0"
                         >
@@ -4031,31 +6590,68 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                               {outcome.title}
                             </span>
                             <span className="w-full text-[10px] font-medium text-text-muted leading-snug break-words whitespace-normal">
-                              {outcomeActionSubtitle(
-                                outcome,
-                                actionPipelineContext?.pipeline.stages || [],
-                              )}
+                              {isGeneralNote
+                                ? 'הוספת הערה חופשית'
+                                : outcomeActionSubtitle(
+                                    outcome,
+                                    actionPipelineContext?.pipeline.stages || [],
+                                  )}
                             </span>
                           </span>
                           <div className="w-6 h-6 rounded-full bg-gray-50 group-hover:bg-primary-100 flex items-center justify-center transition-colors shrink-0 mt-0.5">
                             <CheckCircleIcon className="w-4 h-4 text-gray-300 group-hover:text-primary-600 transition-colors" />
                           </div>
                         </button>
+                        {!isGeneralNote ? (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setAutomationInfoView({ mode: 'outcome', outcome });
+                            }}
+                            className="shrink-0 px-2.5 pt-3.5 pb-3 border-0 bg-transparent text-blue-600 hover:text-blue-700 transition-colors flex items-center justify-center self-start"
+                            title="מה יקרה בפעולה זו?"
+                            aria-label={`מידע על אוטומציות — ${outcome.title}`}
+                          >
+                            <InformationCircleIcon className="w-5 h-5" />
+                          </button>
+                        ) : null}
+                      </div>
+                    );
+                    })}
+                  {pendingOutcomeDraft?.eventKey === journalEventKey(selectedEvent) ? (
+                    <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded-xl space-y-2">
+                      <p className="text-xs font-semibold text-amber-900 leading-relaxed">
+                        תצוגה מקדימה — השינוי יישמר רק לאחר לחיצה על «שמור».
+                      </p>
+                      <div className="flex gap-2">
                         <button
                           type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setAutomationInfoView({ mode: 'outcome', outcome });
-                          }}
-                          className="shrink-0 px-2.5 pt-3.5 pb-3 border-0 bg-transparent text-blue-600 hover:text-blue-700 transition-colors flex items-center justify-center self-start"
-                          title="מה יקרה בפעולה זו?"
-                          aria-label={`מידע על אוטומציות — ${outcome.title}`}
+                          onClick={handleCancelPendingOutcome}
+                          disabled={committingOutcome || isSavingDescription}
+                          className="flex-1 px-3 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
                         >
-                          <InformationCircleIcon className="w-5 h-5" />
+                          ביטול
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleCommitPendingOutcome()}
+                          disabled={committingOutcome || isSavingDescription}
+                          className="flex-1 px-3 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:opacity-50 flex items-center justify-center gap-1"
+                        >
+                          {committingOutcome || isSavingDescription ? (
+                            <>
+                              <ArrowPathIcon className="w-4 h-4 animate-spin" /> שומר...
+                            </>
+                          ) : (
+                            <>
+                              <CheckIcon className="w-4 h-4" /> שמור
+                            </>
+                          )}
                         </button>
                       </div>
-                    ))
-                  )}
+                    </div>
+                  ) : null}
                 </div>
               )}
             </div>
@@ -4063,14 +6659,40 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         </div>
       </div>
 
+      <DuplicateProcessPromptModal
+        isOpen={Boolean(duplicateProcessPrompt?.existingEvents.length)}
+        processName={duplicateProcessPrompt?.processName || ''}
+        organizationName={duplicateProcessPrompt?.organizationName || ''}
+        existingEvents={(duplicateProcessPrompt?.existingEvents || []).map(summarizeDuplicateProcessEvent)}
+        onGoToExisting={() => {
+          const target = pickBestProcessEvent(duplicateProcessPrompt?.existingEvents || []);
+          if (target) navigateToExistingProcessEvent(target);
+        }}
+        onCreateAnyway={() => {
+          const pending = duplicateProcessPrompt?.pendingPayload;
+          setDuplicateProcessPrompt(null);
+          if (pending) {
+            void executeCreateProcessEvent(pending)
+              .then(() => closeCreateEventModal())
+              .catch((err: unknown) => {
+                alert(err instanceof Error ? err.message : 'יצירת האירוע נכשלה');
+              });
+            return;
+          }
+          setIsEventModalOpen(true);
+        }}
+        onClose={() => setDuplicateProcessPrompt(null)}
+      />
+
       {effectiveCreateClientId ? (
         <ProcessEventModal
-          key={`${eventModalScope?.clientId || effectiveCreateClientId}:${eventModalScope?.organizationId || effectiveCreateOrganizationId}:${eventModalScope?.organizationName || createOrganizationName}`}
+          key={`${eventModalScope?.clientId || effectiveCreateClientId}:${modalContactsOrganizationScope.organizationId || ''}:${modalContactsOrganizationScope.organizationTmpId || ''}:${eventModalScope?.organizationName || createOrganizationName}`}
           isOpen={isEventModalOpen}
           onClose={closeCreateEventModal}
           onSave={handleCreateProcessEvent}
           clientId={eventModalScope?.clientId || effectiveCreateClientId}
-          organizationId={eventModalScope?.organizationId || effectiveCreateOrganizationId || null}
+          organizationId={modalContactsOrganizationScope.organizationId}
+          organizationTmpId={modalContactsOrganizationScope.organizationTmpId}
           organizationName={eventModalScope?.organizationName || createOrganizationName || undefined}
           clientName={eventModalScope?.organizationName || createOrganizationName}
           contactId={scopeContactId || scopeCandidateId || undefined}
@@ -4081,6 +6703,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           candidatePipelines={modalCandidatePipelines}
           linkedEntityName={scopeCandidateId ? scopeContactName || undefined : undefined}
           initialData={createEventInitialData}
+          restrictContactsToOrganization={hideFilters || Boolean(scopeContactId)}
         />
       ) : null}
 
@@ -4110,17 +6733,18 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         candidate={candidateDrawer}
         isOpen={isCandidateDrawerOpen && Boolean(candidateDrawer)}
         onClose={() => setIsCandidateDrawerOpen(false)}
+        onOpenMessageModal={openMessageModal}
         isFavorite={false}
         onToggleFavorite={() => {}}
         overlayZIndexClass={drawerOverlayZ}
       />
       <ContactDrawer
         isOpen={isContactDrawerOpen && Boolean(contactDrawer)}
-        onClose={() => setIsContactDrawerOpen(false)}
+        onClose={closeContactDrawer}
         contact={contactDrawer}
         processOptions={[]}
         onStartProcess={() => {}}
-        openMessageModal={() => {}}
+        openMessageModal={openMessageModal}
       />
       <OrganizationPreviewDrawer
         target={orgDrawerTarget}
@@ -4138,6 +6762,104 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         onClose={() => setIsJobDrawerOpen(false)}
         overlayZIndexClass={drawerOverlayZ}
       />
+
+      {editorDateRangeModal ? (
+        <div
+          className="fixed inset-0 bg-black/60 z-[10090] flex items-center justify-center p-4 backdrop-blur-sm"
+          onClick={() => setEditorDateRangeModal(null)}
+          dir="rtl"
+        >
+          <div
+            className="bg-bg-card w-full max-w-md rounded-2xl shadow-2xl border border-border-default overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="editor-date-range-title"
+          >
+            <header className="flex items-start justify-between gap-3 p-5 border-b border-border-default">
+              <div className="flex items-start gap-3 min-w-0">
+                <CalendarDaysIcon className="w-6 h-6 text-primary-600 shrink-0 mt-0.5" />
+                <div className="min-w-0">
+                  <h3 id="editor-date-range-title" className="text-lg font-bold text-text-default">
+                    טווח תאריכים לעריכה
+                  </h3>
+                  <p className="text-sm text-text-muted mt-1 truncate">
+                    נערך על ידי: <span className="font-semibold text-text-default">{editorDateRangeModal.editorName}</span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditorDateRangeModal(null)}
+                className="shrink-0 p-1.5 rounded-lg text-text-muted hover:bg-bg-hover hover:text-text-default"
+                aria-label="סגור"
+              >
+                <XMarkIcon className="w-5 h-5" />
+              </button>
+            </header>
+            <div className="p-5 space-y-4">
+              <p className="text-xs text-text-muted leading-relaxed">
+                יוצגו אירועים עם עדכון או יצירה על ידי עורך זה בטווח שנבחר. השאר ריק לכל התאריכים.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-semibold text-text-muted">מ-תאריך</label>
+                  <input
+                    type="date"
+                    value={editorDateRangeModal.dateFrom}
+                    onChange={(e) =>
+                      setEditorDateRangeModal((prev) =>
+                        prev ? { ...prev, dateFrom: e.target.value } : prev,
+                      )
+                    }
+                    className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-xs font-semibold text-text-muted">עד-תאריך</label>
+                  <input
+                    type="date"
+                    value={editorDateRangeModal.dateTo}
+                    onChange={(e) =>
+                      setEditorDateRangeModal((prev) =>
+                        prev ? { ...prev, dateTo: e.target.value } : prev,
+                      )
+                    }
+                    className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+            <footer className="flex justify-end gap-2 p-5 border-t border-border-default bg-gray-50/60">
+              <button
+                type="button"
+                onClick={() => setEditorDateRangeModal(null)}
+                className="px-4 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50"
+              >
+                ביטול
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditorDateRangeModal((prev) =>
+                    prev ? { ...prev, dateFrom: '', dateTo: '' } : prev,
+                  );
+                }}
+                className="px-4 py-2 text-sm font-semibold text-gray-600 bg-white border border-gray-200 rounded-lg hover:bg-gray-50"
+              >
+                נקה טווח
+              </button>
+              <button
+                type="button"
+                onClick={applyEditorDateRangeModal}
+                className="px-4 py-2 text-sm font-semibold text-white bg-primary-600 rounded-lg hover:bg-primary-700"
+              >
+                החל
+              </button>
+            </footer>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };

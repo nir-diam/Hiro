@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { XMarkIcon, ArrowUpTrayIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 
 export type DocumentType = 'קורות חיים' | 'תעודה' | 'מסמך זיהוי' | 'חוזה' | 'הסכם' | 'חשבונית' | 'אחר';
 
@@ -27,14 +28,23 @@ interface DocumentFormModalProps {
 
 const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, onSave, document, context, contextName }) => {
   const { t } = useLanguage();
+  const { user } = useAuth();
+  const defaultUploadedBy = useMemo(
+    () => String(user?.name || user?.email || '').trim() || 'מערכת',
+    [user?.name, user?.email],
+  );
   const [formData, setFormData] = useState({
     name: '',
     type: 'קורות חיים' as DocumentType,
     notes: '',
-    uploadedBy: 'דנה כהן',
+    uploadedBy: defaultUploadedBy,
   });
   const [fileName, setFileName] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const MAX_FILE_BYTES = 10 * 1024 * 1024;
+  const ACCEPTED_FILE = /\.(pdf|doc|docx|dox|png|jpe?g)$/i;
 
   useEffect(() => {
     if (document) {
@@ -51,23 +61,59 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
         name: '',
         type: context === 'client' ? 'חוזה' : 'קורות חיים',
         notes: '',
-        uploadedBy: 'דנה כהן',
+        uploadedBy: defaultUploadedBy,
       });
       setFileName(null);
       setFile(null);
     }
-  }, [document, isOpen, context]);
+  }, [document, isOpen, context, defaultUploadedBy]);
+
+  const applyFile = (nextFile: File) => {
+    if (nextFile.size > MAX_FILE_BYTES) {
+      alert(t('document_form.file_too_large') || 'הקובץ גדול מ-10MB');
+      return;
+    }
+    if (!ACCEPTED_FILE.test(nextFile.name)) {
+      alert(t('document_form.file_type_invalid') || 'סוג קובץ לא נתמך');
+      return;
+    }
+    setFile(nextFile);
+    setFileName(nextFile.name);
+    setFormData((prev) =>
+      prev.name
+        ? prev
+        : { ...prev, name: nextFile.name.split('.').slice(0, -1).join('.') },
+    );
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      const nextFile = e.target.files[0];
-      setFile(nextFile);
-      setFileName(nextFile.name);
-      // Pre-fill name field if it's empty
-      if (!formData.name) {
-        setFormData(prev => ({ ...prev, name: nextFile.name.split('.').slice(0, -1).join('.') }));
-      }
-    }
+    const nextFile = e.target.files?.[0];
+    if (nextFile) applyFile(nextFile);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDragEnter = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLLabelElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const nextFile = e.dataTransfer.files?.[0];
+    if (nextFile) applyFile(nextFile);
   };
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
@@ -107,7 +153,18 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
           <main className="p-6 space-y-4 overflow-y-auto max-h-[70vh]">
             {!document && (
                  <div className="flex items-center justify-center w-full">
-                    <label htmlFor="dropzone-file" className="flex flex-col items-center justify-center w-full h-40 border-2 border-border-default border-dashed rounded-lg cursor-pointer bg-bg-subtle hover:bg-bg-hover">
+                    <label
+                      htmlFor="dropzone-file"
+                      className={`flex flex-col items-center justify-center w-full h-40 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
+                        isDragging
+                          ? 'border-primary-500 bg-primary-50'
+                          : 'border-border-default bg-bg-subtle hover:bg-bg-hover'
+                      }`}
+                      onDragOver={handleDragOver}
+                      onDragEnter={handleDragEnter}
+                      onDragLeave={handleDragLeave}
+                      onDrop={handleDrop}
+                    >
                         <div className="flex flex-col items-center justify-center pt-5 pb-6">
                             <ArrowUpTrayIcon className="w-8 h-8 mb-4 text-text-subtle" />
                             <p className="mb-2 text-sm text-text-muted"><span className="font-semibold">לחץ להעלאה</span> או גרור קובץ</p>

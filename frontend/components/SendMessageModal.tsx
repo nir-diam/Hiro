@@ -26,13 +26,29 @@ import {
     type ClientAttachment,
 } from '../services/clientAttachmentsApi';
 import { logWhatsappComposeOpen, sendComposeSms } from '../services/messagingApi';
-import { createOutboundMessageClientEvent } from '../services/clientOutboundMessageApi';
+import {
+    createOutboundMessageClientEvent,
+    type OutboundMessageAttachmentRef,
+} from '../services/clientOutboundMessageApi';
 import { applyMessageTemplatePlaceholders, loadMessagingPlaceholderValues } from '../services/messageTemplatePlaceholders';
 import {
     applyProposalTemplatePlaceholders,
     fetchProposalTemplates,
     type ProposalTemplateDto,
 } from '../services/proposalsApi';
+import {
+    fetchClientLogoForProposalExport,
+    trimLogoForProposalPdf,
+    type ExportImagePayload,
+} from '../utils/exportImagePayload';
+import { applyClientLogoToEmailAttachments } from '../utils/emailAttachmentLogoStamp';
+import {
+    prepareProposalHtmlForDelivery,
+    prepareProposalHtmlForPdf,
+    wrapProposalEmailBlock,
+    wrapProposalPdfDocument,
+} from '../utils/proposalHtmlPrepare';
+import { authHeaders } from '../utils/authHeaders';
 import { useAuth } from '../context/AuthContext';
 import type { MessageRecipientOption } from '../hooks/useUIState';
 import { RichTextArea } from './RichTextArea';
@@ -247,6 +263,7 @@ interface SendMessageModalProps {
   /** CRM journal context (single-recipient / contact profile). */
   linkedClientId?: string | null;
   linkedOrganizationId?: string | null;
+  linkedOrganizationName?: string | null;
   linkedContactId?: string | null;
   recipientType?: MessageTemplateRecipientType;
 }
@@ -313,6 +330,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     initialRecipientIds,
     linkedClientId,
     linkedOrganizationId,
+    linkedOrganizationName,
     linkedContactId,
     recipientType,
 }) => {
@@ -335,6 +353,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         templateName: string;
     } | null>(null);
     const [proposalEditDraft, setProposalEditDraft] = useState('');
+    const [proposalLogoPayload, setProposalLogoPayload] = useState<ExportImagePayload | null>(null);
+    const [resolvedLinkedOrgName, setResolvedLinkedOrgName] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState<string | null>(null);
     const [templates, setTemplates] = useState<MessageTemplateDto[]>([]);
@@ -448,6 +468,9 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         subject?: string;
         /** email → map toEmail to recipient; wa/sms → one event per CRM recipient */
         emailResults?: { to: string; notificationMessageId?: string | null; providerMessageId?: string | null }[];
+        emailAttachments?: SendNotificationEmailAttachment[];
+        proposalTemplateNames?: string[];
+        isProposal?: boolean;
     }) => {
         const recipients = crmRecipientsForLog;
         if (!recipients.length) return;
@@ -461,6 +484,18 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     || recipients[0];
                 const clientId = String(match?.clientId || linkedClientId || '').trim();
                 if (!clientId) continue;
+                const messageId = result.notificationMessageId ? String(result.notificationMessageId).trim() : '';
+                const attachmentRefs: OutboundMessageAttachmentRef[] =
+                    messageId && args.emailAttachments?.length
+                        ? args.emailAttachments.map((att, index) => ({
+                              filename: att.filename,
+                              contentType: att.contentType || null,
+                              size: att.content ? Math.floor((att.content.length * 3) / 4) : null,
+                              notificationMessageId: messageId,
+                              index,
+                              contentBase64: att.content || null,
+                          }))
+                        : [];
                 tasks.push(
                     createOutboundMessageClientEvent({
                         clientId,
@@ -475,6 +510,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         notificationMessageId: result.notificationMessageId || null,
                         providerMessageId: result.providerMessageId || null,
                         deliveryStatus: 'נשלח',
+                        attachments: attachmentRefs.length ? attachmentRefs : undefined,
+                        proposalTemplateNames: args.proposalTemplateNames?.length
+                            ? args.proposalTemplateNames
+                            : undefined,
+                        isProposal: args.isProposal === true,
                     }).catch((err) => {
                         console.warn('[SendMessageModal] failed to create email journal event', err);
                     }),
@@ -582,13 +622,28 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         candidatePhone,
     ]);
 
+    const proposalCompanyName = useMemo(() => {
+        const explicit = String(linkedOrganizationName || '').trim();
+        if (explicit) return explicit;
+        if (resolvedLinkedOrgName) return resolvedLinkedOrgName;
+        const fromRecipient = String(primaryCrmRecipient?.subtitle || '').trim();
+        if (fromRecipient && fromRecipient !== 'מייל חופשי') return fromRecipient;
+        return String(placeholderValues.company_name || placeholderValues.client_name || '').trim();
+    }, [
+        linkedOrganizationName,
+        resolvedLinkedOrgName,
+        primaryCrmRecipient?.subtitle,
+        placeholderValues.company_name,
+        placeholderValues.client_name,
+    ]);
+
     const proposalPlaceholderContext = useMemo(
         () => ({
             contactName: primaryCrmRecipient?.name || effectiveName,
             contactEmail: primaryCrmRecipient?.email || effectiveEmail || '',
             contactPhone: primaryCrmRecipient?.phone || effectivePhone || '',
             contactRole: primaryCrmRecipient?.subtitle || '',
-            companyName: primaryCrmRecipient?.subtitle || String(placeholderValues.client_name || ''),
+            companyName: proposalCompanyName,
             repName: senderDisplayName,
             repEmail: String(user?.email || ''),
             repPhone: String(user?.phone || ''),
@@ -598,20 +653,26 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             effectiveName,
             effectiveEmail,
             effectivePhone,
-            placeholderValues.client_name,
+            proposalCompanyName,
             senderDisplayName,
             user?.email,
             user?.phone,
         ],
     );
 
-    const resolveProposalBodyHtml = useCallback(
+    const resolveProposalRawHtml = useCallback(
         (tpl: ProposalTemplateDto, rowIndex: number): string => {
             const override = proposalRowCustomizations[rowIndex]?.contentOverride;
-            if (override !== undefined) return override;
-            return applyProposalTemplatePlaceholders(tpl.content || '', proposalPlaceholderContext);
+            const source = override !== undefined ? override : (tpl.content || '');
+            return applyProposalTemplatePlaceholders(source, proposalPlaceholderContext);
         },
         [proposalRowCustomizations, proposalPlaceholderContext],
+    );
+
+    const resolveProposalBodyHtml = useCallback(
+        (tpl: ProposalTemplateDto, rowIndex: number): string =>
+            prepareProposalHtmlForDelivery(resolveProposalRawHtml(tpl, rowIndex), proposalLogoPayload),
+        [resolveProposalRawHtml, proposalLogoPayload],
     );
 
     const closeProposalEditModal = useCallback(() => {
@@ -731,6 +792,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setProposalTemplates([]);
         setProposalTemplatesError(null);
         setProposalRowCustomizations({});
+        setProposalLogoPayload(null);
+        setResolvedLinkedOrgName('');
         closeProposalEditModal();
         setSelectedTemplateId('');
         setSelectedJobId('');
@@ -822,6 +885,64 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             cancelled = true;
         };
     }, [isOpen, mode, effectiveClientId]);
+
+    useEffect(() => {
+        if (!isOpen || mode !== 'email') {
+            setProposalLogoPayload(null);
+            return;
+        }
+        let cancelled = false;
+        void fetchClientLogoForProposalExport(effectiveClientId)
+            .then(async (payload) => {
+                if (cancelled) return;
+                setProposalLogoPayload(payload ? await trimLogoForProposalPdf(payload) : null);
+            })
+            .catch(() => {
+                if (!cancelled) setProposalLogoPayload(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, mode, effectiveClientId]);
+
+    useEffect(() => {
+        if (!isOpen) {
+            setResolvedLinkedOrgName('');
+            return;
+        }
+        const explicit = String(linkedOrganizationName || '').trim();
+        if (explicit) {
+            setResolvedLinkedOrgName(explicit);
+            return;
+        }
+        const orgId = String(
+            linkedOrganizationId || primaryCrmRecipient?.organizationId || '',
+        ).trim();
+        if (!orgId) {
+            setResolvedLinkedOrgName('');
+            return;
+        }
+        let cancelled = false;
+        const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+        void fetch(`${apiBase}/api/organizations/${encodeURIComponent(orgId)}`, {
+            headers: authHeaders(true),
+            credentials: 'include',
+        })
+            .then(async (res) => {
+                if (!res.ok) return null;
+                return res.json() as Promise<{ name?: string }>;
+            })
+            .then((row) => {
+                if (cancelled) return;
+                setResolvedLinkedOrgName(String(row?.name || '').trim());
+            })
+            .catch(() => {
+                if (!cancelled) setResolvedLinkedOrgName('');
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, linkedOrganizationName, linkedOrganizationId, primaryCrmRecipient?.organizationId]);
 
     useEffect(() => {
         if (!isOpen || mode !== 'email' || !effectiveClientId) {
@@ -1076,16 +1197,19 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         });
 
         try {
+            let deliveryLogoPayload = proposalLogoPayload;
+            if (!deliveryLogoPayload && proposalEntries.length > 0) {
+                const raw = await fetchClientLogoForProposalExport(effectiveClientId);
+                deliveryLogoPayload = raw ? await trimLogoForProposalPdf(raw) : null;
+            }
+
             const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
             for (const { tpl, rowIndex } of proposalEntries) {
-                const bodyHtml = resolveProposalBodyHtml(tpl, rowIndex);
+                const rawHtml = resolveProposalRawHtml(tpl, rowIndex);
                 const sendAsPdf = Boolean(proposalRowCustomizations[rowIndex]?.sendAsPdf);
                 if (sendAsPdf) {
-                    const pdfHtml =
-                        `<div dir="rtl" style="font-family:sans-serif;padding:24px;width:794px;background:#fff;box-sizing:border-box;line-height:1.55;color:#222;">` +
-                        `<div style="font-weight:700;font-size:16px;margin-bottom:12px;">${escapeHtml(tpl.name)}</div>` +
-                        `${bodyHtml}` +
-                        `</div>`;
+                    const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                    const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
                     const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
                     const baseName = sanitizeProposalPdfFilename(tpl.name);
                     const filename =
@@ -1098,12 +1222,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         contentType: 'application/pdf',
                     });
                 } else {
-                    proposalHtmlBlocks.push(
-                        `<div style="margin-top:1.25em;padding-top:1em;border-top:1px solid #ddd;">` +
-                            `<div style="font-weight:700;color:#333;font-size:13px;margin-bottom:0.5em;">${escapeHtml(tpl.name)}</div>` +
-                            `<div dir="rtl">${bodyHtml}</div>` +
-                            `</div>`,
-                    );
+                    const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                    proposalHtmlBlocks.push(wrapProposalEmailBlock(bodyHtml, escapeHtml(tpl.name)));
                 }
             }
         } catch (pdfErr: unknown) {
@@ -1145,11 +1265,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
         setIsSubmitting(true);
         try {
-            let emailAttachments: SendNotificationEmailAttachment[] = [];
+            let userEmailAttachments: SendNotificationEmailAttachment[] = [];
             const selectedAttachmentRows = attachments.filter((row) => row.trim());
             if (selectedAttachmentRows.length) {
                 try {
-                    emailAttachments = await buildComposeEmailAttachments(
+                    userEmailAttachments = await buildComposeEmailAttachments(
                         selectedAttachmentRows,
                         localAttachmentFiles,
                         clientAttachmentsById,
@@ -1161,15 +1281,24 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     setIsSubmitting(false);
                     return;
                 }
-                if (selectedAttachmentRows.length && emailAttachments.length === 0) {
+                if (selectedAttachmentRows.length && userEmailAttachments.length === 0) {
                     setSubmitError('לא ניתן לצרף את הקבצים שנבחרו — נסו שוב או בחרו קבצים אחרים');
                     setIsSubmitting(false);
                     return;
                 }
             }
-            if (proposalPdfAttachments.length) {
-                emailAttachments = [...emailAttachments, ...proposalPdfAttachments];
+            if (userEmailAttachments.length) {
+                try {
+                    userEmailAttachments = await applyClientLogoToEmailAttachments(userEmailAttachments);
+                } catch (logoErr: unknown) {
+                    setSubmitError(
+                        logoErr instanceof Error ? logoErr.message : 'הוספת לוגו לקבצים המצורפים נכשלה',
+                    );
+                    setIsSubmitting(false);
+                    return;
+                }
             }
+            let emailAttachments = [...userEmailAttachments, ...proposalPdfAttachments];
 
             const emailResults: {
                 to: string;
@@ -1220,6 +1349,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                 body: textOut,
                 subject: subject.trim(),
                 emailResults,
+                emailAttachments,
+                proposalTemplateNames: selectedProposalTemplates.length
+                    ? selectedProposalTemplates.map((t) => t.name)
+                    : undefined,
+                isProposal: selectedProposalTemplates.length > 0,
             });
             onClose();
         } catch (err: unknown) {

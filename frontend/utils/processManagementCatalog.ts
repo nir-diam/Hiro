@@ -55,10 +55,80 @@ const LEGACY_SYSTEM_EVENT_KEYS: Record<string, string> = {
   form_completed_tech_test: 'טופס.מבחן_מקצועי_הוגש',
   bg_check_passed: 'בדיקת_רקע.עבר_בהצלחה',
   hris_sync_completed: 'מערכת_HR.סנכרון_הושלם',
+  staff_email_sent: 'דיוור ודיווח.נשלח מייל',
+  email_sent: 'דיוור ודיווח.נשלח מייל',
+  proposal_sent: 'דיוור ודיווח.הצעת מחיר',
+  proposal: 'דיוור ודיווח.הצעת מחיר',
 };
+
+/** Catalog/API may use a short label while journal rows store the long form. */
+export const PROPOSAL_SYSTEM_EVENT_NAMES = new Set(['נשלחה הצעת מחיר', 'הצעת מחיר']);
+
+export function isProposalSystemEventName(name: string): boolean {
+  return PROPOSAL_SYSTEM_EVENT_NAMES.has(String(name || '').trim());
+}
+
+export function isProposalSystemEventEntry(entry: SystemEventCatalogEntry): boolean {
+  return String(entry.triggerName || '').trim() === 'דיוור ודיווח'
+    && isProposalSystemEventName(entry.eventName);
+}
+
+function proposalSystemEventNamesMatch(storedEventName: string, entry: SystemEventCatalogEntry): boolean {
+  const stored = String(storedEventName || '').trim();
+  if (!stored) return false;
+  if (stored === entry.eventName) return true;
+  return isProposalSystemEventEntry(entry) && isProposalSystemEventName(stored);
+}
 
 export const systemEventCompositeKey = (triggerName: string, eventName: string) =>
   `${String(triggerName || '').trim()}::${String(eventName || '').trim()}`;
+
+/** One catalog row for proposal sends regardless of short/long eventName in DB. */
+export function canonicalSystemEventCompositeKey(triggerName: string, eventName: string): string {
+  const trigger = String(triggerName || '').trim();
+  const name = String(eventName || '').trim();
+  if (trigger === 'דיוור ודיווח' && isProposalSystemEventName(name)) {
+    return systemEventCompositeKey(trigger, 'הצעת מחיר');
+  }
+  return systemEventCompositeKey(trigger, name);
+}
+
+/** Merge API catalog rows with built-in fallback entries (e.g. before DB migration). */
+export function mergeSystemEventCatalogGroups(
+  primary: SystemEventCatalogGroup[],
+  supplemental: SystemEventCatalogGroup[],
+): SystemEventCatalogGroup[] {
+  const byTrigger = new Map<string, Map<string, SystemEventCatalogEntry>>();
+  const ingest = (groups: SystemEventCatalogGroup[]) => {
+    for (const group of groups) {
+      const trigger = String(group.label || '').trim() || 'אירועים';
+      if (!byTrigger.has(trigger)) byTrigger.set(trigger, new Map());
+      const bucket = byTrigger.get(trigger)!;
+      for (const entry of group.events) {
+        const value = entry.value.includes('::')
+          ? canonicalSystemEventCompositeKey(
+              entry.value.split('::')[0] || entry.triggerName,
+              entry.value.split('::').slice(1).join('::') || entry.eventName,
+            )
+          : canonicalSystemEventCompositeKey(entry.triggerName, entry.eventName);
+        const existing = bucket.get(value);
+        if (!existing) {
+          bucket.set(value, { ...entry, value, rowIds: [...entry.rowIds] });
+          continue;
+        }
+        for (const id of entry.rowIds) {
+          if (id && !existing.rowIds.includes(id)) existing.rowIds.push(id);
+        }
+      }
+    }
+  };
+  ingest(primary);
+  ingest(supplemental);
+  return Array.from(byTrigger.entries()).map(([label, eventsMap]) => ({
+    label,
+    events: Array.from(eventsMap.values()).sort((a, b) => a.label.localeCompare(b.label, 'he')),
+  }));
+}
 
 export function buildSystemEventGroupsFromApiRows(
   rows: Array<{ id: string; isActive?: boolean; triggerName: string; eventName: string }>,
@@ -69,11 +139,15 @@ export function buildSystemEventGroupsFromApiRows(
     const triggerName = String(row.triggerName || 'אירועים').trim();
     const eventName = String(row.eventName || '').trim();
     if (!eventName) continue;
-    const value = systemEventCompositeKey(triggerName, eventName);
+    const value = canonicalSystemEventCompositeKey(triggerName, eventName);
+    const label =
+      triggerName === 'דיוור ודיווח' && isProposalSystemEventName(eventName)
+        ? 'הצעת מחיר'
+        : eventName;
     if (!byTrigger.has(triggerName)) byTrigger.set(triggerName, new Map());
     const bucket = byTrigger.get(triggerName)!;
     if (!bucket.has(value)) {
-      bucket.set(value, { value, label: eventName, triggerName, eventName, rowIds: [] });
+      bucket.set(value, { value, label, triggerName, eventName: label, rowIds: [] });
     }
     const id = String(row.id || '').trim();
     if (id) bucket.get(value)!.rowIds.push(id);
@@ -217,7 +291,9 @@ function metadataMatchesSystemEvent(
     if (rowId && entry.rowIds.includes(rowId)) return true;
     const triggerName = String(row.triggerName || '').trim();
     const eventName = String(row.eventName || '').trim();
-    if (triggerName === entry.triggerName && eventName === entry.eventName) return true;
+    if (triggerName === entry.triggerName && proposalSystemEventNamesMatch(eventName, entry)) {
+      return true;
+    }
   }
   const rowId = String(metadata.systemEventRowId || '').trim();
   if (rowId && entry.rowIds.includes(rowId)) return true;
@@ -247,6 +323,125 @@ function pipelinePlacementMatchesSystemEvent(
     }
     if (!sid && !stageName) return true;
   }
+  return false;
+}
+
+function isOutboundProposalEvent(event: {
+  title?: string;
+  description?: string;
+  type?: string[];
+  metadata?: Record<string, unknown>;
+}): boolean {
+  const meta = event.metadata;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta) && meta.outboundProposal === true) {
+    return true;
+  }
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    const names = meta.proposalTemplateNames;
+    if (Array.isArray(names) && names.some((name) => String(name || '').trim())) return true;
+    const attachments = meta.attachments;
+    if (Array.isArray(attachments)) {
+      const hasProposalAttachment = attachments.some((row) => {
+        if (!row || typeof row !== 'object') return false;
+        const filename = String((row as Record<string, unknown>).filename || '').trim();
+        return /הצעת\s*מחיר|proposal/i.test(filename);
+      });
+      if (hasProposalAttachment) return true;
+    }
+    const sys = meta.systemEvent;
+    if (sys && typeof sys === 'object' && !Array.isArray(sys)) {
+      const row = sys as Record<string, unknown>;
+      if (isProposalSystemEventName(String(row.eventName || '').trim())) return true;
+    }
+  }
+  const types = Array.isArray(event.type) ? event.type : [];
+  if (types.some((t) => {
+    const v = String(t || '').trim().toLowerCase();
+    return v === 'proposal' || v === 'הצעת מחיר';
+  })) {
+    return true;
+  }
+  const title = String(event.title || '').trim();
+  if (title.startsWith('נשלחה הצעת מחיר') || title.startsWith('הצעת מחיר:')) return true;
+  return /תבניות הצעת מחיר:/i.test(String(event.description || ''));
+}
+
+function outboundStaffEmailMatchesSystemEvent(
+  event: {
+    title?: string;
+    description?: string;
+    process?: string;
+    type?: string[];
+    metadata?: Record<string, unknown>;
+  },
+  entry: SystemEventCatalogEntry,
+): boolean {
+  if (entry.eventName !== 'נשלח מייל') return false;
+  if (isOutboundProposalEvent(event)) return false;
+  const meta = event.metadata;
+  const isOutbound =
+    meta && typeof meta === 'object' && !Array.isArray(meta) && meta.outboundMessage === true;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    if (isOutbound) {
+      const channel = String(meta.channel || '').trim().toLowerCase();
+      if (channel === 'email' || channel === 'mail' || channel.includes('email') || channel === 'מייל') {
+        return true;
+      }
+    }
+    const sys = meta.systemEvent;
+    if (sys && typeof sys === 'object' && !Array.isArray(sys)) {
+      const row = sys as Record<string, unknown>;
+      if (
+        String(row.triggerName || '').trim() === entry.triggerName
+        && String(row.eventName || '').trim() === entry.eventName
+      ) {
+        return true;
+      }
+    }
+  }
+  const types = Array.isArray(event.type) ? event.type : [];
+  const hasEmailType = types.some((t) => {
+    const v = String(t || '').trim().toLowerCase();
+    return v === 'email' || v === 'mail' || v === 'מייל';
+  });
+  if (hasEmailType && isOutbound) return true;
+  const proc = String(event.process || '').trim().toLowerCase();
+  if ((proc === 'email' || proc === 'mail' || proc === 'מייל') && isOutbound) return true;
+  const title = String(event.title || '').trim();
+  if (title.startsWith('נשלח מייל')) return true;
+  const desc = String(event.description || '');
+  if (/^ערוץ:\s*(מייל|email)\b/im.test(desc)) return true;
+  return false;
+}
+
+function outboundProposalMatchesSystemEvent(
+  event: {
+    title?: string;
+    description?: string;
+    type?: string[];
+    metadata?: Record<string, unknown>;
+  },
+  entry: SystemEventCatalogEntry,
+): boolean {
+  if (!isProposalSystemEventEntry(entry)) return false;
+  if (!isOutboundProposalEvent(event)) return false;
+  const meta = event.metadata;
+  if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+    const sys = meta.systemEvent;
+    if (sys && typeof sys === 'object' && !Array.isArray(sys)) {
+      const row = sys as Record<string, unknown>;
+      if (
+        String(row.triggerName || '').trim() === entry.triggerName
+        && proposalSystemEventNamesMatch(String(row.eventName || '').trim(), entry)
+      ) {
+        return true;
+      }
+    }
+  }
+  const title = String(event.title || '').trim();
+  if (title.startsWith('נשלחה הצעת מחיר') || title.startsWith('הצעת מחיר:')) return true;
+  const desc = String(event.description || '');
+  if (/תבניות הצעת מחיר:/i.test(desc)) return true;
   return false;
 }
 
@@ -290,6 +485,8 @@ export function eventMatchesSystemEventFilters(
     const entry = resolveSystemEventEntry(key, groups);
     if (!entry) continue;
     if (metadataMatchesSystemEvent(event.metadata, entry)) return true;
+    if (outboundStaffEmailMatchesSystemEvent(event, entry)) return true;
+    if (outboundProposalMatchesSystemEvent(event, entry)) return true;
     const matches = pipelineMatches.get(entry.value) || [];
     if (pipelinePlacementMatchesSystemEvent(event, matches, pipelines)) return true;
     if (textMatchesSystemEvent(event, entry)) return true;

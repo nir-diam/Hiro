@@ -1,6 +1,7 @@
 import type { Client, Contact } from '../components/ClientsListView';
 import type { Candidate } from '../components/CandidatesListView';
 import { authHeaders } from './authHeaders';
+import { contactFromApi, primaryEmail, primaryPhone } from './contactFormModel';
 
 export type JobDrawerJob = {
   id: string | number;
@@ -89,6 +90,13 @@ function normalizeContactFromApi(raw: Record<string, unknown>, fallback: Contact
       .slice(0, 2)
       .map((w) => w[0])
       .join('') || fallback.avatar || '?';
+  const form = contactFromApi(raw);
+  const phone =
+    primaryPhone(form, 'mobile')
+    || primaryPhone(form, 'office')
+    || String(raw.mobilePhone || raw.phone || fallback.phone || '');
+  const email = primaryEmail(form) || String(raw.email || fallback.email || '');
+
   return {
     ...fallback,
     id: String(raw.id || fallback.id),
@@ -101,12 +109,46 @@ function normalizeContactFromApi(raw: Record<string, unknown>, fallback: Contact
       (raw.organizationLogo as string | undefined)
       || (orgRow?.logo as string | undefined)
       || fallback.clientLogo,
-    phone: String(raw.phone || raw.mobilePhone || fallback.phone || ''),
-    email: String(raw.email || fallback.email || ''),
+    phone,
+    email,
     avatar: initials,
     pipelineId: raw.pipelineId ? String(raw.pipelineId) : fallback.pipelineId,
     stageId: raw.processStage ? String(raw.processStage) : fallback.stageId,
   };
+}
+
+async function fetchContactRow(
+  apiBase: string,
+  clientId: string,
+  contactId: string,
+): Promise<Record<string, unknown> | null> {
+  const res = await fetch(
+    `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}`,
+    {
+      credentials: 'include',
+      headers: authHeaders(),
+      cache: 'no-store',
+    },
+  );
+  if (res.ok) {
+    const json = await res.json();
+    const raw = (json?.data ?? json) as Record<string, unknown>;
+    if (raw && typeof raw === 'object') return raw;
+  }
+
+  const listRes = await fetch(
+    `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts`,
+    {
+      credentials: 'include',
+      headers: authHeaders(),
+      cache: 'no-store',
+    },
+  );
+  if (!listRes.ok) return null;
+  const listJson = await listRes.json();
+  const rows = Array.isArray(listJson) ? listJson : listJson?.data ?? [];
+  const match = rows.find((row: Record<string, unknown>) => String(row.id || '') === String(contactId));
+  return match && typeof match === 'object' ? match : null;
 }
 
 export async function hydrateContactForDrawer(
@@ -117,18 +159,8 @@ export async function hydrateContactForDrawer(
 ): Promise<Contact | null> {
   if (!apiBase || !clientId || !contactId) return null;
   try {
-    const res = await fetch(
-      `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}`,
-      {
-        credentials: 'include',
-        headers: authHeaders(),
-        cache: 'no-store',
-      },
-    );
-    if (!res.ok) return null;
-    const json = await res.json();
-    const raw = (json?.data ?? json) as Record<string, unknown>;
-    if (!raw || typeof raw !== 'object') return null;
+    const raw = await fetchContactRow(apiBase, clientId, contactId);
+    if (!raw) return null;
     return normalizeContactFromApi(raw, fallback);
   } catch {
     return null;

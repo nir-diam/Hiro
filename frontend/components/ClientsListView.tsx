@@ -28,6 +28,7 @@ import { buildMoveTargetOptions, isOutcomeTarget, resolveMoveTarget } from '../u
 import { fetchClientHealthPulse, type OrgHealthPulseDto } from '../services/clientHealthRulesApi';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
 
 // --- TYPES ---
 type ClientStatus = 'פעיל' | 'לא פעיל' | 'בהקפאה' | 'ליד חדש';
@@ -1244,7 +1245,27 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const isTenantUser = Boolean(tenantClientId);
     
     // --- Tabs State ---
-    const [activeTab, setActiveTab] = useState<'companies' | 'contacts' | 'tasks' | 'events'>('companies');
+    const CLIENTS_ACTIVE_TAB_KEY = 'hiro.clientsList.activeTab';
+    const loadClientsActiveTab = (): 'companies' | 'contacts' | 'tasks' | 'events' => {
+        if (typeof sessionStorage === 'undefined') return 'companies';
+        try {
+            const saved = sessionStorage.getItem(CLIENTS_ACTIVE_TAB_KEY);
+            if (saved === 'contacts' || saved === 'tasks' || saved === 'events') return saved;
+        } catch {
+            // ignore
+        }
+        return 'companies';
+    };
+    const [activeTab, setActiveTab] = useState<'companies' | 'contacts' | 'tasks' | 'events'>(loadClientsActiveTab);
+
+    useEffect(() => {
+        if (typeof sessionStorage === 'undefined') return;
+        try {
+            sessionStorage.setItem(CLIENTS_ACTIVE_TAB_KEY, activeTab);
+        } catch {
+            // ignore
+        }
+    }, [activeTab]);
 
     // --- Clients Data & State ---
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -1651,42 +1672,6 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         return [];
     }, [isPlatformAdmin, clients, tenantClientId, linkedOrganizations]);
 
-    const eventScopeOrganization = useMemo(() => {
-        if (filterContactClient === 'all') return null;
-
-        if (isTenantUser) {
-            const org = linkedOrganizations.find((o) => namesMatchLoosely(o.name, filterContactClient));
-            if (org?.organizationId) {
-                return { organizationId: org.organizationId, name: org.name, clientId: tenantClientId || undefined };
-            }
-        }
-
-        const contactMatch = contacts.find((c) => namesMatchLoosely(c.clientName, filterContactClient));
-        if (contactMatch) {
-            if (isTenantUser && contactMatch.organizationId && tenantClientId) {
-                return {
-                    organizationId: contactMatch.organizationId,
-                    name: contactMatch.clientName,
-                    clientId: contactMatch.clientId || tenantClientId,
-                };
-            }
-            if (isPlatformAdmin && contactMatch.clientId) {
-                return {
-                    organizationId: contactMatch.organizationId || null,
-                    name: contactMatch.clientName,
-                    clientId: contactMatch.clientId,
-                };
-            }
-        }
-
-        if (isPlatformAdmin) {
-            const client = clients.find((c) => namesMatchLoosely(c.name, filterContactClient));
-            if (client) {
-                return { organizationId: null as string | null, name: client.name, clientId: client.id };
-            }
-        }
-        return null;
-    }, [filterContactClient, isTenantUser, isPlatformAdmin, linkedOrganizations, clients, contacts, tenantClientId]);
     
     // Available stages based on selected pipeline (stages + outcomes)
     const availableStageOptions = useMemo(() => {
@@ -3062,6 +3047,210 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     }
 
 
+    const handleClearListFilters = () => {
+        setSearchTerm('');
+        if (activeTab === 'companies') {
+            setFilterAccountManager('all');
+            setCompanyFilters(EMPTY_COMPANY_FILTERS);
+            setSelectedLocations([]);
+            setActivePipelineId('all');
+            setActiveStageId('all');
+        } else if (activeTab === 'contacts') {
+            setFilterContactRole('all');
+            setFilterContactClient('all');
+            setFilterContactPipeline('all');
+            setFilterContactStage('all');
+            setFilterContactDateFrom('');
+            setFilterContactDateTo('');
+        }
+    };
+
+    const listActiveFilterChips = useMemo((): ActiveFilterChip[] => {
+        const chips: ActiveFilterChip[] = [];
+        const q = searchTerm.trim();
+        if (q) {
+            chips.push({
+                id: 'search',
+                group: 'חיפוש',
+                label: q,
+                onRemove: () => setSearchTerm(''),
+            });
+        }
+
+        if (activeTab === 'companies') {
+            if (filterAccountManager !== 'all') {
+                chips.push({
+                    id: `manager:${filterAccountManager}`,
+                    group: 'מנהל תיק',
+                    label: filterAccountManager,
+                    onRemove: () => setFilterAccountManager('all'),
+                });
+            }
+            const cf = normalizeCompanyFilters(companyFilters);
+            const pushCompanyValues = (group: string, key: keyof CompanyFilters, values: string[]) => {
+                for (const value of values) {
+                    chips.push({
+                        id: `${String(key)}:${value}`,
+                        group,
+                        label: value,
+                        onRemove: () =>
+                            setCompanyFilters((prev) => {
+                                const n = normalizeCompanyFilters(prev);
+                                return { ...n, [key]: (n[key] as string[]).filter((v) => v !== value) };
+                            }),
+                    });
+                }
+            };
+            pushCompanyValues('תעשייה', 'industries', cf.industries);
+            pushCompanyValues('תחום', 'fields', cf.fields);
+            pushCompanyValues('תפקיד', 'roles', cf.roles);
+            pushCompanyValues('גודל', 'sizes', cf.sizes);
+            pushCompanyValues('סקטור', 'sectors', cf.sectors);
+            for (const loc of selectedLocations) {
+                const label = String(loc.value || '').trim();
+                if (!label) continue;
+                chips.push({
+                    id: `loc:${label}`,
+                    group: 'מיקום',
+                    label,
+                    onRemove: () =>
+                        setSelectedLocations((prev) => prev.filter((l) => l !== loc)),
+                });
+            }
+            if (activePipelineId !== 'all') {
+                const pipeline = pipelines.find((p) => p.id === activePipelineId);
+                chips.push({
+                    id: `pipeline:${activePipelineId}`,
+                    group: 'תהליך',
+                    label: pipeline?.name || activePipelineId,
+                    onRemove: () => {
+                        setActivePipelineId('all');
+                        setActiveStageId('all');
+                    },
+                });
+            }
+            if (activeStageId !== 'all') {
+                const option = availableStageOptions.find((o) => o.value === activeStageId);
+                chips.push({
+                    id: `stage:${activeStageId}`,
+                    group: 'שלב/תוצאה',
+                    label: option?.label || activeStageId,
+                    onRemove: () => setActiveStageId('all'),
+                });
+            }
+        }
+
+        if (activeTab === 'contacts') {
+            if (filterContactRole !== 'all') {
+                chips.push({
+                    id: `role:${filterContactRole}`,
+                    group: 'תפקיד',
+                    label: filterContactRole,
+                    onRemove: () => setFilterContactRole('all'),
+                });
+            }
+            if (filterContactClient !== 'all') {
+                chips.push({
+                    id: `client:${filterContactClient}`,
+                    group: 'לקוח',
+                    label: filterContactClient,
+                    onRemove: () => setFilterContactClient('all'),
+                });
+            }
+            if (filterContactPipeline !== 'all') {
+                const pipeline = pipelines.find((p) => p.id === filterContactPipeline);
+                chips.push({
+                    id: `contact-pipeline:${filterContactPipeline}`,
+                    group: 'תהליך',
+                    label: pipeline?.name || filterContactPipeline,
+                    onRemove: () => {
+                        setFilterContactPipeline('all');
+                        setFilterContactStage('all');
+                    },
+                });
+            }
+            if (filterContactStage !== 'all') {
+                const option = availableContactStageOptions.find((o) => o.value === filterContactStage);
+                chips.push({
+                    id: `contact-stage:${filterContactStage}`,
+                    group: 'שלב/תוצאה',
+                    label: option?.label || filterContactStage,
+                    onRemove: () => setFilterContactStage('all'),
+                });
+            }
+            if (filterContactDateFrom || filterContactDateTo) {
+                chips.push({
+                    id: 'contact-dates',
+                    group: 'תאריך יצירה',
+                    label: `${filterContactDateFrom || '…'} – ${filterContactDateTo || '…'}`,
+                    onRemove: () => {
+                        setFilterContactDateFrom('');
+                        setFilterContactDateTo('');
+                    },
+                });
+            }
+        }
+
+        return chips;
+    }, [
+        searchTerm,
+        activeTab,
+        filterAccountManager,
+        companyFilters,
+        selectedLocations,
+        activePipelineId,
+        activeStageId,
+        pipelines,
+        availableStageOptions,
+        filterContactRole,
+        filterContactClient,
+        filterContactPipeline,
+        filterContactStage,
+        availableContactStageOptions,
+        filterContactDateFrom,
+        filterContactDateTo,
+    ]);
+
+    const listResultsSummary = useMemo(() => {
+        if (activeTab === 'companies') {
+            if (isTenantUser) {
+                return {
+                    visible: !isLoading,
+                    filtered: filteredLinkedOrganizations.length,
+                    total: linkedOrganizations.length,
+                    entityLabel: 'חברות מקושרות',
+                };
+            }
+            return {
+                visible: !isLoading,
+                filtered: filteredClients.length,
+                total: clients.length,
+                entityLabel: 'לקוחות',
+            };
+        }
+        if (activeTab === 'contacts') {
+            return {
+                visible: !contactsLoading && !contactsError,
+                filtered: filteredContacts.length,
+                total: contacts.length,
+                entityLabel: 'אנשי קשר',
+            };
+        }
+        return null;
+    }, [
+        activeTab,
+        isTenantUser,
+        isLoading,
+        filteredLinkedOrganizations.length,
+        linkedOrganizations.length,
+        filteredClients.length,
+        clients.length,
+        contactsLoading,
+        contactsError,
+        filteredContacts.length,
+        contacts.length,
+    ]);
+
     // --- Render ---
 
     return (
@@ -3186,14 +3375,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                      <UserGroupIcon className="w-5 h-5 inline-block ml-2"/>
                      אנשי קשר
                  </button>
-                 {/* Processes / Tasks — admin: across clients; tenant: across linked orgs */}
-                 <button 
-                    onClick={() => { setActiveTab('tasks'); setSelectedCompanyIds(new Set()); setSelectedContactIds(new Set()); }} 
-                    className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'tasks' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
-                 >
-                     <ClipboardDocumentCheckIcon className="w-5 h-5 inline-block ml-2"/>
-                     תהליכים/משימות
-                 </button>
+              
                  <button
                     onClick={() => { setActiveTab('events'); setSelectedCompanyIds(new Set()); setSelectedContactIds(new Set()); }}
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'events' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
@@ -3208,7 +3390,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
              <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm flex flex-col items-center gap-4 relative z-30">
                  
                  {/* Top Row: Search */}
-                 <div className="w-full flex items-center gap-4">
+                 <div className="w-full flex flex-col gap-2">
                      <div className="relative flex-grow">
                         <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                         <input 
@@ -3223,6 +3405,35 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                             className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 transition-all" 
                         />
                      </div>
+                     {listResultsSummary?.visible ? (
+                         <p className="text-xs font-semibold text-text-muted px-1">
+                             {listActiveFilterChips.length > 0 ||
+                             listResultsSummary.filtered !== listResultsSummary.total ? (
+                                 <>
+                                     מציג{' '}
+                                     <span className="text-primary-700 font-bold">{listResultsSummary.filtered}</span>{' '}
+                                     מתוך {listResultsSummary.total} {listResultsSummary.entityLabel}
+                                 </>
+                             ) : (
+                                 <>
+                                     <span className="text-text-default font-bold">{listResultsSummary.filtered}</span>{' '}
+                                     {listResultsSummary.entityLabel}
+                                 </>
+                             )}
+                         </p>
+                     ) : null}
+                     {(activeTab === 'companies' || activeTab === 'contacts') && listActiveFilterChips.length > 0 ? (
+                         <div className="flex flex-wrap items-center gap-2">
+                             <button
+                                 type="button"
+                                 onClick={handleClearListFilters}
+                                 className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-primary-600 text-white hover:bg-primary-700 shadow-sm border border-primary-600 shrink-0"
+                             >
+                                 נקה חיפוש
+                             </button>
+                             <ActiveFilterChips chips={listActiveFilterChips} />
+                         </div>
+                     ) : null}
                  </div>
 
                  {/* Filters Row - Companies tab (admin clients + tenant linked orgs) */}
@@ -4429,19 +4640,9 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  ) : activeTab === 'events' ? (
                     <ClientsEventsJournalTab
                         clientOptions={eventClientOptions}
-                        defaultClientId={
-                            isPlatformAdmin
-                                ? eventScopeOrganization?.clientId || clients[0]?.id || null
-                                : tenantClientId
-                        }
-                        defaultOrganizationId={eventScopeOrganization?.organizationId || null}
-                        defaultOrganizationName={eventScopeOrganization?.name || null}
-                        scopeOrganizationId={eventScopeOrganization?.organizationId || null}
-                        scopeOrganizationName={eventScopeOrganization?.name || null}
-                        preferredOrganizationLabel={
-                            filterContactClient !== 'all' ? filterContactClient : null
-                        }
-                        crossClientJournal={Boolean(isPlatformAdmin && !eventScopeOrganization?.organizationId)}
+                        defaultClientId={isPlatformAdmin ? clients[0]?.id || null : tenantClientId}
+                        crossClientJournal={isPlatformAdmin}
+                        openMessageModal={openMessageModal}
                     />
                  ) : (
                     // --- TASKS VIEW: admin → all clients; tenant → orgs under tenant client ---

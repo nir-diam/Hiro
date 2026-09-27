@@ -28,6 +28,9 @@ export type ExecutePipelineOutcomeParams = {
     candidateId?: string;
   };
   source?: 'manual' | 'system_event';
+  /** Optional journal row title/comment from the UI draft before commit. */
+  historyTitle?: string;
+  historyComment?: string;
 };
 
 export type AutomationResultItem = {

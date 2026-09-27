@@ -127,9 +127,51 @@ const sanitizeClientDisplayName = (client) => {
   return plain;
 };
 
+/** Large JSONB columns — kept in DB for journal/history but omitted from GET /api/clients/:id. */
+const CLIENT_API_EXCLUDE = ['events', 'documents', 'users', 'finance'];
+
+const ORG_LINK_SUMMARY_ATTRIBUTES = [
+  'id',
+  'name',
+  'nameEn',
+  'legalName',
+  'mainField',
+  'mainField2',
+  'subField',
+  'secondaryField',
+  'employeeCount',
+  'type',
+  'website',
+  'logo',
+  'address',
+  'phone',
+  'location',
+  'description',
+  'snippet',
+  'structure',
+  'businessModel',
+  'productType',
+  'activityStatus',
+];
+
+const clientToApiJson = (client) => {
+  if (!client) return client;
+  const plain = sanitizeClientDisplayName(
+    client.toJSON ? client.toJSON() : (typeof client.get === 'function' ? client.get({ plain: true }) : client),
+  );
+  if (!plain || typeof plain !== 'object') return plain;
+  for (const key of CLIENT_API_EXCLUDE) {
+    if (key in plain) delete plain[key];
+  }
+  return plain;
+};
+
 const list = async (options = {}) => {
   const activeOnly = Boolean(options.activeOnly);
-  const q = { order: [['name', 'ASC']] };
+  const q = {
+    order: [['name', 'ASC']],
+    attributes: { exclude: CLIENT_API_EXCLUDE },
+  };
   if (activeOnly) {
     q.where = { isActive: true };
   }
@@ -145,6 +187,42 @@ const getById = async (id) => {
     throw err;
   }
   return client;
+};
+
+const CLIENT_BY_ID_CACHE_MS = 30_000;
+/** @type {Map<string, { at: number, data: Record<string, unknown> }>} */
+const clientByIdApiCache = new Map();
+
+const invalidateClientApiCache = (id) => {
+  const key = String(id || '').trim();
+  if (key) clientByIdApiCache.delete(key);
+};
+
+/** Slim client row for HTTP API (no events journal blob / embedded documents). */
+const getByIdForApi = async (id, { skipCache = false } = {}) => {
+  const key = String(id || '').trim();
+  if (!key) {
+    const err = new Error('Client not found');
+    err.status = 404;
+    throw err;
+  }
+  if (!skipCache) {
+    const hit = clientByIdApiCache.get(key);
+    if (hit && Date.now() - hit.at < CLIENT_BY_ID_CACHE_MS) {
+      return hit.data;
+    }
+  }
+  const client = await Client.findByPk(key, {
+    attributes: { exclude: CLIENT_API_EXCLUDE },
+  });
+  if (!client) {
+    const err = new Error('Client not found');
+    err.status = 404;
+    throw err;
+  }
+  const data = clientToApiJson(client);
+  clientByIdApiCache.set(key, { at: Date.now(), data });
+  return data;
 };
 
 const create = async (payload) => {
@@ -179,7 +257,10 @@ const linkOrganizationForClient = async (clientId, payload = {}) => {
   const linkedId = coerceString(payload.linkedOrganizationId) || coerceString(payload.organizationId);
 
   if (linkedId) {
-    return clientOrganizationSyncService.linkClientToOrganization(clientId, linkedId, { fullSync: true });
+    await clientOrganizationSyncService.linkClientToOrganization(clientId, linkedId, { fullSync: true });
+    const json = await getByIdWithLinks(clientId);
+    json.lastLinkedOrganizationId = linkedId;
+    return json;
   }
 
   const patch = buildClientCreatePayload(payload);
@@ -202,30 +283,46 @@ const linkOrganizationForClient = async (clientId, payload = {}) => {
 
   if (tmp?.id) {
     await clientOrganizationSyncService.ensureOrganizationTmpLink(clientId, tmp.id, { isPrimary: true });
-    return client.reload();
+    const json = await getByIdWithLinks(clientId);
+    json.lastLinkedOrganizationTmpId = String(tmp.id);
+    return json;
   }
 
-  return client;
+  return getByIdWithLinks(clientId);
 };
 
-const getByIdWithLinks = async (id) => {
-  const client = await getById(id);
-  // Use the full linked-orgs query so organizationLinks includes org names
-  const links = await ClientOrganizationLink.findAll({
-    where: { clientId: id },
-    include: [
-      {
-        model: Organization,
-        as: 'organization',
-        required: false,
-        attributes: { exclude: ['embedding'] },
-      },
-      { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
-    ],
-    order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
-  });
-  const json = client.toJSON ? client.toJSON() : { ...client.get() };
-  json.organizationLinks = links.map((l) => (l.toJSON ? l.toJSON() : l));
+const getByIdWithLinks = async (id, opts = {}) => {
+  const includeLinks = opts.includeLinks !== false;
+  if (!includeLinks) {
+    return getByIdForApi(id, { skipCache: opts.skipCache });
+  }
+  const [client, links] = await Promise.all([
+    Client.findByPk(id, { attributes: { exclude: CLIENT_API_EXCLUDE } }),
+    includeLinks
+      ? ClientOrganizationLink.findAll({
+        where: { clientId: id },
+        include: [
+          {
+            model: Organization,
+            as: 'organization',
+            required: false,
+            attributes: ORG_LINK_SUMMARY_ATTRIBUTES,
+          },
+          { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
+        ],
+        order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
+      })
+      : Promise.resolve([]),
+  ]);
+  if (!client) {
+    const err = new Error('Client not found');
+    err.status = 404;
+    throw err;
+  }
+  const json = clientToApiJson(client);
+  if (includeLinks) {
+    json.organizationLinks = links.map((l) => (l.toJSON ? l.toJSON() : l));
+  }
   return json;
 };
 
@@ -319,12 +416,13 @@ const update = async (id, payload) => {
     clean.primaryColor = pc !== undefined ? pc || null : null;
   }
   await client.update(clean);
-  return client.reload();
+  return getByIdForApi(id);
 };
 
 const remove = async (id) => {
   const client = await getById(id);
   await client.destroy();
+  invalidateClientApiCache(id);
 };
 
 /** Map Job.client (free-text company label) to Client.id for templates / tenancy. */
@@ -348,7 +446,11 @@ const findIdByJobClientLabel = async (label) => {
 module.exports = {
   list,
   getById,
+  CLIENT_API_EXCLUDE,
+  getByIdForApi,
+  invalidateClientApiCache,
   getByIdWithLinks,
+  clientToApiJson,
   create,
   update,
   remove,

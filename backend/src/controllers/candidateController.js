@@ -163,7 +163,8 @@ const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...ar
 const mammoth = require('mammoth');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
 const { extractWithPdftotextVariants } = require('../utils/pdftotextExtract');
-const { pickBestResumeTextExtract } = require('../utils/pdfTextQuality');
+const { pickBestResumeTextExtract, resumeTextLooksOcrGarbled } = require('../utils/pdfTextQuality');
+const { resolveCandidateSearchText } = require('../utils/buildSearchTextFromAiParse');
 const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 
@@ -325,7 +326,7 @@ const extractNameHintFromFileName = (fileName) => {
   const stripNoise = (s) =>
     String(s || '')
       .replace(/\.(pdf|docx?|rtf|txt)$/iu, '')
-      .replace(/\b(final|new|updated|scan|copy|cv|resume)\b/gi, ' ')
+      .replace(/\b(final|new|updated|scan|copy|cv|resume|parsed|extracted|ocr)\b/gi, ' ')
       .replace(/[()[\]{}]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();
@@ -571,6 +572,7 @@ const applyFileNameNameHint = (aiResult, fileName, resumeText = null) =>
 const isUnreliableResumeTextExtract = (text) => {
   const s = String(text || '').trim();
   if (!s) return true;
+  if (resumeTextLooksOcrGarbled(s)) return true;
   if (looksLikeRawPdfUtf8String(s)) return true;
   // Thin text layer — common for designed / partially image CVs
   if (s.length < 400) return true;
@@ -1155,32 +1157,39 @@ const salvageTruncatedJson = (text) => {
   }
 };
 
+const normalizeLlmJsonText = (text) =>
+  String(text || '')
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/,\s*([}\]])/g, '$1');
+
 const tryParseJson = (text) => {
   if (!text) return null;
-  const trimmed = String(text).trim();
+  const trimmed = normalizeLlmJsonText(text);
   if (!trimmed) return null;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // Try to extract the first JSON object/array from the response
-    const startObj = trimmed.indexOf('{');
-    const startArr = trimmed.indexOf('[');
-    const start = startObj === -1 ? startArr : startArr === -1 ? startObj : Math.min(startObj, startArr);
-    if (start === -1) return null;
+  const attempts = [trimmed];
+  const startObj = trimmed.indexOf('{');
+  const startArr = trimmed.indexOf('[');
+  const start = startObj === -1 ? startArr : startArr === -1 ? startObj : Math.min(startObj, startArr);
+  if (start > 0) attempts.push(trimmed.slice(start));
+  if (start !== -1) {
     const endObj = trimmed.lastIndexOf('}');
     const endArr = trimmed.lastIndexOf(']');
     const end = endObj === -1 ? endArr : endArr === -1 ? endObj : Math.max(endObj, endArr);
-    if (end !== -1 && end > start) {
-      const slice = trimmed.slice(start, end + 1);
-      try {
-        return JSON.parse(slice);
-      } catch {
-        // fall through to salvage
-      }
-    }
-    // Last resort: salvage a truncated response (close strings/brackets).
-    return salvageTruncatedJson(trimmed);
+    if (end !== -1 && end > start) attempts.push(trimmed.slice(start, end + 1));
   }
+
+  for (const candidate of attempts) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      /* try next slice */
+    }
+  }
+  return salvageTruncatedJson(trimmed);
 };
 
 const normalizeStringArray = (val) => {
@@ -2086,8 +2095,8 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null }) => {
     educationCount: Array.isArray(parsed?.education) ? parsed.education.length : 0,
   }));
 
-  // One-shot validate-and-repair pass when the model dropped required keys.
-  if (missing.length) {
+  // One-shot validate-and-repair pass when JSON did not parse or required keys are missing.
+  if (!parsed || missing.length) {
     try {
       const repairMessage =
         `Your previous JSON was missing or malformed for these keys: ${JSON.stringify(missing)}.\n` +
@@ -2494,6 +2503,17 @@ const listProfileVersions = async (req, res) => {
   }
 };
 
+const shareProfileWithCandidate = async (req, res) => {
+  try {
+    const updated = await candidateService.shareStaffProfileWithCandidate(req.params.id);
+    res.json(updated);
+  } catch (err) {
+    res.status(err.status || 500).json({
+      message: err.message || 'Failed to share profile with candidate',
+    });
+  }
+};
+
 
 const getCandidateTagsSchemaText = () => `
 Candidate tag schema (from backend/src/models/SystemTag.js):
@@ -2674,10 +2694,11 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
 
     let visionAiResult = null;
     const pdfBuffer = buffer && isPdfUploadBuffer(buffer, mimeType) ? buffer : null;
+    const textGarbled = resumeTextLooksOcrGarbled(text);
     const unreliableText = isUnreliableResumeTextExtract(text);
     if (pdfBuffer && (!String(text || '').trim() || unreliableText)) {
       console.log('[cv-vision] running Gemini Vision', {
-        reason: !String(text || '').trim() ? 'empty-text' : 'unreliable-text',
+        reason: !String(text || '').trim() ? 'empty-text' : textGarbled ? 'ocr-garbled' : 'unreliable-text',
         textLen: String(text || '').trim().length,
       });
       visionAiResult = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
@@ -2706,12 +2727,24 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
       console.log('[cv-vision] using vision result as primary structured parse');
     } else if (String(text || '').trim() && !looksLikeRawPdfUtf8String(text)) {
       aiResult = (await parseResumeWithAi({ resumeText: text, fileNameHint })) || {};
-      if (pdfBuffer && nameFieldsLookUnreliable(aiResult)) {
-        console.log('[cv-vision] text AI name unreliable — trying vision for identity fields');
-        if (!visionAiResult) visionAiResult = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+      const missingAfterTextAi = findMissingResumeKeys(aiResult);
+      const textParseMostlyFailed = missingAfterTextAi.length >= RESUME_REQUIRED_TOP_KEYS.length - 2;
+      if (pdfBuffer && (textParseMostlyFailed || nameFieldsLookUnreliable(aiResult) || textGarbled)) {
+        if (!visionAiResult) {
+          console.log('[cv-vision] text AI weak — trying native PDF vision', {
+            missingKeys: missingAfterTextAi.length,
+            garbled: textGarbled,
+          });
+          visionAiResult = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+        }
         if (visionAiResult) {
-          aiResult = preferVisionIdentityFields(aiResult, visionAiResult);
-          console.log('[cv-vision] merged vision identity fields into text AI result');
+          if (textParseMostlyFailed || textGarbled) {
+            aiResult = visionAiResult;
+            console.log('[cv-vision] replaced weak text AI parse with vision result');
+          } else {
+            aiResult = preferVisionIdentityFields(aiResult, visionAiResult);
+            console.log('[cv-vision] merged vision identity fields into text AI result');
+          }
         }
       }
     } else if (visionAiResult) {
@@ -2793,7 +2826,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
       education: normalizeEducation(aiResult.education || fallback.education),
       languages: normalizeLanguages(aiResult.languages || fallback.languages),
       industryAnalysis,
-      searchText: normalizeResumeSearchText(text).slice(0, 50000),
+      searchText: resolveCandidateSearchText(aiResult, text),
       searchTextSavedAt: new Date(),
       source: strOrNull(req.body?.source) || strOrNull(aiResult.source) || 'ai-upload',
       ...(resumeContentHash ? { resumeContentHash } : {}),
@@ -2875,7 +2908,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
       });
     }
 
-    void tryEmbedCandidate(createdCandidate.id, text);
+    void tryEmbedCandidate(createdCandidate.id);
     void ensureOrganizationsFromExperience(createdCandidate.workExperience, createdCandidate.id);
     if (aiTagsForSync.length) {
       await candidateTagService.syncTagsForCandidate(createdCandidate.id, aiTagsForSync);
@@ -3557,27 +3590,20 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
       ? LANDING_FORM_PRESERVE_FIELDS
       : options.preserveFields || new Set();
 
-  const baseUpdates =
-    extraText && extraText.trim()
-      ? { searchText: extraText.slice(0, 50000), searchTextSavedAt: new Date() }
-      : {};
-
-  let mergedUpdates = { ...baseUpdates };
+  let mergedUpdates = {};
   let aiTagEntries = [];
+  let workingText = String(extraText || '');
   try {
-    let workingText = String(extraText || '');
+    workingText = String(extraText || '');
     const fileNameHint = extractNameHintFromFileName(options.fileName || options.filename || null)?.name || null;
     const rtlFixed = fixCharReversedHebrewText(workingText, fileNameHint);
     if (rtlFixed !== workingText) {
       console.log('[cv-hebrew-rtl][enrich] applied character-reversed Hebrew fix', baseCandidate?.id);
       workingText = rtlFixed;
-      if (workingText.trim()) {
-        mergedUpdates.searchText = workingText.slice(0, 50000);
-        mergedUpdates.searchTextSavedAt = new Date();
-      }
     }
 
     const pdfBuffer = options.pdfBuffer && Buffer.isBuffer(options.pdfBuffer) ? options.pdfBuffer : null;
+    const textGarbled = resumeTextLooksOcrGarbled(workingText);
     const unreliableText = isUnreliableResumeTextExtract(workingText);
     let ai = options.pdfVisionResult && typeof options.pdfVisionResult === 'object'
       ? options.pdfVisionResult
@@ -3586,7 +3612,7 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
     if (!ai && pdfBuffer && (!String(workingText || '').trim() || unreliableText)) {
       console.log('[cv-vision][enrich] running Gemini Vision', {
         candidateId: baseCandidate?.id,
-        reason: !String(workingText || '').trim() ? 'empty-text' : 'unreliable-text',
+        reason: !String(workingText || '').trim() ? 'empty-text' : textGarbled ? 'ocr-garbled' : 'unreliable-text',
         textLen: String(workingText || '').trim().length,
       });
       ai = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
@@ -3596,16 +3622,30 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
 
     if (!usedVisionAsPrimary) {
       const textAi = await parseResumeWithAi({ resumeText: workingText || '', fileNameHint });
+      const missingAfterTextAi = findMissingResumeKeys(textAi);
+      const textParseMostlyFailed = missingAfterTextAi.length >= RESUME_REQUIRED_TOP_KEYS.length - 2;
       if (textAi && typeof textAi === 'object') {
-        if (pdfBuffer && nameFieldsLookUnreliable(textAi)) {
-          console.log('[cv-vision][enrich] text AI name unreliable — vision for identity', baseCandidate?.id);
+        if (pdfBuffer && (textParseMostlyFailed || nameFieldsLookUnreliable(textAi) || textGarbled)) {
+          console.log('[cv-vision][enrich] text AI weak — vision fallback', {
+            candidateId: baseCandidate?.id,
+            missingKeys: missingAfterTextAi.length,
+            garbled: textGarbled,
+          });
           if (!ai) ai = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
-          ai = ai ? preferVisionIdentityFields(textAi, ai) : textAi;
+          ai = ai && (textParseMostlyFailed || textGarbled)
+            ? ai
+            : ai
+              ? preferVisionIdentityFields(textAi, ai)
+              : textAi;
         } else {
           ai = textAi;
         }
       } else if (!ai) {
-        ai = textAi;
+        if (pdfBuffer && textParseMostlyFailed) {
+          ai = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+        } else {
+          ai = textAi;
+        }
       }
     }
 
@@ -3687,9 +3727,20 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
       const fallback = buildParsedUpdates(baseCandidate, extraText);
       mergedUpdates = { ...mergedUpdates, ...fallback };
     }
+
+    const resolvedSearchText = resolveCandidateSearchText(ai, workingText);
+    if (resolvedSearchText.trim()) {
+      mergedUpdates.searchText = resolvedSearchText;
+      mergedUpdates.searchTextSavedAt = new Date();
+    }
   } catch (e) {
     const fallback = buildParsedUpdates(baseCandidate, extraText);
     mergedUpdates = { ...mergedUpdates, ...fallback };
+    const resolvedSearchText = resolveCandidateSearchText(null, workingText);
+    if (resolvedSearchText.trim()) {
+      mergedUpdates.searchText = resolvedSearchText;
+      mergedUpdates.searchTextSavedAt = new Date();
+    }
   }
 
   mergedUpdates = filterPreservedCandidateFields(mergedUpdates, baseCandidate, preserveFields);
@@ -3700,7 +3751,7 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
   if (aiTagEntries.length) {
     await candidateTagService.syncTagsForCandidate(baseCandidate.id, aiTagEntries);
   }
-  void tryEmbedCandidate(baseCandidate.id, extraText);
+  void tryEmbedCandidate(baseCandidate.id);
   const refreshedCandidate = await candidateService.getById(baseCandidate.id);
   void ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id);
   return refreshedCandidate;
@@ -5596,6 +5647,7 @@ module.exports = {
   getByUser,
   listRelatedCandidates,
   listProfileVersions,
+  shareProfileWithCandidate,
   get,
   create,
   createFromAi,

@@ -182,11 +182,25 @@ function buildCreateDescription(row, kind = 'tag') {
   return `הסוכן יצר החלטה חדשה: **${term}** — ${decisionLabel} (${statusLabel})`;
 }
 
+function resolveAuditActor(req, opts = {}) {
+  if (opts.actor === 'agent' || req?.agent) return 'agent';
+  if (opts.actor === 'user') return 'user';
+  if (req?.user || req?.dbUser) return 'user';
+  if (!req) return 'agent';
+  return 'user';
+}
+
 function actorPayload(req, opts = {}) {
-  if (opts.actor === 'agent' || (!req && opts.actor !== 'user')) {
-    return { ...AGENT_ACTOR };
-  }
+  const actor = resolveAuditActor(req, opts);
+  if (actor === 'agent') return { ...AGENT_ACTOR };
   return {};
+}
+
+function buildResolveActionDescription(metadata = {}) {
+  const resolveAction = metadata?.resolveAction;
+  if (!resolveAction) return null;
+  const label = REVIEWER_ACTION_LABELS[String(resolveAction)] || String(resolveAction);
+  return `בוצעה פעולה: **${label}**`;
 }
 
 async function recordTagDecisionAudit(req, before, after, opts = {}) {
@@ -194,22 +208,30 @@ async function recordTagDecisionAudit(req, before, after, opts = {}) {
   if (!afterPlain?.id) return;
   const beforePlain = plainRow(before);
   const changes = buildChangeSet(beforePlain, afterPlain);
-  if (!changes.length && !opts.force) return;
+  const actor = resolveAuditActor(req, opts);
+  const metadata = {
+    source: actor === 'user' ? 'admin_ui' : 'agent_api',
+    actor,
+    decisionKind: 'tag',
+    pendingTagId: afterPlain.pendingTagId || beforePlain?.pendingTagId || null,
+    ...(opts.metadata || {}),
+  };
+  const resolveDescription = buildResolveActionDescription(metadata);
+  if (!changes.length && !opts.force && !resolveDescription) return;
 
   await auditLogger.log(req, {
     level: 'info',
     action: opts.action || 'update',
-    description: opts.description || buildDescription(changes, beforePlain, afterPlain, { kind: 'tag' }),
+    description:
+      opts.description
+      || resolveDescription
+      || buildDescription(changes, beforePlain, afterPlain, { kind: 'tag' }),
     entityType: TAG_ENTITY,
     entityId: String(afterPlain.id),
     entityName: String(afterPlain.originalTerm || beforePlain?.originalTerm || '').slice(0, 255),
-    metadata: {
-      decisionKind: 'tag',
-      pendingTagId: afterPlain.pendingTagId || beforePlain?.pendingTagId || null,
-      ...(opts.metadata || {}),
-    },
+    metadata,
     changes,
-    ...actorPayload(req, opts),
+    ...actorPayload(req, { ...opts, actor }),
   });
 }
 
@@ -228,6 +250,8 @@ async function recordOrgDecisionAudit(req, before, after, opts = {}) {
     entityId: String(afterPlain.id),
     entityName: String(afterPlain.originalTerm || beforePlain?.originalTerm || '').slice(0, 255),
     metadata: {
+      source: 'agent_api',
+      actor: opts.actor || 'agent',
       decisionKind: 'organization',
       candidateId: afterPlain.candidateId || beforePlain?.candidateId || null,
       ...(opts.metadata || {}),

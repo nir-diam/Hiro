@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import AccordionSection from './AccordionSection';
-import { BuildingOffice2Icon, UserCircleIcon, PencilIcon, PlusIcon } from './Icons';
+import { BuildingOffice2Icon, PencilIcon, PlusIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
@@ -93,6 +93,27 @@ const formatWebsiteLabel = (website?: string | null) =>
         .replace(/^https?:\/\/(www\.)?/i, '')
         .replace(/\/$/, '');
 
+/** Navigate to the org profile after create/link, or tenant client profile for admin-only creates. */
+const resolvePostCreatePath = (
+    result: Record<string, unknown> | null | undefined,
+    linkedOrganizationId: string | null,
+): string => {
+    const lastTmpId = result?.lastLinkedOrganizationTmpId
+        ? String(result.lastLinkedOrganizationTmpId)
+        : '';
+    if (lastTmpId) {
+        return `/organizations/tmp/${lastTmpId}`;
+    }
+    const lastOrgId = linkedOrganizationId
+        || (result?.lastLinkedOrganizationId ? String(result.lastLinkedOrganizationId) : '');
+    if (lastOrgId) {
+        return `/organizations/${lastOrgId}`;
+    }
+    const clientId = result?.id ? String(result.id) : '';
+    if (clientId) return `/clients/${clientId}`;
+    return '/clients';
+};
+
 const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     const { t } = useLanguage();
     const { user } = useAuth();
@@ -123,10 +144,6 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
         companyDescription: '',
         aliasesText: '',
         status: 'פעיל',
-        contactName: '',
-        contactRole: '',
-        contactEmail: '',
-        contactPhone: '',
         notes: '',
     });
 
@@ -259,7 +276,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                     }
                     const updated = await res.json();
                     onSave(updated);
-                    navigate('/clients');
+                    navigate(resolvePostCreatePath(updated, linkedOrganizationId));
                     return;
                 }
 
@@ -279,7 +296,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                     }
                     const created = await res.json();
                     onSave(created);
-                    navigate('/clients');
+                    navigate(resolvePostCreatePath(created, linkedOrganizationId));
                     return;
                 }
             }
@@ -297,18 +314,13 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                 subField: finalData.subField,
                 secondaryField: finalData.secondaryField || undefined,
                 phone: finalData.companyPhone,
-                email: finalData.contactEmail || undefined,
                 status: finalData.status,
-                mainContactName: finalData.contactName,
-                mainContactEmail: finalData.contactEmail,
-                mainContactPhone: finalData.contactPhone,
                 logoUrl: finalData.logoUrl || undefined,
                 metadata: {
                     website: finalData.website,
                     address: finalData.address,
                     description: finalData.companyDescription,
                     aliases,
-                    contactRole: finalData.contactRole,
                     notes: finalData.notes,
                     mainField: finalData.mainField || undefined,
                     mainField2: finalData.mainField2,
@@ -332,7 +344,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                 }
                 const updated = await res.json();
                 onSave(updated);
-                navigate('/clients');
+                navigate(resolvePostCreatePath(updated, null));
                 return;
             }
 
@@ -356,7 +368,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
             } else if (managerInvite?.ok === false) {
                 window.alert(managerInvite.error || t('client_form.manager_invite_failed'));
             }
-            navigate('/clients');
+            navigate(resolvePostCreatePath(created, linkedOrganizationId));
         } catch (e: any) {
             setError(e?.message || 'Create failed');
         } finally {
@@ -548,22 +560,6 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                     </AccordionSection>
                 </div>
 
-                <div id="contact-person">
-                    <AccordionSection title={t('client_form.section_contact')} icon={<UserCircleIcon className="w-5 h-5"/>} defaultOpen={!isExistingOrgSelected}>
-                        {isPlatformAdmin && !isExistingOrgSelected ? (
-                            <p className="mb-4 text-sm text-primary-800 bg-primary-50 border border-primary-200 rounded-xl px-4 py-3">
-                                {t('client_form.contact_manager_hint')}
-                            </p>
-                        ) : null}
-                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-                            <FormInput label={t('client_form.field_contact_name')} name="contactName" value={formData.contactName} onChange={handleChange} required={!isExistingOrgSelected} readOnly={isExistingOrgSelected} />
-                            <FormInput label={t('client_form.field_contact_role')} name="contactRole" value={formData.contactRole} onChange={handleChange} readOnly={isExistingOrgSelected} />
-                            <FormInput label={t('client_form.field_contact_email')} name="contactEmail" value={formData.contactEmail} onChange={handleChange} type="email" required={!isExistingOrgSelected} readOnly={isExistingOrgSelected} />
-                            <FormInput label={t('client_form.field_contact_phone')} name="contactPhone" value={formData.contactPhone} onChange={handleChange} type="tel" readOnly={isExistingOrgSelected} />
-                        </div>
-                    </AccordionSection>
-                </div>
-                
                  <div id="internal-notes">
                     <AccordionSection title={t('client_form.section_notes')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen={false}>
                         <FormTextArea label={t('client_form.field_notes')} name="notes" value={formData.notes} onChange={handleChange} placeholder={t('client_form.placeholder_notes')} readOnly={isExistingOrgSelected} />

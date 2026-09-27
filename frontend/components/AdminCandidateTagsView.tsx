@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { SparklesIcon } from './Icons';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+    STICKY_TABLE_CLASS,
+    ADMIN_TABLE_SCROLL_CLASS,
+    stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
 
@@ -411,23 +417,27 @@ const AdminCandidateTagsView: React.FC = () => {
                     ) : (
                         <>
                             {tags.length ? (
-                                <div className="overflow-x-auto bg-bg-card border border-border-default rounded-2xl shadow-sm">
-                                    <table className="w-full text-sm text-right">
-                                        <thead className="bg-bg-subtle text-text-muted uppercase text-xs font-semibold">
+                                <HorizontalScrollArea
+                                    pinHeader
+                                    className="bg-bg-card border border-border-default rounded-2xl shadow-sm"
+                                    scrollClassName={ADMIN_TABLE_SCROLL_CLASS}
+                                >
+                                    <table className={`w-full min-w-[1280px] text-sm text-right ${STICKY_TABLE_CLASS}`} dir="rtl">
+                                        <thead className="border-b border-border-default text-text-muted uppercase text-xs font-semibold">
                                             <tr>
-                                                <th className="p-3">מועמד</th>
-                                                <th className="p-3">Tag Key</th>
-                                                <th className="p-3">שם בעברית</th>
-                                                <th className="p-3">Raw Type</th>
-                                                <th className="p-3">Context</th>
-                                                <th className="p-3">Current</th>
-                                                <th className="p-3">Summary</th>
-                                                <th className="p-3">Confidence</th>
-                                                <th className="p-3">Weight</th>
-                                                <th className="p-3">Final</th>
-                                                <th className="p-3">Active</th>
-                                                <th className="p-3 whitespace-nowrap">תאריך יצירה</th>
-                                                <th className="p-3">Actions</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>מועמד</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Tag Key</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>שם בעברית</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Raw Type</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Context</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Current</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Summary</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Confidence</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Weight</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Final</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Active</th>
+                                                <th className={`p-3 whitespace-nowrap ${stickyTableHeaderCellClass()}`}>תאריך יצירה</th>
+                                                <th className={`p-3 ${stickyTableHeaderCellClass()}`}>Actions</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-border-default">
@@ -496,7 +506,7 @@ const AdminCandidateTagsView: React.FC = () => {
                                             })}
                                         </tbody>
                                     </table>
-                                </div>
+                                </HorizontalScrollArea>
                             ) : (
                                 <div className="rounded-xl border border-border-default bg-white/80 p-6 text-sm text-text-muted text-center">
                                     לא נמצאו רשומות בעמוד זה.

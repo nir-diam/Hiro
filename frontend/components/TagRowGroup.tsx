@@ -25,9 +25,19 @@ const TYPE_DEFAULT_BORDER: Record<SmartTagType, string> = {
 };
 
 const modeBorderClass = (mode: SmartTagMode | undefined, type: SmartTagType): string => {
-    if (mode === 'mandatory') return 'border-green-500 ring-1 ring-green-500/25';
-    if (mode === 'negative') return 'border-red-500 ring-1 ring-red-500/25';
+    if (mode === 'mandatory') {
+        return 'border-[3px] border-green-500 ring-2 ring-green-400/70 shadow-[0_0_0_1px_rgba(34,197,94,0.45),0_0_10px_rgba(34,197,94,0.35)]';
+    }
+    if (mode === 'negative') {
+        return 'border-[3px] border-red-500 ring-2 ring-red-400/70 shadow-[0_0_0_1px_rgba(239,68,68,0.45),0_0_10px_rgba(239,68,68,0.35)]';
+    }
     return TYPE_DEFAULT_BORDER[type];
+};
+
+const modeToggleTitle = (mode: SmartTagMode | undefined): string => {
+    const current =
+        mode === 'mandatory' ? 'חובה' : mode === 'negative' ? 'שלילי' : 'רגיל';
+    return `מצב נוכחי: ${current} — לחץ לשינוי (רגיל / חובה / שלילי)`;
 };
 
 const TYPE_LABELS_HE: Record<SmartTagType, string> = {
@@ -142,7 +152,14 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
                 type="button"
                 onClick={handleBadgeClick}
                 className={badgeClass}
-                title={canToggleMode ? 'לחץ לשינוי מצב (רגיל / חובה / שלילי)' : undefined}
+                title={canToggleMode ? modeToggleTitle(mode) : undefined}
+                aria-label={
+                    mode === 'mandatory'
+                        ? `${label} — תגית חובה`
+                        : mode === 'negative'
+                          ? `${label} — תגית שלילית`
+                          : label
+                }
             >
                 {isAiSuggested && <SparklesIcon className="w-3 h-3 opacity-70" />}
                 <span>{label}</span>

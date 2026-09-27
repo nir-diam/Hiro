@@ -18,6 +18,16 @@ import {
 
 const PAGE_SIZE = 20;
 
+const isAgentAuditLog = (log: AuditLogEntry): boolean => {
+    const meta = log.metadata || {};
+    return (
+        log.user.name === 'סוכן AI (Hiro)'
+        || meta.source === 'agent_api'
+        || meta.actor === 'agent'
+        || Boolean(meta.agentUsername)
+    );
+};
+
 // --- COMPONENTS ---
 
 const StatusBadge: React.FC<{ level: AuditLogLevel }> = ({ level }) => {
@@ -117,6 +127,14 @@ const LogDetailDrawer: React.FC<{ log: AuditLogEntry | null; onClose: () => void
                     </div>
                 )}
 
+                {log.entity ? (
+                    <div className="bg-bg-subtle p-4 rounded-xl border border-border-default">
+                        <h4 className="font-bold text-sm text-text-default mb-2">ישות</h4>
+                        <p className="text-sm font-mono">{log.entity.type} · {log.entity.id}</p>
+                        {log.entity.name ? <p className="text-sm text-text-muted mt-1">{log.entity.name}</p> : null}
+                    </div>
+                ) : null}
+
                 <div>
                     <h4 className="font-bold text-sm text-text-default mb-3 flex items-center gap-2">
                         <CodeBracketIcon className="w-4 h-4"/> מטא-דאטה טכני
@@ -129,6 +147,10 @@ const LogDetailDrawer: React.FC<{ log: AuditLogEntry | null; onClose: () => void
     os: log.metadata?.os || null,
     latency: log.metadata?.duration != null ? `${log.metadata.duration}ms` : null,
     status: log.metadata?.statusCode ?? null,
+    actor: log.metadata?.actor || null,
+    source: log.metadata?.source || null,
+    agentUsername: log.metadata?.agentUsername || null,
+    operation: log.metadata?.operation || null,
     entity: log.entity || null,
     metadata: log.metadata || {},
 }, null, 2)}
@@ -152,6 +174,7 @@ const AdminEventsView: React.FC = () => {
     const [searchTermDebounced, setSearchTermDebounced] = useState('');
     const [levelFilter, setLevelFilter] = useState<string>('all');
     const [actionFilter, setActionFilter] = useState<string>('all');
+    const [actorFilter, setActorFilter] = useState<'all' | 'agent'>('all');
     const [dateRange, setDateRange] = useState<DateRange | null>(null);
     const [isLive, setIsLive] = useState(false);
 
@@ -173,7 +196,7 @@ const AdminEventsView: React.FC = () => {
     // Reset to page 1 whenever a filter changes
     useEffect(() => {
         setCurrentPage(1);
-    }, [searchTermDebounced, levelFilter, actionFilter, dateRange]);
+    }, [searchTermDebounced, levelFilter, actionFilter, actorFilter, dateRange]);
 
     const queryParams = useMemo(() => ({
         page: currentPage,
@@ -181,9 +204,10 @@ const AdminEventsView: React.FC = () => {
         search: searchTermDebounced || undefined,
         level: levelFilter,
         action: actionFilter,
+        actor: actorFilter,
         from: dateRange?.from || undefined,
         to: dateRange?.to || undefined,
-    }), [currentPage, searchTermDebounced, levelFilter, actionFilter, dateRange]);
+    }), [currentPage, searchTermDebounced, levelFilter, actionFilter, actorFilter, dateRange]);
 
     const loadLogs = useCallback(async (silent = false) => {
         if (!apiBase) {
@@ -368,6 +392,15 @@ const AdminEventsView: React.FC = () => {
                         <option value="system">System</option>
                     </select>
 
+                    <select
+                        value={actorFilter}
+                        onChange={(e) => setActorFilter(e.target.value as 'all' | 'agent')}
+                        className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 min-w-[140px]"
+                    >
+                        <option value="all">כל המבצעים</option>
+                        <option value="agent">סוכן AI בלבד</option>
+                    </select>
+
                     <div className="w-[180px] flex-shrink-0">
                         <DateRangeSelector value={dateRange} onChange={setDateRange} placeholder="כל הזמנים" />
                     </div>
@@ -412,24 +445,37 @@ const AdminEventsView: React.FC = () => {
                                         טוען נתונים…
                                     </td>
                                 </tr>
-                            ) : logs.length > 0 ? logs.map(log => (
-                                <tr key={log.id} className="hover:bg-bg-hover transition-colors group cursor-pointer" onClick={() => setSelectedLog(log)}>
+                            ) : logs.length > 0 ? logs.map(log => {
+                                const agentLog = isAgentAuditLog(log);
+                                return (
+                                <tr key={log.id} className={`hover:bg-bg-hover transition-colors group cursor-pointer ${agentLog ? 'bg-indigo-50/20' : ''}`} onClick={() => setSelectedLog(log)}>
                                     <td className="p-4"><StatusBadge level={log.level} /></td>
                                     <td className="p-4 text-text-subtle">{new Date(log.timestamp).toLocaleString('he-IL')}</td>
                                     <td className="p-4">
                                         <div className="flex items-center gap-2">
-                                            <div className="w-6 h-6 rounded-full bg-bg-subtle flex items-center justify-center border border-border-default text-[10px]">
+                                            <div className={`w-6 h-6 rounded-full flex items-center justify-center border text-[10px] ${agentLog ? 'bg-indigo-100 border-indigo-200 text-indigo-700' : 'bg-bg-subtle border-border-default'}`}>
                                                 {log.user.avatar || (log.user.name || '?').slice(0, 2).toUpperCase()}
                                             </div>
-                                            <span className="truncate max-w-[100px] text-text-default font-sans font-semibold">{log.user.name || log.user.email || '—'}</span>
+                                            <div className="min-w-0">
+                                                <span className="truncate max-w-[120px] block text-text-default font-sans font-semibold">{log.user.name || log.user.email || '—'}</span>
+                                                {agentLog ? (
+                                                    <span className="text-[10px] font-bold text-indigo-600">סוכן</span>
+                                                ) : null}
+                                            </div>
                                         </div>
                                     </td>
                                     <td className="p-4"><ActionBadge action={log.action} /></td>
-                                    <td className="p-4 font-sans text-text-default font-medium truncate max-w-xs" title={log.description}>{log.description}</td>
+                                    <td className="p-4 font-sans text-text-default font-medium max-w-xs">
+                                        <div className="truncate" title={log.description}>{log.description}</div>
+                                        {log.changes && log.changes.length > 0 ? (
+                                            <span className="text-[10px] text-text-muted font-normal">{log.changes.length} שדות השתנו</span>
+                                        ) : null}
+                                    </td>
                                     <td className="p-4">
                                         {log.entity ? (
-                                            <span className="bg-bg-subtle px-2 py-0.5 rounded text-primary-600 border border-border-default">
-                                                {log.entity.type}: {log.entity.id}
+                                            <span className="bg-bg-subtle px-2 py-0.5 rounded text-primary-600 border border-border-default block truncate max-w-[180px]" title={`${log.entity.type}: ${log.entity.id}`}>
+                                                {log.entity.name || log.entity.type}
+                                                <span className="text-text-muted font-normal"> · {log.entity.type}</span>
                                             </span>
                                         ) : <span className="text-text-subtle">-</span>}
                                     </td>
@@ -440,7 +486,8 @@ const AdminEventsView: React.FC = () => {
                                         </button>
                                     </td>
                                 </tr>
-                            )) : (
+                            );
+                            }) : (
                                 <tr>
                                     <td colSpan={8} className="p-10 text-center">
                                         <div className="flex flex-col items-center justify-center text-text-muted opacity-60">

@@ -235,9 +235,46 @@ const globalLookup = async (req, res) => {
   }
 };
 
+/** GET /api/organizations/:id/profile — org + linked client in one round-trip */
+const getProfile = async (req, res) => {
+  const startedAt = Date.now();
+  let dbStartedAt = startedAt;
+  try {
+    const orgId = String(req.params.id || '').trim();
+    dbStartedAt = Date.now();
+    const bundle = await organizationService.getOrganizationProfileBundle(orgId, {
+      authUser: req.user || null,
+    });
+    const now = Date.now();
+    const dbDur = now - dbStartedAt;
+    const totalDur = now - startedAt;
+    res.set('Server-Timing', `db;dur=${dbDur}, app;dur=${totalDur}`);
+    res.set('Cache-Control', 'private, max-age=60');
+    res.json(bundle);
+  } catch (err) {
+    const now = Date.now();
+    res.set('Server-Timing', `db;dur=${now - dbStartedAt}, app;dur=${now - startedAt}`);
+    res.status(err.status || 404).json({ message: err.message || 'Not found' });
+  }
+};
+
 const get = async (req, res) => {
   try {
-    const org = await organizationService.getById(req.params.id);
+    const includePrimaryClient =
+      req.query?.includePrimaryClient === '1' || req.query?.includePrimaryClient === 'true';
+    const orgId = String(req.params.id || '').trim();
+
+    const [org, primaryClient] = await Promise.all([
+      organizationService.getByIdForApi(orgId),
+      includePrimaryClient
+        ? organizationService.getPrimaryClientSummary(orgId)
+        : Promise.resolve(null),
+    ]);
+
+    res.set('Cache-Control', 'private, max-age=30');
+    if (primaryClient) {
+      return res.json({ ...org, primaryClient });
+    }
     res.json(org);
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
@@ -737,22 +774,9 @@ const getPrimaryClient = async (req, res) => {
     const orgId = String(req.params.id || '').trim();
     if (!orgId) return res.status(400).json({ message: 'org id required' });
 
-    // Prefer the isPrimary link; fall back to the first created link.
-    const link = await ClientOrganizationLink.findOne({
-      where: { organizationId: orgId },
-      include: [{ model: Client, as: 'client', attributes: ['id', 'name', 'displayName'] }],
-      order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
-    });
-
-    if (!link || !link.client) {
-      return res.json({ clientId: null, clientName: null });
-    }
-
-    const c = link.client;
-    return res.json({
-      clientId: String(c.id),
-      clientName: String(c.displayName || c.name || ''),
-    });
+    const summary = await organizationService.getPrimaryClientSummary(orgId);
+    res.set('Cache-Control', 'private, max-age=30');
+    return res.json(summary);
   } catch (err) {
     res.status(500).json({ message: err.message || 'Failed to get primary client' });
   }
@@ -806,143 +830,14 @@ const listJobs = async (req, res) => {
  */
 const getInsights = async (req, res) => {
   try {
-    const { sequelize } = require('../config/db');
-    const NotificationMessage = require('../models/NotificationMessage');
-
-    const org = await organizationService.getById(req.params.id);
-    if (!org) return res.status(404).json({ message: 'Organization not found' });
-
-    const plainOrg = org.get ? org.get({ plain: true }) : org;
+    const clientInsightsService = require('../services/clientInsightsService');
     const clientId = req.query?.clientId ? String(req.query.clientId).trim() : null;
-
-    const orgLabels = new Set(
-      [
-        plainOrg.name,
-        plainOrg.nameEn,
-        plainOrg.legalName,
-        ...(Array.isArray(plainOrg.aliases) ? plainOrg.aliases : []),
-      ]
-        .map((v) => String(v || '').trim())
-        .filter(Boolean),
-    );
-    const labelList = [...orgLabels];
-
-    // ── Jobs for this org (optionally under current client) ────────────────
-    const jobOr = [];
-    if (plainOrg.id) jobOr.push({ organizationId: plainOrg.id });
-    for (const label of labelList) {
-      jobOr.push({ client: { [Op.iLike]: label } });
-    }
-    const jobWhere = jobOr.length ? { [Op.or]: jobOr } : { id: null };
-    if (clientId) jobWhere.clientId = clientId;
-
-    const jobRows = await Job.findAll({
-      where: jobWhere,
-      attributes: ['id', 'status'],
-      raw: true,
-    });
-    const jobCounts = { open: 0, frozen: 0, closed: 0 };
-    const jobIds = [];
-    for (const j of jobRows) {
-      jobIds.push(String(j.id));
-      const s = String(j.status || '').toLowerCase();
-      if (s === 'פתוחה' || s === 'open') jobCounts.open++;
-      else if (s === 'מוקפאת' || s === 'frozen' || s === 'paused') jobCounts.frozen++;
-      else if (s === 'סגורה' || s === 'closed') jobCounts.closed++;
-    }
-
-    // ── Referrals: messages for org jobs or org name as clientName ────────
-    const now = new Date();
-    const weekStart = new Date(now); weekStart.setDate(now.getDate() - 7); weekStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const yearStart = new Date(now.getFullYear(), 0, 1);
-
-    let referralsWeek = 0;
-    let referralsMonth = 0;
-    let referralsYear = 0;
-    let hiredCount = 0;
-
-    const matchOr = [];
-    for (const l of labelList) {
-      matchOr.push(sequelize.literal(`metadata->'taskPayload'->>'clientName' ILIKE ${sequelize.escape(l)}`));
-    }
-    for (const jid of jobIds.slice(0, 200)) {
-      matchOr.push(sequelize.literal(`metadata->'taskPayload'->>'jobId' = ${sequelize.escape(jid)}`));
-    }
-
-    if (matchOr.length) {
-      try {
-        const messages = await NotificationMessage.findAll({
-          where: {
-            createdAt: { [Op.gte]: yearStart },
-            [Op.or]: matchOr,
-          },
-          attributes: ['createdAt', 'status', 'metadata'],
-          raw: true,
-        });
-
-        for (const msg of messages) {
-          const d = new Date(msg.createdAt);
-          if (d >= weekStart) referralsWeek++;
-          if (d >= monthStart) referralsMonth++;
-          referralsYear++;
-        }
-
-        const hiredAll = await NotificationMessage.findAll({
-          where: {
-            [Op.and]: [
-              { [Op.or]: matchOr },
-              {
-                [Op.or]: [
-                  { status: { [Op.iLike]: '%hired%' } },
-                  sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%hired%'`),
-                  sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%התקבל%'`),
-                ],
-              },
-            ],
-          },
-          attributes: ['id'],
-          raw: true,
-        });
-        hiredCount = hiredAll.length;
-      } catch (refErr) {
-        console.warn('[organizationInsights] referrals query failed:', refErr?.message || refErr);
-      }
-    }
-
-    // Relationship start = when this client linked the org (fallback: org createdAt)
-    let relationshipStartedAt = plainOrg.createdAt || null;
-    if (clientId && plainOrg.id) {
-      try {
-        const link = await ClientOrganizationLink.findOne({
-          where: { clientId, organizationId: plainOrg.id },
-          order: [['created_at', 'ASC']],
-        });
-        if (link?.createdAt) relationshipStartedAt = link.createdAt;
-      } catch (linkErr) {
-        console.warn('[organizationInsights] link lookup failed:', linkErr?.message || linkErr);
-      }
-    }
-
-    // Best-effort: stamp organizationId onto matched jobs for future queries
-    if (plainOrg.id && jobIds.length) {
-      Job.update(
-        { organizationId: plainOrg.id },
-        { where: { id: { [Op.in]: jobIds }, organizationId: null } },
-      ).catch(() => {});
-    }
-
-    res.json({
-      openJobs: jobCounts.open,
-      frozenJobs: jobCounts.frozen,
-      closedJobs: jobCounts.closed,
-      referrals: { week: referralsWeek, month: referralsMonth, year: referralsYear },
-      hiredCount,
-      relationshipStartedAt,
-    });
+    const payload = await clientInsightsService.getOrganizationInsights(req.params.id, clientId);
+    res.set('Cache-Control', 'private, max-age=30');
+    res.json(payload);
   } catch (err) {
     console.error('[organizationInsights]', err?.message || err);
-    res.status(500).json({ message: err?.message || 'Failed to load insights' });
+    res.status(err.status || 500).json({ message: err?.message || 'Failed to load insights' });
   }
 };
 
@@ -999,6 +894,7 @@ module.exports = {
   listQuery,
   globalLookup,
   get,
+  getProfile,
   create,
   update,
   remove,

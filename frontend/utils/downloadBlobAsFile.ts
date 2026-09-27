@@ -1,4 +1,4 @@
-/** Save or share a file blob; anchor download often fails on iOS/Android. */
+/** Save a file blob. Uses anchor download on desktop; mobile fallbacks where needed. */
 export async function downloadBlobAsFile(
     blob: Blob,
     filename: string,
@@ -7,7 +7,13 @@ export async function downloadBlobAsFile(
     const type = mimeType ?? (blob.type || 'application/octet-stream');
     const file = new File([blob], filename, { type });
 
-    if (typeof navigator.share === 'function' && typeof navigator.canShare === 'function') {
+    const isIos =
+        /iPad|iPhone|iPod/i.test(navigator.userAgent) &&
+        !(window as Window & { MSStream?: unknown }).MSStream;
+    const isMobile = isIos || /Android/i.test(navigator.userAgent);
+
+    // Web Share on desktop opens the OS share sheet instead of downloading — mobile only.
+    if (isMobile && typeof navigator.share === 'function' && typeof navigator.canShare === 'function') {
         try {
             if (navigator.canShare({ files: [file] })) {
                 await navigator.share({ files: [file], title: filename });
@@ -19,9 +25,6 @@ export async function downloadBlobAsFile(
     }
 
     const url = URL.createObjectURL(file);
-    const isIos =
-        /iPad|iPhone|iPod/i.test(navigator.userAgent) &&
-        !(window as Window & { MSStream?: unknown }).MSStream;
 
     if (isIos) {
         const opened = window.open(url, '_blank');

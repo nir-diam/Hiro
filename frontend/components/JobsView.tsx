@@ -21,6 +21,13 @@ import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+    ADMIN_TABLE_SCROLL_CLASS,
+    STICKY_TABLE_CLASS,
+    stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
+import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
 
 // --- TYPES ---
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
@@ -765,7 +772,13 @@ const JobsView: React.FC = () => {
 
     const handleResetFilters = () => {
         setFilters(initialFilters);
+        setDateRange(null);
+        setCompanyFilterState({ sizes: [], sectors: [], industry: '', field: '' });
         setIsAdvancedFilterOpen(false);
+    };
+
+    const handleClearSearch = () => {
+        handleResetFilters();
     };
 
     const openStatusModal = (job: Job) => {
@@ -1050,6 +1063,185 @@ const JobsView: React.FC = () => {
     };
 
 
+    const jobActiveFilterChips = useMemo((): ActiveFilterChip[] => {
+        const chips: ActiveFilterChip[] = [];
+        const pushText = (group: string, name: keyof typeof filters, label?: string) => {
+            const raw = filters[name];
+            const value = typeof raw === 'string' ? raw.trim() : '';
+            if (!value) return;
+            chips.push({
+                id: `${String(name)}:${value}`,
+                group,
+                label: label || value,
+                onRemove: () => setFilters((prev) => ({ ...prev, [name]: '' })),
+            });
+        };
+
+        if (filters.searchTerm.trim()) {
+            chips.push({
+                id: 'search',
+                group: 'חיפוש',
+                label: filters.searchTerm.trim(),
+                onRemove: () => setFilters((prev) => ({ ...prev, searchTerm: '' })),
+            });
+        }
+        pushText('לקוח', 'client');
+        if (filters.status) {
+            chips.push({
+                id: `status:${filters.status}`,
+                group: 'סטטוס',
+                label: t(`status.${filters.status}`),
+                onRemove: () => setFilters((prev) => ({ ...prev, status: '' })),
+            });
+        }
+        if (filters.field || filters.role) {
+            chips.push({
+                id: 'job-field',
+                group: 'תחום',
+                label: filters.role || filters.field,
+                onRemove: () => setFilters((prev) => ({ ...prev, field: '', role: '' })),
+            });
+        }
+        if (filters.fromDate || filters.toDate) {
+            chips.push({
+                id: 'dates',
+                group: 'תאריכים',
+                label: `${filters.fromDate || '…'} – ${filters.toDate || '…'}`,
+                onRemove: () => {
+                    setDateRange(null);
+                    setFilters((prev) => ({ ...prev, fromDate: '', toDate: '' }));
+                },
+            });
+        }
+        for (const loc of filters.locations) {
+            const label = String(loc.value || loc.label || '').trim();
+            if (!label) continue;
+            chips.push({
+                id: `loc:${label}`,
+                group: 'מיקום',
+                label,
+                onRemove: () =>
+                    setFilters((prev) => ({
+                        ...prev,
+                        locations: prev.locations.filter((l) => l !== loc),
+                    })),
+            });
+        }
+        if (filters.companyIndustry) {
+            chips.push({
+                id: `industry:${filters.companyIndustry}`,
+                group: 'תעשייה',
+                label: filters.companyIndustry,
+                onRemove: () => {
+                    setCompanyFilterState((prev) => ({ ...prev, industry: '' }));
+                    setFilters((prev) => ({ ...prev, companyIndustry: '' }));
+                },
+            });
+        }
+        for (const size of filters.companySizes) {
+            chips.push({
+                id: `size:${size}`,
+                group: 'גודל חברה',
+                label: size,
+                onRemove: () =>
+                    setCompanyFilterState((prev) => ({
+                        ...prev,
+                        sizes: prev.sizes.filter((s) => s !== size),
+                    })),
+            });
+        }
+        for (const sector of filters.companySectors) {
+            chips.push({
+                id: `sector:${sector}`,
+                group: 'סקטור',
+                label: sector,
+                onRemove: () =>
+                    setCompanyFilterState((prev) => ({
+                        ...prev,
+                        sectors: prev.sectors.filter((s) => s !== sector),
+                    })),
+            });
+        }
+        for (const scope of filters.jobScopes) {
+            chips.push({
+                id: `scope:${scope}`,
+                group: 'היקף',
+                label: scope,
+                onRemove: () => handleJobScopeToggle(scope),
+            });
+        }
+        if (String(filters.workingHours || '').trim() && filters.workingHours !== initialFilters.workingHours) {
+            chips.push({
+                id: 'working-hours',
+                group: 'שעות',
+                label: filters.workingHours,
+                onRemove: () => setFilters((prev) => ({ ...prev, workingHours: initialFilters.workingHours })),
+            });
+        }
+        pushText('מגדר', 'gender');
+        if (filters.mobility) {
+            chips.push({
+                id: `mobility:${filters.mobility}`,
+                group: 'ניידות',
+                label: filters.mobility,
+                onRemove: () => setFilters((prev) => ({ ...prev, mobility: '' })),
+            });
+        }
+        pushText('רכז גיוס', 'recruiter');
+        pushText('עדיפות', 'priority');
+        pushText('סוג לקוח', 'clientType');
+        pushText('רישיון', 'licenseType');
+        pushText('קוד פרסום', 'postingCode');
+        pushText('רכז גיוס', 'recruitingCoordinator');
+        pushText('מנהל תיק', 'accountManager');
+        if (
+            filters.salaryMin !== initialFilters.salaryMin ||
+            filters.salaryMax !== initialFilters.salaryMax
+        ) {
+            chips.push({
+                id: 'salary-range',
+                group: 'שכר',
+                label: `${filters.salaryMin.toLocaleString()} – ${filters.salaryMax.toLocaleString()} ₪`,
+                onRemove: () =>
+                    setFilters((prev) => ({
+                        ...prev,
+                        salaryMin: initialFilters.salaryMin,
+                        salaryMax: initialFilters.salaryMax,
+                    })),
+            });
+        }
+        if (filters.ageMin !== initialFilters.ageMin || filters.ageMax !== initialFilters.ageMax) {
+            chips.push({
+                id: 'age-range',
+                group: 'גיל',
+                label: `${filters.ageMin} – ${filters.ageMax}`,
+                onRemove: () =>
+                    setFilters((prev) => ({
+                        ...prev,
+                        ageMin: initialFilters.ageMin,
+                        ageMax: initialFilters.ageMax,
+                    })),
+            });
+        }
+        if (
+            filters.positionsMin !== initialFilters.positionsMin ||
+            filters.positionsMax !== initialFilters.positionsMax
+        ) {
+            chips.push({
+                id: 'positions-range',
+                group: 'משרות פתוחות',
+                label: `${filters.positionsMin} – ${filters.positionsMax}`,
+                onRemove: () =>
+                    setFilters((prev) => ({
+                        ...prev,
+                        positionsMin: initialFilters.positionsMin,
+                        positionsMax: initialFilters.positionsMax,
+                    })),
+            });
+        }
+        return chips;
+    }, [filters, t, handleJobScopeToggle]);
+
     const StatCard = ({ title, value, icon, color }: { title: string, value: string | number, icon: any, color: string }) => (
         <div className="bg-bg-card p-4 rounded-xl border border-border-default flex items-center justify-between shadow-sm">
              <div>
@@ -1206,6 +1398,18 @@ const JobsView: React.FC = () => {
                             </div>
                         </div>
                     </div>
+                    {jobActiveFilterChips.length > 0 ? (
+                        <div className="flex flex-wrap items-center gap-2 mt-2">
+                            <button
+                                type="button"
+                                onClick={handleClearSearch}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-primary-600 text-white hover:bg-primary-700 shadow-sm border border-primary-600 shrink-0"
+                            >
+                                נקה חיפוש
+                            </button>
+                            <ActiveFilterChips chips={jobActiveFilterChips} />
+                        </div>
+                    ) : null}
                 </div>
 
                 {isAdvancedFilterOpen && (
@@ -1370,17 +1574,20 @@ const JobsView: React.FC = () => {
                 </div>
             )}
 
-            <main className="flex-1 overflow-hidden">
+            <main className="flex-1 min-w-0">
                  {sortedAndFilteredJobs.length > 0 ? (
                     viewMode === 'table' ? (
-                        <div className="bg-bg-card rounded-2xl border border-border-default overflow-hidden shadow-sm">
-                            <div className="overflow-x-auto">
-                                <table className="w-full text-sm text-right min-w-[1000px]">
-                                    <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default">
+                        <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm min-w-0">
+                            <HorizontalScrollArea
+                                pinHeader
+                                className="min-w-0"
+                                scrollClassName={ADMIN_TABLE_SCROLL_CLASS}
+                            >
+                                <table className={`w-full text-sm text-right min-w-[1000px] ${STICKY_TABLE_CLASS}`} dir="rtl">
+                                    <thead className="text-text-muted font-bold text-xs uppercase">
                                         <tr>
-                                            {/* Select Column (Static First) */}
                                             {selectionMode && (
-                                                <th className="p-4 w-12 text-center bg-bg-subtle">
+                                                <th className={stickyTableHeaderCellClass('p-4 w-12 text-center')}>
                                                      <input 
                                                         type="checkbox" 
                                                         onChange={handleSelectAll} 
@@ -1403,7 +1610,9 @@ const JobsView: React.FC = () => {
                                                         onDragEnd={handleDragEnd} 
                                                         onDragOver={(e) => e.preventDefault()} 
                                                         onDrop={handleDrop} 
-                                                        className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors bg-bg-subtle ${draggingColumn === col.id ? 'opacity-50' : ''}`}
+                                                        className={stickyTableHeaderCellClass(
+                                                            `p-4 cursor-pointer hover:bg-bg-hover transition-colors ${draggingColumn === col.id ? 'opacity-50' : ''}`,
+                                                        )}
                                                     >
                                                         <div className="flex items-center gap-1">
                                                             {col.header} 
@@ -1438,7 +1647,7 @@ const JobsView: React.FC = () => {
                                         ))}
                                     </tbody>
                                 </table>
-                            </div>
+                            </HorizontalScrollArea>
                         </div>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">

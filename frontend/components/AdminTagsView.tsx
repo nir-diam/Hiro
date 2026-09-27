@@ -1,11 +1,11 @@
 
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, useNavigationType } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, PlusIcon, PencilIcon, TrashIcon, CheckIcon, XMarkIcon, 
     SparklesIcon, TagIcon, BuildingOffice2Icon, CheckCircleIcon, NoSymbolIcon,
     ChevronDownIcon, ArrowLeftIcon, ArrowUpTrayIcon, DocumentArrowDownIcon, ChatBubbleBottomCenterTextIcon,
-    Bars3Icon, Squares2X2Icon, TableCellsIcon, ListBulletIcon, CalendarDaysIcon, ArrowDownTrayIcon
+    Bars3Icon, Squares2X2Icon, TableCellsIcon, CalendarDaysIcon, ArrowDownTrayIcon
 } from './Icons';
 import HiroAIChat from './HiroAIChat';
 import AuditHistoryRow from './AuditHistoryRow';
@@ -18,6 +18,11 @@ import {
     TAG_DOMAIN_PICKLIST_CATEGORY_ID,
 } from '../services/picklistValuesApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+    STICKY_TABLE_CLASS,
+    ADMIN_TABLE_SCROLL_CLASS,
+    stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
 import { blacklistTags } from '../services/tagCorrectionsApi';
 
 const normalizePicklistOptions = (rows: { label?: string; value?: string }[]) =>
@@ -1399,16 +1404,108 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({
 
 const PICKLIST_CATEGORY_ID = '7605ff08-fc40-49ef-9e90-4c6490c5c25c';
 
+const isTagsMultiFilterActive = (selectedValues: unknown[]) => selectedValues.length > 0;
+
+const filterControlClass = (isActive: boolean, extra = '') =>
+    [
+        'border rounded-xl px-3 py-2 text-sm font-medium transition-all focus:ring-2 focus:ring-purple-400',
+        isActive
+            ? 'bg-purple-50 border-purple-300 text-purple-900 ring-1 ring-purple-200 shadow-sm'
+            : 'bg-white border-border-default text-text-default hover:bg-bg-hover',
+        extra,
+    ]
+        .filter(Boolean)
+        .join(' ');
+
+const ADMIN_TAGS_FILTER_STATE_KEY = 'hiro.adminTags.listFilters.v1';
+const ADMIN_TAGS_RESTORE_ON_BACK_KEY = 'hiro.adminTags.restoreOnBack';
+
+type AdminTagsFilterSnapshot = {
+    version: 1;
+    searchTerm: string;
+    selectedTypes: string[];
+    selectedCategories: string[];
+    selectedStatuses: TagStatus[];
+    selectedSources: SourceFilterValue[];
+    activityFrom: string;
+    activityTo: string;
+    synonymFilter: string;
+    showCollisionsOnly: boolean;
+    page: number;
+    pageSize: number;
+};
+
+const DEFAULT_ADMIN_TAGS_FILTERS: Omit<AdminTagsFilterSnapshot, 'version'> = {
+    searchTerm: '',
+    selectedTypes: [],
+    selectedCategories: [],
+    selectedStatuses: [],
+    selectedSources: [],
+    activityFrom: '',
+    activityTo: '',
+    synonymFilter: '',
+    showCollisionsOnly: false,
+    page: 1,
+    pageSize: 100,
+};
+
+function tryRestoreAdminTagsFilters(
+    navigationType: ReturnType<typeof useNavigationType>,
+): AdminTagsFilterSnapshot | null {
+    if (navigationType !== 'POP') return null;
+    if (typeof sessionStorage === 'undefined') return null;
+    if (sessionStorage.getItem(ADMIN_TAGS_RESTORE_ON_BACK_KEY) !== '1') return null;
+    try {
+        const raw = sessionStorage.getItem(ADMIN_TAGS_FILTER_STATE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as AdminTagsFilterSnapshot;
+        if (parsed?.version !== 1) return null;
+        sessionStorage.removeItem(ADMIN_TAGS_RESTORE_ON_BACK_KEY);
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function persistAdminTagsFilters(snapshot: AdminTagsFilterSnapshot) {
+    if (typeof sessionStorage === 'undefined') return;
+    try {
+        sessionStorage.setItem(ADMIN_TAGS_FILTER_STATE_KEY, JSON.stringify(snapshot));
+    } catch {
+        // ignore quota / privacy mode
+    }
+}
+
+function clearAdminTagsFilterStorage() {
+    if (typeof sessionStorage === 'undefined') return;
+    try {
+        sessionStorage.removeItem(ADMIN_TAGS_FILTER_STATE_KEY);
+        sessionStorage.removeItem(ADMIN_TAGS_RESTORE_ON_BACK_KEY);
+    } catch {
+        // ignore
+    }
+}
+
 const AdminTagsView: React.FC = () => {
     const [searchParams] = useSearchParams();
     const readUrlSearch = () => (searchParams.get('search') || searchParams.get('q') || '').trim();
+    const navigationType = useNavigationType();
+    const restoredFilters = useMemo(
+        () => tryRestoreAdminTagsFilters(navigationType),
+        [navigationType],
+    );
+    const initialUrlSearch = readUrlSearch();
     const [tags, setTags] = useState<Tag[]>([]);
-    const [searchTerm, setSearchTerm] = useState(() => readUrlSearch());
-    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(() => readUrlSearch());
-    const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
-    const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-    const [selectedStatuses, setSelectedStatuses] = useState<TagStatus[]>([]);
-    const [synonymFilter, setSynonymFilter] = useState('');
+    const [searchTerm, setSearchTerm] = useState(
+        () => initialUrlSearch || restoredFilters?.searchTerm || '',
+    );
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(
+        () => initialUrlSearch || restoredFilters?.searchTerm || '',
+    );
+    const [selectedTypes, setSelectedTypes] = useState<string[]>(restoredFilters?.selectedTypes ?? []);
+    const [selectedCategories, setSelectedCategories] = useState<string[]>(restoredFilters?.selectedCategories ?? []);
+    const [selectedStatuses, setSelectedStatuses] = useState<TagStatus[]>(restoredFilters?.selectedStatuses ?? []);
+    const [synonymFilter, setSynonymFilter] = useState(restoredFilters?.synonymFilter ?? '');
     const [editingTag, setEditingTag] = useState<Tag | null>(null);
     const [isModalOpen, setIsModalOpen] = useState(false);
     
@@ -1459,9 +1556,9 @@ const AdminTagsView: React.FC = () => {
     const statusDropdownRef = useRef<HTMLDivElement>(null);
     const sourceDropdownRef = useRef<HTMLDivElement>(null);
     const [sourceDropdownOpen, setSourceDropdownOpen] = useState(false);
-    const [selectedSources, setSelectedSources] = useState<SourceFilterValue[]>([]);
-    const [activityFrom, setActivityFrom] = useState('');
-    const [activityTo, setActivityTo] = useState('');
+    const [selectedSources, setSelectedSources] = useState<SourceFilterValue[]>(restoredFilters?.selectedSources ?? []);
+    const [activityFrom, setActivityFrom] = useState(restoredFilters?.activityFrom ?? '');
+    const [activityTo, setActivityTo] = useState(restoredFilters?.activityTo ?? '');
     const [sortConfig, setSortConfig] = useState<SortConfig>({ key: 'tagKey', direction: 'asc' });
     const [columnOrder, setColumnOrder] = useState<SortKey[]>(['tagKey', 'displayNameHe', 'displayNameEn', 'type', 'category', 'status', 'updatedAt', 'source', 'usageCount', 'jobUsageCount']);
     const [inlineLoading, setInlineLoading] = useState<Record<string, boolean>>({});
@@ -1472,15 +1569,14 @@ const AdminTagsView: React.FC = () => {
     const [candidateUsageCounts, setCandidateUsageCounts] = useState<Record<string, number>>({});
     const [jobUsageCounts, setJobUsageCounts] = useState<Record<string, number>>({});
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    const [filterVertical, setFilterVertical] = useState(true);
-    const [showCollisionsOnly, setShowCollisionsOnly] = useState(false);
+    const [showCollisionsOnly, setShowCollisionsOnly] = useState(restoredFilters?.showCollisionsOnly ?? false);
     const [collisionTagsList, setCollisionTagsList] = useState<Tag[]>([]);
     const [collisionSharedPhrases, setCollisionSharedPhrases] = useState<Record<string, string[]>>({});
     const [collisionsLoading, setCollisionsLoading] = useState(false);
     const navigate = useNavigate();
     const pageSizeOptions = useMemo(() => [50, 100, 200, 500, 1000, 10000], []);
-    const [pageSize, setPageSize] = useState(100);
-    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(restoredFilters?.pageSize ?? 100);
+    const [page, setPage] = useState(restoredFilters?.page ?? 1);
     const [totalRecords, setTotalRecords] = useState(0);
 
     useEffect(() => {
@@ -1494,6 +1590,66 @@ const AdminTagsView: React.FC = () => {
         setSearchTerm(urlSearch);
         setDebouncedSearchTerm(urlSearch);
     }, [urlSearch]);
+
+    useEffect(() => {
+        persistAdminTagsFilters({
+            version: 1,
+            searchTerm,
+            selectedTypes,
+            selectedCategories,
+            selectedStatuses,
+            selectedSources,
+            activityFrom,
+            activityTo,
+            synonymFilter,
+            showCollisionsOnly,
+            page,
+            pageSize,
+        });
+    }, [
+        searchTerm,
+        selectedTypes,
+        selectedCategories,
+        selectedStatuses,
+        selectedSources,
+        activityFrom,
+        activityTo,
+        synonymFilter,
+        showCollisionsOnly,
+        page,
+        pageSize,
+    ]);
+
+    useEffect(() => () => {
+        if (typeof sessionStorage === 'undefined') return;
+        try {
+            sessionStorage.setItem(ADMIN_TAGS_RESTORE_ON_BACK_KEY, '1');
+        } catch {
+            // ignore
+        }
+    }, []);
+
+    const handleClearAllFilters = useCallback(() => {
+        const defaults = DEFAULT_ADMIN_TAGS_FILTERS;
+        clearAdminTagsFilterStorage();
+        setSearchTerm(defaults.searchTerm);
+        setDebouncedSearchTerm('');
+        setSelectedTypes(defaults.selectedTypes);
+        setSelectedCategories(defaults.selectedCategories);
+        setSelectedStatuses(defaults.selectedStatuses);
+        setSelectedSources(defaults.selectedSources);
+        setActivityFrom(defaults.activityFrom);
+        setActivityTo(defaults.activityTo);
+        setSynonymFilter(defaults.synonymFilter);
+        setShowCollisionsOnly(defaults.showCollisionsOnly);
+        setPage(defaults.page);
+        setPageSize(defaults.pageSize);
+        setTypeDropdownOpen(false);
+        setCategoryDropdownOpen(false);
+        setStatusDropdownOpen(false);
+        setSourceDropdownOpen(false);
+        setCategorySearch('');
+    }, []);
 
     const resolveSuggestedType = useCallback((suggestion: any) => {
         const normalize = (value?: string) => (value || '').toString().trim().toLowerCase();
@@ -1519,7 +1675,6 @@ const AdminTagsView: React.FC = () => {
 
         return suggestion?.type || '';
     }, [typePicklistOptions]);
-    const filterLayoutClass = filterVertical ? 'grid grid-cols-1 md:grid-cols-6 gap-3' : 'grid grid-cols-1 gap-3';
 
     const tagNameOptions = useMemo(() => {
         return Array.from(new Set(
@@ -2873,14 +3028,6 @@ const AdminTagsView: React.FC = () => {
                         </button>
                         <button
                             type="button"
-                            onClick={() => setFilterVertical(prev => !prev)}
-                            className={`inline-flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-semibold transition ${filterVertical ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-border-default bg-transparent text-text-muted'}`}
-                        >
-                            <ListBulletIcon className="w-4 h-4" />
-                            {filterVertical ? 'סינון אנכי' : 'סינון אופקי'}
-                        </button>
-                        <button
-                            type="button"
                             onClick={handleToggleCollisions}
                             disabled={collisionsLoading}
                             title="הצג רק תגיות שיש להן כינוי/מילה נרדפת משותפת עם תגית אחרת"
@@ -2917,7 +3064,7 @@ const AdminTagsView: React.FC = () => {
                         placeholder="חפש לפי שם, מפתח או קטגוריה..." 
                         value={searchTerm}
                         onChange={e => setSearchTerm(e.target.value)}
-                        className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 transition shadow-sm" 
+                        className={`${filterControlClass(Boolean(searchTerm.trim()), 'w-full pl-3 pr-10 py-2.5 text-sm rounded-xl shadow-sm')}`}
                     />
                 </div>
                     <div className="flex flex-wrap gap-3 items-center w-full md:w-auto">
@@ -2933,20 +3080,20 @@ const AdminTagsView: React.FC = () => {
                 </div>
             </div>
 
-            <div className={`bg-bg-card rounded-2xl border border-border-default p-3 mb-6 ${filterLayoutClass}`}>
-                <div className="relative" ref={typeDropdownRef}>
+            <div className="relative z-40 bg-bg-card rounded-2xl border border-border-default p-3 mb-6 flex flex-wrap items-center gap-2">
+                <div className="relative w-auto min-w-[140px]" ref={typeDropdownRef}>
                     <button
                         type="button"
                         onClick={() => setTypeDropdownOpen(prev => !prev)}
-                        className="w-full text-xs text-left bg-bg-input border border-border-default rounded-xl py-2 px-3 flex items-center justify-between"
+                        className={`${filterControlClass(isTagsMultiFilterActive(selectedTypes))} w-full text-xs flex items-center justify-between gap-2`}
                     >
-                        <span>{selectedTypes.length ? selectedTypes.length + ' סוגים' : 'סוג (הכל)'}</span>
-                        <ChevronDownIcon className={'w-4 h-4 transition ' + (typeDropdownOpen ? 'rotate-180' : '')} />
+                        <span className="truncate">{selectedTypes.length ? selectedTypes.length + ' סוגים' : 'סוג (הכל)'}</span>
+                        <ChevronDownIcon className={'w-4 h-4 flex-shrink-0 transition ' + (typeDropdownOpen ? 'rotate-180' : '')} />
                     </button>
                     {typeDropdownOpen && (
-                        <div className="absolute z-20 mt-1 w-full bg-white border border-border-default rounded-xl shadow-lg max-h-48 overflow-y-auto">
+                        <div className="absolute z-50 mt-1 min-w-full w-max bg-white border border-border-default rounded-xl shadow-lg max-h-48 overflow-y-auto right-0">
                             {typePicklistOptions.map(option => (
-                                <label key={option.value} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-bg-subtle cursor-pointer">
+                                <label key={option.value} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-bg-subtle cursor-pointer whitespace-nowrap">
                                     <input
                                         type="checkbox"
                                         checked={selectedTypes.includes(option.value)}
@@ -2959,17 +3106,17 @@ const AdminTagsView: React.FC = () => {
                         </div>
                     )}
                 </div>
-                <div className="relative" ref={categoryDropdownRef}>
+                <div className="relative w-auto min-w-[140px]" ref={categoryDropdownRef}>
                     <button
                         type="button"
                         onClick={() => setCategoryDropdownOpen(prev => !prev)}
-                        className="w-full text-xs text-left bg-bg-input border border-border-default rounded-xl py-2 px-3 flex items-center justify-between"
+                        className={`${filterControlClass(isTagsMultiFilterActive(selectedCategories))} w-full text-xs flex items-center justify-between gap-2`}
                     >
-                        <span>{selectedCategories.length ? selectedCategories.length + ' קטגוריות' : 'קטגוריה (הכל)'}</span>
-                        <ChevronDownIcon className={'w-4 h-4 transition ' + (categoryDropdownOpen ? 'rotate-180' : '')} />
+                        <span className="truncate">{selectedCategories.length ? selectedCategories.length + ' קטגוריות' : 'קטגוריה (הכל)'}</span>
+                        <ChevronDownIcon className={'w-4 h-4 flex-shrink-0 transition ' + (categoryDropdownOpen ? 'rotate-180' : '')} />
                     </button>
                     {categoryDropdownOpen && (
-                        <div className="absolute z-20 mt-1 w-full bg-white border border-border-default rounded-xl shadow-lg">
+                        <div className="absolute z-50 mt-1 min-w-full w-56 bg-white border border-border-default rounded-xl shadow-lg right-0">
                             <input
                                 type="text"
                                 value={categorySearch}
@@ -2996,19 +3143,19 @@ const AdminTagsView: React.FC = () => {
                         </div>
                     )}
                 </div>
-                <div className="relative" ref={statusDropdownRef}>
+                <div className="relative w-auto min-w-[140px]" ref={statusDropdownRef}>
                     <button
                         type="button"
                         onClick={() => setStatusDropdownOpen(prev => !prev)}
-                        className="w-full text-xs text-left bg-bg-input border border-border-default rounded-xl py-2 px-3 flex items-center justify-between"
+                        className={`${filterControlClass(isTagsMultiFilterActive(selectedStatuses))} w-full text-xs flex items-center justify-between gap-2`}
                     >
-                        <span>{selectedStatuses.length ? selectedStatuses.length + ' סטטוסים' : 'סטטוס (הכל)'}</span>
-                        <ChevronDownIcon className={'w-4 h-4 transition ' + (statusDropdownOpen ? 'rotate-180' : '')} />
+                        <span className="truncate">{selectedStatuses.length ? selectedStatuses.length + ' סטטוסים' : 'סטטוס (הכל)'}</span>
+                        <ChevronDownIcon className={'w-4 h-4 flex-shrink-0 transition ' + (statusDropdownOpen ? 'rotate-180' : '')} />
                     </button>
                     {statusDropdownOpen && (
-                        <div className="absolute z-20 mt-1 w-full bg-white border border-border-default rounded-xl shadow-lg">
+                        <div className="absolute z-50 mt-1 min-w-full w-max bg-white border border-border-default rounded-xl shadow-lg right-0">
                             {statusOptions.map(status => (
-                                <label key={status} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-bg-subtle cursor-pointer">
+                                <label key={status} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-bg-subtle cursor-pointer whitespace-nowrap">
                                     <input
                                         type="checkbox"
                                         checked={selectedStatuses.includes(status)}
@@ -3021,56 +3168,66 @@ const AdminTagsView: React.FC = () => {
                         </div>
                     )}
                 </div>
-                <div className="grid gap-3 md:grid-cols-2">
-                    <div className="flex flex-col gap-1 w-full">
-                        <label className="text-[10px] text-text-muted uppercase tracking-wider">מתאריך</label>
-                        <input
-                            type="date"
-                            value={activityFrom}
-                            onChange={e => setActivityFrom(e.target.value)}
-                            className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition"
-                        />
-                    </div>
-                    <div className="flex flex-col gap-1 w-full">
-                        <label className="text-[10px] text-text-muted uppercase tracking-wider">עד תאריך</label>
-                        <input
-                            type="date"
-                            value={activityTo}
-                            min={activityFrom || undefined}
-                            onChange={e => setActivityTo(e.target.value)}
-                            className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition"
-                        />
-                    </div>
+                <div className="flex flex-col gap-1 w-auto min-w-[130px]">
+                    <label className="text-[10px] text-text-muted uppercase tracking-wider">מתאריך</label>
+                    <input
+                        type="date"
+                        value={activityFrom}
+                        onChange={e => setActivityFrom(e.target.value)}
+                        className={`${filterControlClass(Boolean(activityFrom))} w-full text-xs p-2`}
+                    />
                 </div>
-                <div className="flex flex-col gap-1">
-                    <label className="text-[10px] text-text-muted uppercase tracking-wider">מקור</label>
-                    <div className="relative" ref={sourceDropdownRef}>
-                        <button
-                            type="button"
-                            onClick={() => setSourceDropdownOpen(prev => !prev)}
-                            className="w-full text-xs text-left bg-bg-input border border-border-default rounded-xl py-2 px-3 flex items-center justify-between"
-                        >
-                            <span>{selectedSources.length ? selectedSources.length + ' מקורות' : 'מקור (הכל)'}</span>
-                            <ChevronDownIcon className={'w-4 h-4 transition ' + (sourceDropdownOpen ? 'rotate-180' : '')} />
-                        </button>
-                        {sourceDropdownOpen && (
-                            <div className="absolute z-20 mt-1 w-full bg-white border border-border-default rounded-xl shadow-lg">
-                                {SOURCE_FILTER_OPTIONS.map(option => (
-                                    <label key={option.value} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-bg-subtle cursor-pointer">
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedSources.includes(option.value)}
-                                            onChange={() => toggleSourceSelection(option.value)}
-                                            className="w-3 h-3"
-                                        />
-                                        <span>{option.label}</span>
-                                    </label>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+                <div className="flex flex-col gap-1 w-auto min-w-[130px]">
+                    <label className="text-[10px] text-text-muted uppercase tracking-wider">עד תאריך</label>
+                    <input
+                        type="date"
+                        value={activityTo}
+                        min={activityFrom || undefined}
+                        onChange={e => setActivityTo(e.target.value)}
+                        className={`${filterControlClass(Boolean(activityTo))} w-full text-xs p-2`}
+                    />
                 </div>
-                <input type="text" value={synonymFilter} onChange={e => setSynonymFilter(e.target.value)} placeholder="מילה נרדפת" className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition" />
+                <div className="relative w-auto min-w-[140px]" ref={sourceDropdownRef}>
+                    <button
+                        type="button"
+                        onClick={() => setSourceDropdownOpen(prev => !prev)}
+                        className={`${filterControlClass(isTagsMultiFilterActive(selectedSources))} w-full text-xs flex items-center justify-between gap-2`}
+                    >
+                        <span className="truncate">{selectedSources.length ? selectedSources.length + ' מקורות' : 'מקור (הכל)'}</span>
+                        <ChevronDownIcon className={'w-4 h-4 flex-shrink-0 transition ' + (sourceDropdownOpen ? 'rotate-180' : '')} />
+                    </button>
+                    {sourceDropdownOpen && (
+                        <div className="absolute z-50 mt-1 min-w-full w-max bg-white border border-border-default rounded-xl shadow-lg right-0">
+                            {SOURCE_FILTER_OPTIONS.map(option => (
+                                <label key={option.value} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-bg-subtle cursor-pointer whitespace-nowrap">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedSources.includes(option.value)}
+                                        onChange={() => toggleSourceSelection(option.value)}
+                                        className="w-3 h-3"
+                                    />
+                                    <span>{option.label}</span>
+                                </label>
+                            ))}
+                        </div>
+                    )}
+                </div>
+                <input
+                    type="text"
+                    value={synonymFilter}
+                    onChange={e => setSynonymFilter(e.target.value)}
+                    placeholder="מילה נרדפת"
+                    className={`${filterControlClass(Boolean(synonymFilter.trim()))} w-auto min-w-[120px] text-xs p-2`}
+                />
+                <button
+                    type="button"
+                    onClick={handleClearAllFilters}
+                    className="flex items-center gap-2 text-sm px-3 py-2 rounded-xl border font-bold transition-colors shadow-sm bg-white border-border-default text-text-muted hover:text-red-600 hover:border-red-200 hover:bg-red-50 mr-auto"
+                    title="נקה את כל מסנני החיפוש"
+                >
+                    <XMarkIcon className="w-4 h-4" />
+                    נקה סינון
+                </button>
             </div>
 
             {/* Bulk Actions Bar (Visible when items selected) */}
@@ -3172,11 +3329,15 @@ const AdminTagsView: React.FC = () => {
                         </button>
                     </div>
                 </div>
-                <HorizontalScrollArea className="flex flex-col flex-1 min-w-0" scrollClassName="overflow-x-auto flex-1 min-w-0 w-full [scrollbar-width:thin]">
-                    <table className="w-full min-w-[1760px] text-right text-sm" dir="rtl">
-                        <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-10 border-b border-border-default">
+                <HorizontalScrollArea
+                    pinHeader
+                    className="flex flex-col flex-1 min-w-0"
+                    scrollClassName={`${ADMIN_TABLE_SCROLL_CLASS} flex-1`}
+                >
+                    <table className={`w-full min-w-[1760px] text-right text-sm ${STICKY_TABLE_CLASS}`} dir="rtl">
+                        <thead className="border-b border-border-default text-text-muted font-bold text-xs uppercase">
                             <tr>
-                                <th className="p-4 w-12 text-center">
+                                <th className={`p-4 w-12 text-center ${stickyTableHeaderCellClass()}`}>
                                     <input 
                                         type="checkbox" 
                                         onChange={handleSelectAll} 
@@ -3187,7 +3348,7 @@ const AdminTagsView: React.FC = () => {
                                 {columnOrder.map(key => (
                                     <th
                                         key={key}
-                                        className={`p-4 cursor-pointer select-none ${getTagTableColumnClass(key)}`}
+                                        className={`p-4 cursor-pointer select-none ${getTagTableColumnClass(key)} ${stickyTableHeaderCellClass()}`}
                                         draggable
                                         onDragStart={(e) => handleColumnDragStart(e, key)}
                                         onDragOver={(e) => e.preventDefault()}
@@ -3201,9 +3362,9 @@ const AdminTagsView: React.FC = () => {
                                         </div>
                                     </th>
                                 ))}
-                                <th className="p-4 w-[8%]"></th>
+                                <th className={`p-4 w-[8%] ${stickyTableHeaderCellClass()}`}></th>
                                 <th
-                                    className={`p-4 cursor-pointer select-none ${getTagTableColumnClass('synonyms')}`}
+                                    className={`p-4 cursor-pointer select-none ${getTagTableColumnClass('synonyms')} ${stickyTableHeaderCellClass()}`}
                                     onClick={() => toggleSort('synonyms')}
                                 >
                                     <div className="flex items-center justify-between gap-1">

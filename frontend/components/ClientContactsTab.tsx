@@ -93,6 +93,8 @@ interface ClientContactsTabProps {
     organizationId?: string;
     /** Pending linked organization (before admin approval). */
     organizationTmpId?: string;
+    /** Display name for proposal placeholders ({company_name}) when messaging from org profile. */
+    organizationName?: string;
     onOpenMessageModal: (config: MessageModalConfig) => void;
 }
 
@@ -101,6 +103,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
     clientId,
     organizationId,
     organizationTmpId,
+    organizationName,
     onOpenMessageModal,
 }) => {
     const { t } = useLanguage();
@@ -359,12 +362,30 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
     };
 
     const handleActionClick = (mode: 'email' | 'sms' | 'whatsapp', contact: ContactFormState) => {
+        const orgLabel = String(organizationName || '').trim();
+        const linkedOrgId = organizationId || organizationTmpId || null;
         onOpenMessageModal({
             mode,
             recipientType: 'client_contact',
             candidateName: contact.name,
             candidatePhone: primaryPhone(contact, 'mobile') || primaryPhone(contact, 'office'),
             candidateEmail: primaryEmail(contact) || undefined,
+            linkedClientId: clientId,
+            linkedContactId: contact.id,
+            linkedOrganizationId: linkedOrgId,
+            linkedOrganizationName: orgLabel || null,
+            recipientOptions: [
+                {
+                    id: contact.id,
+                    name: contact.name,
+                    email: primaryEmail(contact) || '',
+                    phone: primaryPhone(contact, 'mobile') || primaryPhone(contact, 'office') || '',
+                    subtitle: orgLabel || null,
+                    clientId,
+                    organizationId: linkedOrgId,
+                },
+            ],
+            initialRecipientIds: [contact.id],
         });
     };
     

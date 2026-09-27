@@ -62,31 +62,31 @@ const JobSearchFilters: React.FC<JobSearchFiltersProps> = ({ searchTerm, setSear
     };
 
     return (
-        <div className="w-full bg-white rounded-2xl shadow-sm border border-border-default p-4 mb-6">
-            <div className="flex flex-col lg:flex-row gap-4 items-center justify-between">
-                
-                {/* Right Side - Search Input */}
-                <div className="relative w-full lg:w-[350px] order-1">
-                    <MagnifyingGlassIcon className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-text-subtle" />
-                    <input 
-                        type="text" 
-                        value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
-                        placeholder="חיפוש משרה, חברה או מילות מפתח..." 
-                        className="w-full bg-bg-subtle/50 border border-border-default rounded-xl py-3 pl-4 pr-10 text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all outline-none"
-                    />
-                     {searchTerm && (
-                        <button 
-                            onClick={() => setSearchTerm('')}
-                            className="absolute left-3 top-1/2 -translate-y-1/2 p-1 rounded-full hover:bg-bg-hover text-text-subtle"
-                        >
-                            <XMarkIcon className="w-4 h-4" />
-                        </button>
-                    )}
-                </div>
+        <div className="w-full bg-white rounded-2xl shadow-sm border border-border-default p-4 mb-6 space-y-4">
+            {/* Search — full width */}
+            <div className="relative w-full">
+                <MagnifyingGlassIcon className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-text-subtle pointer-events-none" />
+                <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="חיפוש משרה, חברה או מילות מפתח..."
+                    className="w-full bg-bg-subtle/50 border border-border-default rounded-xl py-3.5 pl-12 pr-12 text-base focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all outline-none"
+                />
+                {searchTerm && (
+                    <button
+                        type="button"
+                        onClick={() => setSearchTerm('')}
+                        className="absolute left-4 top-1/2 -translate-y-1/2 p-1 rounded-full hover:bg-bg-hover text-text-subtle"
+                    >
+                        <XMarkIcon className="w-4 h-4" />
+                    </button>
+                )}
+            </div>
 
-                {/* Center - Filters */}
-                <div className="flex items-center gap-2 w-full lg:w-auto overflow-visible order-2 flex-wrap lg:flex-nowrap">
+            <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
+                {/* Filters */}
+                <div className="flex items-center gap-2 w-full lg:flex-1 overflow-visible flex-wrap lg:flex-nowrap">
                     
                     {/* Role Selector */}
                     <button 
@@ -133,8 +133,8 @@ const JobSearchFilters: React.FC<JobSearchFiltersProps> = ({ searchTerm, setSear
                     </button>
                 </div>
 
-                 {/* Left Side - Actions */}
-                <div className="flex items-center gap-3 order-3 lg:w-auto w-full justify-end">
+                {/* Actions */}
+                <div className="flex items-center gap-3 w-full lg:w-auto justify-end shrink-0">
                      <button 
                         onClick={handleClearAll}
                         className="text-text-muted hover:text-red-500 text-sm font-medium whitespace-nowrap px-2"

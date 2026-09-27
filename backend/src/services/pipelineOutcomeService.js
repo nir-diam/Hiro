@@ -1013,7 +1013,45 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
   }
 }
 
-async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline) {
+function resolveManualOutcomeJournal(options = {}) {
+  const historyTitle = trim(options.historyTitle);
+  const historyComment = trim(options.historyComment);
+  return {
+    historyTitle: historyTitle || null,
+    historyComment: historyComment || null,
+  };
+}
+
+function defaultOutcomeActivitySummary(outcome) {
+  if (outcome.actionType === 'close') {
+    return outcome.name && trim(outcome.name) && outcome.name !== EVENT_CLOSED_SUMMARY
+      ? `${EVENT_CLOSED_SUMMARY} · ${trim(outcome.name)}`
+      : EVENT_CLOSED_SUMMARY;
+  }
+  return outcome.name;
+}
+
+function buildClientEventStatusUpdate(actor, outcome, options = {}) {
+  const { historyTitle, historyComment } = resolveManualOutcomeJournal(options);
+  const activitySummary = historyTitle || defaultOutcomeActivitySummary(outcome);
+  const date = new Date().toISOString();
+  const newUpdate = {
+    id: `u-${Date.now()}`,
+    title: activitySummary,
+    date,
+    creator: actor,
+    ...(historyComment ? { comment: historyComment } : {}),
+  };
+  const historyRow = {
+    user: actor,
+    timestamp: date,
+    summary: activitySummary,
+    ...(historyComment ? { comment: historyComment } : {}),
+  };
+  return { newUpdate, historyRow };
+}
+
+async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline, options = {}) {
   const stages = pipeline.stages || [];
   const currentStage = stages.find((s) => s.id === ctx.stageId) || null;
   let nextStageId = currentStage?.id || ctx.stageId;
@@ -1070,7 +1108,15 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline) {
         await JobCandidate.update({ workflowMeta: wm }, { where: { id: ctx.jobCandidate.id } });
       }
     }
-    return { nextStageId, nextStageName, note, dueDate, closed: true };
+    const manualJournal = resolveManualOutcomeJournal(options);
+    return {
+      nextStageId,
+      nextStageName,
+      note: manualJournal.historyTitle || note,
+      dueDate,
+      closed: true,
+      historyComment: manualJournal.historyComment || undefined,
+    };
   } else {
     const slaDue = applyOutcomeSlaDueDateTime(outcome, stages);
     if (slaDue.dueDate) {
@@ -1078,6 +1124,9 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline) {
       dueTime = slaDue.dueTime;
     }
   }
+
+  const manualJournal = resolveManualOutcomeJournal(options);
+  if (manualJournal.historyTitle) note = manualJournal.historyTitle;
 
   if (ctx.candidateId && nextStageId) {
     await candidateService.update(ctx.candidateId, {
@@ -1116,10 +1165,18 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline) {
     });
   }
 
-  return { nextStageId, nextStageName, note, dueDate, dueTime, closed: false };
+  return {
+    nextStageId,
+    nextStageName,
+    note,
+    dueDate,
+    dueTime,
+    closed: false,
+    historyComment: manualJournal.historyComment || undefined,
+  };
 }
 
-async function applyClientOutcomeAction(req, ctx, outcome, pipeline) {
+async function applyClientOutcomeAction(req, ctx, outcome, pipeline, options = {}) {
   const stages = pipeline.stages || [];
   const event = ctx.event;
   let nextStageName = event.stage;
@@ -1159,18 +1216,7 @@ async function applyClientOutcomeAction(req, ctx, outcome, pipeline) {
   }
 
   const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
-  const activitySummary =
-    outcome.actionType === 'close'
-      ? outcome.name && String(outcome.name).trim() && outcome.name !== EVENT_CLOSED_SUMMARY
-        ? `${EVENT_CLOSED_SUMMARY} · ${String(outcome.name).trim()}`
-        : EVENT_CLOSED_SUMMARY
-      : outcome.name;
-  const newUpdate = {
-    id: `u-${Date.now()}`,
-    title: activitySummary,
-    date: new Date().toISOString(),
-    creator: actor,
-  };
+  const { newUpdate, historyRow } = buildClientEventStatusUpdate(actor, outcome, options);
   const events = Array.isArray(ctx.client.events) ? ctx.client.events : [];
   const nextEvents = events.map((e) =>
     String(e.id) === String(ctx.clientEventId)
@@ -1183,10 +1229,7 @@ async function applyClientOutcomeAction(req, ctx, outcome, pipeline) {
           dueTime: nextDueTime,
           isActive: nextIsActive,
           updates: [newUpdate, ...(Array.isArray(e.updates) ? e.updates : [])],
-          history: [
-            { user: actor, timestamp: newUpdate.date, summary: activitySummary },
-            ...(Array.isArray(e.history) ? e.history : []),
-          ],
+          history: [historyRow, ...(Array.isArray(e.history) ? e.history : [])],
         }
       : e,
   );
@@ -1211,6 +1254,7 @@ async function syncClientEventAfterCandidateOutcome(
   outcome,
   actionResult,
   ctx = null,
+  options = {},
 ) {
   const cid = String(clientId || '').trim();
   const eventId = String(clientEventId || '').trim();
@@ -1223,10 +1267,13 @@ async function syncClientEventAfterCandidateOutcome(
 
   const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
   const now = new Date().toISOString();
+  const manualJournal = resolveManualOutcomeJournal(options);
   const activitySummary =
-    actionResult?.note && String(actionResult.note).trim()
-      ? String(actionResult.note).trim()
-      : outcome.name;
+    manualJournal.historyTitle ||
+    (actionResult?.note && trim(actionResult.note)) ||
+    outcome.name;
+  const historyComment =
+    manualJournal.historyComment || trim(actionResult?.historyComment) || null;
 
   let nextStageName = actionResult?.nextStageName || event.stage;
   let nextStageId = actionResult?.nextStageId || event.stageId || null;
@@ -1243,6 +1290,13 @@ async function syncClientEventAfterCandidateOutcome(
     title: activitySummary,
     date: now,
     creator: actor,
+    ...(historyComment ? { comment: historyComment } : {}),
+  };
+  const historyRow = {
+    user: actor,
+    timestamp: now,
+    summary: activitySummary,
+    ...(historyComment ? { comment: historyComment } : {}),
   };
   const nextEvents = events.map((e) =>
     String(e.id) === eventId
@@ -1255,10 +1309,7 @@ async function syncClientEventAfterCandidateOutcome(
           dueTime: nextDueTime,
           isActive: nextIsActive,
           updates: [newUpdate, ...(Array.isArray(e.updates) ? e.updates : [])],
-          history: [
-            { user: actor, timestamp: now, summary: activitySummary },
-            ...(Array.isArray(e.history) ? e.history : []),
-          ],
+          history: [historyRow, ...(Array.isArray(e.history) ? e.history : [])],
           metadata: {
             ...(e.metadata && typeof e.metadata === 'object' ? e.metadata : {}),
             ...(ctx ? jobMetaFromContext(ctx) : {}),
@@ -1282,7 +1333,11 @@ async function executeOutcome(req, params) {
     context = {},
     source = 'manual',
     skipCandidateAction = false,
+    historyTitle = '',
+    historyComment = '',
   } = params;
+
+  const journalOptions = { historyTitle, historyComment };
 
   if (!clientId || !pipelineId || !stageId || !outcomeId) {
     throw Object.assign(new Error('clientId, pipelineId, stageId and outcomeId are required'), { status: 400 });
@@ -1313,7 +1368,7 @@ async function executeOutcome(req, params) {
     if (skipCandidateAction) {
       actionResult = { skippedAction: true };
     } else {
-      actionResult = await applyCandidateOutcomeAction(req, ctx, outcome, pipeline);
+      actionResult = await applyCandidateOutcomeAction(req, ctx, outcome, pipeline, journalOptions);
       if (context.clientEventId) {
         const updatedEvent = await syncClientEventAfterCandidateOutcome(
           req,
@@ -1322,12 +1377,13 @@ async function executeOutcome(req, params) {
           outcome,
           actionResult,
           ctx,
+          journalOptions,
         );
         if (updatedEvent) actionResult.event = updatedEvent;
       }
     }
   } else {
-    actionResult = await applyClientOutcomeAction(req, ctx, outcome, pipeline);
+    actionResult = await applyClientOutcomeAction(req, ctx, outcome, pipeline, journalOptions);
   }
 
   const automations = Array.isArray(outcome.automations) ? outcome.automations : [];

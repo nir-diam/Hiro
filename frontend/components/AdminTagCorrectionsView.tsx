@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigationType } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, TagIcon, 
     CheckCircleIcon, ExclamationTriangleIcon, SparklesIcon, 
@@ -41,6 +41,27 @@ function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: 
         ...(range.to ? { dateTo: range.to } : {}),
     };
 }
+
+function formatOccurrenceCreatedDate(raw: string | null | undefined): string {
+    if (!raw) return '—';
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return '—';
+    return date.toLocaleDateString('he-IL', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+    });
+}
+
+const pickOccurrenceCreatedDate = (...values: unknown[]): string | null => {
+    for (const value of values) {
+        const raw = String(value ?? '').trim();
+        if (!raw) continue;
+        const date = new Date(raw);
+        if (!Number.isNaN(date.getTime())) return date.toISOString();
+    }
+    return null;
+};
 
 function formatCandidateTagsFromDbForExport(tags: CandidateTagMatchDto[] | undefined): string {
     if (!Array.isArray(tags) || !tags.length) return '';
@@ -133,6 +154,23 @@ const StatCard: React.FC<{ title: string; value: number; icon: React.ReactNode; 
     </div>
 );
 
+const isMultiFilterActive = (selectedValues: string[]) =>
+    selectedValues.length > 0 && !selectedValues.includes('all');
+
+const filterControlClass = (isActive: boolean, extra = '') =>
+    [
+        'border rounded-xl px-3 py-2 text-sm font-medium transition-all focus:ring-2 focus:ring-purple-400',
+        isActive
+            ? 'bg-purple-50 border-purple-300 text-purple-900 ring-1 ring-purple-200 shadow-sm'
+            : 'bg-white border-border-default text-text-default hover:bg-bg-hover',
+        extra,
+    ]
+        .filter(Boolean)
+        .join(' ');
+
+const filterSelectClass = (isActive: boolean) =>
+    filterControlClass(isActive, 'w-full appearance-none cursor-pointer py-2 px-2 pr-7 text-xs rounded-lg');
+
 // --- MULTI-SELECT COMPONENT ---
 const MultiSelectDropdown: React.FC<{ 
     options: {value: string, label: string}[]; 
@@ -140,7 +178,8 @@ const MultiSelectDropdown: React.FC<{
     onChange: (values: string[]) => void; 
     placeholder: string;
     allLabel?: string;
-}> = ({ options, selectedValues, onChange, placeholder, allLabel = "בחר הכל" }) => {
+    className?: string;
+}> = ({ options, selectedValues, onChange, placeholder, allLabel = "בחר הכל", className = '' }) => {
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = React.useRef<HTMLDivElement>(null);
 
@@ -168,6 +207,7 @@ const MultiSelectDropdown: React.FC<{
     };
 
     const isAllSelected = selectedValues.includes('all') || selectedValues.length === 0;
+    const isActive = isMultiFilterActive(selectedValues);
     let displayLabel = placeholder;
     if (!isAllSelected) {
         const selectedLabels = options.filter(o => selectedValues.includes(o.value)).map(o => o.label);
@@ -175,11 +215,11 @@ const MultiSelectDropdown: React.FC<{
     }
 
     return (
-        <div className="relative inline-block text-right w-full" ref={containerRef}>
+        <div className={`relative inline-block text-right ${className || 'w-full'}`} ref={containerRef}>
             <button
                 type="button"
                 onClick={() => setIsOpen(!isOpen)}
-                className="w-full bg-white border border-border-default rounded-xl px-3 py-2 text-sm focus:ring-2 focus:ring-primary-500 transition-all font-medium text-text-default flex items-center justify-between gap-2"
+                className={`${filterControlClass(isActive)} w-full flex items-center justify-between gap-2`}
             >
                 <span className="truncate max-w-[120px]">{displayLabel}</span>
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-text-muted flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -187,7 +227,7 @@ const MultiSelectDropdown: React.FC<{
                 </svg>
             </button>
             {isOpen && (
-                <div className="absolute z-10 mt-1 w-56 bg-white border border-border-default rounded-lg shadow-lg max-h-60 overflow-auto flex flex-col p-1 right-0">
+                <div className="absolute z-50 mt-1 w-56 bg-white border border-border-default rounded-lg shadow-lg max-h-60 overflow-auto flex flex-col p-1 right-0">
                     <label className="flex items-center gap-2 px-2 py-1.5 hover:bg-bg-subtle rounded cursor-pointer text-sm font-medium">
                         <input type="checkbox" checked={isAllSelected} onChange={() => toggleOption('all')} className="rounded text-primary-600 focus:ring-primary-500 border-border-default" />
                         {allLabel}
@@ -218,6 +258,97 @@ const AI_STATUS_FILTER_OPTIONS = [
     { value: 'approved', label: 'נבדק ואושר' },
     { value: 'delete', label: 'מחיקה / התעלמות' },
 ];
+
+const TAG_CORRECTIONS_FILTER_STATE_KEY = 'hiro.adminTagCorrections.filters.v1';
+const TAG_CORRECTIONS_RESTORE_ON_BACK_KEY = 'hiro.adminTagCorrections.restoreOnBack';
+
+type TagCorrectionsFilterSnapshot = {
+    version: 1;
+    activeTab: 'manual' | 'ai' | 'blacklist';
+    aiApprovalFilter: 'all' | TagManualApprovalStatus;
+    aiFilterStatus: string[];
+    aiFilterDecision: string[];
+    aiFilterHesitation: string[];
+    aiFilterDateRange: DateRange | null;
+    aiSortOrder: 'asc' | 'desc';
+    aiSearchTerm: string;
+    aiFilterType: string;
+    aiMinOccurrences: number;
+    aiReviewStatus: 'pending_review' | 'approved' | 'overridden' | 'manual_queue' | 'all';
+    aiPage: number;
+    aiPageSize: number;
+    searchTerm: string;
+    filterType: string;
+    minOccurrences: number;
+    page: number;
+    pageSize: number;
+    blacklistSearchTerm: string;
+    blacklistFilterType: string;
+};
+
+const DEFAULT_TAG_CORRECTIONS_FILTERS: Omit<TagCorrectionsFilterSnapshot, 'version'> = {
+    activeTab: 'ai',
+    aiApprovalFilter: 'pending',
+    aiFilterStatus: ['all'],
+    aiFilterDecision: ['all'],
+    aiFilterHesitation: ['all'],
+    aiFilterDateRange: null,
+    aiSortOrder: 'desc',
+    aiSearchTerm: '',
+    aiFilterType: 'all',
+    aiMinOccurrences: 1,
+    aiReviewStatus: 'all',
+    aiPage: 1,
+    aiPageSize: 50,
+    searchTerm: '',
+    filterType: 'all',
+    minOccurrences: 1,
+    page: 1,
+    pageSize: 50,
+    blacklistSearchTerm: '',
+    blacklistFilterType: 'all',
+};
+
+function tryRestoreTagCorrectionsFilters(
+    navigationType: ReturnType<typeof useNavigationType>,
+    isBlacklistOnly: boolean,
+): TagCorrectionsFilterSnapshot | null {
+    if (navigationType !== 'POP') return null;
+    if (typeof sessionStorage === 'undefined') return null;
+    if (sessionStorage.getItem(TAG_CORRECTIONS_RESTORE_ON_BACK_KEY) !== '1') return null;
+    try {
+        const raw = sessionStorage.getItem(TAG_CORRECTIONS_FILTER_STATE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as TagCorrectionsFilterSnapshot;
+        if (parsed?.version !== 1) return null;
+        sessionStorage.removeItem(TAG_CORRECTIONS_RESTORE_ON_BACK_KEY);
+        if (isBlacklistOnly && parsed.activeTab !== 'blacklist') {
+            return { ...parsed, activeTab: 'blacklist' };
+        }
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+function persistTagCorrectionsFilters(snapshot: TagCorrectionsFilterSnapshot) {
+    if (typeof sessionStorage === 'undefined') return;
+    try {
+        sessionStorage.setItem(TAG_CORRECTIONS_FILTER_STATE_KEY, JSON.stringify(snapshot));
+    } catch {
+        // ignore quota / privacy mode
+    }
+}
+
+function clearTagCorrectionsFilterStorage() {
+    if (typeof sessionStorage === 'undefined') return;
+    try {
+        sessionStorage.removeItem(TAG_CORRECTIONS_FILTER_STATE_KEY);
+        sessionStorage.removeItem(TAG_CORRECTIONS_RESTORE_ON_BACK_KEY);
+    } catch {
+        // ignore
+    }
+}
 
 const getHesitationBucket = (level: number | null | undefined): 'low' | 'medium' | 'high' | null => {
     if (level == null) return null;
@@ -258,15 +389,26 @@ const getDecisionStatusBucket = (
 const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = ({ mode = 'full' }) => {
     const isBlacklistOnly = mode === 'blacklist-only';
     const { t } = useLanguage();
-    const navigate = useNavigate();
+    const navigationType = useNavigationType();
+    const restoredFilters = useMemo(
+        () => tryRestoreTagCorrectionsFilters(navigationType, isBlacklistOnly),
+        [navigationType, isBlacklistOnly],
+    );
 
     const openTagsListSearch = useCallback((term: string) => {
         const q = term.trim();
         if (!q) return;
-        navigate(`/admin/tags/list?search=${encodeURIComponent(q)}`);
-    }, [navigate]);
+        try {
+            sessionStorage.setItem(TAG_CORRECTIONS_RESTORE_ON_BACK_KEY, '1');
+        } catch {
+            // ignore
+        }
+        window.open(`/admin/tags/list?search=${encodeURIComponent(q)}`, '_blank', 'noopener,noreferrer');
+    }, []);
 
-    const [activeTab, setActiveTab] = useState<'manual' | 'ai' | 'blacklist'>(isBlacklistOnly ? 'blacklist' : 'ai');
+    const [activeTab, setActiveTab] = useState<'manual' | 'ai' | 'blacklist'>(
+        restoredFilters?.activeTab ?? (isBlacklistOnly ? 'blacklist' : 'ai'),
+    );
     const [isAgentOn, setIsAgentOn] = useState(true);
     const [agentSettingsLoading, setAgentSettingsLoading] = useState(false);
     const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
@@ -275,8 +417,8 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
     const [aiDecisionsLoading, setAiDecisionsLoading] = useState(false);
     const [statusMessage, setStatusMessage] = useState('');
     const pageSizeOptions = [50, 100, 200, 500, 1000, 10000] as const;
-    const [page, setPage] = useState(1);
-    const [pageSize, setPageSize] = useState(50);
+    const [page, setPage] = useState(restoredFilters?.page ?? 1);
+    const [pageSize, setPageSize] = useState(restoredFilters?.pageSize ?? 50);
     const [listTotal, setListTotal] = useState(0);
     const [listTotalPages, setListTotalPages] = useState(1);
     const [listLoading, setListLoading] = useState(false);
@@ -286,27 +428,31 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
     // State
     const [unmatched, setUnmatched] = useState<UnmatchedTag[]>([]);
     const [selectedGroup, setSelectedGroup] = useState<GroupedTag | null>(null);
-    const [searchTerm, setSearchTerm] = useState('');
-    const [debouncedSearch, setDebouncedSearch] = useState('');
+    const [searchTerm, setSearchTerm] = useState(restoredFilters?.searchTerm ?? '');
+    const [debouncedSearch, setDebouncedSearch] = useState(restoredFilters?.searchTerm?.trim() ?? '');
 
     // Filters State
-    const [filterType, setFilterType] = useState<string>('all');
-    const [minOccurrences, setMinOccurrences] = useState<number>(1);
+    const [filterType, setFilterType] = useState<string>(restoredFilters?.filterType ?? 'all');
+    const [minOccurrences, setMinOccurrences] = useState<number>(restoredFilters?.minOccurrences ?? 1);
 
     // AI Tab Filtering State
-    const [aiFilterDecision, setAiFilterDecision] = useState<string[]>(['all']);
-    const [aiFilterHesitation, setAiFilterHesitation] = useState<string[]>(['all']);
-    const [aiFilterStatus, setAiFilterStatus] = useState<string[]>(['all']);
-    const [aiFilterDateRange, setAiFilterDateRange] = useState<DateRange | null>(null);
-    const [aiSortOrder, setAiSortOrder] = useState<'asc' | 'desc'>('desc');
-    const [aiSearchTerm, setAiSearchTerm] = useState('');
-    const [aiDebouncedSearch, setAiDebouncedSearch] = useState('');
-    const [aiFilterType, setAiFilterType] = useState('all');
-    const [aiMinOccurrences, setAiMinOccurrences] = useState(1);
-    const [aiReviewStatus, setAiReviewStatus] = useState<'pending_review' | 'approved' | 'overridden' | 'manual_queue' | 'all'>('all');
-    const [aiApprovalFilter, setAiApprovalFilter] = useState<'all' | TagManualApprovalStatus>('pending');
-    const [aiPageSize, setAiPageSize] = useState(50);
-    const [aiPage, setAiPage] = useState(1);
+    const [aiFilterDecision, setAiFilterDecision] = useState<string[]>(restoredFilters?.aiFilterDecision ?? ['all']);
+    const [aiFilterHesitation, setAiFilterHesitation] = useState<string[]>(restoredFilters?.aiFilterHesitation ?? ['all']);
+    const [aiFilterStatus, setAiFilterStatus] = useState<string[]>(restoredFilters?.aiFilterStatus ?? ['all']);
+    const [aiFilterDateRange, setAiFilterDateRange] = useState<DateRange | null>(restoredFilters?.aiFilterDateRange ?? null);
+    const [aiSortOrder, setAiSortOrder] = useState<'asc' | 'desc'>(restoredFilters?.aiSortOrder ?? 'desc');
+    const [aiSearchTerm, setAiSearchTerm] = useState(restoredFilters?.aiSearchTerm ?? '');
+    const [aiDebouncedSearch, setAiDebouncedSearch] = useState(restoredFilters?.aiSearchTerm?.trim() ?? '');
+    const [aiFilterType, setAiFilterType] = useState(restoredFilters?.aiFilterType ?? 'all');
+    const [aiMinOccurrences, setAiMinOccurrences] = useState(restoredFilters?.aiMinOccurrences ?? 1);
+    const [aiReviewStatus, setAiReviewStatus] = useState<'pending_review' | 'approved' | 'overridden' | 'manual_queue' | 'all'>(
+        restoredFilters?.aiReviewStatus ?? 'all',
+    );
+    const [aiApprovalFilter, setAiApprovalFilter] = useState<'all' | TagManualApprovalStatus>(
+        restoredFilters?.aiApprovalFilter ?? 'pending',
+    );
+    const [aiPageSize, setAiPageSize] = useState(restoredFilters?.aiPageSize ?? 50);
+    const [aiPage, setAiPage] = useState(restoredFilters?.aiPage ?? 1);
     const [aiServerTotal, setAiServerTotal] = useState(0);
     const [aiServerTotalPages, setAiServerTotalPages] = useState(1);
     const [exportingExcel, setExportingExcel] = useState(false);
@@ -317,8 +463,8 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [linkTagResults, setLinkTagResults] = useState<TagOption[]>([]);
     const [linkTagSearchLoading, setLinkTagSearchLoading] = useState(false);
-    const [linkedCandidates, setLinkedCandidates] = useState<{ id: string; name: string }[]>([]);
-    const [linkedJobs, setLinkedJobs] = useState<{ id: string; title: string }[]>([]);
+    const [linkedCandidates, setLinkedCandidates] = useState<{ id: string; name: string; createdDate?: string | null }[]>([]);
+    const [linkedJobs, setLinkedJobs] = useState<{ id: string; title: string; createdDate?: string | null }[]>([]);
     const [linkedCandidatesLoading, setLinkedCandidatesLoading] = useState(false);
     const [drawerCandidate, setDrawerCandidate] = useState<any | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -335,8 +481,8 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
     // Blacklist tab state
     const [blacklistDecisions, setBlacklistDecisions] = useState<TagAiDecisionDto[]>([]);
     const [blacklistLoading, setBlacklistLoading] = useState(false);
-    const [blacklistSearchTerm, setBlacklistSearchTerm] = useState('');
-    const [blacklistFilterType, setBlacklistFilterType] = useState('all');
+    const [blacklistSearchTerm, setBlacklistSearchTerm] = useState(restoredFilters?.blacklistSearchTerm ?? '');
+    const [blacklistFilterType, setBlacklistFilterType] = useState(restoredFilters?.blacklistFilterType ?? 'all');
     const [blacklistPage, setBlacklistPage] = useState(1);
     const blacklistPageSize = 25;
 
@@ -347,8 +493,8 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
         occurrencesSource: 'pending' | 'merged' | 'created' | 'none';
         term: string;
         targetLabel?: string;
-        candidates: { id: string; name: string }[];
-        jobs: { id: string; title: string }[];
+        candidates: { id: string; name: string; createdDate?: string | null }[];
+        jobs: { id: string; title: string; createdDate?: string | null }[];
         loading: boolean;
     } | null>(null);
 
@@ -371,8 +517,22 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
             const candidates = rawCandidates.map((e: any) => ({
                 id: e.candidate_id || e.candidateId || e.id,
                 name: e.full_name || e.fullName || e.email || e.phone || 'מועמד',
+                createdDate: pickOccurrenceCreatedDate(
+                    e.createdDate,
+                    e.created_at,
+                    e.createdAt,
+                ),
             }));
-            const jobs = rawJobs.map((j: any) => ({ id: j.id, title: j.title || j.name || 'משרה' }));
+            const jobs = rawJobs.map((j: any) => ({
+                id: j.job_id || j.jobId || j.id,
+                title: j.title || j.name || 'משרה',
+                createdDate: pickOccurrenceCreatedDate(
+                    j.createdDate,
+                    j.created_at,
+                    j.createdAt,
+                    j.openDate,
+                ),
+            }));
             setAiOccurrencesPopup((prev) => prev ? {
                 ...prev,
                 occurrencesSource: body?.source === 'pending' || body?.source === 'merged' || body?.source === 'created'
@@ -629,6 +789,92 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
     }, [aiSearchTerm]);
     useEffect(() => { setAiPage(1); }, [aiDebouncedSearch, aiFilterType, aiFilterDecision, aiFilterHesitation, aiFilterStatus, aiFilterDateRange, aiReviewStatus, aiMinOccurrences, aiApprovalFilter]);
 
+    useEffect(() => {
+        persistTagCorrectionsFilters({
+            version: 1,
+            activeTab,
+            aiApprovalFilter,
+            aiFilterStatus,
+            aiFilterDecision,
+            aiFilterHesitation,
+            aiFilterDateRange,
+            aiSortOrder,
+            aiSearchTerm,
+            aiFilterType,
+            aiMinOccurrences,
+            aiReviewStatus,
+            aiPage,
+            aiPageSize,
+            searchTerm,
+            filterType,
+            minOccurrences,
+            page,
+            pageSize,
+            blacklistSearchTerm,
+            blacklistFilterType,
+        });
+    }, [
+        activeTab,
+        aiApprovalFilter,
+        aiFilterStatus,
+        aiFilterDecision,
+        aiFilterHesitation,
+        aiFilterDateRange,
+        aiSortOrder,
+        aiSearchTerm,
+        aiFilterType,
+        aiMinOccurrences,
+        aiReviewStatus,
+        aiPage,
+        aiPageSize,
+        searchTerm,
+        filterType,
+        minOccurrences,
+        page,
+        pageSize,
+        blacklistSearchTerm,
+        blacklistFilterType,
+    ]);
+
+    useEffect(() => () => {
+        if (typeof sessionStorage === 'undefined') return;
+        try {
+            sessionStorage.setItem(TAG_CORRECTIONS_RESTORE_ON_BACK_KEY, '1');
+        } catch {
+            // ignore
+        }
+    }, []);
+
+    const handleClearAllFilters = useCallback(() => {
+        const defaults = DEFAULT_TAG_CORRECTIONS_FILTERS;
+        clearTagCorrectionsFilterStorage();
+        setActiveTab(isBlacklistOnly ? 'blacklist' : defaults.activeTab);
+        setAiApprovalFilter(defaults.aiApprovalFilter);
+        setAiFilterStatus(defaults.aiFilterStatus);
+        setAiFilterDecision(defaults.aiFilterDecision);
+        setAiFilterHesitation(defaults.aiFilterHesitation);
+        setAiFilterDateRange(defaults.aiFilterDateRange);
+        setAiSortOrder(defaults.aiSortOrder);
+        setAiSearchTerm(defaults.aiSearchTerm);
+        setAiDebouncedSearch('');
+        setAiFilterType(defaults.aiFilterType);
+        setAiMinOccurrences(defaults.aiMinOccurrences);
+        setAiReviewStatus(defaults.aiReviewStatus);
+        setAiPage(defaults.aiPage);
+        setAiPageSize(defaults.aiPageSize);
+        setSearchTerm(defaults.searchTerm);
+        setDebouncedSearch('');
+        setFilterType(defaults.filterType);
+        setMinOccurrences(defaults.minOccurrences);
+        setPage(defaults.page);
+        setPageSize(defaults.pageSize);
+        setBlacklistSearchTerm(defaults.blacklistSearchTerm);
+        setBlacklistFilterType(defaults.blacklistFilterType);
+        setIsMultiSelectMode(false);
+        setSelectedDecisions(new Set());
+        setBlacklistPage(1);
+    }, [isBlacklistOnly]);
+
     const loadUnmatched = useCallback(async () => {
         if (!apiBase) return;
         setListLoading(true);
@@ -802,9 +1048,23 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                 const normalizedCandidates = allCandidates.map((entry: any) => ({
                     id: entry.candidate_id || entry.candidateId || entry.id,
                     name: entry.full_name || entry.fullName || entry.email || entry.phone || 'מועמד',
+                    createdDate: pickOccurrenceCreatedDate(
+                        entry.createdDate,
+                        entry.created_at,
+                        entry.createdAt,
+                    ),
                 }));
                 setLinkedCandidates(Array.from(new Map(normalizedCandidates.map((c) => [c.id, c])).values()));
-                const normalizedJobs = allJobs.map((job: any) => ({ id: job.id, title: job.title || job.name || 'משרה' }));
+                const normalizedJobs = allJobs.map((job: any) => ({
+                    id: job.job_id || job.jobId || job.id,
+                    title: job.title || job.name || 'משרה',
+                    createdDate: pickOccurrenceCreatedDate(
+                        job.createdDate,
+                        job.created_at,
+                        job.createdAt,
+                        job.openDate,
+                    ),
+                }));
                 setLinkedJobs(Array.from(new Map(normalizedJobs.map((j) => [j.id, j])).values()));
             } catch (err) {
                 console.error('[AdminTagCorrectionsView] failed to load candidate info', err);
@@ -1311,84 +1571,52 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
             {/* AI Review tab */}
             {!isBlacklistOnly && activeTab === 'ai' && (
                 <div className="flex flex-col bg-bg-card rounded-2xl border border-border-default shadow-sm animate-fade-in">
-                    <div className="p-4 border-b border-border-default space-y-3 relative z-20 flex-shrink-0">
-                        {/* Status tabs */}
-                        <div className="flex items-center gap-1 bg-bg-surface rounded-xl p-1 border border-border-subtle">
-                            {([
-                                { value: 'pending_review', label: 'ממתין לאישור', icon: '⏳' },
-                                { value: 'approved',       label: 'מוזג אוטו׳',   icon: '✅' },
-                                { value: 'manual_queue',   label: 'לטיפול ידני',  icon: '🖐️' },
-                                { value: 'overridden',     label: 'נדרס ידנית',   icon: '✏️' },
-                                { value: 'all',            label: 'הכל',          icon: '📋' },
-                            ] as { value: 'pending_review' | 'approved' | 'overridden' | 'manual_queue' | 'all'; label: string; icon: string }[]).map(tab => (
-                                <button
-                                    key={tab.value}
-                                    type="button"
-                                    onClick={() => setAiReviewStatus(tab.value)}
-                                    className={`flex-1 flex items-center justify-center gap-1.5 text-xs font-bold py-1.5 px-2 rounded-lg transition-colors ${
-                                        aiReviewStatus === tab.value
-                                            ? 'bg-white text-primary-700 shadow-sm border border-border-default'
-                                            : 'text-text-muted hover:text-text-default hover:bg-white/60'
-                                    }`}
-                                >
-                                    <span>{tab.icon}</span>
-                                    {tab.label}
-                                </button>
-                            ))}
-                        </div>
-
-                        {/* Search + type + min occurrences */}
-                        <div className="space-y-2">
-                            <div className="relative">
+                    <div className="p-4 border-b border-border-default space-y-3 relative z-40 flex-shrink-0">
+                        <div className="flex flex-wrap items-end gap-2">
+                            <div className="relative min-w-[200px] flex-1 max-w-md">
                                 <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                                 <input
                                     type="text"
                                     placeholder="חיפוש חופשי לפי מונח..."
                                     value={aiSearchTerm}
                                     onChange={e => setAiSearchTerm(e.target.value)}
-                                    className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 transition-all"
+                                    className={`${filterControlClass(Boolean(aiSearchTerm.trim()), 'w-full pl-3 pr-10 py-2.5 text-sm rounded-xl')}`}
                                 />
                             </div>
-                            <div className="flex gap-2">
-                                {/* Type filter */}
-                                <div className="flex-1 relative min-w-0">
-                                    <select
-                                        value={aiFilterType}
-                                        onChange={e => setAiFilterType(e.target.value)}
-                                        className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-2 pr-7 text-xs focus:ring-1 focus:ring-primary-500 appearance-none cursor-pointer"
-                                    >
-                                        <option value="all">כל הסוגים</option>
-                                        <option value="skill">Skill</option>
-                                        <option value="role">Role</option>
-                                        <option value="industry">Industry</option>
-                                        <option value="tool">Tool</option>
-                                        <option value="certification">Certification</option>
-                                        <option value="language">Language</option>
-                                        <option value="seniority">Seniority</option>
-                                        <option value="education">Education / Degree</option>
-                                        <option value="soft_skill">Soft Skill</option>
-                                    </select>
-                                    <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
-                                </div>
-                                <div className="flex-shrink-0 min-w-[220px] sm:min-w-[240px]">
-                                    <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">עודכן לאחרונה</label>
-                                    <DateRangeSelector
-                                        value={aiFilterDateRange}
-                                        onChange={setAiFilterDateRange}
-                                        placeholder="הכל"
-                                    />
-                                </div>
+                            <div className="relative w-auto min-w-[140px]">
+                                <select
+                                    value={aiFilterType}
+                                    onChange={e => setAiFilterType(e.target.value)}
+                                    className={filterSelectClass(aiFilterType !== 'all')}
+                                >
+                                    <option value="all">כל הסוגים</option>
+                                    <option value="skill">Skill</option>
+                                    <option value="role">Role</option>
+                                    <option value="industry">Industry</option>
+                                    <option value="tool">Tool</option>
+                                    <option value="certification">Certification</option>
+                                    <option value="language">Language</option>
+                                    <option value="seniority">Seniority</option>
+                                    <option value="education">Education / Degree</option>
+                                    <option value="soft_skill">Soft Skill</option>
+                                </select>
+                                <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            </div>
+                            <div className="w-auto min-w-[200px]">
+                                <DateRangeSelector
+                                    value={aiFilterDateRange}
+                                    onChange={setAiFilterDateRange}
+                                    placeholder="עודכן לאחרונה"
+                                />
                             </div>
                         </div>
 
-                        {/* Decision filter + sort + multi-select */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 bg-bg-surface p-3 rounded-xl border border-border-subtle">
-                            {/* Manual approval status filter */}
-                            <div className="relative min-w-0">
+                        <div className="flex flex-wrap items-center gap-2 bg-bg-surface p-3 rounded-xl border border-border-subtle">
+                            <div className="relative w-auto min-w-[150px]">
                                 <select
                                     value={aiApprovalFilter}
                                     onChange={e => setAiApprovalFilter(e.target.value as 'all' | TagManualApprovalStatus)}
-                                    className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-2 pr-7 text-xs focus:ring-1 focus:ring-primary-500 appearance-none cursor-pointer"
+                                    className={filterSelectClass(aiApprovalFilter !== 'all')}
                                 >
                                     <option value="all">הכל (אישור ידני)</option>
                                     <option value="pending">⏳ ממתין לאישור</option>
@@ -1397,13 +1625,29 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                 </select>
                                 <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                             </div>
+                            <div className="relative w-auto min-w-[150px]">
+                                <select
+                                    value={aiReviewStatus}
+                                    onChange={e => setAiReviewStatus(e.target.value as typeof aiReviewStatus)}
+                                    className={filterSelectClass(aiReviewStatus !== 'all')}
+                                >
+                                    <option value="all">כל סטטוסי ביקורת</option>
+                                    <option value="pending_review">⏳ ממתין לאישור</option>
+                                    <option value="approved">✅ מוזג אוטומטית</option>
+                                    <option value="manual_queue">🖐️ לטיפול ידני</option>
+                                    <option value="overridden">✏️ נדרס ידנית</option>
+                                </select>
+                                <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            </div>
                             <MultiSelectDropdown
+                                className="w-auto min-w-[140px]"
                                 options={AI_STATUS_FILTER_OPTIONS}
                                 selectedValues={aiFilterStatus}
                                 onChange={setAiFilterStatus}
                                 placeholder="כל הסטטוסים"
                             />
                             <MultiSelectDropdown
+                                className="w-auto min-w-[140px]"
                                 options={[
                                     {value: 'merge', label: 'מיזוג והתאמה'},
                                     {value: 'create', label: 'יצירת תגית חדשה'},
@@ -1413,25 +1657,31 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                 onChange={setAiFilterDecision}
                                 placeholder="כל ההחלטות"
                             />
-                            <div className="flex items-center gap-2">
+                            <MultiSelectDropdown
+                                className="w-auto min-w-[150px]"
+                                options={AI_HESITATION_FILTER_OPTIONS}
+                                selectedValues={aiFilterHesitation}
+                                onChange={setAiFilterHesitation}
+                                placeholder="כל רמות ההתלבטות"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => setAiSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')}
+                                className={`${filterControlClass(aiSortOrder === 'asc')} flex items-center gap-1.5 justify-between min-w-[140px]`}
+                            >
+                                <span>מיון לפי תאריך</span>
+                                {aiSortOrder === 'asc' ? <ChevronUpIcon className="w-4 h-4 text-purple-600"/> : <ChevronDownIcon className="w-4 h-4 text-purple-600"/>}
+                            </button>
+                            <div className="flex flex-wrap items-center gap-2 mr-auto">
                                 <button
                                     type="button"
-                                    onClick={() => setAiSortOrder(prev => prev === 'asc' ? 'desc' : 'asc')}
-                                    className="flex items-center gap-1.5 bg-white border border-border-default rounded-xl px-3 py-2 text-sm font-medium text-text-default hover:bg-bg-hover transition-colors w-full justify-between"
+                                    onClick={handleClearAllFilters}
+                                    className="flex items-center gap-2 text-sm px-3 py-2 rounded-xl border font-bold transition-colors shadow-sm bg-white border-border-default text-text-muted hover:text-red-600 hover:border-red-200 hover:bg-red-50"
+                                    title="נקה את כל מסנני החיפוש"
                                 >
-                                    <span>מיון לפי תאריך</span>
-                                    {aiSortOrder === 'asc' ? <ChevronUpIcon className="w-4 h-4 text-primary-600"/> : <ChevronDownIcon className="w-4 h-4 text-primary-600"/>}
+                                    <XMarkIcon className="w-4 h-4" />
+                                    נקה סינון
                                 </button>
-                            </div>
-                            <div className="min-w-0">
-                                <MultiSelectDropdown
-                                    options={AI_HESITATION_FILTER_OPTIONS}
-                                    selectedValues={aiFilterHesitation}
-                                    onChange={setAiFilterHesitation}
-                                    placeholder="כל רמות ההתלבטות"
-                                />
-                            </div>
-                            <div className="flex items-center justify-end gap-2">
                                 <button
                                     type="button"
                                     onClick={() => void handleExportExcel()}
@@ -1445,7 +1695,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                 <button
                                     type="button"
                                     onClick={() => { setIsMultiSelectMode(!isMultiSelectMode); if (isMultiSelectMode) setSelectedDecisions(new Set()); }}
-                                    className={`flex items-center gap-2 text-sm px-3 py-2 rounded-xl border font-bold transition-colors shadow-sm ${isMultiSelectMode ? 'bg-primary-50 border-primary-300 text-primary-700' : 'bg-white border-border-default text-text-default hover:bg-bg-hover'}`}
+                                    className={`flex items-center gap-2 text-sm px-3 py-2 rounded-xl border font-bold transition-colors shadow-sm ${isMultiSelectMode ? 'bg-purple-50 border-purple-300 text-purple-800' : 'bg-white border-border-default text-text-default hover:bg-bg-hover'}`}
                                 >
                                     <Squares2X2Icon className="w-4 h-4"/>בחירה מרובה
                                 </button>
@@ -1500,7 +1750,19 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                     <th className={`p-4 w-[10%] ${stickyTableHeaderCellClass()}`}>קונטקסט</th>
                                     <th className={`p-4 w-[14%] ${stickyTableHeaderCellClass()}`}>החלטת מודל והסבר</th>
                                     <th className={`p-4 w-[12%] ${stickyTableHeaderCellClass()}`}>מדד התלבטות AI</th>
-                                    <th className={`p-4 w-[12%] ${stickyTableHeaderCellClass()}`}>הקשר רחב בבסיס הנתונים</th>
+                                    <th className={`p-4 w-[12%] ${stickyTableHeaderCellClass()}`}>
+                                        <div>הקשר רחב בבסיס הנתונים</div>
+                                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[9px] font-normal text-text-muted">
+                                            <span className="inline-flex items-center gap-0.5 text-purple-700">
+                                                <SparklesIcon className="w-2.5 h-2.5" />
+                                                סמנטי
+                                            </span>
+                                            <span className="inline-flex items-center gap-0.5 text-blue-700">
+                                                <MagnifyingGlassIcon className="w-2.5 h-2.5" />
+                                                FUZZY
+                                            </span>
+                                        </div>
+                                    </th>
                                     <th className={`p-4 min-w-[180px] ${stickyTableHeaderCellClass()}`}>הערות סוכן</th>
                                     <th className={`p-4 min-w-[220px] ${stickyTableHeaderCellClass()}`}>פסיקת סוכן</th>
                                     <th className={`p-4 min-w-[220px] ${stickyTableHeaderCellClass()}`}>הערות משתמש</th>
@@ -1528,14 +1790,18 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                 <div className="flex items-center gap-2 mb-1">
                                                     <button
                                                         type="button"
-                                                        onClick={() => openTagsListSearch(decision.originalTerm)}
-                                                        className="font-bold text-text-default text-base text-right hover:text-primary-600 hover:underline transition-colors"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            openTagsListSearch(decision.originalTerm);
+                                                        }}
+                                                        className="font-bold text-text-default text-base text-right hover:text-primary-600 hover:underline transition-colors cursor-pointer relative z-10"
                                                         dir="auto"
-                                                        title="חפש בתגיות"
+                                                        title="חפש בתגיות (טאב חדש)"
                                                     >
                                                         {decision.originalTerm}
                                                     </button>
                                                     <button
+                                                        type="button"
                                                         onClick={() => void openAiOccurrences(decision)}
                                                         className="text-[10px] font-bold bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full flex-shrink-0 hover:bg-gray-200 transition-colors flex items-center gap-1 border border-transparent hover:border-gray-300"
                                                         title="צפה במועמדים/משרות"
@@ -1656,22 +1922,39 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                             </td>
                                             <td className="p-4 align-top">
                                                 <div className="flex flex-wrap gap-1.5">
-                                                    {decision.candidateTagsFromDB.slice(0, expandedAiRows.has(decision.id) ? undefined : 5).map((tag) => (
-                                                        <div key={tag.name} className="flex items-center gap-1 bg-bg-subtle border border-border-subtle pl-1.5 pr-2 py-0.5 rounded text-[10px]" dir="auto">
-                                                            {tag.source === 'vector' ? (
-                                                                <div className="flex items-center gap-0.5 text-purple-700 bg-purple-100/70 border border-purple-200 px-1 rounded-[4px]" title="Semantic Match (Vector)">
-                                                                    <SparklesIcon className="w-2.5 h-2.5" />
-                                                                    {tag.score != null && <span className="font-mono text-[9px] font-bold leading-none">{Math.round(tag.score * 100)}%</span>}
+                                                    {decision.candidateTagsFromDB.slice(0, expandedAiRows.has(decision.id) ? undefined : 5).map((tag, tagIdx) => {
+                                                        const isFuzzy = tag.source === 'fuzzy';
+                                                        const tagKey = tag.tagId || `${tag.name}-${tag.source || 'unknown'}-${tagIdx}`;
+                                                        return (
+                                                        <div
+                                                            key={tagKey}
+                                                            className={`flex items-center gap-1 pl-1.5 pr-2 py-0.5 rounded text-[10px] border ${
+                                                                isFuzzy
+                                                                    ? 'bg-blue-50/80 border-blue-200 ring-1 ring-blue-100/80'
+                                                                    : 'bg-bg-subtle border-border-subtle'
+                                                            }`}
+                                                            dir="auto"
+                                                            title={isFuzzy ? 'התאמה טקסטואלית (Fuzzy)' : 'התאמה סמנטית (Vector)'}
+                                                        >
+                                                            {isFuzzy ? (
+                                                                <div className="flex items-center gap-0.5 text-blue-800 bg-blue-100 border border-blue-300 px-1 py-[1.5px] rounded-[4px] shrink-0" title="Text Match (Fuzzy)">
+                                                                    <MagnifyingGlassIcon className="w-2.5 h-2.5" />
+                                                                    <span className="font-mono text-[9px] font-bold leading-none">FUZZY</span>
                                                                 </div>
                                                             ) : (
-                                                                <div className="flex items-center gap-0.5 text-blue-700 bg-blue-100/70 border border-blue-200 px-1 py-[1.5px] rounded-[4px]" title="Text Match (Fuzzy)">
-                                                                    <MagnifyingGlassIcon className="w-2.5 h-2.5" />
-                                                                    <span className="font-mono text-[9px] font-bold leading-none hidden md:inline">FUZZY</span>
+                                                                <div className="flex items-center gap-0.5 text-purple-700 bg-purple-100/70 border border-purple-200 px-1 rounded-[4px] shrink-0" title="Semantic Match (Vector)">
+                                                                    <SparklesIcon className="w-2.5 h-2.5" />
+                                                                    {tag.score != null ? (
+                                                                        <span className="font-mono text-[9px] font-bold leading-none">{Math.round(tag.score * 100)}%</span>
+                                                                    ) : (
+                                                                        <span className="font-mono text-[9px] font-bold leading-none">VEC</span>
+                                                                    )}
                                                                 </div>
                                                             )}
-                                                            <span className="text-text-default font-medium leading-none">{tag.name}</span>
+                                                            <span className={`font-medium leading-none ${isFuzzy ? 'text-blue-950' : 'text-text-default'}`}>{tag.name}</span>
                                                         </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                     {decision.candidateTagsFromDB.length > 5 && (
                                                         <button
                                                             type="button"
@@ -2033,10 +2316,13 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                         <td className="p-4 align-top">
                                                             <button
                                                                 type="button"
-                                                                onClick={() => openTagsListSearch(decision.originalTerm)}
-                                                                className="font-bold text-text-default text-sm text-right hover:text-primary-600 hover:underline transition-colors"
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    openTagsListSearch(decision.originalTerm);
+                                                                }}
+                                                                className="font-bold text-text-default text-sm text-right hover:text-primary-600 hover:underline transition-colors cursor-pointer relative z-10"
                                                                 dir="auto"
-                                                                title="חפש בתגיות"
+                                                                title="חפש בתגיות (טאב חדש)"
                                                             >
                                                                 {decision.originalTerm}
                                                             </button>
@@ -2290,7 +2576,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
         {/* AI Occurrences popup */}
         {aiOccurrencesPopup && (
             <div className="fixed inset-0 bg-slate-900/50 z-[200] flex items-center justify-center p-4" onClick={() => setAiOccurrencesPopup(null)}>
-                <div className="bg-white rounded-xl shadow-xl border border-border-default w-full max-w-sm overflow-hidden" onClick={(e) => e.stopPropagation()}>
+                <div className="bg-white rounded-xl shadow-xl border border-border-default w-full max-w-md overflow-hidden" onClick={(e) => e.stopPropagation()}>
                     <div className="p-4 border-b border-border-default flex justify-between items-center bg-bg-subtle/50">
                         <span className="font-bold text-text-default" dir="auto">
                             {aiOccurrencesPopup.loading ? 'טוען...' : (
@@ -2338,7 +2624,12 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                         <div className="w-8 h-8 rounded-full bg-primary-50 text-primary-600 flex items-center justify-center font-bold flex-shrink-0">
                                             {c.name.charAt(0)}
                                         </div>
-                                        <span className="truncate text-text-default font-medium">{c.name}</span>
+                                        <div className="flex-1 min-w-0">
+                                            <span className="truncate text-text-default font-medium block">{c.name}</span>
+                                            <span className="text-xs text-text-muted">
+                                                נוצר: {formatOccurrenceCreatedDate(c.createdDate)}
+                                            </span>
+                                        </div>
                                     </button>
                                 ))}
                             </>
@@ -2356,7 +2647,12 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                         <div className="w-8 h-8 rounded-full bg-amber-50 text-amber-600 flex items-center justify-center flex-shrink-0">
                                             <TagIcon className="w-4 h-4" />
                                         </div>
-                                        <span className="truncate text-text-default font-medium">{j.title}</span>
+                                        <div className="flex-1 min-w-0">
+                                            <span className="truncate text-text-default font-medium block">{j.title}</span>
+                                            <span className="text-xs text-text-muted">
+                                                נוצר: {formatOccurrenceCreatedDate(j.createdDate)}
+                                            </span>
+                                        </div>
                                     </button>
                                 ))}
                             </>

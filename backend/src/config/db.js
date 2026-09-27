@@ -7,11 +7,14 @@ const sequelize = new Sequelize(
     || 'postgres://postgres:qwe123ZZZ@herodb.cjauwauq6xes.eu-north-1.rds.amazonaws.com:5432/postgres',
   {
     logging: false,
+    dialectOptions: {
+      keepAlive: true,
+    },
     pool: {
-      max: 20,       // up from default 5
-      min: 2,
-      acquire: 60000, // ms to wait before throwing ConnectionAcquireTimeoutError
-      idle: 10000,    // ms a connection can be idle before being released
+      max: 20,
+      min: 5,
+      acquire: 60000,
+      idle: 30000,
     },
   },
 );
@@ -234,6 +237,17 @@ const connectDb = async () => {
     CREATE INDEX IF NOT EXISTS idx_client_tasks_org
       ON client_tasks ("organizationId")
       WHERE "organizationId" IS NOT NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_tasks
+      ADD COLUMN IF NOT EXISTS "organizationTmpId" UUID NULL REFERENCES organizations_tmp(id) ON DELETE SET NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_client_tasks_org_tmp
+      ON client_tasks ("organizationTmpId")
+      WHERE "organizationTmpId" IS NOT NULL;
   `).catch(() => {});
 
   await sequelize.query(`

@@ -25,6 +25,7 @@ router.get('/all-tasks', clientTaskController.listAll);
 router.get('/all-events', authMiddleware, attachDbUser, clientEventController.listAll);
 router.get('/:id/contacts', authMiddleware, attachDbUser, clientContactController.list);
 router.post('/:id/contacts', authMiddleware, attachDbUser, clientContactController.create);
+router.get('/:id/contacts/:contactId', authMiddleware, attachDbUser, clientContactController.get);
 router.get('/:id/contacts/:contactId/jobs', authMiddleware, attachDbUser, clientContactController.listJobs);
 router.put('/:id/contacts/:contactId', authMiddleware, attachDbUser, clientContactController.update);
 router.delete('/:id/contacts/:contactId', authMiddleware, attachDbUser, clientContactController.remove);
@@ -177,7 +178,6 @@ router.put(
 router.get(
   '/:id/health-pulse',
   authMiddleware,
-  attachDbUser,
   clientHealthRuleController.pulse,
 );
 
@@ -226,6 +226,7 @@ router.delete(
 );
 
 router.get('/me/export-logo', authMiddleware, attachDbUser, clientController.getMyExportLogo);
+router.get('/:id/export-logo', authMiddleware, attachDbUser, clientController.getExportLogo);
 
 router.get('/:id/insights', authMiddleware, attachDbUser, clientController.getInsights);
 router.get('/:id', clientController.get);

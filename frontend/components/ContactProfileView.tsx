@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import {
   PhoneIcon,
@@ -28,6 +28,7 @@ import { MessageModalConfig } from '../hooks/useUIState';
 import { authHeaders } from '../utils/authHeaders';
 import {
   contactFromApi,
+  contactOrganizationTmpId,
   contactToApiPayload,
   primaryEmail,
   primaryPhone,
@@ -35,7 +36,19 @@ import {
 } from '../utils/contactFormModel';
 import { useBreadcrumbContext } from '../context/BreadcrumbContext';
 
-type Tab = 'details' | 'tasks' | 'processes' | 'events' | 'jobs' | 'finance' | 'emails' | 'sms' | 'whatsapp' | 'company_emails' | 'history';
+type Tab =
+  | 'details'
+  | 'tasks'
+  | 'processes'
+  | 'events'
+  | 'jobs'
+  | 'finance'
+  | 'emails'
+  | 'sms'
+  | 'whatsapp'
+  | 'personal_emails'
+  | 'company_emails'
+  | 'history';
 
 const PROFILE_TABS = new Set<Tab>([
   'details',
@@ -44,21 +57,18 @@ const PROFILE_TABS = new Set<Tab>([
   'events',
   'jobs',
   'finance',
-  'emails',
   'sms',
   'whatsapp',
-  'company_emails',
+  'personal_emails',
   'history',
 ]);
 
 const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
   { id: 'details', label: 'פרטים אישיים', icon: <PencilIcon className="w-5 h-5" /> },
   { id: 'tasks', label: 'משימות', icon: <ClipboardDocumentCheckIcon className="w-5 h-5" /> },
-  { id: 'processes', label: 'תהליכים', icon: <ArrowPathIcon className="w-5 h-5" /> },
   { id: 'events', label: 'אירועים', icon: <CalendarDaysIcon className="w-5 h-5" /> },
   { id: 'finance', label: 'כספים', icon: <BanknotesIcon className="w-5 h-5" /> },
-  { id: 'emails', label: 'מיילים', icon: <EnvelopeIcon className="w-5 h-5" /> },
-  { id: 'company_emails', label: 'מיילי חברה', icon: <EnvelopeIcon className="w-5 h-5" /> },
+  { id: 'personal_emails', label: 'מיילים אישיים', icon: <EnvelopeIcon className="w-5 h-5" /> },
   { id: 'sms', label: 'SMS', icon: <ChatBubbleBottomCenterTextIcon className="w-5 h-5" /> },
   { id: 'whatsapp', label: 'WhatsApp', icon: <WhatsappIcon className="w-5 h-5" /> },
   { id: 'jobs', label: 'משרות משויכות', icon: <BriefcaseIcon className="w-5 h-5" /> },
@@ -97,7 +107,11 @@ interface ContactProfileViewProps {
 const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModal }) => {
   const { clientId, contactId } = useParams<{ clientId: string; contactId: string }>();
   const [searchParams] = useSearchParams();
-  const tabFromUrl = searchParams.get('tab');
+  const tabFromUrlRaw = searchParams.get('tab');
+  const tabFromUrl =
+    tabFromUrlRaw === 'company_emails' || tabFromUrlRaw === 'emails'
+      ? 'personal_emails'
+      : tabFromUrlRaw;
   const pipelineFromUrl = searchParams.get('pipelineId');
   const processStageFromUrl = searchParams.get('processStage');
   const [activeTab, setActiveTab] = useState<Tab>(() => {
@@ -122,18 +136,23 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
   const [error, setError] = useState<string | null>(null);
   const { setContactProfileParent } = useBreadcrumbContext();
 
+  const organizationDisplayName = useMemo(() => {
+    if (!contact) return '';
+    return String(
+      contact.organizationName
+        || contact.organization?.name
+        || contact.organization?.displayName
+        || '',
+    ).trim();
+  }, [contact]);
+
   useEffect(() => {
     if (!contact) {
       setContactProfileParent(null);
       return;
     }
     const organizationId = contact.organizationId ? String(contact.organizationId).trim() : '';
-    const organizationName = String(
-      contact.organizationName
-        || contact.organization?.name
-        || contact.organization?.displayName
-        || '',
-    ).trim();
+    const organizationName = organizationDisplayName;
     if (organizationId && organizationName) {
       setContactProfileParent({
         label: organizationName,
@@ -143,7 +162,7 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
       setContactProfileParent(null);
     }
     return () => setContactProfileParent(null);
-  }, [contact, setContactProfileParent]);
+  }, [contact, organizationDisplayName, setContactProfileParent]);
 
   useEffect(() => {
     if (!apiBase || !clientId || !contactId) return;
@@ -249,12 +268,14 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
       linkedClientId: clientId || null,
       linkedContactId: contactId || null,
       linkedOrganizationId: contact.organizationId ? String(contact.organizationId) : null,
+      linkedOrganizationName: organizationDisplayName || null,
       recipientOptions: [
         {
           id: String(contactId || contact.id),
           name: contact.name,
           email: displayEmail || contact.mainContactEmail || '',
           phone: displayPhone || '',
+          subtitle: organizationDisplayName || null,
           clientId: clientId || null,
           organizationId: contact.organizationId ? String(contact.organizationId) : null,
         },
@@ -295,10 +316,11 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
       case 'events':
         return (
           <ContactEventsTab
-            key={`${eventsPipelineId || 'all'}:${eventsProcessStageId || ''}`}
+            key={`${contactId}:${eventsPipelineId || 'all'}:${eventsProcessStageId || ''}`}
             clientId={clientId!}
             clientName={clientName}
             organizationId={contact.organizationId ? String(contact.organizationId) : null}
+            organizationTmpId={contactOrganizationTmpId(contact)}
             organizationName={
               String(
                 contact.organizationName
@@ -317,6 +339,7 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
             }
             defaultActionPipelineId={eventsPipelineId}
             defaultProcessStageId={eventsProcessStageId}
+            openMessageModal={openMessageModal}
           />
         );
       case 'finance':
@@ -328,28 +351,18 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
           />
         );
       case 'emails':
-        return (
-          <ContactEmailsTab
-            openMessageModal={openMessageModal}
-            contactName={contact.name}
-            contactPhone={contact.mobilePhone || contact.phone}
-            contactEmail={contact.email}
-            clientId={clientId}
-            contactId={contactId}
-            organizationId={contact.organizationId ? String(contact.organizationId) : null}
-          />
-        );
+      case 'personal_emails':
       case 'company_emails':
         return (
           <ContactEmailsTab
             openMessageModal={openMessageModal}
             contactName={contact.name}
             contactPhone={contact.mobilePhone || contact.phone}
-            contactEmail={contact.email}
+            contactEmail={displayEmail || contact.email}
             clientId={clientId}
             contactId={contactId}
             organizationId={contact.organizationId ? String(contact.organizationId) : null}
-            companyWide
+            title="מיילים אישיים"
           />
         );
       case 'sms':

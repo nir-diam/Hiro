@@ -11,6 +11,8 @@ const ENTITY_TYPE_FROM_KEY = {
   candidate: 'Candidate',
   job: 'Job',
   client: 'Client',
+  organization: 'Organization',
+  'organization-tmp': 'OrganizationTmp',
   'tag-ai-decision': 'TagAiDecision',
   'organization-ai-decision': 'OrganizationAiDecision',
 };
@@ -20,7 +22,7 @@ const resolveEntityType = (raw) => {
   if (!s) return null;
   const lower = s.toLowerCase();
   if (ENTITY_TYPE_FROM_KEY[lower]) return ENTITY_TYPE_FROM_KEY[lower];
-  if (['Candidate', 'Job', 'Client', 'TagAiDecision', 'OrganizationAiDecision'].includes(s)) return s;
+  if (['Candidate', 'Job', 'Client', 'Organization', 'OrganizationTmp', 'TagAiDecision', 'OrganizationAiDecision'].includes(s)) return s;
   return null;
 };
 
@@ -43,6 +45,14 @@ const sanitizeAction = (val) => {
 
 const toPlain = (row) => row.get({ plain: true });
 
+const buildAgentActorFilter = () => ({
+  [Op.or]: [
+    { userName: 'סוכן AI (Hiro)' },
+    where(cast(col('metadata'), 'TEXT'), { [Op.iLike]: '%"source":"agent_api"%' }),
+    where(cast(col('metadata'), 'TEXT'), { [Op.iLike]: '%agentUsername%' }),
+  ],
+});
+
 const buildWhereFromQuery = (query = {}) => {
   const where_ = {};
 
@@ -51,6 +61,28 @@ const buildWhereFromQuery = (query = {}) => {
   }
   if (query.action && query.action !== 'all' && AuditLog.ACTIONS.includes(query.action)) {
     where_.action = query.action;
+  }
+
+  const actor = String(query.actor || '').trim().toLowerCase();
+  if (actor === 'agent') {
+    where_[Op.and] = [...(where_[Op.and] || []), buildAgentActorFilter()];
+  }
+
+  const entityType = resolveEntityType(query.entityType);
+  if (entityType) {
+    where_.entityType = entityType;
+  }
+  const entityId = String(query.entityId || '').trim();
+  if (entityId) {
+    where_.entityId = entityId;
+  }
+
+  const batchId = String(query.batchId || '').trim();
+  if (batchId) {
+    where_[Op.and] = [
+      ...(where_[Op.and] || []),
+      where(cast(col('metadata'), 'TEXT'), { [Op.iLike]: `%${batchId}%` }),
+    ];
   }
 
   if (query.from || query.to) {

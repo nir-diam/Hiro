@@ -457,6 +457,24 @@ const findTagByNameOrAlias = async (name, options = {}) => {
   return null;
 };
 
+const collectExactNameVariants = (tagKey, defaults = {}) => {
+  const names = new Set();
+  for (const raw of [tagKey, defaults.displayNameHe, defaults.displayNameEn]) {
+    const trimmed = String(raw || '').trim();
+    if (trimmed) names.add(trimmed);
+  }
+  return [...names];
+};
+
+/** Block duplicate pending catalog rows — exact name match (he/en/tagKey), pending status only. */
+const findExactPendingDuplicate = async (tagKey, defaults = {}) => {
+  for (const name of collectExactNameVariants(tagKey, defaults)) {
+    const found = await findTagByNameOrAlias(name, { status: 'pending' });
+    if (found) return found;
+  }
+  return null;
+};
+
 /** If a pending duplicate exists but an active catalog tag matches, prefer the active tag. */
 const preferActiveCatalogTag = async (found, searchTargets = []) => {
   if (!found) return found;
@@ -630,6 +648,21 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
   const deprecatedCheck = await Tag.findOne({ where: { tagKey, status: 'deprecated' } });
   if (deprecatedCheck) return null;
 
+  // Reject creating a second pending row for the exact same term (e.g. type-mismatch skip above).
+  const pendingDuplicate = await findExactPendingDuplicate(tagKey, defaults);
+  if (pendingDuplicate) {
+    await maybeUpgradeType(pendingDuplicate);
+    try {
+      const tagCorrectionAgentService = require('./tagCorrectionAgentService');
+      tagCorrectionAgentService.schedulePendingIfNeeded(pendingDuplicate.id, contextSample, {
+        clientId: defaults.clientId || null,
+      });
+    } catch (err) {
+      console.warn('[ensureTagRecord] schedule pending duplicate failed', err?.message || err);
+    }
+    return { tag: pendingDuplicate, created: false };
+  }
+
   const tag = await Tag.create({
     tagKey,
     displayNameHe: defaults.displayNameHe || tagKey,
@@ -707,6 +740,8 @@ const syncCandidateTagModesFromDetails = async (candidateId, tagDetails = []) =>
     const current = row.mode == null || String(row.mode).trim() === '' ? null : String(row.mode).trim();
     if (current === storedMode) continue;
     await row.update({ mode: storedMode });
+    const { invalidateCandidateMatchCache } = require('./candidateJobMatchingService');
+    await invalidateCandidateMatchCache(cid);
   }
 };
 
@@ -804,6 +839,8 @@ const syncCandidateTagDetailsFromPayload = async (candidateId, tagDetails = []) 
       const current = row.mode == null || String(row.mode).trim() === '' ? null : String(row.mode).trim();
       if (current !== storedMode) {
         await row.update({ mode: storedMode });
+        const { invalidateCandidateMatchCache } = require('./candidateJobMatchingService');
+        await invalidateCandidateMatchCache(cid);
       }
       continue;
     }
@@ -1415,6 +1452,10 @@ module.exports = {
     if (newTag) {
       await recordTagUsage(newTag);
     }
+    if (Object.prototype.hasOwnProperty.call(updates, 'mode')) {
+      const { invalidateCandidateMatchCache } = require('./candidateJobMatchingService');
+      await invalidateCandidateMatchCache(candidateTag.entity_id);
+    }
     return candidateTag;
   },
   deleteCandidateTag,
@@ -1438,7 +1479,7 @@ module.exports = {
         ...(activeOnly ? { is_active: true } : {}),
       }),
       include: [
-        { model: Candidate, as: 'candidate', attributes: ['id', 'fullName', 'email', 'phone'] },
+        { model: Candidate, as: 'candidate', attributes: ['id', 'fullName', 'email', 'phone', 'createdAt'] },
       ],
     }),
   listCandidateTagsByTagName,

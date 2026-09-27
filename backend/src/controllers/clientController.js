@@ -1,7 +1,7 @@
 const clientService = require('../services/clientService');
 const clientAuditService = require('../services/clientAuditService');
 const authService = require('../services/authService');
-const { loadExportLogoForUser } = require('../services/clientExportLogoService');
+const { loadExportLogoForUser, loadExportLogoForClientId } = require('../services/clientExportLogoService');
 const { provisionMainContactManager, STAFF_ROLES } = require('../services/staffUserProvisioningService');
 const { Op } = require('sequelize');
 const User = require('../models/User');
@@ -15,7 +15,7 @@ const list = async (req, res) => {
     const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
     if (effectiveClientId && !clientService.isPlatformAdmin(user)) {
       try {
-        const client = await clientService.getById(effectiveClientId);
+        const client = await clientService.getByIdForApi(effectiveClientId);
         if (activeOnly && client.isActive === false) {
           res.set('Cache-Control', 'private, no-store');
           return res.json([]);
@@ -38,7 +38,9 @@ const list = async (req, res) => {
 
 const get = async (req, res) => {
   try {
-    const client = await clientService.getByIdWithLinks(req.params.id);
+    const includeLinks = req.query.includeLinks !== '0' && req.query.includeLinks !== 'false';
+    const client = await clientService.getByIdWithLinks(req.params.id, { includeLinks });
+    res.set('Cache-Control', includeLinks ? 'private, no-store' : 'private, max-age=30');
     res.json(client);
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
@@ -123,10 +125,11 @@ const linkOrganization = async (req, res) => {
 const update = async (req, res) => {
   try {
     const before = await clientService.getById(req.params.id);
-    const client = await clientService.update(req.params.id, req.body);
-    await clientAuditService.recordClientChanges(req, before, client).catch((err) => {
+    await clientService.update(req.params.id, req.body);
+    await clientAuditService.recordClientChanges(req, before, await clientService.getById(req.params.id)).catch((err) => {
       console.error('[clientController.update] audit failed', err?.message || err);
     });
+    const client = await clientService.getByIdForApi(req.params.id);
     res.json(client);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
@@ -242,91 +245,13 @@ const listJobCompanies = async (req, res) => {
 
 const getInsights = async (req, res) => {
   try {
-    const { id: clientId } = req.params;
-    const { sequelize } = require('../config/db');
-    const Job = require('../models/Job');
-    const NotificationMessage = require('../models/NotificationMessage');
-    const Client = require('../models/Client');
-
-    const client = await Client.findByPk(clientId, { attributes: ['id', 'name', 'displayName', 'domain', 'metadata'] });
-    if (!client) return res.status(404).json({ message: 'Client not found' });
-
-    // ── Job counts by status ──────────────────────────────────────────────
-    const jobRows = await Job.findAll({
-      where: { clientId },
-      attributes: ['status'],
-      raw: true,
-    });
-    const jobCounts = { open: 0, frozen: 0, closed: 0 };
-    for (const j of jobRows) {
-      const s = String(j.status || '').toLowerCase();
-      if (s === 'פתוחה' || s === 'open') jobCounts.open++;
-      else if (s === 'מוקפאת' || s === 'frozen' || s === 'paused') jobCounts.frozen++;
-      else if (s === 'סגורה' || s === 'closed') jobCounts.closed++;
-    }
-
-    // ── Referral counts from notification_messages ────────────────────────
-    const plain = client.get ? client.get({ plain: true }) : client;
-    const labels = new Set([plain.name, plain.displayName, plain.domain].filter(Boolean));
-    const meta = plain.metadata || {};
-    if (meta.legalName) labels.add(meta.legalName);
-    if (meta.nameEn) labels.add(meta.nameEn);
-    if (Array.isArray(meta.aliases)) meta.aliases.forEach((a) => labels.add(a));
-    const labelList = [...labels].filter(Boolean);
-
-    const now = new Date();
-    const weekStart = new Date(now); weekStart.setDate(now.getDate() - 7); weekStart.setHours(0, 0, 0, 0);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const yearStart = new Date(now.getFullYear(), 0, 1);
-
-    let referralsWeek = 0, referralsMonth = 0, referralsYear = 0, hiredCount = 0;
-    if (labelList.length) {
-      const messages = await NotificationMessage.findAll({
-        where: {
-          createdAt: { [Op.gte]: yearStart },
-          [Op.or]: labelList.map((l) => sequelize.literal(`metadata->'taskPayload'->>'clientName' ILIKE ${sequelize.escape(l)}`)),
-        },
-        attributes: ['createdAt', 'status', 'metadata'],
-        raw: true,
-      });
-
-      for (const msg of messages) {
-        const d = new Date(msg.createdAt);
-        const wfStatus = msg.metadata?.referralWorkflowStatus || msg.status || '';
-        if (d >= weekStart) referralsWeek++;
-        if (d >= monthStart) referralsMonth++;
-        referralsYear++;
-        if (String(wfStatus).includes('hired') || String(wfStatus).includes('התקבל')) hiredCount++;
-      }
-
-      // Hired count: all time, not just this year
-      const hiredAll = await NotificationMessage.findAll({
-        where: {
-          [Op.and]: [
-            { [Op.or]: labelList.map((l) => sequelize.literal(`metadata->'taskPayload'->>'clientName' ILIKE ${sequelize.escape(l)}`)) },
-            { [Op.or]: [
-              { status: { [Op.iLike]: '%hired%' } },
-              sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%hired%'`),
-              sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%התקבל%'`),
-            ]},
-          ],
-        },
-        attributes: ['id'],
-        raw: true,
-      });
-      hiredCount = hiredAll.length;
-    }
-
-    res.json({
-      openJobs: jobCounts.open,
-      frozenJobs: jobCounts.frozen,
-      closedJobs: jobCounts.closed,
-      referrals: { week: referralsWeek, month: referralsMonth, year: referralsYear },
-      hiredCount,
-    });
+    const clientInsightsService = require('../services/clientInsightsService');
+    const payload = await clientInsightsService.getClientInsights(req.params.id);
+    res.set('Cache-Control', 'private, max-age=30');
+    res.json(payload);
   } catch (err) {
     console.error('[clientInsights]', err?.message || err);
-    res.status(500).json({ message: err?.message || 'Failed to load insights' });
+    res.status(err.status || 500).json({ message: err?.message || 'Failed to load insights' });
   }
 };
 
@@ -407,6 +332,40 @@ const getMyExportLogo = async (req, res) => {
   }
 };
 
+const canReadClientExportLogo = async (user, clientId) => {
+  if (!user) return false;
+  if (clientService.isPlatformAdmin(user)) return true;
+  const ownClientId = user.clientId != null ? String(user.clientId).trim() : '';
+  if (ownClientId && ownClientId === clientId) return true;
+  const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
+  return Boolean(effectiveClientId && String(effectiveClientId) === clientId);
+};
+
+/** Logo bytes for a specific client (proposal PDF/email). */
+const getExportLogo = async (req, res) => {
+  try {
+    const user = req.dbUser;
+    if (!user) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    const clientId = String(req.params.id || '').trim();
+    if (!clientId) {
+      return res.status(400).json({ message: 'Client id required' });
+    }
+    if (!(await canReadClientExportLogo(user, clientId))) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    const payload = await loadExportLogoForClientId(clientId);
+    if (!payload) {
+      return res.status(404).json({ message: 'No logo configured' });
+    }
+    res.set('Cache-Control', 'private, no-store');
+    res.json(payload);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load logo' });
+  }
+};
+
 module.exports = {
   list,
   get,
@@ -422,4 +381,5 @@ module.exports = {
   getInsights,
   listLinkedJobs,
   getMyExportLogo,
+  getExportLogo,
 };

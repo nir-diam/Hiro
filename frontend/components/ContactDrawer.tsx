@@ -1,5 +1,5 @@
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Drawer from './Drawer';
 import {
@@ -88,6 +88,58 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
     const clientId = String(contact?.clientId || '').trim();
     const contactId = String(contact?.id || '').trim();
     const displayContact = contactDetail || contact;
+
+    const displayPhone = useMemo(() => {
+        const raw = String(displayContact?.phone || '').trim();
+        return raw.replace(/\s/g, '');
+    }, [displayContact?.phone]);
+
+    const displayEmail = useMemo(
+        () => String(displayContact?.email || '').trim(),
+        [displayContact?.email],
+    );
+
+    const handleContactAction = useCallback(
+        (mode: 'email' | 'sms' | 'whatsapp') => {
+            if (!displayContact) return;
+            const config: MessageModalConfig = {
+                mode,
+                recipientType: 'client_contact',
+                candidateName: displayContact.name,
+                candidatePhone: displayPhone,
+                candidateEmail: displayEmail || undefined,
+                linkedClientId: clientId || null,
+                linkedOrganizationId: displayContact.organizationId
+                    ? String(displayContact.organizationId)
+                    : null,
+                linkedOrganizationName: displayContact.clientName || null,
+                linkedContactId: contactId || null,
+                recipientOptions: [
+                    {
+                        id: contactId || displayContact.id,
+                        name: displayContact.name,
+                        email: displayEmail,
+                        phone: displayPhone,
+                        subtitle: displayContact.clientName || null,
+                        clientId: clientId || null,
+                        organizationId: displayContact.organizationId
+                            ? String(displayContact.organizationId)
+                            : null,
+                    },
+                ],
+                initialRecipientIds: contactId ? [contactId] : undefined,
+            };
+            openMessageModal(config);
+        },
+        [
+            clientId,
+            contactId,
+            displayContact,
+            displayEmail,
+            displayPhone,
+            openMessageModal,
+        ],
+    );
 
     useEffect(() => {
         if (!isOpen) {
@@ -289,52 +341,60 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
             <div className="flex flex-col h-full">
                 <div className="flex items-center gap-4 mb-6 p-4 bg-bg-subtle rounded-2xl border border-border-default">
                     <div className="w-16 h-16 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center text-2xl font-bold border-2 border-white shadow-sm relative">
-                        {contact.avatar || contact.name.charAt(0)}
+                        {displayContact.avatar || displayContact.name.charAt(0)}
                         <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-white border-2 border-white shadow-sm flex items-center justify-center text-[8px] font-bold text-text-muted overflow-hidden">
-                            {contact.clientLogo ? (
-                                <img src={contact.clientLogo} alt={contact.clientName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            {displayContact.clientLogo ? (
+                                <img src={displayContact.clientLogo} alt={displayContact.clientName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
                             ) : (
-                                contact.clientName.substring(0, 2)
+                                displayContact.clientName.substring(0, 2)
                             )}
                         </div>
                     </div>
                     <div>
-                        <h3 className="text-xl font-black text-text-default">{contact.name}</h3>
-                        <p className="text-sm text-primary-600 font-semibold">{contact.role}</p>
-                        <p className="text-xs text-text-muted mt-1">{contact.clientName}</p>
+                        <h3 className="text-xl font-black text-text-default">{displayContact.name}</h3>
+                        <p className="text-sm text-primary-600 font-semibold">{displayContact.role}</p>
+                        <p className="text-xs text-text-muted mt-1">{displayContact.clientName}</p>
                     </div>
                 </div>
 
                 <div className="flex gap-2 mb-6">
-                    <a href={`tel:${contact.phone}`} className="flex-1 py-2 bg-green-50 text-green-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-green-100 transition-colors border border-green-200">
-                        <PhoneIcon className="w-4 h-4"/> חייג
-                    </a>
+                    {displayPhone ? (
+                        <a
+                            href={`tel:${displayPhone}`}
+                            className="flex-1 py-2 bg-green-50 text-green-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-green-100 transition-colors border border-green-200"
+                        >
+                            <PhoneIcon className="w-4 h-4"/> חייג
+                        </a>
+                    ) : (
+                        <button
+                            type="button"
+                            disabled
+                            className="flex-1 py-2 bg-green-50/60 text-green-700/50 rounded-lg flex items-center justify-center gap-2 text-xs font-bold border border-green-200 cursor-not-allowed"
+                        >
+                            <PhoneIcon className="w-4 h-4"/> חייג
+                        </button>
+                    )}
                     <button
                         type="button"
-                        onClick={() =>
-                            openMessageModal({
-                                mode: 'email',
-                                recipientType: 'client_contact',
-                                candidateName: contact.name,
-                                candidatePhone: contact.phone,
-                                candidateEmail: contact.email,
-                            })
-                        }
-                        className="flex-1 py-2 bg-blue-50 text-blue-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-200"
+                        onClick={() => handleContactAction('email')}
+                        disabled={!displayEmail}
+                        className="flex-1 py-2 bg-blue-50 text-blue-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-blue-50"
                     >
                         <EnvelopeIcon className="w-4 h-4"/> מייל
                     </button>
                     <button
                         type="button"
-                        onClick={() => openMessageModal({ mode: 'sms', recipientType: 'client_contact', candidateName: contact.name, candidatePhone: contact.phone })}
-                        className="flex-1 py-2 bg-purple-50 text-purple-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-purple-100 transition-colors border border-purple-200"
+                        onClick={() => handleContactAction('sms')}
+                        disabled={!displayPhone}
+                        className="flex-1 py-2 bg-purple-50 text-purple-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-purple-100 transition-colors border border-purple-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-purple-50"
                     >
                         <ChatBubbleBottomCenterTextIcon className="w-4 h-4"/> SMS
                     </button>
                     <button
                         type="button"
-                        onClick={() => openMessageModal({ mode: 'whatsapp', recipientType: 'client_contact', candidateName: contact.name, candidatePhone: contact.phone })}
-                        className="flex-1 py-2 bg-emerald-50 text-emerald-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-emerald-100 transition-colors border border-emerald-200"
+                        onClick={() => handleContactAction('whatsapp')}
+                        disabled={!displayPhone}
+                        className="flex-1 py-2 bg-emerald-50 text-emerald-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-emerald-100 transition-colors border border-emerald-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-emerald-50"
                     >
                         <WhatsappIcon className="w-4 h-4"/> וואטסאפ
                     </button>
@@ -351,19 +411,19 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
                         <div className="space-y-4">
                             <div>
                                 <label className="block text-xs font-bold text-text-muted mb-1 uppercase">טלפון</label>
-                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{contact.phone || '—'}</div>
+                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{displayContact.phone || '—'}</div>
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-text-muted mb-1 uppercase">אימייל</label>
-                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{contact.email || '—'}</div>
+                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{displayContact.email || '—'}</div>
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-text-muted mb-1 uppercase">תפקיד</label>
-                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{contact.role || '—'}</div>
+                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{displayContact.role || '—'}</div>
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-text-muted mb-1 uppercase">קשר אחרון</label>
-                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{contact.lastContact || '—'}</div>
+                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{displayContact.lastContact || '—'}</div>
                             </div>
                         </div>
                     )}

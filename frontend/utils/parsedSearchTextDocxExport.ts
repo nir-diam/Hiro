@@ -2,7 +2,6 @@ import {
     AlignmentType,
     BorderStyle,
     Document,
-    ImageRun,
     Packer,
     Paragraph,
     TextRun,
@@ -18,7 +17,12 @@ import {
     type ParsedSearchTextExportOptions,
 } from './parsedSearchTextExportHtml';
 import { downloadBlobAsFile } from './downloadBlobAsFile';
-import type { ExportImagePayload } from './exportImagePayload';
+import { patchDocxBytesForMixedCvExport } from './docxPostProcess';
+import { injectLogoIntoDocx } from './docxLogoInject';
+import {
+    cvLineUsesRtl,
+    tokenizeMixedCvLine,
+} from './cvMixedTextDirection';
 
 const DOCX_MIME =
     'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -29,31 +33,38 @@ function hexColor(hex: string): string {
     return hex.replace('#', '');
 }
 
-function rtlParagraph(
+type DocxParagraphExtra = Record<string, unknown>;
+type DocxRunStyle = Record<string, unknown>;
+
+function cvParagraph(
     children: TextRun[],
-    extra: Partial<ConstructorParameters<typeof Paragraph>[0]> = {},
+    lineText: string,
+    extra: DocxParagraphExtra = {},
 ) {
+    const rtl = cvLineUsesRtl(lineText);
+    // Word mirrors left/right in RTL paragraphs — use START so Hebrew aligns visually right
+    // and English-only lines align visually left.
     return new Paragraph({
-        bidirectional: true,
-        alignment: AlignmentType.RIGHT,
+        bidirectional: rtl,
+        alignment: AlignmentType.START,
         spacing: { after: 120 },
         children,
         ...extra,
-    });
+    } as ConstructorParameters<typeof Paragraph>[0]);
 }
 
-function textRun(text: string, style: Partial<ConstructorParameters<typeof TextRun>[0]> = {}) {
+function textRun(text: string, rtl: boolean, style: DocxRunStyle = {}) {
     return new TextRun({
         text,
-        rightToLeft: true,
+        rightToLeft: rtl,
         font: 'Calibri',
         ...style,
-    });
+    } as ConstructorParameters<typeof TextRun>[0]);
 }
 
-function bodyTextRuns(line: string): TextRun[] {
-    const trimmed = line.trim();
-    if (!trimmed) return [textRun('')];
+function styledRunsForSegment(segment: string, rtl: boolean, baseStyle: DocxRunStyle): TextRun[] {
+    const trimmed = segment.trim();
+    if (!trimmed) return [textRun(segment, rtl, baseStyle)];
 
     const runs: TextRun[] = [];
     let lastIndex = 0;
@@ -61,59 +72,65 @@ function bodyTextRuns(line: string): TextRun[] {
     let match: RegExpExecArray | null;
     while ((match = re.exec(trimmed)) !== null) {
         if (match.index > lastIndex) {
-            runs.push(
-                textRun(trimmed.slice(lastIndex, match.index), {
-                    size: 28,
-                    color: hexColor(CV_EXPORT_COLORS.body),
-                }),
-            );
+            runs.push(textRun(trimmed.slice(lastIndex, match.index), rtl, baseStyle));
         }
-        runs.push(
-            textRun(match[0], {
-                size: 28,
-                bold: true,
-                color: hexColor(CV_EXPORT_COLORS.body),
-            }),
-        );
+        runs.push(textRun(match[0], rtl, { ...baseStyle, bold: true }));
         lastIndex = match.index + match[0].length;
     }
     if (lastIndex < trimmed.length) {
-        runs.push(
-            textRun(trimmed.slice(lastIndex), {
-                size: 28,
-                color: hexColor(CV_EXPORT_COLORS.body),
-            }),
-        );
+        runs.push(textRun(trimmed.slice(lastIndex), rtl, baseStyle));
     }
-    return runs.length ? runs : [textRun(trimmed, { size: 28, color: hexColor(CV_EXPORT_COLORS.body) })];
+    return runs.length ? runs : [textRun(trimmed, rtl, baseStyle)];
+}
+
+function bodyTextRuns(line: string): TextRun[] {
+    const trimmed = line.trim();
+    if (!trimmed) return [textRun('', false)];
+
+    const baseStyle = { size: 28, color: hexColor(CV_EXPORT_COLORS.body) };
+    if (!cvLineUsesRtl(trimmed)) {
+        return styledRunsForSegment(trimmed, false, baseStyle);
+    }
+
+    const tokens = tokenizeMixedCvLine(trimmed);
+    if (tokens.length <= 1) {
+        return styledRunsForSegment(trimmed, true, baseStyle);
+    }
+
+    return tokens.flatMap((token) =>
+        styledRunsForSegment(token.value, token.dir === 'rtl', baseStyle),
+    );
 }
 
 function paragraphForLine(line: string, style: CvLineStyle): Paragraph {
     const trimmed = line.trim();
+    const lineForDir = trimmed || ' ';
 
     switch (style) {
         case 'spacer':
-            return rtlParagraph([textRun('')], { spacing: { after: 80 } });
+            return cvParagraph([textRun('', false)], ' ', { spacing: { after: 80 } });
         case 'name':
-            return rtlParagraph(
+            return cvParagraph(
                 [
-                    textRun(trimmed, {
+                    textRun(trimmed, cvLineUsesRtl(trimmed), {
                         size: 52,
                         bold: true,
                         color: hexColor(CV_EXPORT_COLORS.primaryDark),
                     }),
                 ],
+                lineForDir,
                 { spacing: { after: 200 } },
             );
         case 'section':
-            return rtlParagraph(
+            return cvParagraph(
                 [
-                    textRun(trimmed, {
+                    textRun(trimmed, true, {
                         size: 34,
                         bold: true,
                         color: hexColor(CV_EXPORT_COLORS.primary),
                     }),
                 ],
+                lineForDir,
                 {
                     spacing: { before: 320, after: 160 },
                     border: {
@@ -126,91 +143,61 @@ function paragraphForLine(line: string, style: CvLineStyle): Paragraph {
                 },
             );
         case 'label':
-            return rtlParagraph(
+            return cvParagraph(
                 [
-                    textRun(trimmed, {
+                    textRun(trimmed, cvLineUsesRtl(trimmed), {
                         size: 26,
                         bold: true,
                         underline: {},
                         color: hexColor(CV_EXPORT_COLORS.label),
                     }),
                 ],
+                lineForDir,
                 { spacing: { before: 200, after: 80 } },
             );
         case 'date':
-            return rtlParagraph(
+            return cvParagraph(
                 [
-                    textRun(trimmed, {
+                    textRun(trimmed, cvLineUsesRtl(trimmed), {
                         size: 28,
                         bold: true,
                         color: hexColor(CV_EXPORT_COLORS.body),
                     }),
                 ],
+                lineForDir,
                 { spacing: { before: 240, after: 80 } },
             );
         case 'role':
-            return rtlParagraph(
+            return cvParagraph(
                 [
-                    textRun(trimmed, {
+                    textRun(trimmed, cvLineUsesRtl(trimmed), {
                         size: 30,
                         bold: true,
                         color: hexColor(CV_EXPORT_COLORS.primaryDark),
                     }),
                 ],
+                lineForDir,
                 { spacing: { after: 120 } },
             );
         case 'body':
         default:
-            return rtlParagraph(bodyTextRuns(line));
+            return cvParagraph(bodyTextRuns(line), lineForDir);
     }
 }
 
-function buildLogoParagraph(logo?: ExportImagePayload | null): Paragraph | null {
-    if (!logo) return null;
-    return new Paragraph({
-        bidirectional: true,
-        alignment: AlignmentType.LEFT,
-        spacing: { after: 160 },
-        children: [
-            new ImageRun({
-                type: logo.type,
-                data: logo.data,
-                transformation: {
-                    width: logo.width,
-                    height: logo.height,
-                },
-            }),
-        ],
-    });
-}
-
-function buildTitleParagraphs(options?: ParsedSearchTextExportOptions): Paragraph[] {
-    const name = String(options?.candidateName ?? '').trim();
-    const blocks: Paragraph[] = [];
-    const logoParagraph = buildLogoParagraph(options?.clientLogo);
-    if (logoParagraph) blocks.push(logoParagraph);
-
-    blocks.push(
-        rtlParagraph(
+function buildTitleParagraphs(): Paragraph[] {
+    return [
+        cvParagraph(
             [
-                textRun('מסמך קורות חיים', {
-                    size: 24,
-                    bold: true,
-                    color: hexColor(CV_EXPORT_COLORS.primary),
-                }),
-            ],
-            { spacing: { after: 80 } },
-        ),
-        rtlParagraph(
-            [
-                textRun(PARSED_CV_DOCUMENT_TITLE, {
+                textRun(PARSED_CV_DOCUMENT_TITLE, true, {
                     size: 64,
                     bold: true,
                     color: hexColor(CV_EXPORT_COLORS.primaryDark),
                 }),
             ],
+            PARSED_CV_DOCUMENT_TITLE,
             {
-                spacing: { after: name ? 120 : 280 },
+                spacing: { after: 280 },
                 border: {
                     bottom: {
                         color: hexColor(CV_EXPORT_COLORS.primary),
@@ -220,22 +207,7 @@ function buildTitleParagraphs(options?: ParsedSearchTextExportOptions): Paragrap
                 },
             },
         ),
-    );
-    if (name) {
-        blocks.push(
-            rtlParagraph(
-                [
-                    textRun(name, {
-                        size: 30,
-                        bold: true,
-                        color: hexColor(CV_EXPORT_COLORS.label),
-                    }),
-                ],
-                { spacing: { after: 280 } },
-            ),
-        );
-    }
-    return blocks;
+    ];
 }
 
 async function buildDocxBlob(text: string, options?: ParsedSearchTextExportOptions): Promise<Blob> {
@@ -245,6 +217,16 @@ async function buildDocxBlob(text: string, options?: ParsedSearchTextExportOptio
     );
 
     const doc = new Document({
+        styles: {
+            default: {
+                document: {
+                    run: {
+                        font: 'Calibri',
+                        language: { value: 'he-IL' },
+                    },
+                },
+            },
+        },
         sections: [
             {
                 properties: {
@@ -252,12 +234,22 @@ async function buildDocxBlob(text: string, options?: ParsedSearchTextExportOptio
                         margin: { top: 720, right: 720, bottom: 720, left: 720 },
                     },
                 },
-                children: [...buildTitleParagraphs(options), ...bodyParagraphs],
+                children: [...buildTitleParagraphs(), ...bodyParagraphs],
             },
         ],
     });
 
-    return Packer.toBlob(doc);
+    let bytes = new Uint8Array(await (await Packer.toBlob(doc)).arrayBuffer());
+    bytes = await patchDocxBytesForMixedCvExport(bytes);
+
+    if (options?.clientLogo) {
+        bytes = await injectLogoIntoDocx(bytes.buffer, options.clientLogo, 'left', {
+            applyRtlSectionPatch: false,
+        });
+        bytes = await patchDocxBytesForMixedCvExport(bytes);
+    }
+
+    return new Blob([bytes], { type: DOCX_MIME });
 }
 
 function ensureDocxFilename(filename: string): string {

@@ -12,6 +12,8 @@ const execute = async (req, res) => {
       context: body.context && typeof body.context === 'object' ? body.context : {},
       source: body.source === 'system_event' ? 'system_event' : 'manual',
       skipManualApproval: body.skipManualApproval === true,
+      historyTitle: body.historyTitle != null ? String(body.historyTitle).trim() : '',
+      historyComment: body.historyComment != null ? String(body.historyComment).trim() : '',
     });
     return res.json(result);
   } catch (err) {

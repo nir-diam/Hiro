@@ -185,6 +185,99 @@ const resolve = async (req, res) => {
   });
 };
 
+const TMP_ORG_PATCH_FIELDS = [
+  'name',
+  'nameEn',
+  'legalName',
+  'aliases',
+  'mainField',
+  'subField',
+  'secondaryField',
+  'tags',
+  'techTags',
+  'employeeCount',
+  'type',
+  'website',
+  'linkedinUrl',
+  'location',
+  'hqCountry',
+  'classification',
+  'relation',
+  'foundedYear',
+  'businessModel',
+  'productType',
+  'structure',
+  'parentCompany',
+  'subsidiaries',
+  'growthIndicator',
+  'dataConfidence',
+  'lastVerified',
+  'description',
+  'comments',
+];
+
+const tmpOrgToApi = (tmp) => {
+  const plain = tmp.toJSON ? tmp.toJSON() : tmp.get({ plain: true });
+  return {
+    ...plain,
+    isPending: true,
+    organizationTmpId: plain.id,
+    activityStatus: 'pending',
+  };
+};
+
+const assertTmpOrgAccess = async (tmpId, actor) => {
+  if (!actor) {
+    const err = new Error('Unauthorized');
+    err.status = 401;
+    throw err;
+  }
+  if (clientService.isPlatformAdmin(actor)) {
+    return { tenantClientId: null, isAdmin: true };
+  }
+  const tenantClientId = actor.clientId ? String(actor.clientId).trim() : '';
+  if (!tenantClientId) {
+    const err = new Error('Forbidden');
+    err.status = 403;
+    throw err;
+  }
+  const link = await ClientOrganizationLink.findOne({
+    where: { clientId: tenantClientId, organizationTmpId: tmpId },
+  });
+  if (!link) {
+    const err = new Error('Forbidden');
+    err.status = 403;
+    throw err;
+  }
+  return { tenantClientId, isAdmin: false };
+};
+
+const resolveLinkedClientIdForTmp = async (tmpId, access) => {
+  if (access.tenantClientId) return access.tenantClientId;
+  const link = await ClientOrganizationLink.findOne({
+    where: { organizationTmpId: tmpId },
+    order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
+  });
+  return link?.clientId ? String(link.clientId) : null;
+};
+
+const buildTmpProfileBundle = async (tmp, access) => {
+  const tmpId = String(tmp.id || '').trim();
+  const clientId = await resolveLinkedClientIdForTmp(tmpId, access);
+  let client = null;
+  if (clientId) {
+    client = await clientService.getByIdWithLinks(clientId);
+  }
+  const organization = tmpOrgToApi(tmp);
+  const primaryClient = clientId
+    ? {
+      clientId,
+      clientName: String(client?.displayName || client?.name || ''),
+    }
+    : { clientId: null, clientName: null };
+  return { organization, primaryClient, client };
+};
+
 const getById = async (req, res) => {
   try {
     const tmpId = String(req.params.id || '').trim();
@@ -193,29 +286,69 @@ const getById = async (req, res) => {
     const tmp = await OrganizationTmp.findByPk(tmpId);
     if (!tmp) return res.status(404).json({ message: 'Organization not found' });
 
-    const actor = req.dbUser;
-    if (!actor) return res.status(401).json({ message: 'Unauthorized' });
+    const access = await assertTmpOrgAccess(tmpId, req.dbUser);
+    const includeProfile =
+      req.query?.includeProfile === '1'
+      || req.query?.includeProfile === 'true'
+      || req.query?.includePrimaryClient === '1'
+      || req.query?.includePrimaryClient === 'true';
 
-    if (!clientService.isPlatformAdmin(actor)) {
-      const clientId = actor.clientId ? String(actor.clientId).trim() : '';
-      if (!clientId) return res.status(403).json({ message: 'Forbidden' });
-      const link = await ClientOrganizationLink.findOne({
-        where: { clientId, organizationTmpId: tmpId },
-      });
-      if (!link) return res.status(403).json({ message: 'Forbidden' });
+    res.set('Cache-Control', 'private, max-age=30');
+    if (includeProfile) {
+      return res.json(await buildTmpProfileBundle(tmp, access));
     }
-
-    const plain = tmp.toJSON ? tmp.toJSON() : tmp.get({ plain: true });
-    res.json({
-      ...plain,
-      isPending: true,
-      organizationTmpId: plain.id,
-      activityStatus: 'pending',
-    });
+    res.json(tmpOrgToApi(tmp));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to load organization' });
   }
 };
 
-module.exports = { list, resolve, listHistory, getById };
+/** GET /api/organizations/tmp/:id/profile — pending org + linked tenant client (one round-trip). */
+const getProfile = async (req, res) => {
+  try {
+    const tmpId = String(req.params.id || '').trim();
+    if (!tmpId) return res.status(400).json({ message: 'Missing id' });
+
+    const tmp = await OrganizationTmp.findByPk(tmpId);
+    if (!tmp) return res.status(404).json({ message: 'Organization not found' });
+
+    const access = await assertTmpOrgAccess(tmpId, req.dbUser);
+    res.set('Cache-Control', 'private, max-age=30');
+    res.json(await buildTmpProfileBundle(tmp, access));
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load organization profile' });
+  }
+};
+
+/** PATCH /api/organizations/tmp/:id — tenant managers may edit staging company fields before admin approval. */
+const updateById = async (req, res) => {
+  try {
+    const tmpId = String(req.params.id || '').trim();
+    if (!tmpId) return res.status(400).json({ message: 'Missing id' });
+
+    const tmp = await OrganizationTmp.findByPk(tmpId);
+    if (!tmp) return res.status(404).json({ message: 'Organization not found' });
+
+    await assertTmpOrgAccess(tmpId, req.dbUser);
+
+    const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+    const patch = {};
+    for (const key of TMP_ORG_PATCH_FIELDS) {
+      if (Object.prototype.hasOwnProperty.call(body, key)) {
+        patch[key] = body[key];
+      }
+    }
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ message: 'No updatable fields provided' });
+    }
+
+    await tmp.update(patch);
+    await tmp.reload();
+    res.json(tmpOrgToApi(tmp));
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Update failed' });
+  }
+};
+
+module.exports = { list, resolve, listHistory, getById, getProfile, updateById };
 

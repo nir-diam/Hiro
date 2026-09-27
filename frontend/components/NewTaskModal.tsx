@@ -9,12 +9,25 @@ import {
     GoogleCalendarIcon,
     ClipboardDocumentCheckIcon,
     ChevronDownIcon,
+    PaperClipIcon,
+    TrashIcon,
+    ArrowUpTrayIcon,
 } from './Icons';
+import { formatAttachmentSize } from '../services/clientAttachmentsApi';
+import type { SendNotificationEmailAttachment } from '../services/emailSendApi';
+import { applyClientLogoToEmailAttachments } from '../utils/emailAttachmentLogoStamp';
 import type { Candidate } from './CandidatesListView';
 import { deriveLocalCandidateId } from '../utils/candidateId';
 import { EMPTY_LINKED_LABEL } from '../utils/taskLinkedContext';
+import {
+  hasNewTaskLinkedOverrideContent,
+  type NewTaskLinkedOverride,
+} from '../utils/newTaskLinkedContext';
 import { useAuth } from '../context/AuthContext';
-import { requestNotificationInboxCountsRefresh } from '../services/notificationInboxCounts';
+import {
+    requestNotificationInboxCountsRefresh,
+    type NotificationInboxRefreshDetail,
+} from '../services/notificationInboxCounts';
 import {
     fetchEventTypes,
     filterEventTypesForContext,
@@ -32,6 +45,8 @@ interface NewTaskModalProps {
   onSave: (taskData: any) => void;
   onOpenCandidateSummary: (candidate: Candidate | number) => void;
   pathname: string;
+  /** Selected journal event / screen context when URL has no entity route. */
+  linkedOverride?: NewTaskLinkedOverride | null;
 }
 
 type TaskLinkedRoute =
@@ -165,9 +180,7 @@ function parseDueAsLocalRange(dueDate: string, dueTime: string): { start: Date; 
 
 function buildCalendarEventMeta(form: CalendarFormSlice, isTaskMode: boolean) {
   const subjectBase = isTaskMode ? 'משימה חדשה' : 'תזכורת';
-  const title = `${subjectBase}: ${form.category || 'כללי'}${
-    form.dueDate && form.dueTime ? ` (${form.dueDate} ${form.dueTime})` : ''
-  }`;
+  const title = `${subjectBase}: ${form.category || 'כללי'}`;
 
   const lines: string[] = [];
   if (form.messageText.trim()) lines.push(form.messageText.trim());
@@ -257,21 +270,21 @@ const SingleRangeSlider: React.FC<{
 
     return (
         <div className={className}>
-            <div className="flex justify-between items-center mb-3">
-                <label id={id} className="text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-                <span className="text-sm font-bold text-primary-700 tabular-nums">{value}{unit}</span>
+            <div className="flex justify-between items-center mb-1">
+                <label id={id} className="text-xs font-semibold text-text-muted">{label}</label>
+                <span className="text-xs font-bold text-primary-700 tabular-nums">{value}{unit}</span>
             </div>
-            <div className="relative h-8 flex items-center px-4">
-                <div className="absolute w-full h-1.5 bg-bg-subtle rounded-full">
+            <div className="relative h-5 flex items-center px-1">
+                <div className="absolute w-full h-1 bg-bg-subtle rounded-full">
                     <div
-                        className="absolute h-1.5 bg-primary-500 rounded-full"
+                        className="absolute h-1 bg-primary-500 rounded-full"
                         style={{ width: `${valuePercent}%` }}
                     ></div>
                 </div>
                 <input
                     type="range" min={min} max={max} step={step} value={value} name={name} onChange={onChange}
                     aria-labelledby={id}
-                    className="absolute w-full h-1.5 appearance-none bg-transparent cursor-pointer"
+                    className="absolute w-full h-1 appearance-none bg-transparent cursor-pointer"
                 />
             </div>
         </div>
@@ -290,6 +303,218 @@ type LinkedPanel =
           plainLines: { label: string; value: string }[];
       };
 
+function linkedValueNode(
+    value: string,
+    link?: { href: string } | { onClick: () => void },
+): React.ReactNode {
+    if (value === EMPTY_LINKED_LABEL) {
+        return <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>;
+    }
+    if (link && 'href' in link) {
+        return (
+            <a
+                href={link.href}
+                className="text-primary-600 font-bold hover:underline"
+                onClick={(e) => e.stopPropagation()}
+            >
+                {value}
+            </a>
+        );
+    }
+    if (link && 'onClick' in link) {
+        return (
+            <button
+                type="button"
+                onClick={link.onClick}
+                className="text-primary-600 font-bold hover:underline text-right hover:text-primary-700 transition-colors"
+            >
+                {value}
+            </button>
+        );
+    }
+    return <span className="text-text-default font-semibold">{value}</span>;
+}
+
+function buildLinkedPanelFromOverride(
+    override: NewTaskLinkedOverride,
+    openCandidate: (candidate: Candidate | number) => void,
+): Extract<LinkedPanel, { phase: 'ok' }> {
+    const v = (s: string | undefined) => (String(s ?? '').trim() || EMPTY_LINKED_LABEL);
+    const rows: { label: string; node: React.ReactNode }[] = [];
+    const plainLines: { label: string; value: string }[] = [];
+
+    const pushRow = (
+        label: string,
+        raw: string | undefined,
+        node: React.ReactNode,
+    ) => {
+        const value = v(raw);
+        plainLines.push({ label, value });
+        rows.push({ label, node });
+    };
+
+    if (override.linkedOrganizationLabel) {
+        const orgLabel = v(override.linkedOrganizationLabel);
+        pushRow(
+            'ארגון:',
+            override.linkedOrganizationLabel,
+            linkedValueNode(
+                orgLabel,
+                override.linkedOrganizationId
+                    ? { href: `/organizations/${encodeURIComponent(override.linkedOrganizationId)}` }
+                    : undefined,
+            ),
+        );
+    }
+
+    const candLabel = override.linkedCandidateLabel ? v(override.linkedCandidateLabel) : EMPTY_LINKED_LABEL;
+    if (override.linkedCandidateLabel) {
+        pushRow(
+            'מועמד:',
+            override.linkedCandidateLabel,
+            linkedValueNode(
+                candLabel,
+                override.linkedCandidateBackendId
+                    ? {
+                          onClick: () =>
+                              openCandidate({
+                                  id: deriveLocalCandidateId(override.linkedCandidateBackendId!),
+                                  backendId: override.linkedCandidateBackendId,
+                                  name: override.linkedCandidateLabel || '',
+                                  avatar: '',
+                                  title: '',
+                                  status: '',
+                                  lastActivity: '',
+                                  source: '',
+                                  tags: [],
+                                  internalTags: [],
+                                  matchScore: 0,
+                                  phone: '',
+                              }),
+                      }
+                    : undefined,
+            ),
+        );
+    } else {
+        pushRow('מועמד:', undefined, linkedValueNode(EMPTY_LINKED_LABEL));
+    }
+
+    const jobLabel = override.linkedJobLabel ? v(override.linkedJobLabel) : EMPTY_LINKED_LABEL;
+    pushRow(
+        'משרה:',
+        override.linkedJobLabel,
+        linkedValueNode(
+            jobLabel,
+            override.linkedJobId
+                ? { href: `/jobs/edit/${encodeURIComponent(override.linkedJobId)}` }
+                : undefined,
+        ),
+    );
+
+    const clientLabel = v(override.linkedClientLabel);
+    pushRow(
+        'לקוח:',
+        override.linkedClientLabel,
+        linkedValueNode(
+            clientLabel,
+            override.linkedClientId
+                ? { href: `/clients/${encodeURIComponent(override.linkedClientId)}` }
+                : undefined,
+        ),
+    );
+
+    if (override.linkedContactLabel && !override.linkedCandidateLabel) {
+        const contactLabel = v(override.linkedContactLabel);
+        pushRow(
+            'איש קשר:',
+            override.linkedContactLabel,
+            linkedValueNode(
+                contactLabel,
+                override.linkedClientId && override.linkedContactId
+                    ? {
+                          href: `/clients/${encodeURIComponent(override.linkedClientId)}/contacts/${encodeURIComponent(override.linkedContactId)}`,
+                      }
+                    : undefined,
+            ),
+        );
+    }
+
+    if (override.stageLabel) {
+        pushRow('שלב:', override.stageLabel, linkedValueNode(v(override.stageLabel)));
+    }
+
+    return { phase: 'ok', rows, plainLines };
+}
+
+function linkFieldsFromOverride(override: NewTaskLinkedOverride): Record<string, string | number> {
+    const out: Record<string, string | number> = {};
+    if (override.linkedCandidateBackendId) {
+        out.linkedCandidateBackendId = override.linkedCandidateBackendId;
+        out.linkedCandidateLocalId = deriveLocalCandidateId(override.linkedCandidateBackendId);
+    }
+    if (override.linkedJobId) out.linkedJobId = override.linkedJobId;
+    if (override.linkedClientId) out.linkedClientId = override.linkedClientId;
+    if (override.linkedContactId) out.linkedContactId = override.linkedContactId;
+    if (override.linkedOrganizationId) out.linkedOrganizationId = override.linkedOrganizationId;
+    return out;
+}
+
+function linkLabelsFromOverride(override: NewTaskLinkedOverride): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (override.linkedOrganizationLabel) out.linkedOrganizationLabel = override.linkedOrganizationLabel;
+    if (override.linkedCandidateLabel) out.linkedCandidateLabel = override.linkedCandidateLabel;
+    if (override.linkedJobLabel) out.linkedJobLabel = override.linkedJobLabel;
+    if (override.linkedClientLabel) out.linkedClientLabel = override.linkedClientLabel;
+    if (override.linkedContactLabel) out.linkedContactLabel = override.linkedContactLabel;
+    return out;
+}
+
+function guessAttachmentContentType(filename: string): string {
+    const ext = String(filename || '').split('.').pop()?.toLowerCase() || '';
+    const map: Record<string, string> = {
+        pdf: 'application/pdf',
+        doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xls: 'application/vnd.ms-excel',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        ppt: 'application/vnd.ms-powerpoint',
+        pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        jpeg: 'image/jpeg',
+        gif: 'image/gif',
+        webp: 'image/webp',
+        txt: 'text/plain',
+        csv: 'text/csv',
+        zip: 'application/zip',
+    };
+    return map[ext] || 'application/octet-stream';
+}
+
+function fileToBase64(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = String(reader.result || '');
+            resolve(result.includes(',') ? result.split(',')[1] : result);
+        };
+        reader.onerror = () => reject(reader.error || new Error('קריאת קובץ נכשלה'));
+        reader.readAsDataURL(file);
+    });
+}
+
+async function buildTaskAttachments(files: File[]): Promise<SendNotificationEmailAttachment[]> {
+    const out: SendNotificationEmailAttachment[] = [];
+    for (const file of files) {
+        out.push({
+            filename: file.name,
+            content: await fileToBase64(file),
+            contentType: file.type || guessAttachmentContentType(file.name),
+        });
+    }
+    return out;
+}
+
 function buildEmailBodyWithLinkedContext(messageText: string, plainLines: { label: string; value: string }[]): string {
     const main = (messageText || '').trim();
     if (!plainLines.length) return main;
@@ -298,7 +523,14 @@ function buildEmailBodyWithLinkedContext(messageText: string, plainLines: { labe
     return main ? `${main}\n\n${appendix}` : appendix;
 }
 
-const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, onOpenCandidateSummary, pathname }) => {
+const NewTaskModal: React.FC<NewTaskModalProps> = ({
+    isOpen,
+    onClose,
+    onSave,
+    onOpenCandidateSummary,
+    pathname,
+    linkedOverride = null,
+}) => {
     const { user } = useAuth();
     const [isTaskMode, setIsTaskMode] = useState(false);
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -341,9 +573,13 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
     const assigneePickerRef = useRef<HTMLDivElement>(null);
     const closeButtonRef = useRef<HTMLButtonElement>(null);
     const [assigneeDropdownOpen, setAssigneeDropdownOpen] = useState(false);
+    const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const attachmentFileInputRef = useRef<HTMLInputElement>(null);
     const previouslyFocusedElement = useRef<HTMLElement | null>(null);
     const titleId = useId();
     const contentId = useId();
+    const attachmentInputId = useId();
 
     useEffect(() => {
         if (isOpen) {
@@ -369,6 +605,8 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                 allocatedDays: 3,
             });
             setIsTaskMode(false);
+            setAttachmentFiles([]);
+            if (attachmentFileInputRef.current) attachmentFileInputRef.current.value = '';
             
             previouslyFocusedElement.current = document.activeElement as HTMLElement;
             setTimeout(() => closeButtonRef.current?.focus(), 100);
@@ -534,6 +772,11 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
 
     useEffect(() => {
         if (!isOpen || !apiBase) return;
+
+        if (hasNewTaskLinkedOverrideContent(linkedOverride)) {
+            setLinkedPanel(buildLinkedPanelFromOverride(linkedOverride!, (c) => openSummaryRef.current(c)));
+            return;
+        }
 
         const route = parseTaskLinkedRoute(pathname);
         if (route.kind === 'none') {
@@ -895,7 +1138,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
         return () => {
             cancelled = true;
         };
-    }, [isOpen, apiBase, pathname]);
+    }, [isOpen, apiBase, pathname, linkedOverride]);
 
     const openExternalCalendar = useCallback(
         (target: 'google' | 'outlook365' | 'outlook') => {
@@ -931,60 +1174,125 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
         setFormData(prev => ({ ...prev, [name]: checked !== undefined ? checked : value }));
     };
 
+    const handleAttachmentInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const fileList = e.target.files;
+        if (!fileList?.length) return;
+        const picked: File[] = [];
+        for (let i = 0; i < fileList.length; i += 1) {
+            const file = fileList.item(i);
+            if (file) picked.push(file);
+        }
+        setAttachmentFiles((prev) => {
+            const seen = new Set(prev.map((f) => `${f.name}:${f.size}:${f.lastModified}`));
+            const next = [...prev];
+            for (const file of picked) {
+                const key = `${file.name}:${file.size}:${file.lastModified}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                next.push(file);
+            }
+            return next;
+        });
+        e.target.value = '';
+    };
+
+    const removeAttachmentFile = (index: number) => {
+        setAttachmentFiles((prev) => prev.filter((_, i) => i !== index));
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
+        if (isSubmitting) return;
+        if (attachmentFiles.length && !formData.submissionEmail) {
+            alert('כדי לשלוח קבצים מצורפים, יש להפעיל "תזכורת מייל".');
+            return;
+        }
 
         const linkedPlain =
             linkedPanel.phase === 'ok' && linkedPanel.plainLines.length > 0 ? linkedPanel.plainLines : [];
         const fullMessageText = buildEmailBodyWithLinkedContext(formData.messageText, linkedPlain);
         const route = parseTaskLinkedRoute(pathname);
-        const linkFields: Record<string, string | number> = {};
-        if (route.kind === 'candidate') {
-            linkFields.linkedCandidateBackendId = route.id;
-            linkFields.linkedCandidateLocalId = deriveLocalCandidateId(route.id);
-        } else if (route.kind === 'job') {
-            linkFields.linkedJobId = route.id;
-        } else if (route.kind === 'client') {
-            linkFields.linkedClientId = route.id;
-        } else if (route.kind === 'contact') {
-            linkFields.linkedClientId = route.clientId;
-            linkFields.linkedContactId = route.contactId;
-        } else if (route.kind === 'organization') {
-            linkFields.linkedOrganizationId = route.id;
-        } else if (route.kind === 'organization_tmp') {
-            linkFields.linkedOrganizationTmpId = route.id;
+        const useOverride = hasNewTaskLinkedOverrideContent(linkedOverride);
+        const linkFields: Record<string, string | number> = useOverride
+            ? linkFieldsFromOverride(linkedOverride!)
+            : {};
+        if (!useOverride) {
+            if (route.kind === 'candidate') {
+                linkFields.linkedCandidateBackendId = route.id;
+                linkFields.linkedCandidateLocalId = deriveLocalCandidateId(route.id);
+            } else if (route.kind === 'job') {
+                linkFields.linkedJobId = route.id;
+            } else if (route.kind === 'client') {
+                linkFields.linkedClientId = route.id;
+            } else if (route.kind === 'contact') {
+                linkFields.linkedClientId = route.clientId;
+                linkFields.linkedContactId = route.contactId;
+            } else if (route.kind === 'organization') {
+                linkFields.linkedOrganizationId = route.id;
+            } else if (route.kind === 'organization_tmp') {
+                linkFields.linkedOrganizationTmpId = route.id;
+            }
         }
-        const linkLabels =
-            linkedPlain.length >= 3
-                ? {
-                      ...(linkedPlain[0]?.label.startsWith('ארגון:')
-                          ? { linkedOrganizationLabel: linkedPlain[0].value }
-                          : { linkedCandidateLabel: linkedPlain[0].value }),
-                      linkedJobLabel: linkedPlain.find((l) => l.label.startsWith('משרה:'))?.value
-                          ?? linkedPlain[1]?.value
-                          ?? '',
-                      linkedClientLabel: linkedPlain.find((l) => l.label.startsWith('לקוח:'))?.value
-                          ?? linkedPlain[2]?.value
-                          ?? '',
-                      ...(linkedPlain.find((l) => l.label.startsWith('איש קשר:'))
-                          ? { linkedContactLabel: linkedPlain.find((l) => l.label.startsWith('איש קשר:'))!.value }
-                          : {}),
-                  }
-                : {};
+        const linkLabels = useOverride
+            ? linkLabelsFromOverride(linkedOverride!)
+            : linkedPlain.length >= 3
+              ? {
+                    ...(linkedPlain[0]?.label.startsWith('ארגון:')
+                        ? { linkedOrganizationLabel: linkedPlain[0].value }
+                        : { linkedCandidateLabel: linkedPlain[0].value }),
+                    linkedJobLabel:
+                        linkedPlain.find((l) => l.label.startsWith('משרה:'))?.value ?? linkedPlain[1]?.value ?? '',
+                    linkedClientLabel:
+                        linkedPlain.find((l) => l.label.startsWith('לקוח:'))?.value ?? linkedPlain[2]?.value ?? '',
+                    ...(linkedPlain.find((l) => l.label.startsWith('איש קשר:'))
+                        ? { linkedContactLabel: linkedPlain.find((l) => l.label.startsWith('איש קשר:'))!.value }
+                        : {}),
+                }
+              : {};
+        let emailAttachments: SendNotificationEmailAttachment[] = [];
+        if (attachmentFiles.length) {
+            try {
+                emailAttachments = await buildTaskAttachments(attachmentFiles);
+                emailAttachments = await applyClientLogoToEmailAttachments(emailAttachments);
+            } catch (attachErr: unknown) {
+                alert(
+                    attachErr instanceof Error ? attachErr.message : 'הכנת הקבצים המצורפים נכשלה',
+                );
+                return;
+            }
+        }
+
         const taskPayload = {
             ...formData,
             messageText: fullMessageText,
             isTask: isTaskMode,
             ...linkFields,
             ...linkLabels,
+            attachmentCount: emailAttachments.length,
+            attachmentNames: emailAttachments.map((a) => a.filename),
         };
 
         let postedToServer = false;
+        let refreshFocusTab: NotificationInboxRefreshDetail['focusTab'] | undefined;
+        const onNotificationsPage = pathname.replace(/\/$/, '') === '/notifications';
         if (apiBase) {
+            setIsSubmitting(true);
             try {
                 const me = user?.email?.trim();
+                const meNorm = me ? me.toLowerCase() : '';
                 const assignees = formData.assigneeEmails.map((x) => x.trim()).filter((x) => x.includes('@'));
                 const to = assignees.length ? assignees : me ? [me] : [];
+                const sentOnlyToSelf =
+                    Boolean(meNorm) &&
+                    to.length > 0 &&
+                    to.every((email) => email.trim().toLowerCase() === meNorm);
+                if (onNotificationsPage) {
+                    refreshFocusTab = sentOnlyToSelf
+                        ? isTaskMode
+                            ? 'tasks'
+                            : 'all'
+                        : 'sent';
+                }
                 if (!to.length) {
                     throw new Error('בחרו נמען או ודאו שחשבון המשתמש כולל אימייל');
                 }
@@ -994,9 +1302,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
                 const subjectBase = isTaskMode ? 'משימה חדשה' : 'תזכורת';
-                const subject = `${subjectBase}: ${formData.category || 'כללי'}${
-                    formData.dueDate && formData.dueTime ? ` (${formData.dueDate} ${formData.dueTime})` : ''
-                }`;
+                const subject = `${subjectBase}: ${formData.category || 'כללי'}`;
 
                 const res = await fetch(`${apiBase}/api/email-uploads/send`, {
                     method: 'POST',
@@ -1021,6 +1327,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                         allocatedDays: isTaskMode ? formData.allocatedDays : null,
                         taskPayload,
                         skipSmtp: !formData.submissionEmail,
+                        attachments: emailAttachments.length ? emailAttachments : undefined,
                     }),
                 });
 
@@ -1032,107 +1339,110 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
             } catch (err: any) {
                 console.error('[NewTaskModal] create / send failed', err);
                 alert(err?.message || 'שמירת הפעילות נכשלה');
+                setIsSubmitting(false);
                 return;
+            } finally {
+                setIsSubmitting(false);
             }
         }
 
-        onSave(taskPayload);
         if (postedToServer) {
-            requestNotificationInboxCountsRefresh({ reloadNotificationList: true });
+            requestNotificationInboxCountsRefresh({
+                reloadNotificationList: true,
+                focusTab: refreshFocusTab,
+            });
         }
+        onSave(taskPayload);
     };
 
+    const fieldClass =
+        'w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block py-2 px-2.5 transition-all shadow-sm';
+    const labelClass = 'block text-xs font-bold text-text-default mb-1';
+
     return (
-        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm" onClick={onClose}>
             <div
                 ref={modalRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby={titleId}
-                className="bg-bg-card rounded-3xl shadow-2xl w-full max-w-5xl flex flex-col overflow-hidden max-h-[90vh] border border-border-default/50"
+                className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col overflow-hidden border border-border-default/50"
                 onClick={e => e.stopPropagation()}
                 style={{ animation: 'modalFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}
             >
-                <form onSubmit={handleSubmit} className="flex flex-col h-full overflow-hidden">
-                    <header className="flex items-center justify-between p-6 border-b border-border-default/50 bg-bg-subtle/30 flex-shrink-0">
-                        <h2 id={titleId} className="text-2xl font-black text-text-default tracking-tight">יצירת פעילות חדשה <span className="text-text-muted font-medium text-lg ml-2">(הודעה / משימה)</span></h2>
-                         <button ref={closeButtonRef} type="button" onClick={onClose} className="p-2.5 rounded-full text-text-muted hover:bg-bg-hover hover:text-text-default transition-colors" aria-label="סגור">
-                            <XMarkIcon className="w-6 h-6" />
+                <form onSubmit={handleSubmit} className="flex flex-col overflow-hidden">
+                    <header className="flex items-center justify-between px-4 py-3 border-b border-border-default/50 bg-bg-subtle/30 flex-shrink-0">
+                        <div>
+                            <h2 id={titleId} className="text-lg font-black text-text-default tracking-tight leading-tight">
+                                יצירת פעילות חדשה
+                            </h2>
+                            <p className="text-[11px] text-text-muted mt-0.5">הודעה · תזכורת · משימה</p>
+                        </div>
+                         <button ref={closeButtonRef} type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover hover:text-text-default transition-colors" aria-label="סגור">
+                            <XMarkIcon className="w-5 h-5" />
                         </button>
                     </header>
 
-                    <main className="p-8 overflow-y-auto flex-grow bg-bg-card">
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-10 gap-y-8">
-                             {/* Right Column (in RTL): Textarea */}
-                            <div className="flex flex-col h-full order-1 lg:order-2">
-                                <label htmlFor={contentId} className="block text-sm font-bold text-text-default mb-2">תוכן הפעילות</label>
-                                <textarea
-                                    id={contentId}
-                                    name="messageText"
-                                    value={formData.messageText}
-                                    onChange={handleChange as any}
-                                    className="w-full flex-grow bg-bg-input border border-border-default text-text-default text-base rounded-2xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-4 transition-all shadow-sm resize-none"
-                                    placeholder="כתוב כאן את תוכן ההודעה או המשימה..."
-                                />
-                            </div>
-                            
-                            {/* Left Column (in RTL): Controls */}
-                            <div className="space-y-6 order-2 lg:order-1">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                                    <div className="sm:col-span-2 relative" ref={assigneePickerRef}>
-                                        <label className="block text-sm font-bold text-text-default mb-2">
-                                            למען <span className="text-text-muted font-normal text-xs">(ניתן לבחור מספר נמענים)</span>
-                                        </label>
-                                        {contactsLoading ? (
-                                            <div className="w-full min-h-[44px] flex items-center px-3.5 rounded-xl border border-border-default bg-bg-input text-sm text-text-muted">
-                                                טוען רכזים…
-                                            </div>
-                                        ) : orderedContactOptions.length === 0 ? (
-                                            <p className="text-sm text-amber-700 py-2">לא נמצאו רכזים ללקוח המחובר.</p>
-                                        ) : (
-                                            <>
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setAssigneeDropdownOpen((o) => !o)}
-                                                    aria-expanded={assigneeDropdownOpen}
-                                                    aria-haspopup="listbox"
-                                                    className="w-full min-h-[44px] flex items-center justify-between gap-2 px-3.5 py-2 rounded-xl border border-border-default bg-bg-input text-sm text-right text-text-default shadow-sm hover:border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                    <main className="px-4 py-3 bg-bg-card overflow-hidden">
+                        <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.15fr] gap-3">
+                            {/* Controls column (RTL start) */}
+                            <div className="space-y-2.5 order-2 lg:order-1 min-w-0">
+                                <div className="relative" ref={assigneePickerRef}>
+                                    <label className={labelClass}>
+                                        למען <span className="text-text-muted font-normal">(מספר נמענים)</span>
+                                    </label>
+                                    {contactsLoading ? (
+                                        <div className={`${fieldClass} min-h-[36px] flex items-center text-text-muted`}>
+                                            טוען רכזים…
+                                        </div>
+                                    ) : orderedContactOptions.length === 0 ? (
+                                        <p className="text-xs text-amber-700 py-1">לא נמצאו רכזים ללקוח המחובר.</p>
+                                    ) : (
+                                        <>
+                                            <button
+                                                type="button"
+                                                onClick={() => setAssigneeDropdownOpen((o) => !o)}
+                                                aria-expanded={assigneeDropdownOpen}
+                                                aria-haspopup="listbox"
+                                                className={`${fieldClass} min-h-[36px] flex items-center justify-between gap-2 text-right hover:border-primary-300`}
+                                            >
+                                                <span className="truncate flex-1 min-w-0">{assigneeSummary}</span>
+                                                <ChevronDownIcon
+                                                    className={`w-4 h-4 shrink-0 text-text-muted transition-transform ${assigneeDropdownOpen ? 'rotate-180' : ''}`}
+                                                />
+                                            </button>
+                                            {assigneeDropdownOpen && (
+                                                <div
+                                                    role="listbox"
+                                                    className="absolute top-full left-0 right-0 z-50 mt-1 max-h-40 overflow-y-auto rounded-lg border border-border-default bg-bg-card shadow-lg p-1.5 space-y-0.5"
                                                 >
-                                                    <span className="truncate flex-1 min-w-0">{assigneeSummary}</span>
-                                                    <ChevronDownIcon
-                                                        className={`w-5 h-5 shrink-0 text-text-muted transition-transform ${assigneeDropdownOpen ? 'rotate-180' : ''}`}
-                                                    />
-                                                </button>
-                                                {assigneeDropdownOpen && (
-                                                    <div
-                                                        role="listbox"
-                                                        className="absolute top-full left-0 right-0 z-50 mt-1 max-h-48 overflow-y-auto rounded-xl border border-border-default bg-bg-card shadow-lg p-2 space-y-1"
-                                                    >
-                                                        {orderedContactOptions.map((opt) => {
-                                                            const checked = formData.assigneeEmails.includes(opt.email);
-                                                            return (
-                                                                <label
-                                                                    key={opt.email}
-                                                                    className="flex items-start gap-3 cursor-pointer text-sm text-text-default hover:bg-bg-subtle/80 rounded-lg px-2 py-1.5"
-                                                                >
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        className="mt-0.5 w-4 h-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
-                                                                        checked={checked}
-                                                                        onChange={() => toggleAssigneeEmail(opt.email)}
-                                                                    />
-                                                                    <span className="leading-snug break-all">{opt.label}</span>
-                                                                </label>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                )}
-                                            </>
-                                        )}
-                                    </div>
+                                                    {orderedContactOptions.map((opt) => {
+                                                        const checked = formData.assigneeEmails.includes(opt.email);
+                                                        return (
+                                                            <label
+                                                                key={opt.email}
+                                                                className="flex items-start gap-2 cursor-pointer text-xs text-text-default hover:bg-bg-subtle/80 rounded-md px-2 py-1"
+                                                            >
+                                                                <input
+                                                                    type="checkbox"
+                                                                    className="mt-0.5 w-3.5 h-3.5 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                                                                    checked={checked}
+                                                                    onChange={() => toggleAssigneeEmail(opt.email)}
+                                                                />
+                                                                <span className="leading-snug break-all">{opt.label}</span>
+                                                            </label>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
+                                </div>
+
+                                <div className="grid grid-cols-3 gap-2">
                                     <div>
-                                        <label className="block text-sm font-bold text-text-default mb-2">קטגוריה</label>
-                                        <select name="category" value={formData.category} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3.5 transition-all shadow-sm">
+                                        <label className={labelClass}>קטגוריה</label>
+                                        <select name="category" value={formData.category} onChange={handleChange} className={fieldClass}>
                                             <option value="כללי">כללי</option>
                                             {flightCategories.map((cat) => (
                                                 <option key={cat.id} value={cat.name}>
@@ -1147,136 +1457,196 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                                         </select>
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-bold text-text-default mb-2">במועד</label>
+                                        <label className={labelClass}>במועד</label>
                                         <div className="relative">
-                                            <CalendarDaysIcon className="w-5 h-5 text-text-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                                            <input type="date" name="dueDate" value={formData.dueDate} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3.5 pr-11 transition-all shadow-sm" />
+                                            <CalendarDaysIcon className="w-4 h-4 text-text-muted absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                            <input type="date" name="dueDate" value={formData.dueDate} onChange={handleChange} className={`${fieldClass} pr-8`} />
                                         </div>
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-bold text-text-default mb-2">שעת יעד</label>
+                                        <label className={labelClass}>שעה</label>
                                         <div className="relative">
-                                            <ClockIcon className="w-5 h-5 text-text-muted absolute right-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                                            <input type="time" name="dueTime" value={formData.dueTime} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3.5 pr-11 transition-all shadow-sm" />
+                                            <ClockIcon className="w-4 h-4 text-text-muted absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                            <input type="time" name="dueTime" value={formData.dueTime} onChange={handleChange} className={`${fieldClass} pr-8`} />
                                         </div>
                                     </div>
                                 </div>
-                                
-                                <button
-                                    type="button"
-                                    onClick={() => setIsTaskMode(!isTaskMode)}
-                                    className={`w-full flex items-center justify-center gap-2.5 py-3.5 px-4 rounded-xl text-base font-bold transition-all duration-300 border-2 shadow-sm ${
-                                        isTaskMode
-                                            ? 'bg-primary-50 border-primary-500 text-primary-700 shadow-primary-500/20'
-                                            : 'bg-bg-card border-border-default text-text-default hover:bg-bg-subtle hover:border-primary-300'
-                                    }`}
-                                >
-                                    <ClipboardDocumentCheckIcon className={`w-6 h-6 ${isTaskMode ? 'text-primary-600' : 'text-text-muted'}`} />
-                                    <span>{isTaskMode ? 'מוגדר כמשימה' : 'הפוך למשימה'}</span>
-                                </button>
-                                
-                                {isTaskMode && (
-                                    <div className="animate-content-fade-in space-y-5 p-5 bg-bg-subtle/30 rounded-2xl border border-border-default/80">
-                                        <div>
-                                            <label className="block text-sm font-bold text-text-default mb-2">דחיפות</label>
-                                            <select name="sla" value={formData.sla} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3.5 transition-all shadow-sm">
-                                                <option>נמוכה</option>
-                                                <option>בינונית</option>
-                                                <option>גבוהה</option>
-                                            </select>
-                                        </div>
-                                        <SingleRangeSlider
-                                            label="ימים מוקצים למשימה"
-                                            min={1}
-                                            max={30}
-                                            step={1}
-                                            value={formData.allocatedDays}
-                                            onChange={handleChange}
-                                            name="allocatedDays"
-                                            unit=" ימים"
-                                        />
-                                    </div>
-                                )}
 
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                                     <div className="p-5 rounded-2xl border border-border-default/80 bg-bg-subtle/30 space-y-4">
-                                        <h3 className="text-sm font-bold text-text-default">התראות וזימונים</h3>
-                                        <div className="flex flex-col gap-3">
-                                            <label className="flex items-center gap-3 text-sm font-medium text-text-default cursor-pointer group">
-                                                <input type="checkbox" name="submissionEmail" checked={formData.submissionEmail} onChange={handleChange} className="w-5 h-5 text-primary-600 bg-bg-input border-border-default rounded focus:ring-primary-500 transition-colors cursor-pointer" />
-                                                <span className="group-hover:text-primary-700 transition-colors">תזכורת מייל</span>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsTaskMode(!isTaskMode)}
+                                        className={`inline-flex items-center gap-1.5 py-1.5 px-3 rounded-lg text-xs font-bold transition-all border ${
+                                            isTaskMode
+                                                ? 'bg-primary-50 border-primary-500 text-primary-700'
+                                                : 'bg-bg-card border-border-default text-text-default hover:bg-bg-subtle hover:border-primary-300'
+                                        }`}
+                                    >
+                                        <ClipboardDocumentCheckIcon className={`w-4 h-4 ${isTaskMode ? 'text-primary-600' : 'text-text-muted'}`} />
+                                        <span>{isTaskMode ? 'משימה' : 'הפוך למשימה'}</span>
+                                    </button>
+                                    {isTaskMode ? (
+                                        <div className="animate-content-fade-in flex flex-wrap items-end gap-2 flex-1 min-w-[12rem]">
+                                            <div className="w-[7.5rem] shrink-0">
+                                                <label className={labelClass}>דחיפות</label>
+                                                <select name="sla" value={formData.sla} onChange={handleChange} className={fieldClass}>
+                                                    <option>נמוכה</option>
+                                                    <option>בינונית</option>
+                                                    <option>גבוהה</option>
+                                                </select>
+                                            </div>
+                                            <SingleRangeSlider
+                                                label="ימים מוקצים"
+                                                min={1}
+                                                max={30}
+                                                step={1}
+                                                value={formData.allocatedDays}
+                                                onChange={handleChange}
+                                                name="allocatedDays"
+                                                unit=" ימים"
+                                                className="flex-1 min-w-[8rem]"
+                                            />
+                                        </div>
+                                    ) : null}
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    <div className="p-2.5 rounded-xl border border-border-default/80 bg-bg-subtle/30 space-y-2">
+                                        <h3 className="text-xs font-bold text-text-default">התראות וזימונים</h3>
+                                        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                                            <label className="flex items-center gap-2 text-xs font-medium text-text-default cursor-pointer group">
+                                                <input type="checkbox" name="submissionEmail" checked={formData.submissionEmail} onChange={handleChange} className="w-4 h-4 text-primary-600 bg-bg-input border-border-default rounded focus:ring-primary-500 cursor-pointer" />
+                                                <span className="group-hover:text-primary-700">תזכורת מייל</span>
                                             </label>
-                                            <label className="flex items-center gap-3 text-sm font-medium text-text-default cursor-pointer group">
-                                                <input type="checkbox" name="submissionPopup" checked={formData.submissionPopup} onChange={handleChange} className="w-5 h-5 text-primary-600 bg-bg-input border-border-default rounded focus:ring-primary-500 transition-colors cursor-pointer" />
-                                                <span className="group-hover:text-primary-700 transition-colors">התראה קופצת</span>
+                                            <label className="flex items-center gap-2 text-xs font-medium text-text-default cursor-pointer group">
+                                                <input type="checkbox" name="submissionPopup" checked={formData.submissionPopup} onChange={handleChange} className="w-4 h-4 text-primary-600 bg-bg-input border-border-default rounded focus:ring-primary-500 cursor-pointer" />
+                                                <span className="group-hover:text-primary-700">התראה קופצת</span>
                                             </label>
                                         </div>
-                                        <div className="flex items-center gap-3 pt-2">
+                                        <div className="flex items-center gap-1.5">
                                             <button
                                                 type="button"
-                                                title="Microsoft 365 — פתיחת אירוע בלוח השנה של הארגון"
+                                                title="Microsoft 365"
                                                 aria-label="פתח בלוח שנה Microsoft 365"
                                                 onClick={() => openExternalCalendar('outlook365')}
-                                                className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"
+                                                className="p-1.5 rounded-lg border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 transition-all"
                                             >
-                                                <Microsoft365Icon className="w-6 h-6" />
+                                                <Microsoft365Icon className="w-5 h-5" />
                                             </button>
                                             <button
                                                 type="button"
-                                                title="Outlook — פתיחת אירוע בלוח השנה האישי (Outlook.com)"
+                                                title="Outlook"
                                                 aria-label="פתח בלוח שנה Outlook אישי"
                                                 onClick={() => openExternalCalendar('outlook')}
-                                                className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"
+                                                className="p-1.5 rounded-lg border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 transition-all"
                                             >
-                                                <OutlookTaskIcon className="w-6 h-6" />
+                                                <OutlookTaskIcon className="w-5 h-5" />
                                             </button>
                                             <button
                                                 type="button"
-                                                title="Google Calendar — פתיחת אירוע בלוח השנה של החשבון המחובר בדפדפן"
+                                                title="Google Calendar"
                                                 aria-label="פתח ב-Google Calendar"
                                                 onClick={() => openExternalCalendar('google')}
-                                                className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"
+                                                className="p-1.5 rounded-lg border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 transition-all"
                                             >
-                                                <GoogleCalendarIcon className="w-6 h-6" />
+                                                <GoogleCalendarIcon className="w-5 h-5" />
                                             </button>
                                         </div>
                                     </div>
-                                    <div className="p-5 rounded-2xl border border-border-default/80 bg-bg-subtle/30 flex flex-col">
-                                      <h3 className="text-sm font-bold text-text-default mb-3">מידע מקושר</h3>
-                                      {linkedPanel.phase === 'none' && (
-                                          <p className="text-sm text-text-muted flex-grow">אין הקשר מהמסך הנוכחי (מועמד, משרה, לקוח או ארגון).</p>
-                                      )}
-                                      {linkedPanel.phase === 'loading' && (
-                                          <p className="text-sm text-text-muted flex-grow">טוען נתונים...</p>
-                                      )}
-                                      {linkedPanel.phase === 'error' && (
-                                          <p className="text-sm text-red-600 flex-grow">{linkedPanel.message}</p>
-                                      )}
-                                      {linkedPanel.phase === 'ok' && linkedPanel.rows.length > 0 && (
-                                          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 text-sm items-center flex-grow">
-                                              {linkedPanel.rows.map((r, i) => (
-                                                  <React.Fragment key={`${r.label}-${i}`}>
-                                                      <span className="font-medium text-text-muted justify-self-end">{r.label}</span>
-                                                      <div className="text-right min-w-0">{r.node}</div>
-                                                  </React.Fragment>
-                                              ))}
-                                          </div>
-                                      )}
-                                      {linkedPanel.phase === 'ok' && linkedPanel.rows.length === 0 && (
-                                          <p className="text-sm text-text-muted flex-grow">לא נמצאו שדות להצגה.</p>
-                                      )}
+                                    <div className="p-2.5 rounded-xl border border-border-default/80 bg-bg-subtle/30 min-h-0">
+                                        <h3 className="text-xs font-bold text-text-default mb-1.5">מידע מקושר</h3>
+                                        {linkedPanel.phase === 'none' && (
+                                            <p className="text-[11px] text-text-muted leading-snug">אין הקשר מהמסך הנוכחי.</p>
+                                        )}
+                                        {linkedPanel.phase === 'loading' && (
+                                            <p className="text-[11px] text-text-muted">טוען…</p>
+                                        )}
+                                        {linkedPanel.phase === 'error' && (
+                                            <p className="text-[11px] text-red-600 leading-snug">{linkedPanel.message}</p>
+                                        )}
+                                        {linkedPanel.phase === 'ok' && linkedPanel.rows.length > 0 && (
+                                            <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[11px] items-center">
+                                                {linkedPanel.rows.map((r, i) => (
+                                                    <React.Fragment key={`${r.label}-${i}`}>
+                                                        <span className="font-medium text-text-muted truncate">{r.label}</span>
+                                                        <div className="text-right min-w-0 truncate [&_a]:text-primary-600 [&_button]:text-primary-600 [&_span]:text-text-default">{r.node}</div>
+                                                    </React.Fragment>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {linkedPanel.phase === 'ok' && linkedPanel.rows.length === 0 && (
+                                            <p className="text-[11px] text-text-muted">לא נמצאו שדות.</p>
+                                        )}
                                     </div>
+                                </div>
+                            </div>
+
+                            {/* Content column (RTL end) */}
+                            <div className="flex flex-col min-h-0 order-1 lg:order-2">
+                                <label htmlFor={contentId} className={labelClass}>תוכן הפעילות</label>
+                                <textarea
+                                    id={contentId}
+                                    name="messageText"
+                                    value={formData.messageText}
+                                    onChange={handleChange as any}
+                                    rows={5}
+                                    className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition-all shadow-sm resize-none leading-snug"
+                                    placeholder="כתוב כאן את תוכן ההודעה או המשימה..."
+                                />
+                                <div className="mt-2 flex flex-wrap items-center gap-2">
+                                    <input
+                                        id={attachmentInputId}
+                                        ref={attachmentFileInputRef}
+                                        type="file"
+                                        multiple
+                                        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.txt,.csv,.zip"
+                                        onChange={handleAttachmentInputChange}
+                                        className="hidden"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => attachmentFileInputRef.current?.click()}
+                                        className="inline-flex items-center gap-1 text-[11px] font-bold text-primary-600 hover:text-primary-700 hover:bg-primary-50 px-2 py-1 rounded-md transition-colors shrink-0"
+                                    >
+                                        <ArrowUpTrayIcon className="w-3.5 h-3.5" />
+                                        צרף קובץ
+                                    </button>
+                                    {attachmentFiles.length === 0 ? (
+                                        <span className="text-[11px] text-text-muted">PDF, Word, תמונות…</span>
+                                    ) : (
+                                        attachmentFiles.map((file, index) => (
+                                            <span
+                                                key={`${file.name}-${file.size}-${file.lastModified}`}
+                                                className="inline-flex items-center gap-1 max-w-[180px] pl-2 pr-1 py-0.5 rounded-full border border-border-default bg-bg-subtle/50 text-[11px]"
+                                            >
+                                                <PaperClipIcon className="w-3 h-3 text-text-muted shrink-0" />
+                                                <span className="truncate font-medium">{file.name}</span>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeAttachmentFile(index)}
+                                                    className="p-0.5 rounded-full text-text-muted hover:text-red-600 hover:bg-red-50 shrink-0"
+                                                    aria-label={`הסר ${file.name}`}
+                                                >
+                                                    <TrashIcon className="w-3 h-3" />
+                                                </button>
+                                            </span>
+                                        ))
+                                    )}
                                 </div>
                             </div>
                         </div>
                     </main>
 
-                    <footer className="flex justify-end items-center p-6 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 gap-4">
-                        <button type="button" onClick={onClose} className="px-6 py-3 text-base font-bold text-text-default hover:bg-bg-hover rounded-xl transition-colors">
+                    <footer className="flex justify-end items-center px-4 py-3 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 gap-2">
+                        <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-default hover:bg-bg-hover rounded-lg transition-colors">
                             ביטול
                         </button>
-                        <button type="submit" className="bg-primary-600 text-white font-bold py-3 px-10 rounded-xl hover:bg-primary-700 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 text-base">
-                            {isTaskMode ? 'צור משימה' : 'שליחה'}
+                        <button
+                            type="submit"
+                            disabled={isSubmitting}
+                            className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 transition-all shadow-sm text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                            {isSubmitting ? 'שולח…' : isTaskMode ? 'צור משימה' : 'שליחה'}
                         </button>
                     </footer>
                 </form>

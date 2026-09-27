@@ -25,7 +25,13 @@ import ClientFinanceTab from './ClientFinanceTab';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
-import { authHeaders } from '../utils/authHeaders';
+import {
+    fetchClientById,
+    fetchOrganizationById,
+    fetchOrganizationProfile,
+    fetchPendingOrganizationProfile,
+    invalidateOrganizationProfileCaches,
+} from '../services/organizationProfileApi';
 
 type Tab = 'details' | 'tasks' | 'contacts' | 'processes' | 'jobs' | 'events' | 'documents' | 'finance' | 'history';
 
@@ -47,6 +53,8 @@ interface OrganizationProfileViewProps {
 
 const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openMessageModal }) => {
     const { t } = useLanguage();
+    const { user } = useAuth();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const { organizationId: organizationIdParam, organizationTmpId } = useParams<{
         organizationId?: string;
         organizationTmpId?: string;
@@ -54,10 +62,6 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
     const isPendingOrg = Boolean(organizationTmpId);
     const organizationId = isPendingOrg ? null : (organizationIdParam || null);
     const resolvedOrgKey = organizationTmpId || organizationIdParam || null;
-    const { user } = useAuth();
-    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
-    const tenantClientId = !isPlatformAdmin && user?.clientId ? String(user.clientId) : null;
-
     const [searchParams] = useSearchParams();
     const tabFromUrl = searchParams.get('tab');
     const pipelineFromUrl = searchParams.get('pipelineId');
@@ -69,8 +73,6 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
     });
     const [eventsPipelineId, setEventsPipelineId] = useState<string | null>(pipelineFromUrl);
     const [eventsProcessStageId, setEventsProcessStageId] = useState<string | null>(processStageFromUrl);
-    const apiBase = import.meta.env.VITE_API_BASE || '';
-
     useEffect(() => {
         if (tabFromUrl && PROFILE_TABS.has(tabFromUrl as Tab)) {
             setActiveTab(tabFromUrl as Tab);
@@ -84,79 +86,65 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    // Load organization (approved or pending tmp)
+    // Single load: org + linked client (deduped — avoids StrictMode double-fetch).
     useEffect(() => {
-        if (!apiBase || !resolvedOrgKey) return;
+        if (!resolvedOrgKey) return;
         let active = true;
         setIsLoading(true);
         setError(null);
-        const url = isPendingOrg
-            ? `${apiBase}/api/organizations/tmp/${encodeURIComponent(resolvedOrgKey)}`
-            : `${apiBase}/api/organizations/${encodeURIComponent(resolvedOrgKey)}`;
-        fetch(url, { headers: authHeaders(true) })
-            .then((r) => {
-                if (!r.ok) throw new Error('Organization not found');
-                return r.json();
-            })
-            .then((data) => {
-                if (!active) return;
-                setOrg(data);
-            })
-            .catch((e: any) => {
-                if (!active) return;
-                setError(e?.message || 'Organization not found');
-                setOrg(null);
-            })
-            .finally(() => {
-                if (active) setIsLoading(false);
-            });
-        return () => { active = false; };
-    }, [apiBase, resolvedOrgKey, isPendingOrg]);
 
-    // Resolve linked client (tenant's own client, or org's primary client for admin)
-    useEffect(() => {
-        if (!apiBase || !resolvedOrgKey) return;
-        let active = true;
-
-        const resolve = async () => {
-            let clientId: string | null = tenantClientId;
-
-            if (!clientId && !isPendingOrg && organizationIdParam) {
-                try {
-                    const r = await fetch(
-                        `${apiBase}/api/organizations/${encodeURIComponent(organizationIdParam)}/primary-client`,
-                        { headers: authHeaders(true) },
-                    );
-                    if (r.ok) {
-                        const d = await r.json();
-                        clientId = d.clientId || null;
-                    }
-                } catch { /* ignore */ }
-            }
-
-            if (!clientId) {
-                if (active) setClient(null);
-                return;
-            }
-
+        void (async () => {
             try {
-                const r = await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}`, {
-                    headers: authHeaders(true),
-                });
-                if (!active) return;
-                if (r.ok) {
-                    setClient(await r.json());
-                } else {
-                    setClient(null);
+                if (isPendingOrg) {
+                    try {
+                        const bundle = await fetchPendingOrganizationProfile(resolvedOrgKey);
+                        if (!active) return;
+                        setOrg(bundle.organization);
+                        setClient(bundle.client);
+                        return;
+                    } catch (profileErr) {
+                        const orgData = await fetchOrganizationById(resolvedOrgKey, { pending: true });
+                        if (!active) return;
+                        setOrg(orgData);
+                        const primaryRaw = orgData.primaryClient;
+                        const linkedClientId =
+                            primaryRaw
+                            && typeof primaryRaw === 'object'
+                            && !Array.isArray(primaryRaw)
+                            && (primaryRaw as { clientId?: string }).clientId
+                                ? String((primaryRaw as { clientId: string }).clientId)
+                                : user?.clientId
+                                    ? String(user.clientId)
+                                    : null;
+                        if (linkedClientId) {
+                            setClient(await fetchClientById(linkedClientId));
+                        } else {
+                            setClient(null);
+                        }
+                        if (linkedClientId) return;
+                        throw profileErr;
+                    }
                 }
-            } catch {
-                if (active) setClient(null);
-            }
-        };
 
-        void resolve();
-        return () => { active = false; };
-    }, [apiBase, resolvedOrgKey, organizationIdParam, tenantClientId, isPendingOrg]);
+                const bundle = await fetchOrganizationProfile(String(organizationIdParam || resolvedOrgKey));
+                if (!active) return;
+
+                setOrg(bundle.organization);
+                setClient(bundle.client);
+            } catch (e: unknown) {
+                if (!active) return;
+                setError((e as Error)?.message || 'Organization not found');
+                setOrg(null);
+                setClient(null);
+            } finally {
+                if (active) setIsLoading(false);
+            }
+        })();
+
+        return () => {
+            active = false;
+        };
+    }, [resolvedOrgKey, isPendingOrg, organizationIdParam, user?.clientId]);
 
     // ClientDetailsTab reads company info from organizationLinks — inject current org as primary
     const clientForDetails = useMemo(() => {
@@ -167,13 +155,17 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
             organizationLinks: [
                 { isPrimary: true, organization: org },
                 ...(Array.isArray(client.organizationLinks)
-                    ? client.organizationLinks.filter(
-                        (l: any) => String(l?.organizationId || l?.organization?.id || '') !== String(organizationIdParam || ''),
-                    )
+                    ? client.organizationLinks.filter((l: any) => {
+                        if (organizationTmpId) {
+                            return String(l?.organizationTmpId || '') !== String(organizationTmpId);
+                        }
+                        return String(l?.organizationId || l?.organization?.id || '')
+                            !== String(organizationIdParam || '');
+                    })
                     : []),
             ],
         };
-    }, [client, org, organizationIdParam]);
+    }, [client, org, organizationIdParam, organizationTmpId]);
 
     const clientId = client?.id ? String(client.id) : null;
     const displayName = String(org?.name || client?.displayName || client?.name || '');
@@ -183,7 +175,6 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
         { id: 'details', label: t('client_profile.tab_details'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
         { id: 'tasks', label: 'משימות', icon: <ClipboardDocumentCheckIcon className="w-5 h-5" /> },
         { id: 'contacts', label: t('client_profile.tab_contacts'), icon: <UserGroupIcon className="w-5 h-5" /> },
-        { id: 'processes', label: t('client_profile.tab_processes'), icon: <ArrowPathIcon className="w-5 h-5" /> },
         { id: 'jobs', label: t('client_profile.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
         { id: 'events', label: t('client_profile.tab_events'), icon: <CalendarDaysIcon className="w-5 h-5" /> },
         { id: 'documents', label: t('client_profile.tab_documents'), icon: <DocumentTextIcon className="w-5 h-5" /> },
@@ -208,31 +199,48 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                 return (
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
                         <div className="lg:col-span-2 space-y-6">
-                            {organizationIdParam ? (
-                                <ClientInsightsDashboard
-                                    organizationId={organizationIdParam}
-                                    clientId={clientId || undefined}
-                                    creationDate={
-                                        (org as any)?.createdAt
-                                        || client?.creationDate
-                                        || client?.createdAt
-                                    }
-                                />
-                            ) : (
-                                <div className="rounded-2xl border border-amber-200 bg-amber-50/60 p-5 text-sm text-amber-950">
-                                    <p className="font-bold mb-1">חברה ממתינה לאישור מנהל</p>
-                                    <p className="text-amber-900/90">
-                                        אפשר לנהל אנשי קשר, משתמשים ומשימות כרגיל. נתוני חברה מורחבים יתעדכנו
-                                        לאחר אישור האדמין.
-                                    </p>
-                                </div>
-                            )}
+                            <div className="space-y-4">
+                                {isPendingOrg ? (
+                                    <div className="rounded-2xl border border-amber-200 bg-amber-50/60 p-5 text-sm text-amber-950">
+                                        <p className="font-bold mb-1">חברה ממתינה לאישור מנהל</p>
+                                        <p className="text-amber-900/90">
+                                            ניתן לנהל אנשי קשר, משימות ופרטי החברה כרגיל. לאחר אישור האדמין
+                                            החברה תקושר למאגר הארגונים הגלובלי.
+                                        </p>
+                                    </div>
+                                ) : null}
+                                {clientId ? (
+                                    <ClientInsightsDashboard
+                                        organizationId={organizationIdParam || undefined}
+                                        clientId={clientId}
+                                        clientMetadata={
+                                            client?.metadata && typeof client.metadata === 'object'
+                                                ? (client.metadata as Record<string, unknown>)
+                                                : undefined
+                                        }
+                                        creationDate={
+                                            (org as { createdAt?: string })?.createdAt
+                                            || client?.creationDate
+                                            || client?.createdAt
+                                        }
+                                    />
+                                ) : isPendingOrg ? (
+                                    <div className="rounded-2xl border border-border-default bg-bg-subtle p-5 text-sm text-text-muted">
+                                        טוען נתוני לקוח מקושר… אם ההודעה נשארת, ודאו שהחברה קושרה ללקוח שלכם.
+                                    </div>
+                                ) : null}
+                            </div>
                         </div>
                         <div className="lg:col-span-1 space-y-6">
                             {clientForDetails ? (
                                 <ClientDetailsTab
                                     client={clientForDetails}
-                                    onClientUpdated={setClient}
+                                    onClientUpdated={(updated) => {
+                                        setClient(updated);
+                                        invalidateOrganizationProfileCaches({
+                                            clientId: updated?.id ? String(updated.id) : clientId,
+                                        });
+                                    }}
                                 />
                             ) : noClientMsg}
                         </div>
@@ -242,7 +250,11 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                 return clientId ? (
                     <ClientTasksTab
                         clientId={clientId}
-                        organizationId={isPlatformAdmin ? undefined : organizationIdParam || undefined}
+                        organizationId={
+                            isPlatformAdmin && !organizationTmpId ? undefined : organizationIdParam || undefined
+                        }
+                        organizationTmpId={organizationTmpId || undefined}
+                        organizationName={displayName}
                     />
                 ) : noClientMsg;
             case 'contacts':
@@ -253,6 +265,7 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                             isPlatformAdmin && !organizationTmpId ? undefined : organizationIdParam || undefined
                         }
                         organizationTmpId={organizationTmpId || undefined}
+                        organizationName={displayName}
                         onOpenMessageModal={openMessageModal || noopMessageModal}
                     />
                 ) : noClientMsg;
@@ -277,17 +290,24 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
             case 'events':
                 return clientId && (organizationIdParam || organizationTmpId) ? (
                     <OrganizationEventsTab
-                        key={`${eventsPipelineId || 'all'}:${eventsProcessStageId || ''}`}
+                        key={`${organizationIdParam || organizationTmpId || 'org'}:${eventsPipelineId || 'all'}:${eventsProcessStageId || ''}`}
                         clientId={clientId}
                         organizationId={organizationIdParam || undefined}
                         organizationTmpId={organizationTmpId || undefined}
                         organizationName={displayName}
                         defaultActionPipelineId={eventsPipelineId}
                         defaultProcessStageId={eventsProcessStageId}
+                        openMessageModal={openMessageModal}
                     />
                 ) : noClientMsg;
             case 'documents':
-                return clientId && organizationIdParam ? (
+                return clientId && organizationTmpId ? (
+                    <ClientDocumentsTab
+                        clientId={clientId}
+                        clientName={displayName}
+                        organizationTmpId={organizationTmpId}
+                    />
+                ) : clientId && organizationIdParam ? (
                     <ClientDocumentsTab
                         clientId={clientId}
                         clientName={displayName}

@@ -31,6 +31,12 @@ const scoreResumeTextExtract = (text) => {
   score -= pua * 120;
   if (MOJIBAKE_RE.test(s)) score -= 800;
 
+  // OCR often inserts digits into Hebrew words (8→ח/ת, 6→ו) — heavy penalty.
+  const hebrewDigitMix = (s.match(/[\u0590-\u05FF]\d|\d[\u0590-\u05FF]/g) || []).length;
+  score -= hebrewDigitMix * 120;
+  const bidiMarks = (s.match(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g) || []).length;
+  score -= bidiMarks * 40;
+
   const hebrewWords = s.match(HEBREW_WORD_RE) || [];
   let lexiconHits = 0;
   for (const w of hebrewWords.slice(0, 100)) {
@@ -74,8 +80,27 @@ const pickBestResumeTextExtract = (candidates = []) => {
   return { text: bestText, score: bestScore, source: bestSource };
 };
 
+/** True when extract looks like noisy OCR (digits in Hebrew, mangled email, bidi junk). */
+const resumeTextLooksOcrGarbled = (text) => {
+  const s = String(text || '');
+  if (!s.trim()) return false;
+
+  const hebrewDigitInWord = (s.match(/[\u0590-\u05FF]\d[\u0590-\u05FF]/g) || []).length;
+  const hebrewDigitMix = (s.match(/[\u0590-\u05FF]\d|\d[\u0590-\u05FF]/g) || []).length;
+  if (hebrewDigitInWord >= 1 || hebrewDigitMix >= 3) return true;
+
+  if (/gmail\.com[a-z0-9]{1,6}@|@[a-z0-9]+gmail\.com/i.test(s)) return true;
+  if (/[\u200e\u200f\u202a-\u202e\u2066-\u2069].{0,40}@/.test(s)) return true;
+
+  const ocrLineNoise = (s.match(/‎N[ITWV]{2,4}:/g) || []).length;
+  if (ocrLineNoise >= 2) return true;
+
+  return false;
+};
+
 module.exports = {
   scoreResumeTextExtract,
   pickBestResumeTextExtract,
+  resumeTextLooksOcrGarbled,
   HEBREW_CV_LEXICON,
 };

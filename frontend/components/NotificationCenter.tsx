@@ -14,6 +14,7 @@ import {
     NOTIFICATION_MESSAGES_REFRESH_EVENT,
     NOTIFICATION_MESSAGE_ID_REGEX,
     requestNotificationInboxCountsRefresh,
+    type NotificationInboxRefreshDetail,
 } from '../services/notificationInboxCounts';
 import { deriveLocalCandidateId } from '../utils/candidateId';
 import {
@@ -70,9 +71,12 @@ interface Notification {
   linkedJobLabel?: string;
   linkedClientLabel?: string;
   backendStatus: 'unread' | 'tasks' | 'archived' | 'deleted';
+  deliveryStatus?: 'pending' | 'sent' | 'failed' | 'in_app_only' | string;
   /** Client-only: expanded once in ארכיון (tasks have no separate “read” API). */
   viewedInArchive?: boolean;
 }
+
+type NotificationTab = 'all' | 'tasks' | 'unread' | 'sent' | 'archived';
 
 const notificationStyles: { [key in NotificationType]: { icon: React.ReactNode; bg: string; text: string; } } = {
     task: { icon: <ClipboardDocumentListIcon className="w-5 h-5" />, bg: 'bg-primary-100', text: 'text-primary-600' },
@@ -148,6 +152,13 @@ function formatNotificationSender(row: {
 const NOTIFICATION_PREVIEW_MAX_WORDS = 6;
 
 /** Collapsed row preview: first N words, then "..." (full body only when expanded). */
+/** Legacy task subjects embed due datetime — due date is shown separately in the row. */
+function formatNotificationDisplayTitle(title: string): string {
+    return String(title || '')
+        .replace(/\s*\(\d{4}-\d{2}-\d{2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?\)\s*$/, '')
+        .trim();
+}
+
 function truncatedPreviewWords(text: string, maxWords = NOTIFICATION_PREVIEW_MAX_WORDS): string {
     const raw = String(text ?? '').trim();
     if (!raw) return '';
@@ -167,6 +178,45 @@ function emailInCommaSeparatedField(field: string, emailNorm: string): boolean {
 }
 
 /** Mirrors backend `notificationRecipientMatchesViewer` (email in assignee or toEmail; or assignee equals viewer name). */
+function notificationSentByViewer(
+    notification: Pick<Notification, 'senderUserId'>,
+    userId?: string | null,
+): boolean {
+    if (!userId || !notification.senderUserId) return false;
+    return String(notification.senderUserId) === String(userId);
+}
+
+function formatDeliveryStatusLabel(status?: string): { label: string; className: string } {
+    switch (String(status || '').trim().toLowerCase()) {
+        case 'sent':
+            return { label: 'נשלח', className: 'text-green-700 bg-green-50 border-green-200' };
+        case 'failed':
+            return { label: 'שליחה נכשלה', className: 'text-red-700 bg-red-50 border-red-200' };
+        case 'in_app_only':
+            return { label: 'התראה במערכת בלבד', className: 'text-amber-800 bg-amber-50 border-amber-200' };
+        case 'pending':
+            return { label: 'בתהליך שליחה', className: 'text-blue-700 bg-blue-50 border-blue-200' };
+        default:
+            return { label: 'נשלח', className: 'text-text-muted bg-bg-subtle border-border-default' };
+    }
+}
+
+function formatOutgoingHandlingStatus(notification: Notification): { label: string; className: string } {
+    if (notification.type === 'message') {
+        if (notification.recipientReadAt) {
+            return {
+                label: `נקרא · ${formatRelativeTime(notification.recipientReadAt)}`,
+                className: 'text-green-700 bg-green-50 border-green-200',
+            };
+        }
+        return { label: 'טרם נקרא', className: 'text-text-muted bg-bg-subtle border-border-default' };
+    }
+    if (notification.handledComplete) {
+        return { label: 'טופל על ידי הנמען', className: 'text-green-700 bg-green-50 border-green-200' };
+    }
+    return { label: 'ממתין לטיפול', className: 'text-amber-800 bg-amber-50 border-amber-200' };
+}
+
 function notificationRecipientMatchesViewer(
     notification: Pick<Notification, 'assignee' | 'toEmail'>,
     email?: string | null,
@@ -221,7 +271,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [notifications, setNotifications] = useState<Notification[]>([]);
     const [archivedNotifications, setArchivedNotifications] = useState<Notification[]>([]);
-    const [activeTab, setActiveTab] = useState<'all' | 'tasks' | 'unread' | 'archived'>('all');
+    const [activeTab, setActiveTab] = useState<NotificationTab>('all');
     const [searchTerm, setSearchTerm] = useState('');
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
@@ -376,6 +426,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                             ? tp.linkedClientLabel
                             : legacyLinked.client;
                     const handledComplete = Boolean(metadata?.taskCompleted);
+                    const deliveryStatus =
+                        metadata?.deliveryStatus != null ? String(metadata.deliveryStatus).trim() : undefined;
                     const recipientReadRaw = metadata?.recipientReadAt;
                     const recipientReadAt =
                         recipientReadRaw != null && String(recipientReadRaw).trim() !== ''
@@ -411,6 +463,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                         linkedJobLabel,
                         linkedClientLabel,
                         backendStatus: row?.status === 'tasks' || row?.status === 'archived' || row?.status === 'deleted' ? row.status : 'unread',
+                        deliveryStatus,
                     }];
                 });
 
@@ -435,33 +488,54 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 
     useEffect(() => {
         const onRefresh = (e: Event) => {
-            const d = (e as CustomEvent<{ reloadNotificationList?: boolean }>).detail;
-            if (d?.reloadNotificationList) {
+            const d = (e as CustomEvent<NotificationInboxRefreshDetail>).detail;
+            if (d?.reloadNotificationList !== false) {
                 void loadNotificationsRef.current?.();
+                window.setTimeout(() => {
+                    void loadNotificationsRef.current?.();
+                }, 450);
+            }
+            if (d?.focusTab) {
+                setActiveTab(d.focusTab);
             }
         };
         window.addEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onRefresh);
         return () => window.removeEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onRefresh);
     }, []);
 
+    const inboxNotifications = useMemo(
+        () =>
+            notifications.filter(
+                (n) =>
+                    notificationRecipientMatchesViewer(n, user?.email, user?.name) ||
+                    !notificationSentByViewer(n, user?.id),
+            ),
+        [notifications, user?.id, user?.email, user?.name],
+    );
+    const sentNotifications = useMemo(
+        () => notifications.filter((n) => notificationSentByViewer(n, user?.id)),
+        [notifications, user?.id],
+    );
+
     /** Tab badges: רק פריטים שלא סומנו כטופל — בלי קשר לנקרא/לא נקרא. */
     const allUnreadCount = useMemo(
         () =>
-            notifications.filter((n) => {
+            inboxNotifications.filter((n) => {
                 if (n.type === 'task') return n.backendStatus === 'tasks' && !n.handledComplete;
                 if (n.type === 'message') return !n.handledComplete;
                 return false;
             }).length,
-        [notifications]
+        [inboxNotifications]
     );
     const unreadMessagesCount = useMemo(
-        () => notifications.filter((n) => n.type === 'message' && !n.handledComplete).length,
-        [notifications]
+        () => inboxNotifications.filter((n) => n.type === 'message' && !n.handledComplete).length,
+        [inboxNotifications]
     );
     const openUnreadTasksCount = useMemo(
-        () => notifications.filter((n) => n.backendStatus === 'tasks' && !n.handledComplete).length,
-        [notifications]
+        () => inboxNotifications.filter((n) => n.backendStatus === 'tasks' && !n.handledComplete).length,
+        [inboxNotifications]
     );
+    const sentCount = sentNotifications.length;
 
     const persistNotificationPatch = async (
         id: string,
@@ -552,8 +626,13 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 
     const filteredNotifications = useMemo(() => {
         // הכל + סטטוס «הכל» = כל האינבוקס. סטטוס מתקדם מסנן לפי טופל / לא טופל בלבד.
-        let listToFilter = activeTab === 'archived' ? archivedNotifications : notifications;
-        
+        let listToFilter =
+            activeTab === 'archived'
+                ? archivedNotifications
+                : activeTab === 'sent'
+                  ? sentNotifications
+                  : inboxNotifications;
+
         if (activeTab === 'unread') {
             listToFilter = listToFilter.filter((n) => n.type === 'message');
         }
@@ -589,7 +668,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
             new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
 
         return [...filtered].sort(byTimeDesc);
-    }, [activeTab, searchTerm, notifications, archivedNotifications, advancedFilters]);
+    }, [activeTab, searchTerm, inboxNotifications, sentNotifications, archivedNotifications, advancedFilters]);
 
     /** Default read filter is `pending`; don’t treat it as an “active search” for empty-state copy. */
     const hasAdvancedFilterBeyondDefaults = useMemo(() => {
@@ -877,7 +956,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                         {([
                             ['all', `הכל (${allUnreadCount})`],
                             ['tasks', `משימות פתוחות (${openUnreadTasksCount})`],
-                            ['unread', `הודעות (${unreadMessagesCount})`],
+                            ['unread', `נכנסות (${unreadMessagesCount})`],
+                            ['sent', `יוצאות (${sentCount})`],
                             ['archived', `ארכיון (${archivedNotifications.length})`]
                         ] as const).map(([tab, label]) => (
                             <button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 py-1.5 px-4 text-sm font-semibold rounded-md transition whitespace-nowrap ${activeTab === tab ? 'bg-white shadow-sm text-primary-700 border border-gray-100' : 'text-text-muted hover:text-text-default'}`}>
@@ -885,7 +965,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                             </button>
                         ))}
                     </div>
-                     {activeTab !== 'archived' && (
+                     {activeTab !== 'archived' && activeTab !== 'sent' && (
                         <div className="flex items-center gap-2 p-2 hidden md:flex">
                             <input
                                 type="checkbox"
@@ -1007,6 +1087,9 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                         const bodyWithoutLinked = stripTaskLinkedAppendixFromBody(notification.content);
                         const { icon, bg, text } = notificationStyles[notification.type];
                         const isSelected = selectedNotifications.includes(notification.id);
+                        const isOutgoing = activeTab === 'sent';
+                        const deliveryBadge = formatDeliveryStatusLabel(notification.deliveryStatus);
+                        const handlingBadge = formatOutgoingHandlingStatus(notification);
                         
                         // Task urgency logic
                         const urgencyState = notification.type === 'task' && notification.status !== 'Done' 
@@ -1033,7 +1116,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 
                         return (
                             <div key={notification.id} className={`rounded-lg p-3 flex items-start gap-3 transition-all duration-200 border ${urgencyClasses} ${isSelected ? '!bg-primary-50 !border-primary-300 shadow-md' : ''}`}>
-                                {activeTab !== 'archived' && (
+                                {activeTab !== 'archived' && activeTab !== 'sent' && (
                                     <div className="flex items-center h-full pt-1.5">
                                         <input
                                             type="checkbox"
@@ -1061,7 +1144,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 
                                     {/* טופל — משימות והודעות */}
                                     {(notification.type === 'task' || notification.type === 'message') &&
-                                        activeTab !== 'archived' && (
+                                        activeTab !== 'archived' &&
+                                        activeTab !== 'sent' && (
                                         <button
                                             type="button"
                                             onClick={(e) =>
@@ -1089,8 +1173,23 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                     <div className="flex-1 flex flex-col">
                                         <div className="flex justify-between items-start gap-2">
                                             <div className="min-w-0 flex-1">
-                                                <p className={`font-semibold text-sm ${urgencyState === 'overdue' ? 'text-red-800' : 'text-text-default'}`}>{notification.title}</p>
-                                                {notification.type === 'message' &&
+                                                <p className={`font-semibold text-sm ${urgencyState === 'overdue' ? 'text-red-800' : 'text-text-default'}`}>{formatNotificationDisplayTitle(notification.title)}</p>
+                                                {isOutgoing ? (
+                                                    <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${deliveryBadge.className}`}>
+                                                            {deliveryBadge.label}
+                                                        </span>
+                                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${handlingBadge.className}`}>
+                                                            {handlingBadge.label}
+                                                        </span>
+                                                        {notification.recipient ? (
+                                                            <span className="text-[11px] text-text-muted">
+                                                                אל: {notification.recipient}
+                                                            </span>
+                                                        ) : null}
+                                                    </div>
+                                                ) : (
+                                                    notification.type === 'message' &&
                                                     user?.id &&
                                                     notification.senderUserId &&
                                                     String(notification.senderUserId) === String(user.id) &&
@@ -1098,7 +1197,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                                         <p className="text-[11px] text-green-700 font-medium mt-0.5">
                                                             נקרא · {formatRelativeTime(notification.recipientReadAt)}
                                                         </p>
-                                                    )}
+                                                    )
+                                                )}
                                             </div>
                                             <span className={`text-xs ${dateColorClass} whitespace-nowrap shrink-0 mr-2`}>{displayDate}</span>
                                         </div>
@@ -1119,6 +1219,13 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2 text-xs">
                                                     {notification.recipient && <div><strong className="text-text-muted">נמען:</strong> <span className="font-semibold text-text-default">{notification.recipient}</span></div>}
                                                     {notification.sender && <div><strong className="text-text-muted">שולח:</strong> <span className="font-semibold text-text-default">{notification.sender}</span></div>}
+                                                    {isOutgoing && (
+                                                        <>
+                                                            <div><strong className="text-text-muted">סטטוס שליחה:</strong> <span className="font-semibold text-text-default">{deliveryBadge.label}</span></div>
+                                                            <div><strong className="text-text-muted">סטטוס טיפול:</strong> <span className="font-semibold text-text-default">{handlingBadge.label}</span></div>
+                                                            <div><strong className="text-text-muted">נשלח:</strong> <span className="font-semibold text-text-default">{formatRelativeTime(notification.timestamp)}</span></div>
+                                                        </>
+                                                    )}
                                                     {notification.urgency && <div><strong className="text-text-muted">דחיפות:</strong> <span className="font-semibold text-text-default">{notification.urgency}</span></div>}
                                                     {notification.category && <div><strong className="text-text-muted">קטגוריה:</strong> <span className="font-semibold text-text-default">{notification.category}</span></div>}
                                                 </div>
@@ -1227,6 +1334,10 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                                             <ArrowUturnLeftIcon className="w-4 h-4" />
                                                             שחזר
                                                         </button>
+                                                    ) : isOutgoing ? (
+                                                        <p className="text-xs text-text-muted">
+                                                            מעקב אחר הודעות ומשימות שיצאו מהחשבון שלך — סטטוס הטיפול מתעדכן כשהנמען מטפל בפריט.
+                                                        </p>
                                                     ) : notification.type === 'task' || notification.type === 'message' ? (
                                                         <>
                                                             {notification.status === 'Done' ? (
@@ -1335,13 +1446,29 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 ) : (
                      <div className="text-center py-20 text-text-muted flex flex-col items-center">
                         <MagnifyingGlassIcon className="w-12 h-12 text-text-subtle mb-4" />
-                        <p className="font-semibold text-lg">{searchTerm || hasAdvancedFilterBeyondDefaults ? 'לא נמצאו התראות' : activeTab === 'archived' ? 'הארכיון ריק' : 'אין הודעות חדשות'}</p>
-                        <p className="text-sm mt-1">{searchTerm || hasAdvancedFilterBeyondDefaults ? 'נסה מונח חיפוש אחר.' : activeTab === 'archived' ? 'הודעות שסומנו כטופלו יופיעו כאן.' : 'הכל מעודכן!'}</p>
+                        <p className="font-semibold text-lg">
+                            {searchTerm || hasAdvancedFilterBeyondDefaults
+                                ? 'לא נמצאו התראות'
+                                : activeTab === 'archived'
+                                  ? 'הארכיון ריק'
+                                  : activeTab === 'sent'
+                                    ? 'אין הודעות או משימות יוצאות'
+                                    : 'אין הודעות חדשות'}
+                        </p>
+                        <p className="text-sm mt-1">
+                            {searchTerm || hasAdvancedFilterBeyondDefaults
+                                ? 'נסה מונח חיפוש אחר.'
+                                : activeTab === 'archived'
+                                  ? 'הודעות שסומנו כטופלו יופיעו כאן.'
+                                  : activeTab === 'sent'
+                                    ? 'משימות והודעות שתשלח מהמערכת יופיעו כאן עם סטטוס שליחה וטיפול.'
+                                    : 'הכל מעודכן!'}
+                        </p>
                     </div>
                 )}
             </main>
             
-            {selectedNotifications.length > 0 && activeTab !== 'archived' && (
+            {selectedNotifications.length > 0 && activeTab !== 'archived' && activeTab !== 'sent' && (
                 <div className="absolute bottom-0 inset-x-0 z-20 p-4 flex justify-center pointer-events-none">
                     <div className="pointer-events-auto w-auto max-w-full bg-bg-card shadow-2xl rounded-xl border border-border-default p-2 flex items-center flex-wrap justify-center gap-2 animate-slide-up">
                         <span className="text-sm font-semibold text-text-default px-2">

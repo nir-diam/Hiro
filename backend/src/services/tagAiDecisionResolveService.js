@@ -12,7 +12,14 @@ const snapshotDecision = (decision) => {
 };
 
 const logDecisionChange = async (req, before, decision, metadata = {}) => {
-  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision, { metadata });
+  if (typeof decision?.reload === 'function') {
+    await decision.reload();
+  }
+  await aiDecisionAuditService.recordTagDecisionAudit(req, before, decision, {
+    metadata,
+    force: Boolean(metadata?.resolveAction),
+    actor: req?.user || req?.dbUser ? 'user' : 'agent',
+  });
 };
 
 const normalizeTagKey = (value) =>

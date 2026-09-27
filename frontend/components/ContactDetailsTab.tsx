@@ -17,14 +17,14 @@ const ContactDetailsTab: React.FC<ContactDetailsTabProps> = ({
   isSaving = false,
   error,
 }) => (
-  <div className="space-y-4">
+  <div className="space-y-3">
     <ContactFormFields formData={formData} onChange={onFormChange} error={error} />
-    <div className="flex justify-end pt-2">
+    <div className="flex justify-end max-w-3xl">
       <button
         type="button"
         onClick={() => void onSave()}
         disabled={isSaving}
-        className="bg-primary-600 text-white font-semibold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition-all shadow-sm disabled:opacity-60 disabled:cursor-not-allowed"
+        className="bg-primary-600 text-white font-semibold py-2 px-5 rounded-lg hover:bg-primary-700 transition-all shadow-sm text-sm disabled:opacity-60 disabled:cursor-not-allowed"
       >
         {isSaving ? 'שומר...' : 'שמור שינויים'}
       </button>

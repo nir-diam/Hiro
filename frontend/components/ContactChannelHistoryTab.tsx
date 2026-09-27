@@ -1,8 +1,11 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { PlusIcon } from './Icons';
+import { DocumentArrowDownIcon, PaperClipIcon, PlusIcon } from './Icons';
 import { MessageModalConfig } from '../hooks/useUIState';
+import { formatAttachmentSize } from '../services/clientAttachmentsApi';
 import {
+  downloadNotificationMessageAttachment,
   listOutboundMessageEvents,
+  type OutboundMessageAttachmentRef,
   type OutboundMessageChannel,
   type OutboundMessageHistoryItem,
 } from '../services/clientOutboundMessageApi';
@@ -48,6 +51,27 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [downloadingAttachmentKey, setDownloadingAttachmentKey] = useState<string | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+
+  const attachmentKey = (itemId: string, attachment: OutboundMessageAttachmentRef) =>
+    `${itemId}:${attachment.notificationMessageId}:${attachment.index}`;
+
+  const handleDownloadAttachment = async (
+    itemId: string,
+    attachment: OutboundMessageAttachmentRef,
+  ) => {
+    const key = attachmentKey(itemId, attachment);
+    setAttachmentError(null);
+    setDownloadingAttachmentKey(key);
+    try {
+      await downloadNotificationMessageAttachment(attachment);
+    } catch (e) {
+      setAttachmentError((e as Error)?.message || 'הורדת הקובץ נכשלה');
+    } finally {
+      setDownloadingAttachmentKey(null);
+    }
+  };
 
   const load = useCallback(async () => {
     if (!clientId) {
@@ -138,6 +162,11 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
       {error ? (
         <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{error}</div>
       ) : null}
+      {attachmentError ? (
+        <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+          {attachmentError}
+        </div>
+      ) : null}
 
       <div className="overflow-x-auto">
         <table className="w-full text-sm text-right">
@@ -197,6 +226,47 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
                               <div className="font-semibold">{item.subject}</div>
                             ) : null}
                             <div>{item.body || '(ללא תוכן)'}</div>
+                            {channel === 'email' && item.attachments.length > 0 ? (
+                              <div className="pt-3 mt-3 border-t border-border-default">
+                                <div className="text-text-muted text-xs font-semibold mb-2 flex items-center gap-1.5">
+                                  <PaperClipIcon className="w-4 h-4" />
+                                  קבצים מצורפים ({item.attachments.length})
+                                </div>
+                                <ul className="flex flex-wrap gap-2">
+                                  {item.attachments.map((attachment) => {
+                                    const key = attachmentKey(item.id, attachment);
+                                    const isDownloading = downloadingAttachmentKey === key;
+                                    return (
+                                      <li
+                                        key={key}
+                                        className="inline-flex items-center gap-2 max-w-full rounded-lg border border-border-default bg-bg-card px-3 py-2"
+                                      >
+                                        <span className="truncate font-medium max-w-[14rem]">
+                                          {attachment.filename}
+                                        </span>
+                                        {attachment.size ? (
+                                          <span className="text-xs text-text-muted shrink-0">
+                                            {formatAttachmentSize(Math.max(1, Math.ceil(attachment.size / 1024)))}
+                                          </span>
+                                        ) : null}
+                                        <button
+                                          type="button"
+                                          disabled={isDownloading}
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            void handleDownloadAttachment(item.id, attachment);
+                                          }}
+                                          className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-border-default bg-bg-subtle px-2 py-1 text-xs font-semibold text-text-default hover:bg-bg-card disabled:opacity-60"
+                                        >
+                                          <DocumentArrowDownIcon className="w-3.5 h-3.5" />
+                                          {isDownloading ? 'מוריד...' : 'הורדה'}
+                                        </button>
+                                      </li>
+                                    );
+                                  })}
+                                </ul>
+                              </div>
+                            ) : null}
                           </div>
                         </td>
                       </tr>

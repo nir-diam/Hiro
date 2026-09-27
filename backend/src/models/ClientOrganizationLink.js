@@ -64,5 +64,6 @@ ClientOrganizationLink.belongsTo(Client, { foreignKey: 'clientId', as: 'client' 
 ClientOrganizationLink.belongsTo(Organization, { foreignKey: 'organizationId', as: 'organization' });
 ClientOrganizationLink.belongsTo(OrganizationTmp, { foreignKey: 'organizationTmpId', as: 'organizationTmp' });
 Client.hasMany(ClientOrganizationLink, { foreignKey: 'clientId', as: 'organizationLinks' });
+Organization.hasMany(ClientOrganizationLink, { foreignKey: 'organizationId', as: 'clientLinks' });
 
 module.exports = ClientOrganizationLink;

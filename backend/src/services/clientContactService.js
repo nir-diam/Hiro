@@ -72,6 +72,33 @@ const normalizePhoneEntries = (raw, { phone = '', mobilePhone = '' } = {}) => {
   return entries;
 };
 
+const normalizeLinkEntries = (raw) => {
+  if (!Array.isArray(raw) || !raw.length) return [];
+  const entries = raw
+    .map((e) => ({
+      id: str(e?.id) || newEntryId(),
+      label: str(e?.label),
+      url: str(e?.url || e?.value),
+      isPrimary: Boolean(e?.isPrimary),
+    }))
+    .filter((e) => e.url);
+  if (entries.length && !entries.some((e) => e.isPrimary)) entries[0].isPrimary = true;
+  return entries;
+};
+
+const normalizeAddressEntries = (raw) => {
+  if (!Array.isArray(raw) || !raw.length) return [];
+  const entries = raw
+    .map((e) => ({
+      id: str(e?.id) || newEntryId(),
+      value: str(e?.value),
+      isPrimary: Boolean(e?.isPrimary),
+    }))
+    .filter((e) => e.value);
+  if (entries.length && !entries.some((e) => e.isPrimary)) entries[0].isPrimary = true;
+  return entries;
+};
+
 const primaryFromEntries = (entries, kind) => {
   const list = kind ? entries.filter((e) => e.kind === kind) : entries;
   const primary = list.find((e) => e.isPrimary) || list[0];
@@ -99,6 +126,8 @@ const normalizeContactPayload = (payload = {}) => {
     data.phones || prevMeta.phones,
     { phone: data.phone, mobilePhone: data.mobilePhone },
   );
+  const links = normalizeLinkEntries(data.links || prevMeta.links);
+  const addresses = normalizeAddressEntries(data.addresses || prevMeta.addresses);
 
   data.firstName = firstName;
   data.lastName = lastName;
@@ -106,9 +135,11 @@ const normalizeContactPayload = (payload = {}) => {
   data.email = primaryFromEntries(emails) || str(data.email);
   data.phone = primaryFromEntries(phones, 'office') || str(data.phone);
   data.mobilePhone = primaryFromEntries(phones, 'mobile') || str(data.mobilePhone);
-  data.metadata = { ...prevMeta, emails, phones };
+  data.metadata = { ...prevMeta, emails, phones, links, addresses };
   delete data.emails;
   delete data.phones;
+  delete data.links;
+  delete data.addresses;
 
   if (data.distributionEmail !== undefined) data.distributionEmail = Boolean(data.distributionEmail);
   if (data.distributionSms !== undefined) data.distributionSms = Boolean(data.distributionSms);
@@ -215,6 +246,8 @@ const update = async (id, payload = {}) => {
     || Object.prototype.hasOwnProperty.call(data, 'lastName')
     || Object.prototype.hasOwnProperty.call(data, 'emails')
     || Object.prototype.hasOwnProperty.call(data, 'phones')
+    || Object.prototype.hasOwnProperty.call(data, 'links')
+    || Object.prototype.hasOwnProperty.call(data, 'addresses')
     || Object.prototype.hasOwnProperty.call(data, 'email')
     || Object.prototype.hasOwnProperty.call(data, 'phone')
     || Object.prototype.hasOwnProperty.call(data, 'mobilePhone')
@@ -291,6 +324,25 @@ const migrateContactsFromTmpToOrg = async (organizationTmpId, organizationId) =>
   return migrated;
 };
 
+const getByIdForClient = async (clientId, contactId) => {
+  const cid = String(clientId || '').trim();
+  const contactPk = String(contactId || '').trim();
+  if (!cid || !contactPk) return null;
+
+  const row = await ClientContact.findOne({
+    where: { id: contactPk, clientId: cid },
+    include: [CLIENT_INCLUDE, ORGANIZATION_INCLUDE],
+  });
+  if (!row) return null;
+
+  const j = row.toJSON ? row.toJSON() : row;
+  return {
+    ...j,
+    organizationName: j.organization?.name || j.organization?.nameEn || null,
+    organizationLogo: j.organization?.logo || null,
+  };
+};
+
 /** Jobs whose `contacts` JSONB lists this client contact (kind contact + id). */
 const listJobsForContact = async (clientId, contactId) => {
   const cid = String(clientId || '').trim();
@@ -360,6 +412,7 @@ module.exports = {
   createGroupForClient,
   deleteGroup,
   migrateContactsFromTmpToOrg,
+  getByIdForClient,
   listJobsForContact,
 };
 

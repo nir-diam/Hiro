@@ -6,7 +6,10 @@ const list = async (req, res) => {
     const organizationId = req.query?.organizationId
       ? String(req.query.organizationId).trim()
       : null;
-    const rows = await clientTaskService.listByClientId(clientId, { organizationId });
+    const organizationTmpId = req.query?.organizationTmpId
+      ? String(req.query.organizationTmpId).trim()
+      : null;
+    const rows = await clientTaskService.listByClientId(clientId, { organizationId, organizationTmpId });
     res.json(rows);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list tasks' });
@@ -28,6 +31,9 @@ const create = async (req, res) => {
     const body = { ...(req.body || {}) };
     if (body.organizationId != null) {
       body.organizationId = String(body.organizationId).trim() || null;
+    }
+    if (body.organizationTmpId != null) {
+      body.organizationTmpId = String(body.organizationTmpId).trim() || null;
     }
     const row = await clientTaskService.createForClient(clientId, body);
     res.status(201).json(row);

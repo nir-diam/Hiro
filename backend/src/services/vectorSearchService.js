@@ -1,6 +1,5 @@
 const candidateService = require('./candidateService');
 const { embedText, embedTextCached } = require('./embeddingService');
-const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
 
 // In-memory candidate list cache — avoids re-fetching 600+ rows on every sonar scan
 const CAND_LIST_CACHE_TTL_MS = 60_000; // 60 s
@@ -196,12 +195,8 @@ const embedCandidateAndSave = async (candidateId, extraText = '') => {
         console.warn('[embed] skip update due to empty embedding', candidateId);
         return [];
       }
-      const updatePayload = { embedding };
-      if (extraText && extraText.trim()) {
-        updatePayload.searchText = normalizeResumeSearchText(extraText).slice(0, 50000);
-        updatePayload.searchTextSavedAt = new Date();
-      }
-      await candidateService.update(candidateId, updatePayload);
+      // searchText is owned by CV parse/enrich — never overwrite it during embedding.
+      await candidateService.update(candidateId, { embedding });
       await clearEmbedCooldown(key);
       _candListCache = null;
       return embedding;

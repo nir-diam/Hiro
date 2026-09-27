@@ -22,6 +22,15 @@ const isValidTagIdParam = (raw) => {
   return TAG_ID_RE.test(s);
 };
 
+const pickCreatedDate = (...values) => {
+  for (const value of values) {
+    if (!value) continue;
+    const date = value instanceof Date ? value : new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return null;
+};
+
 const loadAiQueuedPendingTagIds = async () => {
   const rows = await TagAiDecision.findAll({
     where: { reviewStatus: 'pending_review' },
@@ -304,19 +313,28 @@ const remove = async (req, res) => {
 
 const listTagCandidatesHelper = async (tagId) => {
   const entries = await candidateTagService.listCandidateTagsByTag(tagId, { activeOnly: false });
-  return entries.map((entry) => ({
-    candidate_tag_id: entry.id,
-    candidate_id: entry.entity_id,
-    full_name: entry.candidate?.fullName || entry.candidate?.full_name,
-    email: entry.candidate?.email,
-    phone: entry.candidate?.phone,
-  }));
+  return entries.map((entry) => {
+    const plain = entry.get ? entry.get({ plain: true }) : entry;
+    return {
+      candidate_tag_id: plain.id,
+      candidate_id: plain.entity_id,
+      full_name: plain.candidate?.fullName || plain.candidate?.full_name,
+      email: plain.candidate?.email,
+      phone: plain.candidate?.phone,
+      createdDate: pickCreatedDate(
+        plain.createdAt,
+        plain.created_at,
+        plain.candidate?.createdAt,
+        plain.candidate?.created_at,
+      ),
+    };
+  });
 };
 
 const listTagJobsHelper = async (tagId) => {
   const entries = await SystemTag.findAll({
     where: { tag_id: tagId, type: SYSTEM_TAG_TYPE_JOB },
-    attributes: ['id', 'entity_id'],
+    attributes: ['id', 'entity_id', 'created_at'],
   });
   if (!entries.length) return [];
 
@@ -324,7 +342,7 @@ const listTagJobsHelper = async (tagId) => {
   const jobs = jobIds.length
     ? await Job.findAll({
         where: { id: { [Op.in]: jobIds } },
-        attributes: ['id', 'title', 'status', 'client', 'postingCode'],
+        attributes: ['id', 'title', 'status', 'client', 'postingCode', 'openDate', 'createdAt'],
       })
     : [];
   const jobMap = new Map(jobs.map((job) => [String(job.id), job.get({ plain: true })]));
@@ -339,6 +357,13 @@ const listTagJobsHelper = async (tagId) => {
       status: job.status || '',
       client: job.client || '',
       postingCode: job.postingCode || '',
+      createdDate: pickCreatedDate(
+        plain.createdAt,
+        plain.created_at,
+        job.openDate,
+        job.createdAt,
+        job.created_at,
+      ),
     };
   });
 };

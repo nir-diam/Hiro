@@ -1,6 +1,8 @@
 const { Op } = require('sequelize');
 const Organization = require('../models/Organization');
 const OrganizationLocation = require('../models/OrganizationLocation');
+const ClientOrganizationLink = require('../models/ClientOrganizationLink');
+const Client = require('../models/Client');
 const OrganizationChangeHistory = require('../models/OrganizationChangeHistory');
 const CandidateOrganization = require('../models/CandidateOrganization');
 const { sendChat, resolveGeminiApiKey } = require('./geminiService');
@@ -73,7 +75,29 @@ const diceCoefficient = (a = '', b = '') => {
   return Math.round((2 * intersection) / (s1.length - 1 + s2.length - 1) * 100);
 };
 
-const API_ATTRIBUTES = { exclude: ['embedding'] };
+/** Large / unused on profile reads — served via dedicated endpoints when needed. */
+const ORG_API_EXCLUDE = ['embedding', 'history'];
+
+const API_ATTRIBUTES = { exclude: ORG_API_EXCLUDE };
+
+const ORG_BY_ID_CACHE_MS = 60_000;
+const ORG_PROFILE_BUNDLE_CACHE_MS = 60_000;
+/** @type {Map<string, { at: number, data: Record<string, unknown> }>} */
+const orgByIdApiCache = new Map();
+/** @type {Map<string, { at: number, data: Record<string, unknown> }>} */
+const orgProfileBundleCache = new Map();
+
+const invalidateOrgApiCache = (id) => {
+  const key = String(id || '').trim();
+  if (!key) return;
+  orgByIdApiCache.delete(key);
+  orgByIdApiCache.delete(`light:${key}`);
+  for (const cacheKey of orgProfileBundleCache.keys()) {
+    if (cacheKey.startsWith(`${key}:`)) orgProfileBundleCache.delete(cacheKey);
+  }
+};
+
+const orgToApiPlain = (org) => (org?.get ? org.get({ plain: true }) : org);
 
 /** ILIKE on name fields + any entry in aliases[] */
 const organizationSearchWhere = (search) => {
@@ -423,6 +447,177 @@ const getById = async (id) => {
   return org;
 };
 
+/** Cached plain JSON for GET /api/organizations/:id (avoids repeated RDS round-trips). */
+const getByIdForApi = async (id, { skipCache = false } = {}) => {
+  const key = String(id || '').trim();
+  if (!key) {
+    const err = new Error('Organization not found');
+    err.status = 404;
+    throw err;
+  }
+  if (!skipCache) {
+    const hit = orgByIdApiCache.get(key);
+    if (hit && Date.now() - hit.at < ORG_BY_ID_CACHE_MS) {
+      return hit.data;
+    }
+  }
+  const org = await getById(key);
+  const data = orgToApiPlain(org);
+  orgByIdApiCache.set(key, { at: Date.now(), data });
+  return data;
+};
+
+/** Profile header — single query, no extra locations round-trip. */
+const getByIdForApiLight = async (id, { skipCache = false } = {}) => {
+  const key = String(id || '').trim();
+  const cacheKey = `light:${key}`;
+  if (!key) {
+    const err = new Error('Organization not found');
+    err.status = 404;
+    throw err;
+  }
+  if (!skipCache) {
+    const hit = orgByIdApiCache.get(cacheKey);
+    if (hit && Date.now() - hit.at < ORG_BY_ID_CACHE_MS) {
+      return hit.data;
+    }
+  }
+  const org = await Organization.findByPk(key, { attributes: API_ATTRIBUTES });
+  if (!org) {
+    const err = new Error('Organization not found');
+    err.status = 404;
+    throw err;
+  }
+  const data = { ...orgToApiPlain(org), additionalLocations: [] };
+  orgByIdApiCache.set(cacheKey, { at: Date.now(), data });
+  return data;
+};
+
+const getPrimaryClientSummary = async (organizationId) => {
+  const orgId = String(organizationId || '').trim();
+  if (!orgId) return { clientId: null, clientName: null };
+
+  const link = await ClientOrganizationLink.findOne({
+    where: { organizationId: orgId },
+    include: [{ model: Client, as: 'client', attributes: ['id', 'name', 'displayName'] }],
+    order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
+  });
+
+  if (!link?.client) {
+    return { clientId: null, clientName: null };
+  }
+
+  const c = link.client;
+  return {
+    clientId: String(c.id),
+    clientName: String(c.displayName || c.name || ''),
+  };
+};
+
+/**
+ * One-shot org profile load: org + primary client + slim client row.
+ * Uses parallel queries within a single HTTP request (one DB pool connection).
+ */
+const pickPrimaryClientLink = (links) => {
+  const rows = Array.isArray(links) ? links : [];
+  if (!rows.length) return null;
+  const sorted = [...rows].sort((a, b) => {
+    const pri = Number(Boolean(b.isPrimary)) - Number(Boolean(a.isPrimary));
+    if (pri !== 0) return pri;
+    const aTs = new Date(a.created_at || a.createdAt || 0).getTime();
+    const bTs = new Date(b.created_at || b.createdAt || 0).getTime();
+    return aTs - bTs;
+  });
+  return sorted[0] || null;
+};
+
+const loadProfileBundleJoined = async (orgId, preferredClientId = '') => {
+  const clientService = require('./clientService');
+  const preferred = String(preferredClientId || '').trim();
+  const linkInclude = {
+    model: ClientOrganizationLink,
+    as: 'clientLinks',
+    required: false,
+    separate: false,
+    include: [
+      {
+        model: Client,
+        as: 'client',
+        required: false,
+        attributes: { exclude: clientService.CLIENT_API_EXCLUDE || ['events', 'documents', 'users', 'finance'] },
+      },
+    ],
+  };
+  if (preferred) {
+    linkInclude.where = { clientId: preferred };
+  }
+
+  const orgRow = await Organization.findByPk(orgId, {
+    attributes: API_ATTRIBUTES,
+    include: [linkInclude],
+  });
+
+  if (!orgRow) {
+    const err = new Error('Organization not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const plainOrg = orgToApiPlain(orgRow);
+  const organization = { ...plainOrg, additionalLocations: [] };
+  delete organization.clientLinks;
+
+  const links = plainOrg.clientLinks || [];
+  const primaryLink = pickPrimaryClientLink(links);
+  const linkedClient = primaryLink?.client || null;
+  const client = linkedClient ? clientService.clientToApiJson(linkedClient) : null;
+  const resolvedClientId = client?.id ? String(client.id) : null;
+
+  const primaryClient = resolvedClientId
+    ? {
+      clientId: resolvedClientId,
+      clientName: String(client?.displayName || client?.name || ''),
+    }
+    : { clientId: null, clientName: null };
+
+  return { organization, primaryClient, client };
+};
+
+const getOrganizationProfileBundle = async (
+  organizationId,
+  { tenantClientId = null, authUser = null } = {},
+) => {
+  const orgId = String(organizationId || '').trim();
+  if (!orgId) {
+    const err = new Error('Organization not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const authService = require('./authService');
+
+  let hintedClientId = tenantClientId ? String(tenantClientId).trim() : '';
+  if (!hintedClientId && authUser?.clientId) {
+    hintedClientId = String(authUser.clientId).trim();
+  }
+  if (!hintedClientId && authUser?.sub && authUser.role !== 'admin' && authUser.role !== 'super_admin') {
+    const cached = await authService.resolveUserTenantClientIdCached(authUser.sub, authUser.role);
+    if (cached) hintedClientId = String(cached);
+  }
+
+  const tenantKeyPart = hintedClientId || (authUser?.sub ? `u:${authUser.sub}` : 'anon');
+  const bundleCacheKey = `${orgId}:${tenantKeyPart}`;
+  const bundleHit = orgProfileBundleCache.get(bundleCacheKey);
+  if (bundleHit && Date.now() - bundleHit.at < ORG_PROFILE_BUNDLE_CACHE_MS) {
+    return bundleHit.data;
+  }
+
+  const bundle = await loadProfileBundleJoined(orgId, hintedClientId);
+  orgProfileBundleCache.set(bundleCacheKey, { at: Date.now(), data: bundle });
+  orgByIdApiCache.set(`light:${orgId}`, { at: Date.now(), data: bundle.organization });
+  return bundle;
+};
+
 const findByAnyName = async ({ name, nameEn, legalName }) => {
   const candidates = [];
   const pushCandidate = (field, value) => {
@@ -649,6 +844,7 @@ const update = async (id, payload, options = {}) => {
   if (options.syncLinkedClients !== false) {
     fireAndForget(syncOrganizationToLinkedClients(org.id));
   }
+  invalidateOrgApiCache(org.id);
   return org;
 };
 
@@ -663,6 +859,7 @@ const remove = async (id, options = {}) => {
     meta: actorMetaFromOptions(options),
   }));
   await org.destroy();
+  invalidateOrgApiCache(id);
 };
 
 const getByIds = async (ids) => {
@@ -1401,13 +1598,118 @@ const mergeOrganizations = async (payload = {}, options = {}) => {
   };
 };
 
+/**
+ * Add organization aliases. Skips normalized (trim + lowercase) duplicates against
+ * name, nameEn, legalName, and existing aliases; returns the existing alias text.
+ */
+const addAliases = async (orgId, aliasesToAdd, options = {}) => {
+  const org = await getById(orgId);
+  const requested = [
+    ...new Set(
+      (Array.isArray(aliasesToAdd) ? aliasesToAdd : [])
+        .map((alias) => String(alias ?? '').trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!requested.length) {
+    const err = new Error('aliases array is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const aliasKeys = buildOrganizationAliasKeySet(org);
+  const current = Array.isArray(org.aliases) ? [...org.aliases] : [];
+  const added = [];
+  const skippedDuplicates = [];
+
+  for (const alias of requested) {
+    const key = alias.toLowerCase();
+    if (aliasKeys.has(key)) {
+      const existingAlias =
+        current.find((entry) => entry.toLowerCase() === key)
+        || (String(org.name || '').trim().toLowerCase() === key ? org.name : null)
+        || (String(org.nameEn || '').trim().toLowerCase() === key ? org.nameEn : null)
+        || (String(org.legalName || '').trim().toLowerCase() === key ? org.legalName : null)
+        || alias;
+      skippedDuplicates.push({
+        alias,
+        existingAlias,
+      });
+      continue;
+    }
+    aliasKeys.add(key);
+    current.push(alias);
+    added.push(alias);
+  }
+
+  if (added.length) {
+    await org.update(
+      { aliases: current },
+      options.transaction ? { transaction: options.transaction } : undefined,
+    );
+    await org.reload();
+  }
+
+  return {
+    organization: org,
+    aliases: current,
+    added,
+    skippedDuplicates,
+    updated: added.length > 0,
+  };
+};
+
+/**
+ * Remove organization aliases by exact string match (trimmed).
+ * Fails with 404 if any requested alias is missing on the organization.
+ */
+const removeAliases = async (orgId, aliasesToRemove, options = {}) => {
+  const org = await getById(orgId);
+  const requested = [
+    ...new Set(
+      (Array.isArray(aliasesToRemove) ? aliasesToRemove : [])
+        .map((a) => String(a ?? '').trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!requested.length) {
+    const err = new Error('aliases is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const current = Array.isArray(org.aliases) ? org.aliases : [];
+  const notFound = requested.filter((alias) => !current.includes(alias));
+  if (notFound.length) {
+    const err = new Error(`Alias(es) not found on organization: ${notFound.join(', ')}`);
+    err.status = 404;
+    err.code = 'ALIAS_NOT_FOUND';
+    throw err;
+  }
+
+  const removeSet = new Set(requested);
+  const next = current.filter((alias) => !removeSet.has(alias));
+  await org.update(
+    { aliases: next },
+    options.transaction ? { transaction: options.transaction } : undefined,
+  );
+  await org.reload();
+  return org;
+};
+
 module.exports = {
   list,
   globalLookup,
   getById,
+  getByIdForApi,
+  getPrimaryClientSummary,
+  getOrganizationProfileBundle,
+  invalidateOrgApiCache,
   create,
   update,
   remove,
+  addAliases,
+  removeAliases,
   getByIds,
   findByName,
   findOrCreateByName,

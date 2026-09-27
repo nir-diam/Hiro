@@ -119,6 +119,21 @@ const deleteGroup = async (req, res) => {
   }
 };
 
+const get = async (req, res) => {
+  try {
+    const clientId = String(req.params.id || '').trim();
+    const contactId = String(req.params.contactId || '').trim();
+    assertCanListClientContacts(req.dbUser, clientId);
+    const row = await clientContactService.getByIdForClient(clientId, contactId);
+    if (!row) {
+      return res.status(404).json({ message: 'Contact not found' });
+    }
+    res.json(row);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load contact' });
+  }
+};
+
 /** GET /api/clients/:id/contacts/:contactId/jobs — jobs that assign this contact in job.contacts */
 const listJobs = async (req, res) => {
   try {
@@ -135,5 +150,5 @@ const listJobs = async (req, res) => {
   }
 };
 
-module.exports = { list, listAll, create, update, remove, listGroups, createGroup, deleteGroup, listJobs };
+module.exports = { list, listAll, get, create, update, remove, listGroups, createGroup, deleteGroup, listJobs };
 

@@ -930,12 +930,177 @@ Return ONLY the JSON Array of objects. No markdown formatting.`;
   });
 };
 
+const SYNONYM_LANGUAGES = new Set(['he', 'en']);
+const SYNONYM_TYPES = new Set(['synonym', 'alias']);
+
+const normalizeSynonymPhraseKey = (phrase) => String(phrase || '').trim().toLowerCase();
+
+/**
+ * Add synonyms/aliases to a catalog tag. Skips normalized-phrase duplicates and returns
+ * the existing stable id instead of creating a second entry.
+ */
+const addSynonyms = async (tagId, synonymsInput, options = {}) => {
+  const tag = await getById(tagId);
+  const input = Array.isArray(synonymsInput) ? synonymsInput : [];
+  if (!input.length) {
+    const err = new Error('synonyms array is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const existing = normalizeSynonyms(Array.isArray(tag.synonyms) ? tag.synonyms : []);
+  const phraseIndex = new Map();
+  for (const syn of existing) {
+    phraseIndex.set(normalizeSynonymPhraseKey(syn.phrase), syn);
+  }
+
+  const added = [];
+  const skippedDuplicates = [];
+
+  for (let i = 0; i < input.length; i++) {
+    const raw = input[i];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      const err = new Error(`synonyms[${i}] must be an object`);
+      err.status = 400;
+      throw err;
+    }
+
+    const phrase = String(raw.phrase || '').trim();
+    if (!phrase) {
+      const err = new Error(`synonyms[${i}].phrase is required`);
+      err.status = 400;
+      throw err;
+    }
+
+    const language = String(raw.language || '').trim().toLowerCase();
+    if (!SYNONYM_LANGUAGES.has(language)) {
+      const err = new Error(`synonyms[${i}].language must be he or en`);
+      err.status = 400;
+      throw err;
+    }
+
+    const type = String(raw.type || '').trim().toLowerCase();
+    if (!SYNONYM_TYPES.has(type)) {
+      const err = new Error(`synonyms[${i}].type must be synonym or alias`);
+      err.status = 400;
+      throw err;
+    }
+
+    const priority = Number(raw.priority);
+    if (!Number.isInteger(priority) || priority < 1 || priority > 5) {
+      const err = new Error(`synonyms[${i}].priority must be an integer from 1 to 5`);
+      err.status = 400;
+      throw err;
+    }
+
+    const phraseKey = normalizeSynonymPhraseKey(phrase);
+    const duplicate = phraseIndex.get(phraseKey);
+    if (duplicate) {
+      skippedDuplicates.push({
+        phrase,
+        existingSynonymId: duplicate.id,
+      });
+      continue;
+    }
+
+    const newSynonym = {
+      id: `syn_${Date.now()}_${existing.length + added.length}_${Math.random().toString(36).substr(2, 5)}`,
+      phrase,
+      language,
+      type,
+      priority,
+    };
+    added.push(newSynonym);
+    phraseIndex.set(phraseKey, newSynonym);
+  }
+
+  if (!added.length) {
+    return {
+      tag,
+      added,
+      skippedDuplicates,
+      updated: false,
+    };
+  }
+
+  const tagAfter = await update(
+    tagId,
+    { synonyms: [...existing, ...added] },
+    { ...options, actingUser: options.actingUser || 'agent' },
+  );
+
+  return {
+    tag: tagAfter,
+    added,
+    skippedDuplicates,
+    updated: true,
+  };
+};
+
+/**
+ * Remove catalog tag synonyms by stable synonym id (not phrase text).
+ * Fails with 404 if any requested id is missing on the tag.
+ */
+const removeSynonymsByIds = async (tagId, synonymIds, options = {}) => {
+  const tag = await getById(tagId);
+  const requested = [
+    ...new Set(
+      (Array.isArray(synonymIds) ? synonymIds : [])
+        .map((id) => String(id || '').trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!requested.length) {
+    const err = new Error('synonymIds is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const normalized = normalizeSynonyms(Array.isArray(tag.synonyms) ? tag.synonyms : []);
+  const requestedSet = new Set(requested);
+  const removed = [];
+  const remaining = [];
+
+  for (const syn of normalized) {
+    if (requestedSet.has(syn.id)) {
+      removed.push(syn.id);
+      requestedSet.delete(syn.id);
+    } else {
+      remaining.push(syn);
+    }
+  }
+
+  if (requestedSet.size > 0) {
+    const err = new Error(
+      `Synonym id(s) not found on tag: ${[...requestedSet].join(', ')}`,
+    );
+    err.status = 404;
+    err.code = 'SYNONYM_NOT_FOUND';
+    throw err;
+  }
+
+  if (!removed.length) {
+    const err = new Error('No synonyms removed');
+    err.status = 404;
+    err.code = 'SYNONYM_NOT_FOUND';
+    throw err;
+  }
+
+  return update(
+    tagId,
+    { synonyms: remaining },
+    { ...options, actingUser: options.actingUser || 'agent' },
+  );
+};
+
 module.exports = {
   list,
   getById,
   create,
   update,
   remove,
+  addSynonyms,
+  removeSynonymsByIds,
   mergeCatalogTags,
   mergeCatalogTagIntoTarget,
   enrichSuggestions,

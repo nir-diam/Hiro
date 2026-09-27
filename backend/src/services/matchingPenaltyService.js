@@ -569,7 +569,7 @@ function collectCandidateFilterTags(candidate) {
   const negative = [];
   for (const td of candidate.tagDetails || []) {
     if (!td || typeof td !== 'object') continue;
-    const mode = norm(td.mode);
+    const mode = normalizeJobSkillMode(td.mode);
     if (mode !== 'mandatory' && mode !== 'negative') continue;
     const keys = [td.tagKey, td.displayNameHe, td.displayNameEn]
       .map((x) => (x != null ? String(x).trim() : ''))

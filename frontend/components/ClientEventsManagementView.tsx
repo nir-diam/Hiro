@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import ClientsEventsJournalTab from './ClientsEventsJournalTab';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
+import type { MessageModalConfig } from '../hooks/useUIState';
 
 type ClientOption = { id: string; name: string; organizationId?: string | null };
 
@@ -11,7 +12,11 @@ type LinkedOrganizationRow = {
   name?: string | null;
 };
 
-const ClientEventsManagementView: React.FC = () => {
+type Props = {
+  openMessageModal: (config: MessageModalConfig) => void;
+};
+
+const ClientEventsManagementView: React.FC<Props> = ({ openMessageModal }) => {
   const { user, ready: authReady } = useAuth();
   const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
   const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
@@ -127,7 +132,7 @@ const ClientEventsManagementView: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div className="flex flex-col flex-1 min-h-[calc(100dvh-10rem)]">
       {error ? (
         <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
           {error}
@@ -140,6 +145,7 @@ const ClientEventsManagementView: React.FC = () => {
           clientOptions={clientOptions}
           defaultClientId={defaultClientId}
           crossClientJournal={isPlatformAdmin}
+          openMessageModal={openMessageModal}
         />
       )}
     </div>

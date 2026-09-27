@@ -37,6 +37,10 @@ export interface AuditLogListParams {
   search?: string;
   level?: string;
   action?: string;
+  actor?: 'all' | 'agent';
+  entityType?: string;
+  entityId?: string;
+  batchId?: string;
   from?: string;
   to?: string;
 }
@@ -144,6 +148,10 @@ const buildQuery = (params: AuditLogListParams): string => {
   if (params.search) usp.set('search', params.search);
   if (params.level && params.level !== 'all') usp.set('level', params.level);
   if (params.action && params.action !== 'all') usp.set('action', params.action);
+  if (params.actor && params.actor !== 'all') usp.set('actor', params.actor);
+  if (params.entityType) usp.set('entityType', params.entityType);
+  if (params.entityId) usp.set('entityId', params.entityId);
+  if (params.batchId) usp.set('batchId', params.batchId);
   if (params.from) usp.set('from', params.from);
   if (params.to) usp.set('to', params.to);
   const qs = usp.toString();

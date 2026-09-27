@@ -2,12 +2,15 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ArrowDownTrayIcon, FolderIcon, DocumentIcon, PhotoIcon, ArchiveBoxIcon } from './Icons';
 import DocumentFormModal, { Document, DocumentType } from './DocumentFormModal';
 import { authHeaders } from '../utils/authHeaders';
+import { normalizeDocumentUploaderForDisplay } from '../utils/documentUploaderDisplay';
 
 interface ClientDocumentsTabProps {
   clientId: string;
   clientName: string;
-  /** When set, only documents for this organization are listed and new uploads are tagged. */
+  /** Approved organization — list/upload scoped to this id. */
   organizationId?: string;
+  /** Pending (tmp) organization — list/upload scoped to this id. */
+  organizationTmpId?: string;
 }
 
 type BackendDoc = Omit<Document, 'id'> & {
@@ -15,6 +18,7 @@ type BackendDoc = Omit<Document, 'id'> & {
   key?: string;
   url?: string;
   organizationId?: string | null;
+  organizationTmpId?: string | null;
 };
 
 const normalizeDoc = (row: any): BackendDoc => ({
@@ -22,12 +26,13 @@ const normalizeDoc = (row: any): BackendDoc => ({
   name: row.name || '',
   type: row.type as DocumentType,
   uploadDate: row.uploadDate || new Date().toISOString(),
-  uploadedBy: row.uploadedBy || 'מערכת',
+  uploadedBy: normalizeDocumentUploaderForDisplay(row.uploadedBy),
   notes: row.notes || '',
   fileSize: Number(row.fileSize ?? 0),
   key: row.key,
   url: row.url,
   organizationId: row.organizationId != null ? String(row.organizationId) : null,
+  organizationTmpId: row.organizationTmpId != null ? String(row.organizationTmpId) : null,
 });
 
 const documentTypeStyles: { [key in DocumentType]: { bg: string; text: string; } } = {
@@ -67,7 +72,10 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({
   clientId,
   clientName,
   organizationId,
+  organizationTmpId,
 }) => {
+    const orgScopeId = organizationId || organizationTmpId || null;
+    const orgScopeField = organizationTmpId ? 'organizationTmpId' : organizationId ? 'organizationId' : null;
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [documents, setDocuments] = useState<BackendDoc[]>([]);
     const [isLoading, setIsLoading] = useState(false);
@@ -165,6 +173,7 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({
                 url: publicUrl,
                 uploadDate: new Date().toISOString(),
                 ...(organizationId ? { organizationId } : {}),
+                ...(organizationTmpId ? { organizationTmpId } : {}),
             }),
         });
         if (attachRes.ok) {
@@ -190,9 +199,10 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({
         let active = true;
         setIsLoading(true);
         setError(null);
-        const qs = organizationId
-            ? `?organizationId=${encodeURIComponent(organizationId)}`
-            : '';
+        const params = new URLSearchParams();
+        if (organizationId) params.set('organizationId', organizationId);
+        if (organizationTmpId) params.set('organizationTmpId', organizationTmpId);
+        const qs = params.toString() ? `?${params.toString()}` : '';
         fetch(`${apiBase}/api/clients/${clientId}/documents${qs}`, { headers: authHeaders(true) })
             .then((r) => {
                 if (!r.ok) throw new Error('Failed to load documents');
@@ -212,21 +222,24 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({
                 if (active) setIsLoading(false);
             });
         return () => { active = false; };
-    }, [apiBase, clientId, organizationId]);
+    }, [apiBase, clientId, organizationId, organizationTmpId]);
 
     const filteredDocuments = useMemo(() => {
-        const orgScoped = organizationId
-            ? documents.filter((doc) => String(doc.organizationId || '') === organizationId)
+        const orgScoped = orgScopeId && orgScopeField
+            ? documents.filter((doc) => String(doc[orgScopeField] || '') === orgScopeId)
             : documents;
         return orgScoped
             .filter(doc => filterType === 'הכול' || doc.type === filterType)
             .filter(doc => doc.name.toLowerCase().includes(searchTerm.toLowerCase()));
-    }, [documents, searchTerm, filterType, organizationId]);
+    }, [documents, searchTerm, filterType, orgScopeId, orgScopeField]);
 
     const hasUntaggedClientDocuments = useMemo(() => {
-        if (!organizationId) return false;
-        return documents.some((doc) => !String(doc.organizationId || '').trim());
-    }, [documents, organizationId]);
+        if (!orgScopeId) return false;
+        return documents.some((doc) => {
+            if (organizationTmpId) return !String(doc.organizationTmpId || '').trim();
+            return !String(doc.organizationId || '').trim();
+        });
+    }, [documents, orgScopeId, organizationTmpId]);
 
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-4 sm:p-6 border border-border-default">
@@ -297,7 +310,7 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({
                                 </td>
                                 <td className="px-4 py-3"><span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${documentTypeStyles[doc.type as DocumentType]?.bg || 'bg-gray-100'} ${documentTypeStyles[doc.type as DocumentType]?.text || 'text-gray-800'}`}>{doc.type}</span></td>
                                 <td className="px-4 py-3 text-text-muted">{new Date(doc.uploadDate).toLocaleDateString('he-IL')}</td>
-                                <td className="px-4 py-3 text-text-muted">{doc.uploadedBy}</td>
+                                <td className="px-4 py-3 text-text-muted">{doc.uploadedBy || '-'}</td>
                                 <td className="px-4 py-3 text-text-muted">{formatFileSize(doc.fileSize)}</td>
                                 <td className="px-4 py-3 text-text-subtle truncate" title={doc.notes}>{doc.notes || '-'}</td>
                                 <td className="px-4 py-3 text-center">
@@ -360,11 +373,11 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({
                     <FolderIcon className="w-16 h-16 text-text-subtle mb-4"/>
                     <h3 className="text-xl font-bold text-text-default">אין מסמכים שמורים</h3>
                     <p className="mt-2 text-text-muted">
-                        {organizationId
+                        {orgScopeId
                             ? `אין מסמכים שמורים עבור ${clientName}.`
                             : 'אין מסמכים שמורים עבור לקוח זה.'}
                     </p>
-                    {organizationId && hasUntaggedClientDocuments ? (
+                    {orgScopeId && hasUntaggedClientDocuments ? (
                         <p className="mt-3 text-xs text-text-subtle max-w-md">
                             קיימים מסמכים ישנים ברמת הלקוח ללא שיוך לארגון — הם אינם מוצגים בפרופיל ארגון ספציפי.
                             העלה מחדש מכאן כדי לשייך לארגון זה.

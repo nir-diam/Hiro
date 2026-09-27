@@ -3,6 +3,7 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ArrowDownTrayIcon, FolderIcon, DocumentIcon, PhotoIcon, ArchiveBoxIcon } from './Icons';
 import DocumentFormModal, { Document, DocumentType } from './DocumentFormModal';
 import { useLanguage } from '../context/LanguageContext';
+import { normalizeDocumentUploaderForDisplay } from '../utils/documentUploaderDisplay';
 
 type BackendDoc = Document & { id: string; key?: string; url?: string };
 
@@ -11,7 +12,7 @@ const normalizeDoc = (row: Record<string, unknown>): BackendDoc => ({
   name: String(row.name || ''),
   type: row.type as DocumentType,
   uploadDate: String(row.uploadDate || new Date().toISOString()),
-  uploadedBy: String(row.uploadedBy || 'מערכת'),
+  uploadedBy: normalizeDocumentUploaderForDisplay(row.uploadedBy),
   notes: String(row.notes || ''),
   fileSize: Number(row.fileSize ?? 0),
   key: row.key ? String(row.key) : undefined,
@@ -298,7 +299,7 @@ const DocumentsView: React.FC<DocumentsViewProps> = ({ candidateId, candidateNam
                                 </td>
                                 <td className="px-4 py-3"><span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${documentTypeStyles[doc.type as DocumentType]?.bg || 'bg-gray-100'} ${documentTypeStyles[doc.type as DocumentType]?.text || 'text-gray-800'}`}>{doc.type}</span></td>
                                 <td className="px-4 py-3 text-text-muted">{new Date(doc.uploadDate).toLocaleDateString('he-IL')}</td>
-                                <td className="px-4 py-3 text-text-muted">{doc.uploadedBy}</td>
+                                <td className="px-4 py-3 text-text-muted">{doc.uploadedBy || '-'}</td>
                                 <td className="px-4 py-3 text-text-muted">{formatFileSize(doc.fileSize)}</td>
                                 <td className="px-4 py-3 text-text-subtle truncate" title={doc.notes}>{doc.notes || '-'}</td>
                                 <td className="px-4 py-3 text-center">

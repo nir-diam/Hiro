@@ -89,6 +89,59 @@ export async function renderScreeningCvHtmlToPdfBase64(html: string): Promise<st
 
     const rAF = () => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
 
+    const waitForImagesInElement = (root: HTMLElement) =>
+        Promise.all(
+            Array.from(root.querySelectorAll('img')).map(
+                (img) =>
+                    new Promise<void>((resolve) => {
+                        const applyExplicitSize = () => {
+                            const style = img.getAttribute('style') || '';
+                            const isProposalLogo =
+                                /alt=(["'])(?:לוגו|logo)\1/i.test(img.outerHTML) ||
+                                img.getAttribute('alt') === 'לוגו' ||
+                                img.getAttribute('alt') === 'logo';
+                            const wMatch = style.match(/(?:^|;)\s*width:\s*(\d+)px/i);
+                            const w = wMatch
+                                ? Number.parseInt(wMatch[1]!, 10)
+                                : Number.parseInt(img.getAttribute('width') || '', 10);
+                            if (w > 0 && isProposalLogo) {
+                                img.style.width = `${w}px`;
+                                const hAttr = Number.parseInt(img.getAttribute('height') || '', 10);
+                                if (hAttr > 0) {
+                                    img.style.height = `${hAttr}px`;
+                                }
+                                return;
+                            }
+                            const hMatch = style.match(/(?:^|;)\s*height:\s*(\d+)px/i);
+                            const h = hMatch ? Number.parseInt(hMatch[1]!, 10) : 0;
+                            if (w > 0 && h > 0) {
+                                img.width = w;
+                                img.height = h;
+                                img.style.width = `${w}px`;
+                                img.style.height = `${h}px`;
+                            }
+                        };
+                        const finish = () => {
+                            applyExplicitSize();
+                            resolve();
+                        };
+                        if (img.complete && img.naturalWidth > 0) {
+                            finish();
+                            return;
+                        }
+                        img.addEventListener('load', finish, { once: true });
+                        img.addEventListener('error', finish, { once: true });
+                        const src = img.getAttribute('src') || img.src;
+                        if (src) {
+                            img.src = '';
+                            img.src = src;
+                        } else {
+                            finish();
+                        }
+                    }),
+            ),
+        );
+
     // --- Mount host div --------------------------------------------------------
     const host = document.createElement('div');
     host.setAttribute('aria-hidden', 'true');
@@ -97,8 +150,15 @@ export async function renderScreeningCvHtmlToPdfBase64(html: string): Promise<st
     document.body.appendChild(host);
 
     try {
-        // Let the browser finish the initial layout pass.
+        // Let the browser finish the initial layout pass and decode embedded logos.
         await rAF();
+        await waitForImagesInElement(host);
+
+        if (host.querySelector('img[alt="לוגו"], img[alt="logo"]')) {
+            const { tightenProposalLogoLayoutForCapture } = await import('./proposalHtmlPrepare');
+            tightenProposalLogoLayoutForCapture(host);
+            await rAF();
+        }
 
         // --- Inject spacers before elements that would be cut by a page break ----
         //

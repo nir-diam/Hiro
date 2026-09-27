@@ -53,6 +53,11 @@ import { fetchCandidatesListResponse } from '../utils/candidatesListApi';
 import { authHeaders } from '../utils/authHeaders';
 import { fetchSavedSearchBlacklist, type EnrichedBlacklistEntry } from '../services/savedSearchesApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import {
+    ADMIN_TABLE_SCROLL_CLASS,
+    STICKY_TABLE_CLASS,
+    stickyTableHeaderCellClass,
+} from '../utils/stickyTableHeader';
 import type { SummaryDrawerOptions } from '../hooks/useUIState';
 import {
     fetchCandidatePipelines,
@@ -62,6 +67,7 @@ import {
 import { summarizeAutomationResults } from '../utils/processOutcomeSla';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { type Job as JobDetailsJob } from './JobsView';
+import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
 
 const MATCH_POPUP_WIDTH = 288;
 
@@ -1375,6 +1381,32 @@ function buildAdvancedPayloadFromPanel(
         complexRules: serializeComplexRulesForApi(complexRules),
         workingHours: String(searchParams.workingHours || 'גמיש').trim() || 'גמיש',
     };
+}
+
+function isAdvancedSnapshotActive(
+    snapshot: AppliedAdvancedSearchPayload,
+    cf: CompanyFiltersState,
+): boolean {
+    const d = createDefaultListSearchParams();
+    if (companyFiltersAreActive(cf)) return true;
+    if (snapshot.tags?.length) return true;
+    if (snapshot.locations?.length) return true;
+    if (snapshot.statusFilter) return true;
+    if (snapshot.gender !== 'any') return true;
+    if (String(snapshot.interestField || '').trim() || String(snapshot.interestRole || '').trim()) return true;
+    if (snapshot.lastUpdated) return true;
+    if (snapshot.interestDate) return true;
+    if (snapshot.jobScopeAll === false) return true;
+    if (snapshot.ageMin !== d.ageMin || snapshot.ageMax !== d.ageMax) return true;
+    if (snapshot.includeUnknownAge === false) return true;
+    if (snapshot.salaryMin !== d.salaryMin || snapshot.salaryMax !== d.salaryMax) return true;
+    if (snapshot.includeUnknownSalary === false) return true;
+    if (snapshot.hasDegree) return true;
+    if (snapshot.languages?.length) return true;
+    if (snapshot.complexRules?.length) return true;
+    const wh = String(snapshot.workingHours || '').trim();
+    if (wh && wh !== 'גמיש') return true;
+    return false;
 }
 
 type ListViewSnapshotV1 = {
@@ -4564,12 +4596,26 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [navigate, location.search]);
 
     const handleClearSearch = () => {
-        // Clear free search
+        // Strip URL-backed filters so navigation back does not re-apply old constraints.
+        setUrlSearchParams((params) => {
+            const next = new URLSearchParams(params);
+            next.delete('q');
+            const savedSearchActive = isSavedSearchUrlContext(next, loadedSearchRef.current?.id);
+            if (!savedSearchActive) {
+                stripCompanyFiltersFromUrlParams(next);
+            }
+            return next;
+        }, { replace: true });
+
         setSearchTerm('');
         setDebouncedSearchTerm('');
         setComplexRules([]);
         setDebouncedComplexRules([]);
         debouncedComplexRulesRef.current = [];
+        setAdditionalFilters([]);
+        setLanguageFilters([]);
+        setCompanyFilters({ sizes: [], sectors: [], industries: [], fields: [], roles: [] });
+        setSearchParams(mergeListSearchParams({}));
         setAppliedAdvancedFilters(null);
         setPage(1);
         setSuspendListPolling(false);
@@ -4577,16 +4623,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setSmartSearchQuery('');
         setIsSmartSearchOpen(false);
 
-        // Reset saved view (so we don't restore old filters on next mount)
         try {
             sessionStorage.removeItem(VIEW_STATE_KEY);
         } catch {
             // ignore storage errors
         }
 
-        // Show loading buffer again while reloading base list
         setHasInitiallyLoaded(false);
-
         suppressNextListFetchEffectRef.current = true;
         void fetchCandidatesList({
             page: 1,
@@ -4598,6 +4641,535 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     };
+
+    const applyAdvancedFiltersAndRefetch = useCallback(
+        (next: {
+            searchParams: ListSearchParamsState;
+            languageFilters: { language: string; level: string }[];
+            complexRules: ComplexFilterRule[];
+            companyFilters: CompanyFiltersState;
+        }) => {
+            const { searchParams: sp, languageFilters: langs, complexRules: rules, companyFilters: cf } = next;
+            companyFiltersRef.current = cf;
+            setSearchParams(sp);
+            setLanguageFilters(langs);
+            setComplexRules(rules);
+            setCompanyFilters(cf);
+            skipComplexDebounceOnceRef.current = true;
+            setDebouncedComplexRules(rules);
+            debouncedComplexRulesRef.current = rules;
+
+            const snapshot = buildAdvancedPayloadFromPanel(sp, langs, rules);
+            if (companyFiltersAreActive(cf)) {
+                snapshot.companyFilters = {
+                    industries: cf.industries,
+                    fields: cf.fields,
+                    roles: cf.roles,
+                    sizes: cf.sizes,
+                    sectors: cf.sectors,
+                };
+            }
+
+            const active = isAdvancedSnapshotActive(snapshot, cf);
+            suppressNextListFetchEffectRef.current = true;
+            setAppliedAdvancedFilters(active ? snapshot : null);
+            setPage(1);
+
+            if (suspendListPolling) {
+                const pool =
+                    semanticBaselineCandidates && semanticBaselineCandidates.length > 0
+                        ? semanticBaselineCandidates
+                        : candidates;
+                const advForClient = active
+                    ? snapshot
+                    : buildAdvancedPayloadFromPanel(createDefaultListSearchParams(), [], []);
+                const filtered = filterCandidatesByAdvancedClient(
+                    pool,
+                    advForClient,
+                    debouncedSearchTerm,
+                    showIncompleteOnly,
+                );
+                setCandidates(filtered);
+                setTotalCandidates(filtered.length);
+                return;
+            }
+
+            let advanced: AppliedAdvancedSearchPayload | null = null;
+            if (active) {
+                advanced = snapshot;
+            } else if (companyFiltersAreActive(cf)) {
+                advanced = {
+                    companyFilters: {
+                        industries: cf.industries,
+                        fields: cf.fields,
+                        roles: cf.roles,
+                        sizes: cf.sizes,
+                        sectors: cf.sectors,
+                    },
+                } as AppliedAdvancedSearchPayload;
+            }
+
+            void fetchCandidatesList({
+                page: 1,
+                limit: pageSize,
+                search: debouncedSearchTerm,
+                advanced,
+                dataIncomplete: showIncompleteOnly,
+                jobId: selectedJobId.trim(),
+                savedSearchId: loadedSearchRef.current?.id ?? null,
+            });
+        },
+        [
+            suspendListPolling,
+            semanticBaselineCandidates,
+            candidates,
+            debouncedSearchTerm,
+            showIncompleteOnly,
+            selectedJobId,
+            pageSize,
+            fetchCandidatesList,
+        ],
+    );
+
+    const clearSmartSearchFilters = useCallback(() => {
+        setSuspendListPolling(false);
+        setSemanticBaselineCandidates(null);
+        setSmartSearchQuery('');
+        setSelectedJobId('');
+        setIsSmartSearchOpen(false);
+        suppressNextListFetchEffectRef.current = true;
+        setPage(1);
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
+            dataIncomplete: showIncompleteOnly,
+            jobId: '',
+            savedSearchId: loadedSearchRef.current?.id ?? null,
+        });
+    }, [
+        pageSize,
+        debouncedSearchTerm,
+        resolveAdvancedPayloadForFetch,
+        fetchCandidatesList,
+        showIncompleteOnly,
+    ]);
+
+    const updateAdvancedPanel = useCallback(
+        (
+            next: {
+                searchParams: ListSearchParamsState;
+                languageFilters: { language: string; level: string }[];
+                complexRules: ComplexFilterRule[];
+                companyFilters: CompanyFiltersState;
+            },
+            refetch: boolean,
+        ) => {
+            if (refetch) {
+                applyAdvancedFiltersAndRefetch(next);
+                return;
+            }
+            setSearchParams(next.searchParams);
+            setLanguageFilters(next.languageFilters);
+            setComplexRules(next.complexRules);
+            skipComplexDebounceOnceRef.current = true;
+            setDebouncedComplexRules(next.complexRules);
+            debouncedComplexRulesRef.current = next.complexRules;
+        },
+        [applyAdvancedFiltersAndRefetch],
+    );
+
+    const candidateActiveFilterChips = useMemo((): ActiveFilterChip[] => {
+        const chips: ActiveFilterChip[] = [];
+        const q = searchTerm.trim();
+        if (q) {
+            chips.push({
+                id: 'search',
+                group: 'חיפוש',
+                label: q,
+                onRemove: () => {
+                    setUrlSearchParams((params) => {
+                        const next = new URLSearchParams(params);
+                        next.delete('q');
+                        return next;
+                    }, { replace: true });
+                    setSearchTerm('');
+                    setDebouncedSearchTerm('');
+                },
+            });
+        }
+        if (showNeedsAttention) {
+            chips.push({
+                id: 'needs-attention',
+                group: 'סינון מהיר',
+                label: t('candidates.needs_attention_tooltip'),
+                onRemove: () => setShowNeedsAttention(false),
+            });
+        }
+        if (showFavoritesOnly) {
+            chips.push({
+                id: 'favorites-only',
+                group: 'סינון מהיר',
+                label: t('candidates.favorites_only_tooltip'),
+                onRemove: () => setShowFavoritesOnly(false),
+            });
+        }
+        if (showIncompleteOnly) {
+            chips.push({
+                id: 'incomplete-only',
+                group: 'סינון מהיר',
+                label: 'חסר נתונים',
+                onRemove: () => {
+                    setShowIncompleteOnly(false);
+                    setPage(1);
+                },
+            });
+        }
+        if (suspendListPolling && (smartSearchQuery.trim() || selectedJobId.trim())) {
+            const job = jobs.find((j) => j.id === selectedJobId);
+            const label = [smartSearchQuery.trim(), job?.title].filter(Boolean).join(' · ') || 'חיפוש חכם';
+            chips.push({
+                id: 'smart-search',
+                group: 'חיפוש חכם',
+                label,
+                onRemove: clearSmartSearchFilters,
+            });
+        }
+
+        const cfFromApplied = appliedAdvancedFilters?.companyFilters;
+        const effectiveCf: CompanyFiltersState =
+            cfFromApplied && companyFiltersAreActive(normalizeCompanyFiltersState(cfFromApplied))
+                ? normalizeCompanyFiltersState(cfFromApplied)
+                : companyFilters;
+
+        const pushCompanyValues = (
+            group: string,
+            key: keyof CompanyFiltersState,
+            values: string[],
+            cf: CompanyFiltersState,
+        ) => {
+            for (const value of values) {
+                chips.push({
+                    id: `${String(key)}:${value}`,
+                    group,
+                    label: value,
+                    onRemove: () => {
+                        const next = {
+                            ...cf,
+                            [key]: cf[key].filter((v) => v !== value),
+                        };
+                        handleCompanyFiltersApply(next);
+                    },
+                });
+            }
+        };
+
+        if (companyFiltersAreActive(effectiveCf)) {
+            pushCompanyValues('תעשייה', 'industries', effectiveCf.industries, effectiveCf);
+            pushCompanyValues('תחום', 'fields', effectiveCf.fields, effectiveCf);
+            pushCompanyValues('תפקיד', 'roles', effectiveCf.roles, effectiveCf);
+            pushCompanyValues('גודל', 'sizes', effectiveCf.sizes, effectiveCf);
+            pushCompanyValues('סקטור', 'sectors', effectiveCf.sectors, effectiveCf);
+        }
+
+        const draftSnapshot = buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules);
+        const adv =
+            appliedAdvancedFilters ??
+            (isAdvancedSnapshotActive(draftSnapshot, EMPTY_COMPANY_FILTERS) ? draftSnapshot : null);
+        const refetchAdvanced = appliedAdvancedFilters != null;
+        const d = advDefaults;
+        if (!adv) return chips;
+
+        const commitAdvanced = (next: {
+            searchParams: ListSearchParamsState;
+            languageFilters: { language: string; level: string }[];
+            complexRules: ComplexFilterRule[];
+            companyFilters: CompanyFiltersState;
+        }) => updateAdvancedPanel(next, refetchAdvanced);
+
+        for (const tag of adv.tags || []) {
+            const tVal = String(tag || '').trim();
+            if (!tVal) continue;
+            chips.push({
+                id: `tag:${tVal}`,
+                group: 'תגית',
+                label: tVal,
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: {
+                            ...searchParams,
+                            mainFieldTags: searchParams.mainFieldTags.filter((x) => x !== tVal),
+                        },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        for (const loc of adv.locations || []) {
+            const label = String(loc.value || '').trim();
+            if (!label) continue;
+            chips.push({
+                id: `loc:${loc.type}:${label}`,
+                group: 'מיקום',
+                label,
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: {
+                            ...searchParams,
+                            locations: searchParams.locations.filter(
+                                (l) => !(l.type === loc.type && l.value === loc.value),
+                            ),
+                        },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (adv.statusFilter === 'active' || adv.statusFilter === 'inactive') {
+            chips.push({
+                id: `status:${adv.statusFilter}`,
+                group: 'סטטוס',
+                label: adv.statusFilter === 'active' ? 'פעילים' : 'לא פעילים',
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: { ...searchParams, statusFilter: '' },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (adv.gender === 'male' || adv.gender === 'female') {
+            chips.push({
+                id: `gender:${adv.gender}`,
+                group: 'מגדר',
+                label: adv.gender === 'male' ? 'זכר' : 'נקבה',
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: { ...searchParams, gender: 'any' },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (String(adv.interestField || '').trim() || String(adv.interestRole || '').trim()) {
+            chips.push({
+                id: 'interest-field',
+                group: 'תחום עניין',
+                label: adv.interestRole || adv.interestField,
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: { ...searchParams, interestField: '', interestRole: '' },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (adv.lastUpdated?.from || adv.lastUpdated?.to) {
+            chips.push({
+                id: 'last-updated',
+                group: 'עודכן לאחרונה',
+                label: `${adv.lastUpdated.from || '…'} – ${adv.lastUpdated.to || '…'}`,
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: { ...searchParams, lastUpdated: null },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (adv.interestDate?.from || adv.interestDate?.to) {
+            chips.push({
+                id: 'interest-date',
+                group: 'תאריך התעניינות',
+                label: `${adv.interestDate.from || '…'} – ${adv.interestDate.to || '…'}`,
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: { ...searchParams, interestDate: null },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (adv.jobScopeAll === false && adv.jobScopes?.length) {
+            for (const scope of adv.jobScopes) {
+                chips.push({
+                    id: `scope:${scope}`,
+                    group: 'היקף',
+                    label: scope,
+                    onRemove: () => {
+                        const nextScopes = searchParams.jobScopes.filter((s) => s !== scope);
+                        commitAdvanced({
+                            searchParams: {
+                                ...searchParams,
+                                jobScopes: nextScopes.length > 0 ? nextScopes : [...jobScopeOptions],
+                            },
+                            languageFilters,
+                            complexRules,
+                            companyFilters: effectiveCf,
+                        });
+                    },
+                });
+            }
+        }
+        if (
+            adv.ageMin !== d.ageMin ||
+            adv.ageMax !== d.ageMax ||
+            adv.includeUnknownAge === false
+        ) {
+            const parts = [`${adv.ageMin}–${adv.ageMax}`];
+            if (adv.includeUnknownAge === false) parts.push('ללא גיל לא ידוע');
+            chips.push({
+                id: 'age-range',
+                group: 'גיל',
+                label: parts.join(', '),
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: {
+                            ...searchParams,
+                            ageMin: d.ageMin,
+                            ageMax: d.ageMax,
+                            includeUnknownAge: true,
+                        },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (
+            adv.salaryMin !== d.salaryMin ||
+            adv.salaryMax !== d.salaryMax ||
+            adv.includeUnknownSalary === false
+        ) {
+            const parts = [`${adv.salaryMin.toLocaleString()}–${adv.salaryMax.toLocaleString()} ₪`];
+            if (adv.includeUnknownSalary === false) parts.push('ללא שכר לא ידוע');
+            chips.push({
+                id: 'salary-range',
+                group: 'שכר',
+                label: parts.join(', '),
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: {
+                            ...searchParams,
+                            salaryMin: d.salaryMin,
+                            salaryMax: d.salaryMax,
+                            includeUnknownSalary: true,
+                        },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (adv.hasDegree) {
+            chips.push({
+                id: 'has-degree',
+                group: 'השכלה',
+                label: adv.includePracticalEngineers ? 'תואר (+ הנדסאים)' : 'עם תואר',
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: {
+                            ...searchParams,
+                            hasDegree: false,
+                            includePracticalEngineers: false,
+                        },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        for (const lang of adv.languages || []) {
+            const langLabel = lang.level ? `${lang.language} (${lang.level})` : lang.language;
+            chips.push({
+                id: `lang:${lang.language}:${lang.level}`,
+                group: 'שפה',
+                label: langLabel,
+                onRemove: () => {
+                    const nextLangs = languageFilters.filter(
+                        (l) => !(l.language === lang.language && l.level === lang.level),
+                    );
+                    commitAdvanced({
+                        searchParams,
+                        languageFilters: nextLangs,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        if (adv.complexRules?.length) {
+            chips.push({
+                id: 'complex-rules',
+                group: 'חיפוש',
+                label: `חיפוש מורכב (${adv.complexRules.length})`,
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams,
+                        languageFilters,
+                        complexRules: [],
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+        const wh = String(adv.workingHours || '').trim();
+        if (wh && wh !== 'גמיש') {
+            chips.push({
+                id: 'working-hours',
+                group: 'שעות',
+                label: wh,
+                onRemove: () => {
+                    commitAdvanced({
+                        searchParams: { ...searchParams, workingHours: 'גמיש' },
+                        languageFilters,
+                        complexRules,
+                        companyFilters: effectiveCf,
+                    });
+                },
+            });
+        }
+
+        return chips;
+    }, [
+        searchTerm,
+        showNeedsAttention,
+        showFavoritesOnly,
+        showIncompleteOnly,
+        suspendListPolling,
+        smartSearchQuery,
+        selectedJobId,
+        jobs,
+        clearSmartSearchFilters,
+        appliedAdvancedFilters,
+        companyFilters,
+        searchParams,
+        languageFilters,
+        complexRules,
+        advDefaults,
+        updateAdvancedPanel,
+        handleCompanyFiltersApply,
+        setUrlSearchParams,
+        t,
+    ]);
 
     const handleNameClick = useCallback(
         (e: React.MouseEvent, candidate: Candidate) => {
@@ -4900,15 +5472,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             )}
                         </button>
                     </div>
-                    <div className="mt-2">
-                        <button
-                            type="button"
-                            onClick={handleClearSearch}
-                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-primary-600 text-white hover:bg-primary-700 shadow-sm border border-primary-600"
-                        >
-                            נקה חיפוש
-                        </button>
-                    </div>
+                     
+                        <div className="flex flex-wrap items-center gap-2 mt-2">
+                            <button
+                                type="button"
+                                onClick={handleClearSearch}
+                                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-primary-600 text-white hover:bg-primary-700 shadow-sm border border-primary-600 shrink-0"
+                            >
+                                נקה חיפוש
+                            </button>
+                            <ActiveFilterChips chips={candidateActiveFilterChips} />
+                        </div>
+                    
                 </div>
                 <div className="flex flex-wrap items-center gap-2 mt-2 lg:mt-0">
                     <label className="text-[11px] text-text-muted font-semibold uppercase tracking-wide">גודל עמוד</label>
@@ -5301,7 +5876,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                  </div>
             )}
 
-            <main className="relative bg-bg-card rounded-2xl shadow-sm overflow-hidden border border-border-default">
+            <main className="relative bg-bg-card rounded-2xl shadow-sm border border-border-default min-w-0">
                 {isRemoteLoading && !hasInitiallyLoaded ? (
                     <div className="flex flex-col items-center justify-center min-h-[320px] gap-4 p-8">
                         <ArrowPathIcon className="w-10 h-10 text-primary-500 animate-spin" aria-hidden />
@@ -5344,12 +5919,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 }
                             />
                         </div>
-                        <div className="overflow-x-auto">
-                            <table className="w-full text-sm text-right min-w-[800px]">
-                            <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
+                        <HorizontalScrollArea
+                            pinHeader
+                            className="min-w-0"
+                            scrollClassName={ADMIN_TABLE_SCROLL_CLASS}
+                        >
+                            <table className={`w-full text-sm text-right min-w-[800px] ${STICKY_TABLE_CLASS}`} dir="rtl">
+                            <thead className="text-xs text-text-muted uppercase">
                                 <tr>
                                     {selectionMode && paginatedCandidates.length > 0 && (
-                                        <th className="p-4 w-12 align-middle">
+                                        <th className={stickyTableHeaderCellClass('p-4 w-12 align-middle text-center')}>
                                             <input
                                                 ref={selectAllCheckboxRef}
                                                 type="checkbox"
@@ -5370,7 +5949,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             onDragEnd={handleDragEnd} 
                                             onDragOver={(e) => e.preventDefault()} 
                                             onDrop={handleDrop} 
-                                            className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors ${draggingColumn === col.id ? 'dragging' : ''}`}
+                                            className={stickyTableHeaderCellClass(
+                                                `p-4 cursor-pointer hover:bg-bg-hover transition-colors ${draggingColumn === col.id ? 'dragging' : ''}`,
+                                            )}
                                             title="לחץ למיון או גרור לשינוי סדר"
                                         >
                                             <div className="flex items-center gap-2">
@@ -5383,7 +5964,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             </div>
                                         </th>
                                     ))}
-                                    <th scope="col" className="px-2 py-3 sticky end-0 bg-bg-subtle w-16">
+                                    <th scope="col" className={stickyTableHeaderCellClass('px-2 py-3 sticky end-0 w-16 z-40')}>
                                         <div className="relative" ref={settingsRef}>
                                             <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
                                             {isSettingsOpen && (
@@ -5443,7 +6024,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             ))}
                             </tbody>
                         </table>
-                        </div>
+                        </HorizontalScrollArea>
                         <div className="px-4 py-3 border-t border-border-default bg-bg-subtle">
                             <TablePaginationControls
                                 page={page}

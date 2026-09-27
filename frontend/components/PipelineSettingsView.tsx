@@ -737,9 +737,19 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
 
     const dragItem = useRef<number | null>(null);
     const dragOverItem = useRef<number | null>(null);
+    const outcomeDragItem = useRef<{ stageId: string; index: number } | null>(null);
+    const outcomeDragOverItem = useRef<{ stageId: string; index: number } | null>(null);
     const pipelineDragItem = useRef<number | null>(null);
     const pipelineDragOverItem = useRef<number | null>(null);
+    const [draggingStageIndex, setDraggingStageIndex] = useState<number | null>(null);
+    const [dragOverStageIndex, setDragOverStageIndex] = useState<number | null>(null);
+    const [draggingOutcomeKey, setDraggingOutcomeKey] = useState<string | null>(null);
+    const [dragOverOutcomeKey, setDragOverOutcomeKey] = useState<string | null>(null);
     const stagesContainerRef = useRef<HTMLDivElement>(null);
+    const stageRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+    const outcomeRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+    const [highlightStageId, setHighlightStageId] = useState<string | null>(null);
+    const [highlightOutcomeKey, setHighlightOutcomeKey] = useState<string | null>(null);
     const persistEnabled = useRef(false);
     const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
     const persistRevision = useRef(0);
@@ -754,6 +764,36 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
     useEffect(() => {
         expandedStageIdRef.current = expandedStageId;
     }, [expandedStageId]);
+
+    useEffect(() => {
+        if (!highlightStageId) return;
+        const scrollTimer = window.setTimeout(() => {
+            stageRowRefs.current.get(highlightStageId)?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center',
+            });
+        }, 80);
+        const clearTimer = window.setTimeout(() => setHighlightStageId(null), 3500);
+        return () => {
+            window.clearTimeout(scrollTimer);
+            window.clearTimeout(clearTimer);
+        };
+    }, [highlightStageId]);
+
+    useEffect(() => {
+        if (!highlightOutcomeKey) return;
+        const scrollTimer = window.setTimeout(() => {
+            outcomeRowRefs.current.get(highlightOutcomeKey)?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'center',
+            });
+        }, 120);
+        const clearTimer = window.setTimeout(() => setHighlightOutcomeKey(null), 3500);
+        return () => {
+            window.clearTimeout(scrollTimer);
+            window.clearTimeout(clearTimer);
+        };
+    }, [highlightOutcomeKey]);
 
     useEffect(() => {
         if (!clientId) {
@@ -991,8 +1031,9 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
 
     const handleAddStage = () => {
         if (!activePipeline) return;
+        const newStageId = `tmp-${Date.now()}`;
         const newStage: Stage = {
-            id: `tmp-${Date.now()}`,
+            id: newStageId,
             name: 'שלב חדש',
             color: 'bg-gray-100 text-gray-700',
             order: activePipeline.stages.length + 1,
@@ -1005,11 +1046,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
             stages: [...activePipeline.stages, newStage],
         };
         updatePipelines(pipelines.map(p => p.id === activePipelineId ? updatedPipeline : p));
-        setTimeout(() => {
-            if (stagesContainerRef.current) {
-                stagesContainerRef.current.scrollTop = stagesContainerRef.current.scrollHeight;
-            }
-        }, 100);
+        setHighlightStageId(newStageId);
     };
 
     const handleUpdateStage = (stageId: string, field: keyof Stage, value: unknown) => {
@@ -1036,8 +1073,9 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
 
     const handleAddOutcome = (stageId: string) => {
         if (!activePipeline) return;
+        const newOutcomeId = `out-${Date.now()}`;
         const newOutcome: StageOutcome = {
-            id: `out-${Date.now()}`,
+            id: newOutcomeId,
             name: 'תוצאה חדשה',
             actionType: 'stay',
             autoFollowupDays: 7,
@@ -1055,6 +1093,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
         };
         setExpandedStageId(stageId);
         updatePipelines(pipelines.map((p) => (p.id === activePipelineId ? updatedPipeline : p)));
+        setHighlightOutcomeKey(`${stageId}::${newOutcomeId}`);
     };
 
     const handleUpdateOutcome = (
@@ -1202,31 +1241,94 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
         pipelineDragOverItem.current = null;
     };
 
+    const clearStageDragState = () => {
+        dragItem.current = null;
+        dragOverItem.current = null;
+        setDraggingStageIndex(null);
+        setDragOverStageIndex(null);
+    };
+
     const handleDragStart = (e: React.DragEvent, position: number) => {
         dragItem.current = position;
+        dragOverItem.current = position;
+        setDraggingStageIndex(position);
+        setDragOverStageIndex(position);
         e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', String(position));
     };
 
     const handleDragEnter = (e: React.DragEvent, position: number) => {
+        if (dragItem.current === null) return;
         dragOverItem.current = position;
+        setDragOverStageIndex(position);
         e.preventDefault();
     };
 
     const handleDragEnd = () => {
         if (!activePipeline || dragItem.current === null || dragOverItem.current === null) {
-            dragItem.current = null;
-            dragOverItem.current = null;
+            clearStageDragState();
             return;
         }
-        const newStages = [...activePipeline.stages];
-        const draggedItemContent = newStages[dragItem.current];
-        newStages.splice(dragItem.current, 1);
-        newStages.splice(dragOverItem.current, 0, draggedItemContent);
-        const reorderedStages = newStages.map((s, i) => ({ ...s, order: i + 1 }));
-        const updatedPipeline = { ...activePipeline, stages: reorderedStages };
-        updatePipelines(pipelines.map(p => p.id === activePipelineId ? updatedPipeline : p));
-        dragItem.current = null;
-        dragOverItem.current = null;
+        if (dragItem.current !== dragOverItem.current) {
+            const newStages = [...activePipeline.stages];
+            const draggedItemContent = newStages[dragItem.current];
+            newStages.splice(dragItem.current, 1);
+            newStages.splice(dragOverItem.current, 0, draggedItemContent);
+            const reorderedStages = newStages.map((s, i) => ({ ...s, order: i + 1 }));
+            const updatedPipeline = { ...activePipeline, stages: reorderedStages };
+            updatePipelines(pipelines.map(p => p.id === activePipelineId ? updatedPipeline : p));
+        }
+        clearStageDragState();
+    };
+
+    const outcomeDragKey = (stageId: string, index: number) => `${stageId}::${index}`;
+
+    const clearOutcomeDragState = () => {
+        outcomeDragItem.current = null;
+        outcomeDragOverItem.current = null;
+        setDraggingOutcomeKey(null);
+        setDragOverOutcomeKey(null);
+    };
+
+    const handleOutcomeDragStart = (e: React.DragEvent, stageId: string, index: number) => {
+        outcomeDragItem.current = { stageId, index };
+        outcomeDragOverItem.current = { stageId, index };
+        setDraggingOutcomeKey(outcomeDragKey(stageId, index));
+        setDragOverOutcomeKey(outcomeDragKey(stageId, index));
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', outcomeDragKey(stageId, index));
+        e.stopPropagation();
+    };
+
+    const handleOutcomeDragEnter = (e: React.DragEvent, stageId: string, index: number) => {
+        if (!outcomeDragItem.current || outcomeDragItem.current.stageId !== stageId) return;
+        outcomeDragOverItem.current = { stageId, index };
+        setDragOverOutcomeKey(outcomeDragKey(stageId, index));
+        e.preventDefault();
+        e.stopPropagation();
+    };
+
+    const handleOutcomeDragEnd = () => {
+        if (!activePipeline || !outcomeDragItem.current || !outcomeDragOverItem.current) {
+            clearOutcomeDragState();
+            return;
+        }
+        const { stageId, index: fromIndex } = outcomeDragItem.current;
+        const { index: toIndex } = outcomeDragOverItem.current;
+        if (fromIndex !== toIndex) {
+            const updatedPipeline = {
+                ...activePipeline,
+                stages: activePipeline.stages.map((s) => {
+                    if (s.id !== stageId) return s;
+                    const outcomes = [...(s.outcomes || [])];
+                    const [moved] = outcomes.splice(fromIndex, 1);
+                    outcomes.splice(toIndex, 0, moved);
+                    return { ...s, outcomes };
+                }),
+            };
+            updatePipelines(pipelines.map((p) => (p.id === activePipelineId ? updatedPipeline : p)));
+        }
+        clearOutcomeDragState();
     };
 
     if (!clientId) {
@@ -1298,7 +1400,16 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
             ) : null}
 
             <div className="h-full flex flex-col md:flex-row gap-6 flex-1 min-h-0">
-            <style>{`.ghost { opacity: 0.5; background: #f3f4f6; }`}</style>
+            <style>{`
+                .pipeline-drop-target {
+                    box-shadow: inset 0 3px 0 0 rgb(var(--color-primary-500));
+                    border-color: rgb(var(--color-primary-400));
+                    background-color: rgb(var(--color-primary-50) / 0.55);
+                }
+                .pipeline-dragging {
+                    opacity: 0.45;
+                }
+            `}</style>
 
             <div className="w-full md:w-1/4 flex flex-col gap-4">
                 <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm h-full">
@@ -1434,21 +1545,30 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                     return (
                                     <div
                                         key={stage.id}
-                                        className="bg-white border border-border-default rounded-xl group hover:shadow-md transition-all flex flex-col overflow-hidden"
-                                        draggable={!isExpanded}
-                                        onDragStart={(e) => {
-                                            if (isExpanded) {
-                                                e.preventDefault();
-                                                return;
-                                            }
-                                            handleDragStart(e, index);
+                                        ref={(el) => {
+                                            if (el) stageRowRefs.current.set(stage.id, el);
+                                            else stageRowRefs.current.delete(stage.id);
                                         }}
+                                        className={`bg-white border border-border-default rounded-xl group hover:shadow-md transition-all flex flex-col overflow-hidden ${
+                                            highlightStageId === stage.id
+                                                ? 'pipeline-item-new-highlight ring-4 ring-primary-500/50 border-2 border-primary-500 shadow-lg shadow-primary-500/20'
+                                                : ''
+                                        } ${
+                                            dragOverStageIndex === index && draggingStageIndex !== index
+                                                ? 'pipeline-drop-target'
+                                                : ''
+                                        } ${draggingStageIndex === index ? 'pipeline-dragging' : ''}`}
                                         onDragEnter={(e) => handleDragEnter(e, index)}
-                                        onDragEnd={handleDragEnd}
                                         onDragOver={(e) => e.preventDefault()}
                                     >
                                         <div className="grid grid-cols-[40px_2fr_2fr_1fr_40px_40px] gap-4 items-center p-3 cursor-default">
-                                        <div className="flex items-center justify-center cursor-grab active:cursor-grabbing text-text-subtle hover:text-primary-600">
+                                        <div
+                                            draggable
+                                            onDragStart={(e) => handleDragStart(e, index)}
+                                            onDragEnd={handleDragEnd}
+                                            className="flex items-center justify-center cursor-grab active:cursor-grabbing text-text-subtle hover:text-primary-600 rounded-lg hover:bg-bg-subtle p-1"
+                                            title="גרור לשינוי סדר השלב"
+                                        >
                                             <Bars3Icon className="w-5 h-5"/>
                                         </div>
 
@@ -1529,12 +1649,42 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                                     </button>
                                                 </div>
 
-                                                {(stage.outcomes || []).map((outcome) => (
+                                                {(stage.outcomes || []).map((outcome, outcomeIndex) => {
+                                                    const outcomeHighlightKey = `${stage.id}::${outcome.id}`;
+                                                    const outcomeDragRowKey = outcomeDragKey(stage.id, outcomeIndex);
+                                                    return (
                                                     <div
                                                         key={outcome.id}
-                                                        className="flex flex-col gap-2 bg-white p-3 rounded-lg border border-border-default shadow-sm"
+                                                        ref={(el) => {
+                                                            if (el) outcomeRowRefs.current.set(outcomeHighlightKey, el);
+                                                            else outcomeRowRefs.current.delete(outcomeHighlightKey);
+                                                        }}
+                                                        onDragEnter={(e) => handleOutcomeDragEnter(e, stage.id, outcomeIndex)}
+                                                        onDragOver={(e) => e.preventDefault()}
+                                                        className={`flex flex-col gap-2 bg-white p-3 rounded-lg border border-border-default shadow-sm ${
+                                                            highlightOutcomeKey === outcomeHighlightKey
+                                                                ? 'pipeline-item-new-highlight ring-4 ring-primary-500/50 border-2 border-primary-500 shadow-lg shadow-primary-500/25'
+                                                                : ''
+                                                        } ${
+                                                            dragOverOutcomeKey === outcomeDragRowKey && draggingOutcomeKey !== outcomeDragRowKey
+                                                                ? 'pipeline-drop-target'
+                                                                : ''
+                                                        } ${draggingOutcomeKey === outcomeDragRowKey ? 'pipeline-dragging' : ''}`}
                                                     >
-                                                        <div className="grid grid-cols-[2fr_1fr_1fr_40px] gap-3 items-center">
+                                                        <div className="grid grid-cols-[32px_2fr_1fr_1fr_40px] gap-3 items-center">
+                                                        <div
+                                                            draggable={(stage.outcomes || []).length > 1}
+                                                            onDragStart={(e) => handleOutcomeDragStart(e, stage.id, outcomeIndex)}
+                                                            onDragEnd={handleOutcomeDragEnd}
+                                                            className={`flex items-center justify-center rounded-lg p-1 ${
+                                                                (stage.outcomes || []).length > 1
+                                                                    ? 'cursor-grab active:cursor-grabbing text-text-subtle hover:text-primary-600 hover:bg-bg-subtle'
+                                                                    : 'text-text-subtle/40 cursor-default'
+                                                            }`}
+                                                            title={(stage.outcomes || []).length > 1 ? 'גרור לשינוי סדר התוצאה' : undefined}
+                                                        >
+                                                            <Bars3Icon className="w-4 h-4" />
+                                                        </div>
                                                         <input
                                                             type="text"
                                                             value={outcome.name}
@@ -1689,7 +1839,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                                             </div>
                                                         </div>
                                                     </div>
-                                                ))}
+                                                );})}
                                                 {(!stage.outcomes || stage.outcomes.length === 0) && (
                                                     <div className="text-center py-4 text-sm text-text-muted italic bg-white rounded-lg border border-border-default border-dashed">
                                                         לא הוגדרו תוצאות אינטראקציה לשלב זה
@@ -1706,7 +1856,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                         <div className="mt-4 p-4 bg-blue-50 border border-blue-100 rounded-xl flex gap-3 text-sm text-blue-800">
                              <div className="bg-blue-100 p-1.5 rounded-full h-fit"><CheckCircleIcon className="w-5 h-5 text-blue-600"/></div>
                              <div>
-                                 <strong>טיפ:</strong> סדר השלבים משפיע על תצוגת הלוח (Kanban). שלבים עם אותו צבע יופיעו באותה עמודה בלוח. גרור את השלבים כדי לשנות את הסדר.
+                                 <strong>טיפ:</strong> סדר השלבים משפיע על תצוגת הלוח (Kanban). שלבים עם אותו צבע יופיעו באותה עמודה בלוח. גרור בידית <Bars3Icon className="w-4 h-4 inline -mt-0.5" /> לשינוי סדר שלבים ותוצאות.
                                  הגדרת "SLA" תצבע {isCandidateKind ? 'מועמדים' : 'פריטים'} בלוח באדום כאשר הם חורגים מהזמן המוגדר.
                              </div>
                         </div>
@@ -1726,6 +1876,37 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                 onSave={handleAddPipeline}
                 saving={saving}
             />
+            <style>{`
+                @keyframes pipeline-item-new-highlight {
+                    0% {
+                        opacity: 0.45;
+                        transform: translateY(-10px) scale(0.985);
+                        background-color: rgb(var(--color-primary-100));
+                        border-color: rgb(var(--color-primary-600));
+                    }
+                    20% {
+                        opacity: 1;
+                        transform: translateY(0) scale(1.015);
+                        background-color: rgb(var(--color-primary-100));
+                        border-color: rgb(var(--color-primary-600));
+                    }
+                    55% {
+                        opacity: 1;
+                        transform: translateY(0) scale(1.008);
+                        background-color: rgb(var(--color-primary-50));
+                        border-color: rgb(var(--color-primary-500));
+                    }
+                    100% {
+                        opacity: 1;
+                        transform: translateY(0) scale(1);
+                        background-color: rgb(var(--color-bg-card));
+                        border-color: rgb(var(--color-border-default));
+                    }
+                }
+                .pipeline-item-new-highlight {
+                    animation: pipeline-item-new-highlight 3.5s ease-out;
+                }
+            `}</style>
         </div>
     );
 };

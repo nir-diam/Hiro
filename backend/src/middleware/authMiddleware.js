@@ -21,6 +21,9 @@ const authMiddleware = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'change_me');
+    if (decoded?.typ === 'agent') {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
     req.user = decoded;
     return next();
   } catch (err) {
@@ -33,7 +36,12 @@ const optionalAuth = (req, res, next) => {
   const token = getBearerToken(req);
   if (!token) return next();
   try {
-    req.user = jwt.verify(token, process.env.JWT_SECRET || 'change_me');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'change_me');
+    if (decoded?.typ === 'agent') {
+      req.user = null;
+    } else {
+      req.user = decoded;
+    }
   } catch {
     req.user = null;
   }

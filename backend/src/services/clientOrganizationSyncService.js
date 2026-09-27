@@ -4,6 +4,7 @@ const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
 const { migrateContactsFromTmpToOrg } = require('./clientContactService');
+const { migrateTasksFromTmpToOrg } = require('./clientTaskService');
 
 /** Client metadata keys owned by onboarding / CRM — never overwritten from org sync. */
 const CLIENT_OWNED_META_KEYS = new Set(['notes', 'contactRole']);
@@ -135,14 +136,22 @@ const applyOrgToClient = async (client, org, options = {}) => {
   return client.reload();
 };
 
+const clearPrimaryLinksForClient = async (clientId, { exceptLinkId = null } = {}) => {
+  if (!clientId) return;
+  const where = { clientId, isPrimary: true };
+  if (exceptLinkId) where.id = { [Op.ne]: exceptLinkId };
+  await ClientOrganizationLink.update({ isPrimary: false }, { where });
+};
+
 const ensureOrganizationLink = async (clientId, organizationId, { isPrimary = false } = {}) => {
   if (!clientId || !organizationId) return null;
   const [link] = await ClientOrganizationLink.findOrCreate({
     where: { clientId, organizationId },
     defaults: { isPrimary },
   });
-  if (isPrimary && !link.isPrimary) {
-    await link.update({ isPrimary: true });
+  if (isPrimary) {
+    await clearPrimaryLinksForClient(clientId, { exceptLinkId: link.id });
+    if (!link.isPrimary) await link.update({ isPrimary: true });
   }
   return link;
 };
@@ -153,8 +162,9 @@ const ensureOrganizationTmpLink = async (clientId, organizationTmpId, { isPrimar
     where: { clientId, organizationTmpId },
     defaults: { isPrimary },
   });
-  if (isPrimary && !link.isPrimary) {
-    await link.update({ isPrimary: true });
+  if (isPrimary) {
+    await clearPrimaryLinksForClient(clientId, { exceptLinkId: link.id });
+    if (!link.isPrimary) await link.update({ isPrimary: true });
   }
   return link;
 };
@@ -198,6 +208,7 @@ const promoteClientsFromTmp = async (tmpId, orgId) => {
     const client = await Client.findByPk(link.clientId);
     if (client) await applyOrgToClient(client, org, { fullSync: true });
     await migrateContactsFromTmpToOrg(tmpId, org.id);
+    await migrateTasksFromTmpToOrg(tmpId, org.id);
     promoted += 1;
   }
   return promoted;

@@ -1,6 +1,7 @@
 const {
   scoreResumeTextExtract,
   pickBestResumeTextExtract,
+  resumeTextLooksOcrGarbled,
 } = require('../pdfTextQuality');
 
 describe('pdfTextQuality', () => {
@@ -17,5 +18,23 @@ describe('pdfTextQuality', () => {
     ]);
     expect(picked.source).toBe('b');
     expect(picked.text).toContain('קורות');
+  });
+
+  it('penalizes OCR Hebrew with embedded digits', () => {
+    const clean = 'יותר מ-30 שנות ניסיון בניהול תקציבים וחשבות שכר';
+    const ocr = 'יותר מ 30 ה8ש יהול תקציבים ותזרימי 8ה"ח ראשית';
+    expect(scoreResumeTextExtract(clean)).toBeGreaterThan(scoreResumeTextExtract(ocr));
+    expect(resumeTextLooksOcrGarbled(ocr)).toBe(true);
+    expect(resumeTextLooksOcrGarbled(clean)).toBe(false);
+  });
+
+  it('prefers pdftotext over garbled OCR when both present', () => {
+    const pdftotext = 'ברכה מייסון ג\'דיידה-מכר msob26@gmail.com ניסיון בחשבונאות';
+    const ocr = 'ברכה מייסון ג\'דיידה -מכר 4927277-052 ‎gmail.comémsob26@‏ -יותר מ 30 ה8ש יהול';
+    const picked = pickBestResumeTextExtract([
+      { text: pdftotext, source: 'pdftotext-layout' },
+      { text: ocr, source: 'ocr' },
+    ]);
+    expect(picked.source).toBe('pdftotext-layout');
   });
 });

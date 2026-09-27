@@ -1,8 +1,19 @@
 import { authHeaders } from '../utils/authHeaders';
+import { downloadBlobAsFile } from '../utils/downloadBlobAsFile';
 
 const apiBase = () => import.meta.env.VITE_API_BASE || '';
 
 export type OutboundMessageChannel = 'email' | 'whatsapp' | 'sms';
+
+export type OutboundMessageAttachmentRef = {
+    filename: string;
+    contentType?: string | null;
+    size?: number | null;
+    notificationMessageId: string;
+    index: number;
+    /** Stored on client journal events so downloads work even if notification metadata is missing. */
+    contentBase64?: string | null;
+};
 
 export type CreateOutboundMessageEventInput = {
     clientId: string;
@@ -17,6 +28,10 @@ export type CreateOutboundMessageEventInput = {
     notificationMessageId?: string | null;
     providerMessageId?: string | null;
     deliveryStatus?: string | null;
+    attachments?: OutboundMessageAttachmentRef[];
+    /** When set, logs a completed proposal-sent journal event instead of a generic email event. */
+    proposalTemplateNames?: string[];
+    isProposal?: boolean;
 };
 
 /** Normalize any channel-like value. Never silently defaults to SMS. */
@@ -71,12 +86,19 @@ export async function createOutboundMessageClientEvent(
     const subject = input.subject != null ? String(input.subject).trim() : '';
     const body = String(input.body || '').trim();
     const delivery = String(input.deliveryStatus || 'נשלח').trim() || 'נשלח';
+    const proposalTemplateNames = Array.isArray(input.proposalTemplateNames)
+        ? input.proposalTemplateNames.map((name) => String(name || '').trim()).filter(Boolean)
+        : [];
+    const isProposalSend =
+        channel === 'email'
+        && (input.isProposal === true || proposalTemplateNames.length > 0);
 
     const descriptionLines = [
         `ערוץ: ${channelHe}`,
         `מאת: ${sender}`,
         `אל: ${to}`,
         subject ? `נושא: ${subject}` : null,
+        isProposalSend ? `תבניות הצעת מחיר: ${proposalTemplateNames.join(', ')}` : null,
         `מתי: ${whenLabel}`,
         `סטטוס מסירה: ${delivery}`,
         input.providerMessageId ? `מזהה ספק: ${input.providerMessageId}` : null,
@@ -91,16 +113,18 @@ export async function createOutboundMessageClientEvent(
     const organizationId = input.organizationId ? String(input.organizationId).trim() : '';
 
     const title =
-        channel === 'email'
-            ? `נשלח מייל${subject ? `: ${subject}` : ''}${contactName ? ` ל${contactName}` : ''}`
-            : channel === 'whatsapp'
-              ? `נשלחה הודעת WhatsApp${contactName ? ` ל${contactName}` : ''}`
-              : `נשלחה הודעת SMS${contactName ? ` ל${contactName}` : ''}`;
+        isProposalSend
+            ? `נשלחה הצעת מחיר${proposalTemplateNames.length ? `: ${proposalTemplateNames.join(', ')}` : ''}${contactName ? ` ל${contactName}` : ''}`
+            : channel === 'email'
+              ? `נשלח מייל${subject ? `: ${subject}` : ''}${contactName ? ` ל${contactName}` : ''}`
+              : channel === 'whatsapp'
+                ? `נשלחה הודעת WhatsApp${contactName ? ` ל${contactName}` : ''}`
+                : `נשלחה הודעת SMS${contactName ? ` ל${contactName}` : ''}`;
 
     const payload = {
         title: title.slice(0, 240),
         // English channel code first for reliable filtering; Hebrew/label second for UI.
-        type: [channel, channelHe],
+        type: isProposalSend ? ['proposal', 'הצעת מחיר', channel, channelHe] : [channel, channelHe],
         date: when.toISOString(),
         description: descriptionLines.join('\n'),
         coordinator: sender,
@@ -127,7 +151,25 @@ export async function createOutboundMessageClientEvent(
             deliveryStatus: delivery,
             providerMessageId: input.providerMessageId || null,
             notificationMessageId: input.notificationMessageId || null,
+            attachments: Array.isArray(input.attachments) && input.attachments.length ? input.attachments : null,
             readReceipt: null,
+            ...(isProposalSend
+                ? {
+                      outboundProposal: true,
+                      proposalTemplateNames,
+                      systemEvent: {
+                          triggerName: 'דיוור ודיווח',
+                          eventName: 'הצעת מחיר',
+                      },
+                  }
+                : channel === 'email'
+                  ? {
+                        systemEvent: {
+                            triggerName: 'דיוור ודיווח',
+                            eventName: 'נשלח מייל',
+                        },
+                    }
+                  : {}),
         },
     };
 
@@ -173,6 +215,8 @@ export type OutboundMessageHistoryItem = {
     contactId: string | null;
     contactName: string | null;
     organizationId: string | null;
+    notificationMessageId: string | null;
+    attachments: OutboundMessageAttachmentRef[];
 };
 
 type ClientEventLike = {
@@ -192,8 +236,77 @@ type ClientEventLike = {
         body?: string;
         sender?: string;
         deliveryStatus?: string | null;
+        notificationMessageId?: string | null;
+        attachments?: OutboundMessageAttachmentRef[] | null;
     } | null;
 };
+
+const parseAttachmentRefs = (
+    meta: ClientEventLike['metadata'],
+    fallbackNotificationMessageId: string | null,
+): OutboundMessageAttachmentRef[] => {
+    const raw = meta?.attachments;
+    if (!Array.isArray(raw) || !raw.length) return [];
+    const messageId =
+        (meta?.notificationMessageId != null ? String(meta.notificationMessageId).trim() : '')
+        || fallbackNotificationMessageId
+        || '';
+    if (!messageId) return [];
+
+    return raw
+        .map((row, index) => {
+            if (!row || typeof row !== 'object') return null;
+            const filename = String((row as OutboundMessageAttachmentRef).filename || '').trim();
+            if (!filename) return null;
+            const rowIndex = Number((row as OutboundMessageAttachmentRef).index);
+            const resolvedIndex = Number.isInteger(rowIndex) && rowIndex >= 0 ? rowIndex : index;
+            const rowMessageId = String((row as OutboundMessageAttachmentRef).notificationMessageId || '').trim();
+            return {
+                filename,
+                contentType:
+                    (row as OutboundMessageAttachmentRef).contentType != null
+                        ? String((row as OutboundMessageAttachmentRef).contentType)
+                        : null,
+                size:
+                    typeof (row as OutboundMessageAttachmentRef).size === 'number'
+                        ? (row as OutboundMessageAttachmentRef).size
+                        : null,
+                notificationMessageId: rowMessageId || messageId,
+                index: resolvedIndex,
+            } satisfies OutboundMessageAttachmentRef;
+        })
+        .filter((row): row is OutboundMessageAttachmentRef => Boolean(row));
+};
+
+export function notificationAttachmentDownloadUrl(messageId: string, index: number): string {
+    return `${apiBase()}/api/email-uploads/messages/${encodeURIComponent(messageId)}/attachments/${index}`;
+}
+
+export async function downloadNotificationMessageAttachment(
+    attachment: OutboundMessageAttachmentRef,
+): Promise<void> {
+    const messageId = String(attachment.notificationMessageId || '').trim();
+    if (!messageId || !apiBase()) {
+        throw new Error('לא ניתן להוריד את הקובץ');
+    }
+
+    const res = await fetch(notificationAttachmentDownloadUrl(messageId, attachment.index), {
+        method: 'GET',
+        headers: authHeaders(),
+        credentials: 'include',
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(
+            typeof (err as { message?: string }).message === 'string'
+                ? (err as { message: string }).message
+                : 'הורדת הקובץ נכשלה',
+        );
+    }
+
+    const blob = await res.blob();
+    await downloadBlobAsFile(blob, attachment.filename);
+}
 
 const extractBodyFromDescription = (description: string): string => {
     const marker = '── תוכן ההודעה ──';
@@ -254,6 +367,10 @@ const toHistoryItem = (event: ClientEventLike, channel: OutboundMessageChannel):
     const description = String(event.description || '');
     const linked =
         event.linkedTo && typeof event.linkedTo === 'object' ? event.linkedTo : null;
+    const notificationMessageId =
+        meta?.notificationMessageId != null
+            ? String(meta.notificationMessageId).trim() || null
+            : extractFieldFromDescription(description, 'מזהה הודעה במערכת');
     return {
         id: String(event.id || ''),
         channel,
@@ -273,6 +390,8 @@ const toHistoryItem = (event: ClientEventLike, channel: OutboundMessageChannel):
         contactId: linked?.id ? String(linked.id) : null,
         contactName: linked?.name ? String(linked.name) : null,
         organizationId: event.organizationId != null ? String(event.organizationId) : null,
+        notificationMessageId,
+        attachments: parseAttachmentRefs(meta, notificationMessageId),
     };
 };
 

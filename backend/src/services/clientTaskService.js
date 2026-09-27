@@ -1,10 +1,34 @@
 const ClientTask = require('../models/ClientTask');
 const Client = require('../models/Client');
 const Organization = require('../models/Organization');
+const OrganizationTmp = require('../models/OrganizationTmp');
 
-const buildTaskWhere = (clientId, { organizationId = null } = {}) => {
+const normalizeOrgFields = (data) => {
+  const next = { ...data };
+  if (
+    Object.prototype.hasOwnProperty.call(next, 'organizationId')
+    && next.organizationId != null
+    && String(next.organizationId).trim() === ''
+  ) {
+    next.organizationId = null;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(next, 'organizationTmpId')
+    && next.organizationTmpId != null
+    && String(next.organizationTmpId).trim() === ''
+  ) {
+    next.organizationTmpId = null;
+  }
+  return next;
+};
+
+const buildTaskWhere = (clientId, { organizationId = null, organizationTmpId = null } = {}) => {
   const where = { clientId };
-  if (organizationId) where.organizationId = String(organizationId);
+  if (organizationTmpId) {
+    where.organizationTmpId = String(organizationTmpId);
+  } else if (organizationId) {
+    where.organizationId = String(organizationId);
+  }
   return where;
 };
 
@@ -17,6 +41,12 @@ const listByClientId = async (clientId, opts = {}) =>
         as: 'organization',
         required: false,
         attributes: ['id', 'name', 'logo'],
+      },
+      {
+        model: OrganizationTmp,
+        as: 'organizationTmp',
+        required: false,
+        attributes: ['id', 'name'],
       },
     ],
     order: [['dueDate', 'ASC'], ['createdAt', 'ASC']],
@@ -37,15 +67,18 @@ const listAllWithClient = async () =>
         required: false,
         attributes: ['id', 'name', 'logo'],
       },
+      {
+        model: OrganizationTmp,
+        as: 'organizationTmp',
+        required: false,
+        attributes: ['id', 'name'],
+      },
     ],
     order: [['dueDate', 'ASC'], ['createdAt', 'ASC']],
   });
 
 const createForClient = async (clientId, payload = {}) => {
-  const data = { ...payload, clientId };
-  if (data.organizationId != null && String(data.organizationId).trim() === '') {
-    data.organizationId = null;
-  }
+  const data = normalizeOrgFields({ ...payload, clientId });
   return ClientTask.create(data);
 };
 
@@ -56,15 +89,7 @@ const update = async (id, payload = {}) => {
     err.status = 404;
     throw err;
   }
-  const data = { ...payload };
-  if (
-    Object.prototype.hasOwnProperty.call(data, 'organizationId')
-    && data.organizationId != null
-    && String(data.organizationId).trim() === ''
-  ) {
-    data.organizationId = null;
-  }
-  await row.update(data);
+  await row.update(normalizeOrgFields(payload));
   return row;
 };
 
@@ -78,4 +103,23 @@ const remove = async (id) => {
   await row.destroy();
 };
 
-module.exports = { listByClientId, listAllWithClient, createForClient, update, remove };
+const migrateTasksFromTmpToOrg = async (organizationTmpId, organizationId) => {
+  const tmpId = String(organizationTmpId || '').trim();
+  const orgId = String(organizationId || '').trim();
+  if (!tmpId || !orgId) return 0;
+
+  const [count] = await ClientTask.update(
+    { organizationId: orgId, organizationTmpId: null },
+    { where: { organizationTmpId: tmpId } },
+  );
+  return count;
+};
+
+module.exports = {
+  listByClientId,
+  listAllWithClient,
+  createForClient,
+  update,
+  remove,
+  migrateTasksFromTmpToOrg,
+};

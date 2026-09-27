@@ -11,6 +11,7 @@ const {
   jobRequiresSalary,
   jobRequiresAvailability,
   normalizeAvailabilityTier,
+  candidateTagFiltersMatch,
   DEFAULT_PENALTY_POLICIES,
 } = require('../matchingPenaltyService');
 
@@ -342,5 +343,44 @@ describe('computeGeneralPenalties aligns with parameterMatches', () => {
     const jobOpen = { gender: 'לא משנה', mobility: false, licenseType: 'לא חשוב', jobType: [] };
     const pen = computeGeneralPenalties({ gender: 'נקבה' }, jobOpen, CONFIG);
     expect(pen.total).toBe(0);
+  });
+});
+
+describe('candidateTagFiltersMatch — profile tag green/red modes', () => {
+  const jobWithReception = {
+    skills: [{ key: 'receptionist', name: 'פקיד/ת קבלה ושירות', mode: 'normal' }],
+  };
+  const jobWithLogistics = {
+    skills: [{ key: 'logistics_coordinator', name: 'רכז/ת לוגיסטיקה', mode: 'normal' }],
+  };
+
+  it('excludes jobs that have a candidate negative (red) tag', () => {
+    const candidate = {
+      tagDetails: [
+        {
+          tagKey: 'receptionist',
+          displayNameHe: 'פקיד/ת קבלה ושירות',
+          mode: 'negative',
+          rawType: 'role',
+        },
+      ],
+    };
+    expect(candidateTagFiltersMatch(jobWithReception, candidate).ok).toBe(false);
+    expect(candidateTagFiltersMatch(jobWithLogistics, candidate).ok).toBe(true);
+  });
+
+  it('requires jobs to include candidate mandatory (green) tags', () => {
+    const candidate = {
+      tagDetails: [
+        {
+          tagKey: 'receptionist',
+          displayNameHe: 'פקיד/ת קבלה ושירות',
+          mode: 'mandatory',
+          rawType: 'role',
+        },
+      ],
+    };
+    expect(candidateTagFiltersMatch(jobWithReception, candidate).ok).toBe(true);
+    expect(candidateTagFiltersMatch(jobWithLogistics, candidate).ok).toBe(false);
   });
 });

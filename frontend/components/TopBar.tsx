@@ -12,7 +12,7 @@ import HelpCenterDrawer from './HelpCenterDrawer';
 import { useAuth } from '../context/AuthContext';
 import {
     NOTIFICATION_MESSAGES_REFRESH_EVENT,
-    countInboxAttentionFromApiRows,
+    countIncomingMessagesFromApiRows,
 } from '../services/notificationInboxCounts';
 
 const ActionButton: React.FC<{
@@ -84,7 +84,7 @@ interface TopBarProps {
 const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenNewTask, onToggleSidebar }) => {
     const navigate = useNavigate();
     const location = useLocation();
-    const { canPage } = useAuth();
+    const { canPage, user } = useAuth();
     
     const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
     const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
@@ -119,11 +119,17 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                 return;
             }
             const rows: unknown = await response.json();
-            setInboxAttentionCount(countInboxAttentionFromApiRows(rows));
+            setInboxAttentionCount(
+                countIncomingMessagesFromApiRows(rows, {
+                    email: user?.email,
+                    name: user?.name,
+                    id: user?.id,
+                }),
+            );
         } catch {
             setInboxAttentionCount(0);
         }
-    }, [showNotificationsPage, apiBase]);
+    }, [showNotificationsPage, apiBase, user?.email, user?.name, user?.id]);
 
     useEffect(() => {
         void refreshInboxAttentionCount();
