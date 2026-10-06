@@ -2,7 +2,7 @@ const express = require('express');
 const tagController = require('../controllers/tagController');
 const authMiddleware = require('../middleware/authMiddleware');
 const optionalAuth = authMiddleware.optionalAuth;
-const { optionalAttachDbUser } = require('../middleware/permissionMiddleware');
+const { optionalAttachDbUser, authMiddleware: authRequired, requirePagePermission } = require('../middleware/permissionMiddleware');
 
 const router = express.Router();
 const tagWrite = [optionalAuth, optionalAttachDbUser];
@@ -20,9 +20,13 @@ router.patch('/ai-decisions/:id/comments', ...tagWrite, tagController.updateAiDe
 router.patch('/ai-decisions/:id/fields', ...tagWrite, tagController.updateAiDecisionFields);
 router.post('/ai-decisions/backfill', tagController.backfillAiDecisions);
 router.post('/ai-decisions/backfill-auto-merge', tagController.backfillAutoMerge);
+router.post('/ai-decisions/refresh-hybrid-snapshots', ...tagWrite, tagController.refreshHybridSnapshots);
 
 router.post('/merge', ...tagWrite, tagController.mergeTags);
 
+const tagAdminWrite = [authRequired, requirePagePermission('page:admin')];
+router.post('/protect', ...tagAdminWrite, tagController.protectTags);
+router.post('/unprotect', ...tagAdminWrite, tagController.unprotectTags);
 
 router.post('/blacklist', ...tagWrite, tagController.blacklistTags);
 router.get('/rebuild-embeddings', tagController.rebuildEmbeddings);

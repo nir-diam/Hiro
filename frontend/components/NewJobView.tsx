@@ -14,12 +14,14 @@ import { SmartTagType } from './SmartTagTypes';
 import TagSelectorModal, { TagOption as GlobalTagOption } from './TagSelectorModal';
 import { GoogleGenAI, Type } from '@google/genai';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
+import { jobFieldKey } from '../utils/portalJobFilters';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import SearchableSelect from './SearchableSelect';
 import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
+import { matchOrgOption } from '../utils/matchCompanyLabel';
 import { jobStatusApiToForm, jobStatusFormToApi } from '../utils/jobStatusLabels';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
 import { saveJobPublication, patchJobBoardSources } from '../services/publishingApi';
@@ -39,6 +41,15 @@ import {
     sortDrivingLicensePicklistRows,
 } from '../services/picklistValuesApi';
 import { fetchClientUsageSettings } from '../services/usageSettingsApi';
+import { CLIENT_MODULE_DIGITAL_SCREENING, isClientModuleEnabled } from '../utils/clientModules';
+import JobCvForwardSettingsCard from './JobCvForwardSettingsCard';
+import {
+    cvForwardSettingsFromJob,
+    cvForwardSettingsToPayload,
+    DEFAULT_CV_FORWARD_SETTINGS,
+    type CvForwardSettingsForm,
+} from '../utils/cvForwardSettings';
+import { formatJobTagRelevanceScoreOnTenHe } from '../utils/tagWeightDisplay';
 
 // --- TYPES ---
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
@@ -579,6 +590,12 @@ const TechnicalIdentifiers: React.FC<{
     onReScreeningCooldownMonthsChange: (n: number) => void;
     onRequireOriginalCvChange: (v: boolean) => void;
     orgScreeningDefaults?: { validityDays: number; cooldownMonths: number; requireOriginalCv: boolean } | null;
+    cvForwardSettings: CvForwardSettingsForm;
+    onCvForwardSettingsChange: (settings: CvForwardSettingsForm) => void;
+    cvForwardStaffUsers: Array<{ id: string; name: string; email?: string }>;
+    cvForwardStaffUsersLoading?: boolean;
+    clientName?: string;
+    defaultTechIdsOpen?: boolean;
 }> = ({
     jobId,
     postingCode,
@@ -592,8 +609,14 @@ const TechnicalIdentifiers: React.FC<{
     onReScreeningCooldownMonthsChange,
     onRequireOriginalCvChange,
     orgScreeningDefaults,
+    cvForwardSettings,
+    onCvForwardSettingsChange,
+    cvForwardStaffUsers,
+    cvForwardStaffUsersLoading,
+    clientName = '',
+    defaultTechIdsOpen = false,
 }) => {
-    const [isOpen, setIsOpen] = useState(false);
+    const [isOpen, setIsOpen] = useState(defaultTechIdsOpen);
     const [uniqueEmailCopied, setUniqueEmailCopied] = useState(false);
     const { t } = useLanguage();
 
@@ -610,7 +633,15 @@ const TechnicalIdentifiers: React.FC<{
     };
 
     return (
-        <div className="mt-6 pt-4 border-t border-border-default">
+        <div className="mt-6 pt-4 border-t border-border-default space-y-4">
+            <JobCvForwardSettingsCard
+                settings={cvForwardSettings}
+                onChange={onCvForwardSettingsChange}
+                staffUsers={cvForwardStaffUsers}
+                staffUsersLoading={cvForwardStaffUsersLoading}
+                clientName={clientName}
+            />
+
             <button 
                 type="button" 
                 onClick={() => setIsOpen(!isOpen)}
@@ -621,7 +652,7 @@ const TechnicalIdentifiers: React.FC<{
             </button>
 
             {isOpen && (
-                <div className="mt-4 space-y-4 animate-fade-in">
+                <div className="space-y-4 animate-fade-in">
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                         <div className="md:col-span-2">
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.unique_email')}</label>
@@ -1233,9 +1264,9 @@ const SmartTag: React.FC<{
 
     const borderClass =
         tag.mode === 'mandatory'
-            ? 'border-green-500'
+            ? 'border-[3px] border-green-500 ring-2 ring-green-400/70 shadow-[0_0_0_1px_rgba(34,197,94,0.45),0_0_10px_rgba(34,197,94,0.35)]'
             : tag.mode === 'negative'
-                ? 'border-red-500'
+                ? 'border-[3px] border-red-500 ring-2 ring-red-400/70 shadow-[0_0_0_1px_rgba(239,68,68,0.45),0_0_10px_rgba(239,68,68,0.35)]'
                 : SMART_TAG_TYPE_BORDER_STYLES[type];
 
     type TooltipLine =
@@ -1252,7 +1283,10 @@ const SmartTag: React.FC<{
               : { kind: 'meta' as const, text: 'ציון רך: משפיע על התאמת תגיות' },
         tag.aiMode ? { kind: 'meta' as const, text: `מצב מקור: ${tag.aiMode}` } : null,
         tag.relevance_score != null && tag.relevance_score !== undefined
-            ? { kind: 'meta' as const, text: `ציון רלוונטיות: ${tag.relevance_score}/10` }
+            ? {
+                  kind: 'meta' as const,
+                  text: `ציון רלוונטיות: ${formatJobTagRelevanceScoreOnTenHe(tag.relevance_score)}`,
+              }
             : null,
         tag.tag_reason ? { kind: 'meta' as const, text: `נימוק: ${tag.tag_reason}` } : null,
         tag.quote ? { kind: 'quote' as const, text: tag.quote } : null,
@@ -1785,6 +1819,60 @@ const formatJobFieldLabel = (jobField: SelectedJobField | null | undefined): str
 const isJobFieldComplete = (jobField: SelectedJobField | null | undefined): boolean =>
     Boolean(jobField?.category?.trim() && jobField?.role?.trim());
 
+const parseJobFieldsFromSource = (
+    raw: unknown,
+    fallback: SelectedJobField | null,
+): SelectedJobField[] => {
+    if (Array.isArray(raw)) {
+        const out: SelectedJobField[] = [];
+        for (const item of raw) {
+            if (!item || typeof item !== 'object') continue;
+            const row = item as Record<string, unknown>;
+            const category = String(row.category || '').trim();
+            const role = String(row.role || '').trim();
+            const fieldType = String(row.fieldType || '').trim();
+            if (!category || !role) continue;
+            out.push({
+                category,
+                fieldType,
+                role,
+                categoryId: row.categoryId != null ? String(row.categoryId) : undefined,
+                clusterId: row.clusterId != null ? String(row.clusterId) : undefined,
+                roleId: row.roleId != null ? String(row.roleId) : undefined,
+            });
+        }
+        if (out.length) return out;
+    }
+    if (isJobFieldComplete(fallback)) return [fallback!];
+    return [];
+};
+
+const resolveFormJobFields = (data: {
+    jobFields?: SelectedJobField[];
+    jobField?: SelectedJobField | null;
+}): SelectedJobField[] => {
+    const fromList = Array.isArray(data.jobFields)
+        ? data.jobFields.filter((f) => isJobFieldComplete(f))
+        : [];
+    if (fromList.length) return fromList;
+    if (isJobFieldComplete(data.jobField)) return [data.jobField!];
+    return [];
+};
+
+const hasRequiredJobFields = (data: {
+    jobFields?: SelectedJobField[];
+    jobField?: SelectedJobField | null;
+}): boolean => resolveFormJobFields(data).length > 0;
+
+const jobFieldsButtonLabel = (
+    fields: SelectedJobField[],
+    placeholder: string,
+): string => {
+    if (!fields.length) return placeholder;
+    if (fields.length === 1) return formatJobFieldLabel(fields[0]);
+    return `${fields.length} תחומים`;
+};
+
 const sections = [
     { id: 'general-info', titleKey: 'new_job.section_general', icon: <BriefcaseIcon className="w-5 h-5"/> },
     { id: 'description-content', titleKey: 'new_job.section_description', icon: <PencilIcon className="w-5 h-5"/> },
@@ -1830,6 +1918,7 @@ const initialJobState = {
     availabilityOptions: [] as string[],
     jobType: ['מלאה'], 
     jobField: null as SelectedJobField | null,
+    jobFields: [] as SelectedJobField[],
     contacts: [] as string[],
     jobTitle: '', 
     jobDescription: '', 
@@ -1863,6 +1952,7 @@ const initialJobState = {
     validityDays: 60,
     reScreeningCooldownMonths: 3,
     requireOriginalCv: false,
+    cvForwardSettings: { ...DEFAULT_CV_FORWARD_SETTINGS },
 };
 
 const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = false, jobData, isEmbedded = false }) => {
@@ -1927,7 +2017,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     // sync formData.clientName to the org's actual name from the options list.
     useEffect(() => {
         if (!selectedOrg.orgId || orgOptionsLoading || filteredOrgOptions.length === 0) return;
-        const match = filteredOrgOptions.find((o) => o.id === selectedOrg.orgId);
+        const match = filteredOrgOptions.find((o) => String(o.id) === String(selectedOrg.orgId));
         if (!match) return;
         setFormData((prev) => {
             if (prev.clientName === match.label) return prev;
@@ -1940,6 +2030,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [parseSummaryData, setParseSummaryData] = useState<{ filled: string[], missing: string[] }>({ filled: [], missing: [] });
 
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
+    const [jobFieldDraft, setJobFieldDraft] = useState<SelectedJobField[]>([]);
+    const [jobFieldDraftError, setJobFieldDraftError] = useState<string | null>(null);
     const [pastedJobText, setPastedJobText] = useState('');
     const aiPasteAnalyzeUsedRef = useRef(false);
     const [isParsing, setIsParsing] = useState(false);
@@ -1980,6 +2072,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         cooldownMonths: number;
         requireOriginalCv: boolean;
     } | null>(null);
+    const [clientModules, setClientModules] = useState<Record<string, unknown>>({});
     const distributionPeopleRef = useRef<JobDistributionOption[]>([]);
     distributionPeopleRef.current = distributionPeople;
     /** Job stores recruiter as display name — resolve to staff user ids once client staff loads. */
@@ -1995,8 +2088,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     );
 
     useEffect(() => {
-        if (isJobFieldComplete(formData.jobField)) setJobFieldError(false);
-    }, [formData.jobField]);
+        if (hasRequiredJobFields(formData)) setJobFieldError(false);
+    }, [formData.jobFields, formData.jobField]);
 
     useEffect(() => {
         const sourceJob = (isEditing ? jobData : duplicateJobSeed) as any;
@@ -2025,6 +2118,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             const loadedField = sourceJob.field != null ? String(sourceJob.field).trim() : '';
             const loadedRole = sourceJob.role != null ? String(sourceJob.role).trim() : '';
             const loadedJobField = jobFieldFromCategoryRole(loadedField, loadedRole);
+            const loadedJobFields = parseJobFieldsFromSource(
+                (sourceJob as { jobFields?: unknown }).jobFields,
+                loadedJobField,
+            );
             const freshPostingCode = String(Math.floor(1 + Math.random() * 999999));
 
             setFormData(prev => ({
@@ -2032,7 +2129,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 clientName: sourceJob.client || prev.clientName,
                 aiField: loadedField || prev.aiField,
                 aiRole: loadedRole || prev.aiRole,
-                jobField: loadedJobField ?? prev.jobField,
+                jobFields: loadedJobFields,
+                jobField: loadedJobFields[0] ?? loadedJobField ?? prev.jobField,
                 publicJobTitle: sourceJob.publicJobTitle || prev.publicJobTitle,
                 publicDescription: sourceJob.PublicDescription
                     ? normalizeValueForEditor(String(sourceJob.PublicDescription))
@@ -2124,6 +2222,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         : prev.reScreeningCooldownMonths,
                 requireOriginalCv:
                     typeof sourceJob.requireOriginalCv === 'boolean' ? sourceJob.requireOriginalCv : prev.requireOriginalCv,
+                cvForwardSettings: cvForwardSettingsFromJob(sourceJob.cvForwardSettings),
                 recruitmentSources: Array.isArray(sourceJob.recruitmentSources)
                     ? sourceJob.recruitmentSources
                     : prev.recruitmentSources,
@@ -2384,19 +2483,17 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         if (selectedOrg.orgId) return selectedOrg.orgId;
         const label = formData.clientName.trim();
         if (!label) return null;
-        const match = orgOptions.find((o) => o.label === label);
-        return match?.id ?? null;
+        return matchOrgOption(label, orgOptions)?.id ?? null;
     }, [selectedOrg.orgId, formData.clientName, orgOptions]);
 
-    const applyOrgSelectionFromLabel = useCallback(
-        (orgLabel: string) => {
-            const trimmed = orgLabel.trim();
-            if (!trimmed) {
+    const applyOrgSelectionById = useCallback(
+        (orgId: string | null) => {
+            if (!orgId) {
                 setSelectedOrg({ orgId: null, clientId: null });
                 return;
             }
 
-            const match = orgOptions.find((o) => o.label === trimmed);
+            const match = orgOptions.find((o) => String(o.id) === String(orgId));
             if (!match) {
                 setSelectedOrg({ orgId: null, clientId: null });
                 return;
@@ -2407,7 +2504,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 return;
             }
 
-            setSelectedOrg({ orgId: match.id, clientId: match.clientId });
+            setSelectedOrg({ orgId: match.id, clientId: match.clientId ?? null });
 
             if (apiBase && !match.clientId) {
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -2430,24 +2527,43 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         [orgOptions, isTenantUser, user?.clientId, apiBase],
     );
 
+    const applyOrgSelectionFromLabel = useCallback(
+        (orgLabel: string) => {
+            const trimmed = orgLabel.trim();
+            if (!trimmed) {
+                applyOrgSelectionById(null);
+                return;
+            }
+
+            const match = matchOrgOption(trimmed, orgOptions);
+            if (!match) {
+                setSelectedOrg({ orgId: null, clientId: null });
+                return;
+            }
+
+            applyOrgSelectionById(match.id);
+        },
+        [orgOptions, applyOrgSelectionById],
+    );
+
     const handleOrgSelect = useCallback(
         (orgId: string | number | null) => {
             if (orgId == null) {
                 setFormData((prev) => ({ ...prev, clientName: '' }));
-                applyOrgSelectionFromLabel('');
+                applyOrgSelectionById(null);
                 return;
             }
             const match = orgOptions.find((o) => String(o.id) === String(orgId));
             if (!match) return;
             setFormData((prev) => ({ ...prev, clientName: match.label }));
-            applyOrgSelectionFromLabel(match.label);
+            applyOrgSelectionById(match.id);
         },
-        [orgOptions, applyOrgSelectionFromLabel],
+        [orgOptions, applyOrgSelectionById],
     );
 
     useEffect(() => {
         if (!resolvedOrganizationId || selectedOrg.orgId === resolvedOrganizationId) return;
-        const match = orgOptions.find((o) => o.id === resolvedOrganizationId);
+        const match = orgOptions.find((o) => String(o.id) === String(resolvedOrganizationId));
         if (!match) return;
         setSelectedOrg((prev) => ({
             orgId: resolvedOrganizationId,
@@ -2480,6 +2596,53 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             cancelled = true;
         };
     }, [resolvedClientId]);
+
+    useEffect(() => {
+        if (!resolvedClientId || !apiBase) {
+            setClientModules(isTenantUser && user?.tenantModules ? { ...user.tenantModules } : {});
+            return;
+        }
+        let cancelled = false;
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        fetch(`${apiBase}/api/clients/${encodeURIComponent(resolvedClientId)}`, {
+            headers: {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : null))
+            .then((raw) => {
+                if (cancelled) return;
+                const modules =
+                    raw && typeof raw === 'object' && raw.modules && typeof raw.modules === 'object'
+                        ? (raw.modules as Record<string, unknown>)
+                        : isTenantUser && user?.tenantModules
+                          ? { ...user.tenantModules }
+                          : {};
+                setClientModules(modules);
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setClientModules(isTenantUser && user?.tenantModules ? { ...user.tenantModules } : {});
+                }
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [resolvedClientId, apiBase, isTenantUser, user?.tenantModules]);
+
+    const digitalScreeningModuleEnabled = isClientModuleEnabled(
+        clientModules,
+        CLIENT_MODULE_DIGITAL_SCREENING,
+    );
+
+    useEffect(() => {
+        if (digitalScreeningModuleEnabled) return;
+        setFormData((prev) =>
+            prev.enableDigitalScreening ? { ...prev, enableDigitalScreening: false } : prev,
+        );
+    }, [digitalScreeningModuleEnabled]);
 
     // Load active recruitment sources for the selected client
     useEffect(() => {
@@ -2957,6 +3120,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 clientName: (extractedData.client || prev.clientName || '').trim() || prev.clientName,
                 aiField: nextAiField,
                 aiRole: nextAiRole,
+                jobFields: fromAiJobField ? [fromAiJobField] : prev.jobFields,
                 jobField: fromAiJobField ?? prev.jobField,
                 regionLabel: (extractedData.region != null && String(extractedData.region).trim())
                     ? String(extractedData.region).trim()
@@ -3032,6 +3196,21 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
             setAiFilledFields(filled);
             setParseSummaryData({ filled: filledList, missing: missingList });
+
+            const aiClientLabel = String(
+                raw.clientResolvedName || extractedData.client || '',
+            ).trim();
+            const orgFromApiId = raw.suggestedOrganizationId
+                ? orgOptions.find((o) => String(o.id) === String(raw.suggestedOrganizationId))
+                : null;
+            const orgMatch = orgFromApiId || matchOrgOption(aiClientLabel, orgOptions);
+            if (orgMatch) {
+                setFormData((prev) => ({ ...prev, clientName: orgMatch.label }));
+                applyOrgSelectionFromLabel(orgMatch.label);
+                setIsClientConfirmed(true);
+            } else if (aiClientLabel) {
+                applyOrgSelectionFromLabel(aiClientLabel);
+            }
 
             aiPasteAnalyzeUsedRef.current = true;
             setParseSuccess(true);
@@ -3372,9 +3551,52 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         setFormData(prev => ({ ...prev, locations: newLocations }));
     };
 
+    const openJobFieldSelector = () => {
+        setJobFieldDraft(resolveFormJobFields(formData));
+        setJobFieldDraftError(null);
+        setIsJobFieldSelectorOpen(true);
+    };
+
+    const toggleJobFieldDraft = (field: SelectedJobField) => {
+        setJobFieldDraftError(null);
+        const key = jobFieldKey(field);
+        setJobFieldDraft((prev) =>
+            prev.some((item) => jobFieldKey(item) === key)
+                ? prev.filter((item) => jobFieldKey(item) !== key)
+                : [...prev, field],
+        );
+    };
+
+    const confirmJobFieldDraft = () => {
+        const cleaned = jobFieldDraft.filter((f) => isJobFieldComplete(f));
+        if (!cleaned.length) {
+            setJobFieldDraftError('יש לבחור לפחות תחום משרה אחד');
+            return;
+        }
+        setFormData((prev) => ({
+            ...prev,
+            jobFields: cleaned,
+            jobField: cleaned[0] ?? null,
+        }));
+        setJobFieldError(false);
+        setJobFieldDraftError(null);
+        setIsJobFieldSelectorOpen(false);
+    };
+
+    const removeSavedJobField = (field: SelectedJobField) => {
+        const key = jobFieldKey(field);
+        setFormData((prev) => {
+            const next = resolveFormJobFields(prev).filter((item) => jobFieldKey(item) !== key);
+            return { ...prev, jobFields: next, jobField: next[0] ?? null };
+        });
+    };
+
+    const savedJobFields = resolveFormJobFields(formData);
+
     const buildJobPayload = () => {
         const data = formDataRef.current;
-        const field = data.jobField;
+        const jobFields = resolveFormJobFields(data);
+        const field = jobFields[0] ?? data.jobField;
         const cityValues = (data.locations || []).filter((loc: LocationItem) => loc.type === 'city').map((loc: LocationItem) => loc.value.trim()).filter(Boolean);
         const firstCity = cityValues[0] || '';
         const locationString = cityValues.length ? cityValues.join(LOCATION_SEP) : '';
@@ -3433,6 +3655,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             client: data.clientName || 'לקוח כללי',
             field: field?.category || data.aiField || '',
             role: field?.role || data.aiRole || '',
+            jobFields,
             priority: data.priority,
             clientType: data.clientTypeLabel || 'כללי',
             city: firstCity,
@@ -3495,7 +3718,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     if (existingOrgId) return String(existingOrgId);
                 }
                 // Auto-resolve: find the org in the loaded options whose label matches the current company name
-                const nameMatch = filteredOrgOptions.find((o) => o.label === data.clientName);
+                const nameMatch = matchOrgOption(data.clientName, filteredOrgOptions);
                 return nameMatch?.id || undefined;
             })(),
             contacts: contactObjects,
@@ -3510,6 +3733,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             digitalQuestions: data.digitalQuestions,
             languages: data.languages,
             skills: serializeSkillsForJobApi(data.skills),
+            cvForwardSettings: cvForwardSettingsToPayload(data.cvForwardSettings),
         };
     };
 
@@ -3517,7 +3741,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         if (isEditing || !apiBase) {
             return null;
         }
-        if (!isJobFieldComplete(formDataRef.current.jobField)) {
+        if (!hasRequiredJobFields(formDataRef.current)) {
             setJobFieldError(true);
             document.getElementById('general-info')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             alert(t('new_job.job_field_required'));
@@ -3574,7 +3798,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
     const handleSaveAndContinue = async () => {
-        if (!isJobFieldComplete(formDataRef.current.jobField)) {
+        if (!hasRequiredJobFields(formDataRef.current)) {
             setJobFieldError(true);
             document.getElementById('general-info')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             alert(t('new_job.job_field_required'));
@@ -3592,7 +3816,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
     const handleJustSave = async () => {
-        if (!isJobFieldComplete(formDataRef.current.jobField)) {
+        if (!hasRequiredJobFields(formDataRef.current)) {
             setJobFieldError(true);
             document.getElementById('general-info')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
             alert(t('new_job.job_field_required'));
@@ -3818,26 +4042,56 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                             </label>
                             <button
                                 type="button"
-                                onClick={() => setIsJobFieldSelectorOpen(true)}
+                                onClick={openJobFieldSelector}
                                 className={`w-full bg-bg-input border rounded-lg py-2.5 px-3 text-sm flex justify-between items-center text-right hover:border-primary-300 transition-colors focus:ring-1 focus:ring-primary-500 ${
-                                    jobFieldError && !isJobFieldComplete(formData.jobField)
+                                    jobFieldError && !hasRequiredJobFields(formData)
                                         ? 'border-red-400 ring-1 ring-red-200'
                                         : 'border-border-default'
                                 }`}
                             >
-                                <span className={`truncate ${formData.jobField ? 'text-text-default' : 'text-text-muted'}`}>
-                                    {formData.jobField ? formatJobFieldLabel(formData.jobField) : t('new_job.choose_field_placeholder') || 'בחר תחום...'}
+                                <span className={`truncate ${savedJobFields.length ? 'text-text-default' : 'text-text-muted'}`}>
+                                    {jobFieldsButtonLabel(
+                                        savedJobFields,
+                                        t('new_job.choose_field_placeholder') || 'בחר תחום...',
+                                    )}
                                 </span>
                                 <BriefcaseIcon className="w-4 h-4 text-text-subtle" />
                             </button>
+                            {savedJobFields.length > 0 ? (
+                                <div className="flex flex-wrap gap-1.5 mt-2">
+                                    {savedJobFields.map((field) => (
+                                        <span
+                                            key={jobFieldKey(field)}
+                                            className="inline-flex items-center gap-1 max-w-full px-2 py-1 rounded-lg text-xs font-semibold bg-primary-50 text-primary-800 border border-primary-100"
+                                            title={formatJobFieldLabel(field)}
+                                        >
+                                            <span className="truncate">{field.role}</span>
+                                            <button
+                                                type="button"
+                                                onClick={() => removeSavedJobField(field)}
+                                                className="p-0.5 rounded hover:bg-primary-100 text-primary-700"
+                                                aria-label={`הסר ${field.role}`}
+                                            >
+                                                <XMarkIcon className="w-3 h-3" />
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                            ) : null}
                             <JobFieldSelector
-                                value={formData.jobField}
-                                onChange={(value) => {
-                                    setJobFieldError(false);
-                                    setFormData((prev) => ({ ...prev, jobField: value }));
-                                }}
+                                multiSelect
+                                selectedValues={jobFieldDraft}
+                                onToggleRole={toggleJobFieldDraft}
+                                onChange={() => undefined}
                                 isModalOpen={isJobFieldSelectorOpen}
                                 setIsModalOpen={setIsJobFieldSelectorOpen}
+                                onConfirm={confirmJobFieldDraft}
+                                selectionError={jobFieldDraftError}
+                                confirmHint={
+                                    jobFieldDraft.length
+                                        ? `נבחרו ${jobFieldDraft.length} — לחץ «אישור» לשמירה`
+                                        : 'בחר לפחות תחום אחד, ואז «אישור»'
+                                }
                             />
                        </div>
                        
@@ -3937,6 +4191,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         onReScreeningCooldownMonthsChange={(n) => setFormData((prev) => ({ ...prev, reScreeningCooldownMonths: n }))}
                         onRequireOriginalCvChange={(v) => setFormData((prev) => ({ ...prev, requireOriginalCv: v }))}
                         orgScreeningDefaults={orgScreeningDefaults}
+                        cvForwardSettings={formData.cvForwardSettings}
+                        onCvForwardSettingsChange={(settings) =>
+                            setFormData((prev) => ({ ...prev, cvForwardSettings: settings }))
+                        }
+                        cvForwardStaffUsers={clientStaffUserOptions}
+                        cvForwardStaffUsersLoading={distributionLoading}
+                        clientName={formData.clientName}
+                        defaultTechIdsOpen={isEditing}
                     />
                 </SectionCard>
 
@@ -4337,7 +4599,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                  <SectionCard id="screening" title={t('new_job.section_screening')} icon={<Cog6ToothIcon className="w-5 h-5"/>}>
                      <div className="space-y-6">
                         
-                        {/* BLOCK 1: DIGITAL (Knockout) */}
+                        {/* BLOCK 1: DIGITAL (Knockout) — gated by client module */}
+                        {digitalScreeningModuleEnabled ? (
                         <div className="border border-border-default rounded-xl p-4 bg-bg-card transition-all duration-200">
                              <div className="flex items-center justify-between mb-3">
                                  <div>
@@ -4409,6 +4672,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                 </div>
                              )}
                         </div>
+                        ) : null}
 
                         {/* BLOCK 2: MANUAL (Phone Script) */}
                         <div className="border border-border-default rounded-xl p-4 bg-bg-card transition-all duration-200">
@@ -4497,7 +4761,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             <div className="sticky bottom-0 z-30 p-4 bg-bg-card border-t border-border-default flex justify-between items-center -mx-4 md:mx-0 rounded-b-2xl shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)]">
                 <div className="text-xs text-text-muted space-y-1">
                     <p>* שינויים נשמרים בטיוטה</p>
-                    {!isJobFieldComplete(formData.jobField) && (
+                    {!hasRequiredJobFields(formData) && (
                         <p className="text-amber-700 font-medium">{t('new_job.job_field_required_hint')}</p>
                     )}
                 </div>
@@ -4510,9 +4774,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     <button
                         type="button"
                         onClick={handleSaveAndContinue}
-                        disabled={isSaving || !isJobFieldComplete(formData.jobField)}
+                        disabled={isSaving || !hasRequiredJobFields(formData)}
                         className={`bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${
-                            isSaving || !isJobFieldComplete(formData.jobField) ? 'opacity-50 cursor-not-allowed' : ''
+                            isSaving || !hasRequiredJobFields(formData) ? 'opacity-50 cursor-not-allowed' : ''
                         }`}
                     >
                         {'פרסום משרה'}
@@ -4520,9 +4784,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     <button
                         type="button"
                         onClick={handleJustSave}
-                        disabled={isSaving || !isJobFieldComplete(formData.jobField)}
+                        disabled={isSaving || !hasRequiredJobFields(formData)}
                         className={`bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover border border-border-default transition ${
-                            isSaving || !isJobFieldComplete(formData.jobField) ? 'opacity-50 cursor-not-allowed' : ''
+                            isSaving || !hasRequiredJobFields(formData) ? 'opacity-50 cursor-not-allowed' : ''
                         }`}
                     >
                         {isSaving ? 'שומר...' : 'שמור'}

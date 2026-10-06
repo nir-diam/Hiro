@@ -1,12 +1,10 @@
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import AccordionSection from './AccordionSection';
-import { BuildingOffice2Icon, PencilIcon, PlusIcon } from './Icons';
+import { BuildingOffice2Icon, PlusIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
-import BusinessFieldHierarchyFields, { mainFieldsFromApi, mainFieldsToApi } from './BusinessFieldHierarchyFields';
 
 const LOOKUP_DEBOUNCE_MS = 300;
 const LOOKUP_MIN_CHARS = 2;
@@ -15,67 +13,39 @@ const LOOKUP_LIMIT = 6;
 type GlobalCompanyLookupResult = {
     id: string;
     name: string;
-    nameEn?: string | null;
-    legalName?: string | null;
-    aliases?: string[];
-    mainField?: string | null;
-    mainField2?: string[];
-    subField?: string[];
-    secondaryField?: string | null;
     website?: string | null;
-    phone?: string | null;
-    address?: string | null;
-    location?: string | null;
-    description?: string | null;
     logo?: string | null;
+    mainField?: string | null;
     matchedAlias?: string | null;
 };
 
-// --- Reusable Form Components ---
-const FormInput: React.FC<{ 
-    label: string; 
-    name: string; 
-    value: string; 
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; 
-    type?: string; 
-    placeholder?: string; 
-    required?: boolean; 
+const FormInput: React.FC<{
+    label: string;
+    name: string;
+    value: string;
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+    placeholder?: string;
+    required?: boolean;
     onFocus?: () => void;
-    onBlur?: () => void;
     autoComplete?: string;
     readOnly?: boolean;
-}> = ({ label, name, value, onChange, type = 'text', placeholder, required = false, onFocus, onBlur, autoComplete, readOnly }) => (
+}> = ({ label, name, value, onChange, placeholder, required = false, onFocus, autoComplete, readOnly }) => (
     <div className="flex flex-col">
-        <label className="text-sm font-bold text-text-default mb-2">{label} {required && <span className="text-red-500">*</span>}</label>
-        <input 
-            type={type} 
-            name={name} 
-            value={value} 
-            onChange={onChange} 
+        <label className="text-sm font-bold text-text-default mb-2">
+            {label} {required && <span className="text-red-500">*</span>}
+        </label>
+        <input
+            type="text"
+            name={name}
+            value={value}
+            onChange={onChange}
             onFocus={onFocus}
-            onBlur={onBlur}
             autoComplete={autoComplete}
             readOnly={readOnly}
-            placeholder={placeholder} 
-            required={required} 
-            className={`w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3.5 transition-all outline-none hover:border-border-strong shadow-sm ${readOnly ? 'opacity-80 cursor-default' : ''}`} 
+            placeholder={placeholder}
+            required={required}
+            className={`w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3.5 transition-all outline-none hover:border-border-strong shadow-sm ${readOnly ? 'opacity-80 cursor-default' : ''}`}
         />
-    </div>
-);
-
-const FormSelect: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode; disabled?: boolean; }> = ({ label, name, value, onChange, children, disabled = false }) => (
-    <div className="flex flex-col">
-        <label className="text-sm font-bold text-text-default mb-2">{label}</label>
-        <select name={name} value={value} onChange={onChange} disabled={disabled} className={`w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3.5 transition-all outline-none hover:border-border-strong shadow-sm ${disabled ? 'opacity-80 cursor-not-allowed' : ''}`}>
-            {children}
-        </select>
-    </div>
-);
-
-const FormTextArea: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void; rows?: number; placeholder?: string; readOnly?: boolean; }> = ({ label, name, value, onChange, rows = 3, placeholder, readOnly = false }) => (
-    <div className="md:col-span-2 flex flex-col">
-        <label className="text-sm font-bold text-text-default mb-2">{label}</label>
-        <textarea name={name} value={value} onChange={onChange} rows={rows} placeholder={placeholder} readOnly={readOnly} className={`w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3.5 transition-all outline-none hover:border-border-strong shadow-sm resize-y ${readOnly ? 'opacity-80 cursor-default' : ''}`}></textarea>
     </div>
 );
 
@@ -84,16 +54,11 @@ interface NewClientViewProps {
   onSave: (clientData: any) => void;
 }
 
-const resolveIndustryValue = (
-    mainField: string | null | undefined,
-): string => String(mainField || '').trim();
-
 const formatWebsiteLabel = (website?: string | null) =>
     String(website || '')
         .replace(/^https?:\/\/(www\.)?/i, '')
         .replace(/\/$/, '');
 
-/** Navigate to the org profile after create/link, or tenant client profile for admin-only creates. */
 const resolvePostCreatePath = (
     result: Record<string, unknown> | null | undefined,
     linkedOrganizationId: string | null,
@@ -101,14 +66,12 @@ const resolvePostCreatePath = (
     const lastTmpId = result?.lastLinkedOrganizationTmpId
         ? String(result.lastLinkedOrganizationTmpId)
         : '';
-    if (lastTmpId) {
-        return `/organizations/tmp/${lastTmpId}`;
-    }
+    if (lastTmpId) return `/organizations/tmp/${lastTmpId}`;
+
     const lastOrgId = linkedOrganizationId
         || (result?.lastLinkedOrganizationId ? String(result.lastLinkedOrganizationId) : '');
-    if (lastOrgId) {
-        return `/organizations/${lastOrgId}`;
-    }
+    if (lastOrgId) return `/organizations/${lastOrgId}`;
+
     const clientId = result?.id ? String(result.id) : '';
     if (clientId) return `/clients/${clientId}`;
     return '/clients';
@@ -121,6 +84,8 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const isTenantStaff = Boolean(user?.clientId) && !isPlatformAdmin;
+
+    const [clientName, setClientName] = useState('');
     const [isSaving, setIsSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [showDropdown, setShowDropdown] = useState(false);
@@ -130,22 +95,6 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     const [debouncedQuery, setDebouncedQuery] = useState('');
     const dropdownRef = useRef<HTMLDivElement>(null);
     const lookupAbortRef = useRef<AbortController | null>(null);
-    
-    const [formData, setFormData] = useState({
-        clientName: '',
-        mainField: '',
-        mainField2: [] as string[],
-        subField: [] as string[],
-        secondaryField: '',
-        website: '',
-        logoUrl: '',
-        companyPhone: '',
-        address: '',
-        companyDescription: '',
-        aliasesText: '',
-        status: 'פעיל',
-        notes: '',
-    });
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -158,11 +107,9 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     }, []);
 
     useEffect(() => {
-        const timer = setTimeout(() => {
-            setDebouncedQuery(formData.clientName.trim());
-        }, LOOKUP_DEBOUNCE_MS);
+        const timer = setTimeout(() => setDebouncedQuery(clientName.trim()), LOOKUP_DEBOUNCE_MS);
         return () => clearTimeout(timer);
-    }, [formData.clientName]);
+    }, [clientName]);
 
     useEffect(() => {
         if (!apiBase || debouncedQuery.length < LOOKUP_MIN_CHARS) {
@@ -202,47 +149,17 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
         return () => controller.abort();
     }, [apiBase, debouncedQuery]);
 
-    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-        const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: value }));
-        
-        if (name === 'clientName') {
-            setShowDropdown(true);
-            setLinkedOrganizationId(null);
-        }
+    const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setClientName(e.target.value);
+        setShowDropdown(true);
+        setLinkedOrganizationId(null);
     };
 
-    const injectCompanyMetadata = useCallback((company: GlobalCompanyLookupResult) => {
-        const aliases = Array.isArray(company.aliases) ? company.aliases.filter(Boolean) : [];
-        const mainField = resolveIndustryValue(company.mainField);
-        const mainField2 = Array.isArray(company.mainField2)
-            ? company.mainField2.map((v) => String(v || '').trim()).filter(Boolean)
-            : [];
-        const subField = Array.isArray(company.subField)
-            ? company.subField.map((v) => String(v || '').trim()).filter(Boolean)
-            : [];
-        setFormData(prev => ({
-            ...prev,
-            clientName: company.name || prev.clientName,
-            mainField: mainField || prev.mainField,
-            mainField2,
-            subField,
-            secondaryField: String(company.secondaryField || ''),
-            website: company.website || prev.website,
-            logoUrl: company.logo || prev.logoUrl,
-            companyPhone: company.phone || prev.companyPhone,
-            address: company.address || company.location || prev.address,
-            companyDescription: company.description || prev.companyDescription,
-            aliasesText: aliases.length ? aliases.join(', ') : prev.aliasesText,
-        }));
+    const selectExistingCompany = useCallback((company: GlobalCompanyLookupResult) => {
+        setClientName(company.name || '');
         setLinkedOrganizationId(company.id || null);
         setShowDropdown(false);
     }, []);
-
-    const clearExistingOrganizationSelection = () => {
-        setLinkedOrganizationId(null);
-        setShowDropdown(false);
-    };
 
     const handleCancel = () => {
         onCancel();
@@ -250,6 +167,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     };
 
     const isExistingOrgSelected = Boolean(linkedOrganizationId);
+    const runBackgroundEnrichment = !isExistingOrgSelected && isTenantStaff;
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -285,8 +203,8 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                         method: 'POST',
                         headers: authHeaders(true),
                         body: JSON.stringify({
-                            name: formData.clientName,
-                            displayName: formData.clientName,
+                            name: clientName,
+                            displayName: clientName,
                             ...linkPayload,
                         }),
                     });
@@ -301,32 +219,9 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                 }
             }
 
-            const finalData = { ...formData };
-            const aliases = finalData.aliasesText
-                .split(',')
-                .map((part) => part.trim())
-                .filter(Boolean);
             const payload = {
-                name: finalData.clientName,
-                industry: finalData.mainField || undefined,
-                mainField: finalData.mainField || undefined,
-                mainField2: finalData.mainField2,
-                subField: finalData.subField,
-                secondaryField: finalData.secondaryField || undefined,
-                phone: finalData.companyPhone,
-                status: finalData.status,
-                logoUrl: finalData.logoUrl || undefined,
-                metadata: {
-                    website: finalData.website,
-                    address: finalData.address,
-                    description: finalData.companyDescription,
-                    aliases,
-                    notes: finalData.notes,
-                    mainField: finalData.mainField || undefined,
-                    mainField2: finalData.mainField2,
-                    subField: finalData.subField,
-                    secondaryField: finalData.secondaryField || undefined,
-                },
+                name: clientName.trim(),
+                ...(runBackgroundEnrichment ? { backgroundEnrichment: true } : {}),
             };
 
             if (isTenantStaff && user?.clientId) {
@@ -344,7 +239,13 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                 }
                 const updated = await res.json();
                 onSave(updated);
-                navigate(resolvePostCreatePath(updated, null));
+                const path = resolvePostCreatePath(updated, null);
+                const orgPipeline = updated?.orgPipeline as { background?: boolean; phase?: string } | null | undefined;
+                const enrichingInBackground = Boolean(
+                    runBackgroundEnrichment
+                    && (orgPipeline?.background || orgPipeline?.phase === 'enriching'),
+                );
+                navigate(path, enrichingInBackground ? { state: { backgroundEnrichment: true } } : undefined);
                 return;
             }
 
@@ -353,6 +254,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                 headers: authHeaders(true),
                 body: JSON.stringify({
                     ...payload,
+                    displayName: clientName.trim(),
                     ...(isPlatformAdmin ? { skipOrganizationLink: true } : {}),
                 }),
             });
@@ -378,212 +280,135 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
 
     const showLookupDropdown =
         showDropdown &&
-        formData.clientName.trim().length >= LOOKUP_MIN_CHARS;
+        !isExistingOrgSelected &&
+        clientName.trim().length >= LOOKUP_MIN_CHARS;
 
     return (
-        <div className="max-w-4xl mx-auto pb-24 w-full px-4 sm:px-6 lg:px-8 animate-fade-in">
+        <div className="max-w-lg mx-auto pb-24 w-full px-4 sm:px-6 animate-fade-in">
             <div className="mb-8 mt-6">
-                <h1 className="text-3xl sm:text-4xl font-extrabold text-text-default mb-3 tracking-tight">{t('client_form.title_new')}</h1>
-                <p className="text-text-muted text-base sm:text-lg max-w-2xl leading-relaxed">
-                    {isTenantStaff
-                        ? 'קשר חברה למאגר הארגונים הגלובלי עבור הלקוח שלך. בחירת חברה קיימת = קישור בלבד; חברה חדשה = staging ב-OrganizationTmp לביקורת מנהל.'
-                        : 'הזן את פרטי החברה כדי להוסיף אותה למאגר הלקוחות של המערכת. ניתן להשתמש בהשלמה האוטומטית לאיתור חברות קיימות ולהעשרת נתונים מהירה.'}
-                </p>
+                <h1 className="text-3xl font-extrabold text-text-default mb-3 tracking-tight">
+                    {t('client_form.title_new')}
+                </h1>
             </div>
 
-            <form onSubmit={handleSubmit} className="space-y-6 sm:space-y-8">
-                 <div id="client-details">
-                    <AccordionSection title={t('client_form.section_company')} icon={<BuildingOffice2Icon className="w-5 h-5"/>} defaultOpen>
-                        {isExistingOrgSelected ? (
-                            <div className="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-primary-200 bg-primary-50 px-4 py-3">
-                                <div>
-                                    <p className="text-sm font-bold text-primary-900">נבחרה חברה קיימת מהמאגר הגלובלי</p>
-                                    <p className="text-xs text-primary-700 mt-0.5">השדות נטענו לצפייה בלבד. השמירה תקשר בלבד בין הלקוח לארגון — ללא יצירת Organization חדש.</p>
-                                </div>
-                                <button
-                                    type="button"
-                                    onClick={clearExistingOrganizationSelection}
-                                    className="shrink-0 text-sm font-bold text-primary-700 hover:text-primary-900 underline"
-                                >
-                                    בחר חברה אחרת
-                                </button>
-                            </div>
-                        ) : null}
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
-                            <div className="relative md:col-span-2 lg:col-span-1" ref={dropdownRef}>
-                                <FormInput 
-                                    label={t('client_form.field_client_name')} 
-                                    name="clientName" 
-                                    value={formData.clientName} 
-                                    onChange={handleChange} 
-                                    onFocus={() => { if (!isExistingOrgSelected) setShowDropdown(true); }}
-                                    autoComplete="off"
-                                    required 
-                                    readOnly={isExistingOrgSelected}
-                                    placeholder={t('client_form.placeholder_name')} 
-                                />
-                                
-                                {showLookupDropdown && !isExistingOrgSelected && (
-                                    <div className="absolute z-50 w-full mt-2 bg-bg-card border border-border-default rounded-2xl shadow-2xl max-h-[22rem] overflow-hidden animate-fade-in flex flex-col ring-1 ring-black/5">
-                                        <div className="px-4 py-3 text-xs font-bold text-text-muted bg-bg-subtle/90 sticky top-0 backdrop-blur-md z-10 border-b border-border-subtle uppercase tracking-wider flex items-center justify-between gap-2">
-                                            <span>{t('client_form.lookup_results')}</span>
-                                            {isLookupLoading && (
-                                                <span className="font-normal normal-case text-primary-600 animate-pulse">
-                                                    {t('client_form.lookup_searching')}
-                                                </span>
-                                            )}
-                                        </div>
-                                        <div className="flex-1 overflow-y-auto">
-                                            {isLookupLoading && (
-                                                <div className="px-4 py-6 text-sm text-text-muted text-center">
-                                                    {t('client_form.lookup_searching')}
-                                                </div>
-                                            )}
-                                            {!isLookupLoading && lookupResults.length === 0 && (
-                                                <div className="px-4 py-3 text-sm text-text-muted">
-                                                    {t('client_form.lookup_no_results')}
-                                                </div>
-                                            )}
-                                            {!isLookupLoading && lookupResults.map((company) => (
-                                                <div 
-                                                    key={company.id} 
-                                                    className="p-4 hover:bg-bg-hover cursor-pointer border-b border-border-subtle last:border-0 flex justify-between items-center transition-colors group"
-                                                    onMouseDown={(e) => e.preventDefault()}
-                                                    onClick={() => injectCompanyMetadata(company)}
-                                                >
-                                                    <div className="flex items-center gap-4 min-w-0">
-                                                        {company.logo ? (
-                                                            <img
-                                                                src={company.logo}
-                                                                alt=""
-                                                                className="w-12 h-12 rounded-xl object-contain bg-bg-subtle border border-border-default group-hover:border-primary-500/30 transition-colors shadow-sm shrink-0 p-1"
-                                                            />
-                                                        ) : (
-                                                            <div className="w-12 h-12 rounded-xl bg-bg-subtle flex items-center justify-center text-text-muted border border-border-default group-hover:border-primary-500/30 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors shadow-sm shrink-0">
-                                                                <BuildingOffice2Icon className="w-6 h-6" />
-                                                            </div>
-                                                        )}
-                                                        <div className="flex flex-col min-w-0">
-                                                            <div className="font-bold text-text-default text-base group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors truncate">
-                                                                {company.name}
-                                                            </div>
-                                                            <div className="text-sm text-text-muted flex items-center gap-2 mt-0.5 min-w-0">
-                                                                {company.website ? (
-                                                                    <span className="truncate max-w-[120px] sm:max-w-xs">
-                                                                        {formatWebsiteLabel(company.website)}
-                                                                    </span>
-                                                                ) : null}
-                                                                {company.matchedAlias ? (
-                                                                    <>
-                                                                        {company.website ? (
-                                                                            <span className="w-1 h-1 rounded-full bg-border-strong shrink-0" />
-                                                                        ) : null}
-                                                                        <span className="text-primary-600 font-medium truncate max-w-[100px] sm:max-w-xs">
-                                                                            {t('client_form.lookup_known_as')} {company.matchedAlias}
-                                                                        </span>
-                                                                    </>
-                                                                ) : null}
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                    <span className="hidden sm:inline-block text-xs font-bold bg-primary-500/10 text-primary-600 dark:text-primary-400 px-3 py-1.5 rounded-full border border-primary-500/20 whitespace-nowrap shrink-0 ms-2">
-                                                        {company.mainField || '—'}
-                                                    </span>
-                                                </div>
-                                            ))}
-                                        </div>
-                                        <div 
-                                            className="p-4 bg-bg-subtle hover:bg-primary-500/5 cursor-pointer text-primary-600 dark:text-primary-400 font-bold flex items-center gap-3 transition-colors border-t border-border-default sticky bottom-0 z-10"
-                                            onMouseDown={(e) => e.preventDefault()}
-                                            onClick={() => {
-                                                setLinkedOrganizationId(null);
-                                                setShowDropdown(false);
-                                            }}
-                                        >
-                                            <div className="w-10 h-10 rounded-full bg-primary-500/10 flex items-center justify-center text-primary-600 dark:text-primary-400 shadow-sm">
-                                                <PlusIcon className="w-5 h-5" />
-                                            </div>
-                                            <span className="text-base">
-                                                {t('client_form.lookup_create_new', { name: formData.clientName.trim() })}
-                                            </span>
-                                        </div>
-                                    </div>
+            <form onSubmit={handleSubmit} className="space-y-6">
+                <div className="relative" ref={dropdownRef}>
+                    <FormInput
+                        label={t('client_form.field_client_name')}
+                        name="clientName"
+                        value={clientName}
+                        onChange={handleNameChange}
+                        onFocus={() => { if (!isExistingOrgSelected) setShowDropdown(true); }}
+                        autoComplete="off"
+                        required
+                        readOnly={isExistingOrgSelected}
+                        placeholder={t('client_form.placeholder_name')}
+                    />
+
+                    {isExistingOrgSelected && (
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setLinkedOrganizationId(null);
+                                setShowDropdown(true);
+                            }}
+                            className="mt-2 text-sm font-bold text-primary-700 hover:text-primary-900 underline"
+                        >
+                            בחר חברה אחרת
+                        </button>
+                    )}
+
+                    {showLookupDropdown && (
+                        <div className="absolute z-50 w-full mt-2 bg-bg-card border border-border-default rounded-2xl shadow-2xl max-h-[22rem] overflow-hidden animate-fade-in flex flex-col ring-1 ring-black/5">
+                            <div className="px-4 py-3 text-xs font-bold text-text-muted bg-bg-subtle/90 sticky top-0 backdrop-blur-md z-10 border-b border-border-subtle uppercase tracking-wider flex items-center justify-between gap-2">
+                                <span>{t('client_form.lookup_results')}</span>
+                                {isLookupLoading && (
+                                    <span className="font-normal normal-case text-primary-600 animate-pulse">
+                                        {t('client_form.lookup_searching')}
+                                    </span>
                                 )}
                             </div>
-                            <div className="md:col-span-2">
-                                <BusinessFieldHierarchyFields
-                                    apiBase={apiBase}
-                                    disabled={isExistingOrgSelected}
-                                    values={{
-                                        mainField: mainFieldsFromApi(formData.mainField, formData.mainField2),
-                                        subField: formData.subField,
-                                        secondaryField: formData.secondaryField,
-                                    }}
-                                    onChange={(next) => {
-                                        if (isExistingOrgSelected) return;
-                                        const { mainField, mainField2 } = mainFieldsToApi(next.mainField);
-                                        setFormData((prev) => ({
-                                            ...prev,
-                                            mainField,
-                                            mainField2,
-                                            subField: next.subField,
-                                            secondaryField: next.secondaryField ?? '',
-                                        }));
-                                    }}
-                                />
-                            </div>
-                            <FormInput label={t('client_form.field_website')} name="website" value={formData.website} onChange={handleChange} type="url" placeholder="https://www.company.com" readOnly={isExistingOrgSelected} />
-                            <div className="flex flex-col gap-3">
-                                <FormInput label="לוגו (URL)" name="logoUrl" value={formData.logoUrl} onChange={handleChange} type="url" placeholder="https://..." readOnly={isExistingOrgSelected} />
-                                {formData.logoUrl.trim() ? (
-                                    <div className="flex items-center gap-3">
-                                        <img
-                                            src={formData.logoUrl.trim()}
-                                            alt=""
-                                            className="w-14 h-14 rounded-xl object-contain border border-border-default bg-bg-subtle p-1"
-                                            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                                        />
-                                        <span className="text-xs text-text-muted">תצוגה מקדימה</span>
+                            <div className="flex-1 overflow-y-auto">
+                                {isLookupLoading && (
+                                    <div className="px-4 py-6 text-sm text-text-muted text-center">
+                                        {t('client_form.lookup_searching')}
                                     </div>
-                                ) : null}
+                                )}
+                                {!isLookupLoading && lookupResults.length === 0 && (
+                                    <div className="px-4 py-3 text-sm text-text-muted">
+                                        {t('client_form.lookup_no_results')}
+                                    </div>
+                                )}
+                                {!isLookupLoading && lookupResults.map((company) => (
+                                    <div
+                                        key={company.id}
+                                        className="p-4 hover:bg-bg-hover cursor-pointer border-b border-border-subtle last:border-0 flex justify-between items-center transition-colors group"
+                                        onMouseDown={(e) => e.preventDefault()}
+                                        onClick={() => selectExistingCompany(company)}
+                                    >
+                                        <div className="flex items-center gap-4 min-w-0">
+                                            {company.logo ? (
+                                                <img
+                                                    src={company.logo}
+                                                    alt=""
+                                                    className="w-12 h-12 rounded-xl object-contain bg-bg-subtle border border-border-default shrink-0 p-1"
+                                                />
+                                            ) : (
+                                                <div className="w-12 h-12 rounded-xl bg-bg-subtle flex items-center justify-center text-text-muted border border-border-default shrink-0">
+                                                    <BuildingOffice2Icon className="w-6 h-6" />
+                                                </div>
+                                            )}
+                                            <div className="flex flex-col min-w-0">
+                                                <div className="font-bold text-text-default truncate">{company.name}</div>
+                                                {company.website ? (
+                                                    <div className="text-sm text-text-muted truncate">
+                                                        {formatWebsiteLabel(company.website)}
+                                                    </div>
+                                                ) : null}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
                             </div>
-                            <FormInput label={t('client_form.field_company_phone')} name="companyPhone" value={formData.companyPhone} onChange={handleChange} type="tel" readOnly={isExistingOrgSelected} />
-                            <FormInput label={t('client_form.field_address')} name="address" value={formData.address} onChange={handleChange} readOnly={isExistingOrgSelected} />
-                            <FormInput label="שמות נוספים (Aliases)" name="aliasesText" value={formData.aliasesText} onChange={handleChange} placeholder="לדוגמה: Microsoft Israel, MSFT" readOnly={isExistingOrgSelected} />
-                            <FormTextArea label="תיאור חברה" name="companyDescription" value={formData.companyDescription} onChange={handleChange} rows={3} placeholder="תיאור קצר על החברה..." readOnly={isExistingOrgSelected} />
-                            <FormSelect label={t('client_form.field_status')} name="status" value={formData.status} onChange={handleChange} disabled={isExistingOrgSelected}>
-                                <option value="פעיל">פעיל</option>
-                                <option value="לא פעיל">לא פעיל</option>
-                                <option value="בהקפאה">בהקפאה</option>
-                            </FormSelect>
+                            <div
+                                className="p-4 bg-bg-subtle hover:bg-primary-500/5 cursor-pointer text-primary-600 font-bold flex items-center gap-3 transition-colors border-t border-border-default"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                    setLinkedOrganizationId(null);
+                                    setShowDropdown(false);
+                                }}
+                            >
+                                <div className="w-10 h-10 rounded-full bg-primary-500/10 flex items-center justify-center">
+                                    <PlusIcon className="w-5 h-5" />
+                                </div>
+                                <span>{t('client_form.lookup_create_new', { name: clientName.trim() })}</span>
+                            </div>
                         </div>
-                    </AccordionSection>
+                    )}
                 </div>
 
-                 <div id="internal-notes">
-                    <AccordionSection title={t('client_form.section_notes')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen={false}>
-                        <FormTextArea label={t('client_form.field_notes')} name="notes" value={formData.notes} onChange={handleChange} placeholder={t('client_form.placeholder_notes')} readOnly={isExistingOrgSelected} />
-                    </AccordionSection>
-                </div>
-                
-                <div className="fixed bottom-0 left-0 right-0 bg-bg-card/90 backdrop-blur-md border-t border-border-default p-4 z-40 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-                    <div className="max-w-4xl mx-auto flex justify-end items-center gap-4 px-4 sm:px-6 lg:px-8">
-                        <button type="button" onClick={handleCancel} className="text-text-muted font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition-colors">{t('client_form.cancel')}</button>
-                        <button
-                            type="submit"
-                            disabled={isSaving}
-                            className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5 disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                            {isSaving ? 'שומר...' : isExistingOrgSelected || isTenantStaff ? 'קשר לארגון' : t('client_form.save')}
-                        </button>
-                    </div>
+                <div className="flex justify-end items-center gap-4 pt-2">
+                    <button
+                        type="button"
+                        onClick={handleCancel}
+                        className="text-text-muted font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition-colors"
+                    >
+                        {t('client_form.cancel')}
+                    </button>
+                    <button
+                        type="submit"
+                        disabled={isSaving}
+                        className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition-all shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                        {isSaving ? 'שומר...' : isExistingOrgSelected || isTenantStaff ? 'קשר לארגון' : t('client_form.save')}
+                    </button>
                 </div>
             </form>
+
             {error && (
-                <div className="mt-4 text-sm text-red-600 font-semibold">
-                    {error}
-                </div>
+                <div className="mt-4 text-sm text-red-600 font-semibold">{error}</div>
             )}
+
         </div>
     );
 };

@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import {
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, UserIcon,
@@ -30,6 +30,8 @@ import {
     stickyTableHeaderCellClass,
 } from '../utils/stickyTableHeader';
 import DateRangeSelector, { type DateRange } from './DateRangeSelector';
+import AdminOrgProfileUpdatesPanel from './AdminOrgProfileUpdatesPanel';
+import { fetchOrgProfileUpdatesPendingCount } from '../services/organizationProfileUpdatesApi';
 
 function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: string } {
     if (!range?.from && !range?.to) return {};
@@ -41,7 +43,7 @@ function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: 
 
 // ─── Shared Types ─────────────────────────────────────────────────────────────
 
-type TabType = 'dashboard' | 'ai_decisions' | 'manual' | 'blacklist';
+type TabType = 'dashboard' | 'ai_decisions' | 'manual' | 'blacklist' | 'profile_updates';
 type DecisionType = 'merge_company' | 'create_company' | 'create_company_enrich' | 'map_generic';
 
 // ─── Manual Tab Types ─────────────────────────────────────────────────────────
@@ -471,6 +473,8 @@ const QuickCreateCompanyModal: React.FC<{
 const AdminCompanyCorrectionsView: React.FC = () => {
     const apiBase = (import.meta as { env?: { VITE_API_BASE?: string } }).env?.VITE_API_BASE || '';
     const navigate = useNavigate();
+    const [searchParams, setSearchParams] = useSearchParams();
+    const subtabFromUrl = searchParams.get('subtab');
 
     const openCompanyDbSearch = useCallback((term: string) => {
         const q = term.trim();
@@ -479,7 +483,29 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     }, [navigate]);
 
     // ── Shared state ──
-    const [activeTab, setActiveTab] = useState<TabType>('ai_decisions');
+    const initialTab: TabType = subtabFromUrl === 'profile_updates' ? 'profile_updates' : 'ai_decisions';
+    const [activeTab, setActiveTab] = useState<TabType>(initialTab);
+    const [profileUpdatesPendingCount, setProfileUpdatesPendingCount] = useState(0);
+
+    const switchTab = useCallback((tab: TabType) => {
+        setActiveTab(tab);
+        setSearchParams((prev) => {
+            const next = new URLSearchParams(prev);
+            if (tab === 'profile_updates') next.set('subtab', 'profile_updates');
+            else next.delete('subtab');
+            return next;
+        }, { replace: true });
+    }, [setSearchParams]);
+
+    useEffect(() => {
+        if (subtabFromUrl === 'profile_updates') setActiveTab('profile_updates');
+    }, [subtabFromUrl]);
+
+    useEffect(() => {
+        void fetchOrgProfileUpdatesPendingCount()
+            .then(setProfileUpdatesPendingCount)
+            .catch(() => setProfileUpdatesPendingCount(0));
+    }, [activeTab]);
     const [expandedEntities, setExpandedEntities] = useState<Set<string>>(new Set());
     const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
     const [drawerCandidate, setDrawerCandidate] = useState<any | null>(null);
@@ -1562,14 +1588,14 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             {/* ── Tabs ── */}
             <div className="flex border-b border-border-default space-x-reverse space-x-8 px-2 font-bold text-sm text-text-muted flex-shrink-0">
                 <button
-                    onClick={() => setActiveTab('dashboard')}
+                    onClick={() => switchTab('dashboard')}
                     className={`pb-3 border-b-2 transition-all flex items-center gap-2 ${activeTab === 'dashboard' ? 'border-indigo-500 text-indigo-600' : 'border-transparent hover:text-text-default'}`}
                 >
                     <SparklesIcon className="w-4 h-4" />
                     <span>לוח בקרה</span>
                 </button>
                 <button
-                    onClick={() => setActiveTab('manual')}
+                    onClick={() => switchTab('manual')}
                     className={`pb-3 border-b-2 transition-all flex items-center gap-2 ${activeTab === 'manual' ? 'border-orange-500 text-orange-600' : 'border-transparent hover:text-text-default'}`}
                 >
                     <span>לטיפול ידני</span>
@@ -1578,13 +1604,22 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                     )}
                 </button>
                 <button
-                    onClick={() => setActiveTab('ai_decisions')}
+                    onClick={() => switchTab('profile_updates')}
+                    className={`pb-3 border-b-2 transition-all flex items-center gap-2 ${activeTab === 'profile_updates' ? 'border-orange-500 text-orange-600' : 'border-transparent hover:text-text-default'}`}
+                >
+                    <span>עדכוני לקוחות</span>
+                    {profileUpdatesPendingCount > 0 && (
+                        <span className="bg-amber-100 text-amber-800 text-[10px] px-2 py-0.5 rounded-full">{profileUpdatesPendingCount}</span>
+                    )}
+                </button>
+                <button
+                    onClick={() => switchTab('ai_decisions')}
                     className={`pb-3 border-b-2 transition-all ${activeTab === 'ai_decisions' ? 'border-orange-500 text-orange-600' : 'border-transparent hover:text-text-default'}`}
                 >
                     החלטות הסוכן (AI)
                 </button>
                 <button
-                    onClick={() => setActiveTab('blacklist')}
+                    onClick={() => switchTab('blacklist')}
                     className={`pb-3 border-b-2 transition-all flex items-center gap-2 ${activeTab === 'blacklist' ? 'border-orange-500 text-orange-600' : 'border-transparent hover:text-text-default'}`}
                 >
                     <span className="text-rose-500"><IconXCircle className="w-4 h-4 rounded-full border border-rose-500 p-0.5" /></span>
@@ -1597,6 +1632,12 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             {activeTab === 'dashboard' && (
                 <div className="flex-1 overflow-y-auto min-h-0 px-1">
                     <AdminCompanyAgentDashboard />
+                </div>
+            )}
+
+            {activeTab === 'profile_updates' && (
+                <div className="flex-1 overflow-y-auto min-h-0 px-1">
+                    <AdminOrgProfileUpdatesPanel onPendingCountChange={setProfileUpdatesPendingCount} />
                 </div>
             )}
 

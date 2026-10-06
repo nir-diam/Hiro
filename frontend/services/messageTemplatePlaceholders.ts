@@ -1,6 +1,14 @@
 import type { AuthUser } from '../context/AuthContext';
 import type { JobComposeRow } from './jobsApi';
 import { buildPublicJobAppUrl, buildPublicJobUrl, resolvePublicClientRouteKey } from './publishingApi';
+import { navigationPlaceholdersFromMetadata } from '../utils/clientNavigationLinks';
+import {
+    alignEmailSignatureHtml,
+    buildEmailSignatureHtml,
+    detectEmailTextDirection,
+    emailSignaturePlainText,
+    parseEmailSignature,
+} from '../utils/emailSignature';
 
 /** Logical keys (without `{}`) — used when merging templates before send. */
 export type MessageTemplateToken =
@@ -26,7 +34,10 @@ export type MessageTemplateToken =
     | 'send_date'
     | 'privacy_policy_link'
     | 'thank_you_page_link'
-    | 'job_public_page_link';
+    | 'job_public_page_link'
+    | 'waze_link'
+    | 'google_maps_link'
+    | 'recruiter_signature';
 
 export const MESSAGE_TEMPLATE_PLACEHOLDER_ROWS: { label: string; token: MessageTemplateToken }[] = [
     { label: 'שם פרטי מועמד', token: 'candidate_first_name' },
@@ -52,6 +63,9 @@ export const MESSAGE_TEMPLATE_PLACEHOLDER_ROWS: { label: string; token: MessageT
     { label: 'מדיניות הפרטיות', token: 'privacy_policy_link' },
     { label: 'כתובת דף תודה', token: 'thank_you_page_link' },
     { label: 'לינק לדף משרה ציבורי', token: 'job_public_page_link' },
+    { label: 'קישור וויז', token: 'waze_link' },
+    { label: 'קישור גוגל מפות', token: 'google_maps_link' },
+    { label: 'חתימת רכז (HTML)', token: 'recruiter_signature' },
 ];
 
 /** Same shape `MessageTemplatesView` historically exported — UI inserts `{token}` into HTML/forms. */
@@ -129,8 +143,17 @@ function formatLinkedJobsSummary(rows: unknown[]): string {
     return lines.join('\n');
 }
 
+export type ApplyMessageTemplateOptions = {
+    /** Keep signature HTML (with logo) for email rich compose — not plain text. */
+    emailCompose?: boolean;
+};
+
 /** Replace `{token}` occurrences using DB-backed / contextual strings (unknown tokens left unchanged). */
-export function applyMessageTemplatePlaceholders(template: string, values: Partial<Record<MessageTemplateToken, string>>): string {
+export function applyMessageTemplatePlaceholders(
+    template: string,
+    values: Partial<Record<MessageTemplateToken, string>>,
+    options?: ApplyMessageTemplateOptions,
+): string {
     let out = String(template ?? '');
     const merged: Record<string, string> = {};
     for (const k of MESSAGE_TEMPLATE_PLACEHOLDER_ROWS.map((r) => r.token)) {
@@ -138,7 +161,16 @@ export function applyMessageTemplatePlaceholders(template: string, values: Parti
     }
     for (const key of Object.keys(merged)) {
         const re = new RegExp(`\\{${escapeRegExp(key)}\\}`, 'g');
-        out = out.replace(re, merged[key]);
+        let val = merged[key];
+        if (key === 'recruiter_signature' && val) {
+            if (options?.emailCompose) {
+                const dir = detectEmailTextDirection(out);
+                val = alignEmailSignatureHtml(val, dir);
+            } else {
+                val = emailSignaturePlainText({ html: val }) || '[חתימת רכז]';
+            }
+        }
+        out = out.replace(re, val);
     }
     return out;
 }
@@ -172,6 +204,7 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
     let linked: unknown[] = [];
     let jobFull: Record<string, unknown> | null = null;
     let jobClientDomain: string | null = null;
+    let clientMetadata: Record<string, unknown> | null = null;
 
     const cid = args.candidateId != null && String(args.candidateId).trim() ? String(args.candidateId).trim() : '';
     const jid = args.jobId != null && String(args.jobId).trim() ? String(args.jobId).trim() : '';
@@ -195,6 +228,20 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
             if (jRes.ok) {
                 const j = (await jRes.json()) as unknown;
                 jobFull = j && typeof j === 'object' ? (j as Record<string, unknown>) : null;
+                const jobClientId =
+                    jobFull?.clientId != null && String(jobFull.clientId).trim()
+                        ? String(jobFull.clientId).trim()
+                        : '';
+                if (jobClientId) {
+                    const cRes = await fetch(`${root}/api/clients/${encodeURIComponent(jobClientId)}`, init);
+                    if (cRes.ok) {
+                        const c = (await cRes.json()) as unknown;
+                        if (c && typeof c === 'object') {
+                            const meta = (c as Record<string, unknown>).metadata;
+                            clientMetadata = meta && typeof meta === 'object' ? (meta as Record<string, unknown>) : null;
+                        }
+                    }
+                }
             }
             if (pubRes.ok) {
                 const pub = (await pubRes.json()) as unknown;
@@ -262,6 +309,8 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
     const recruiterName = u != null ? String(u.name ?? '').trim() : '';
     const recruiterEmail = u != null ? String(u.email ?? '').trim() : '';
     const recruiterPhone = u != null ? String(u.phone ?? '').trim() : '';
+    const recruiterSigPrefs = parseEmailSignature(u?.uiPreferences ?? null);
+    const recruiterSignatureHtml = buildEmailSignatureHtml(recruiterSigPrefs);
 
     const sendDate = new Intl.DateTimeFormat('he-IL', {
         dateStyle: 'long',
@@ -283,6 +332,8 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
             ? buildPublicJobUrl(jid, undefined, postingCode, jobClientDomain)
             : buildPublicJobAppUrl(jid, undefined, postingCode, jobClientDomain)
         : '';
+
+    const navLinks = navigationPlaceholdersFromMetadata(clientMetadata);
 
     const values: Partial<Record<MessageTemplateToken, string>> = {
         candidate_first_name: firstName,
@@ -307,7 +358,48 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
         privacy_policy_link: privacy,
         thank_you_page_link: thankYou,
         job_public_page_link: jobPublicPageLink,
+        waze_link: navLinks.waze_link,
+        google_maps_link: navLinks.google_maps_link,
+        recruiter_signature: recruiterSignatureHtml,
     };
 
+    if (!values.recruiter_signature && u?.id) {
+        try {
+            const { fetchStaffUser } = await import('./usersApi');
+            const staff = await fetchStaffUser(String(u.id));
+            const sig = buildEmailSignatureHtml(parseEmailSignature(staff.uiPreferences ?? null));
+            if (sig) values.recruiter_signature = sig;
+        } catch {
+            /* keep empty */
+        }
+    }
+
     return values;
+}
+
+export function templateUsesNavigationPlaceholders(text: string): {
+    waze: boolean;
+    googleMaps: boolean;
+} {
+    const src = String(text || '');
+    const has = (token: MessageTemplateToken) => new RegExp(`\\{\\s*${token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`).test(src);
+    return {
+        waze: has('waze_link'),
+        googleMaps: has('google_maps_link'),
+    };
+}
+
+export function missingNavigationPlaceholderMessage(
+    subject: string,
+    content: string,
+    values: Partial<Record<MessageTemplateToken, string>>,
+): string | null {
+    const used = templateUsesNavigationPlaceholders(`${subject}\n${content}`);
+    if (used.waze && !String(values.waze_link || '').trim()) {
+        return 'ללקוח לא הוגדרה כתובת הגעה לראיון — לא ניתן לשלוח תבנית עם {waze_link} ריק.';
+    }
+    if (used.googleMaps && !String(values.google_maps_link || '').trim()) {
+        return 'ללקוח לא הוגדרה כתובת הגעה לראיון — לא ניתן לשלוח תבנית עם {google_maps_link} ריק.';
+    }
+    return null;
 }

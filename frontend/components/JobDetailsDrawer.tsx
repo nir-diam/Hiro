@@ -436,6 +436,11 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
     navigate(`/jobs/edit/${jobId}`);
   };
 
+  const handleViewJobCandidates = (jobId: string | number) => {
+    onClose();
+    navigate(`/jobs/edit/${jobId}?view=candidates`);
+  };
+
   if (!isOpen || !job) return null;
 
   const renderContent = () => {
@@ -448,7 +453,7 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
           candidates={jobCandidates}
           loading={candidatesLoading}
           error={candidatesError}
-          onViewAll={() => handleViewFullProfile(job.id)}
+          onViewAll={() => handleViewJobCandidates(job.id)}
         />
       );
       default: return null;

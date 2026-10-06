@@ -813,8 +813,6 @@ const NewCandidateViewV2: React.FC = () => {
 
             <CandidateProfile 
                 candidateData={formData} 
-                onMatchJobsClick={() => {}}
-                onScreenCandidateClick={() => {}}
                 onOpenMessageModal={() => {}}
                 onTagsChange={(t) => setFormData({...formData, tags: t})}
                 onFormChange={setFormData}
@@ -856,8 +854,6 @@ const NewCandidateViewV2: React.FC = () => {
 
             <CandidateProfile 
                 candidateData={formData} 
-                onMatchJobsClick={() => {}}
-                onScreenCandidateClick={() => {}}
                 onOpenMessageModal={() => {}}
                 onTagsChange={(t) => setFormData({...formData, tags: t})}
                 onFormChange={setFormData}

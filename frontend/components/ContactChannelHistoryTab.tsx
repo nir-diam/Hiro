@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { DocumentArrowDownIcon, PaperClipIcon, PlusIcon } from './Icons';
-import { MessageModalConfig } from '../hooks/useUIState';
+import { DocumentArrowDownIcon, DocumentTextIcon, PaperClipIcon, PlusIcon } from './Icons';
+import { MessageModalConfig, type MessageRecipientOption } from '../hooks/useUIState';
+import {
+  fetchClientContactRecipientOptions,
+  mergeMessageRecipientOptions,
+} from '../utils/processEntityDrawers';
 import { formatAttachmentSize } from '../services/clientAttachmentsApi';
 import {
   downloadNotificationMessageAttachment,
@@ -19,9 +23,12 @@ type Props = {
   contactName: string;
   contactPhone?: string;
   contactEmail?: string;
+  contactEmails?: string[];
   clientId?: string | null;
   contactId?: string | null;
   organizationId?: string | null;
+  organizationTmpId?: string | null;
+  organizationName?: string | null;
   companyWide?: boolean;
 };
 
@@ -42,11 +49,15 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
   contactName,
   contactPhone,
   contactEmail,
+  contactEmails,
   clientId,
   contactId,
   organizationId,
+  organizationTmpId,
+  organizationName,
   companyWide = false,
 }) => {
+  const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
   const [items, setItems] = useState<OutboundMessageHistoryItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,11 +92,17 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
     setLoading(true);
     setError(null);
     try {
+      const emailsForFilter =
+        contactEmails && contactEmails.length
+          ? contactEmails
+          : contactEmail
+            ? [contactEmail]
+            : [];
       const rows = await listOutboundMessageEvents({
         clientId,
         channel,
         contactId: companyWide ? null : contactId,
-        contactName: companyWide ? null : contactName,
+        contactEmails: companyWide ? null : emailsForFilter,
         organizationId,
         companyWide,
       });
@@ -96,7 +113,7 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
     } finally {
       setLoading(false);
     }
-  }, [channel, clientId, companyWide, contactId, contactName, organizationId]);
+  }, [channel, clientId, companyWide, contactId, contactEmail, contactEmails, organizationId]);
 
   useEffect(() => {
     void load();
@@ -113,7 +130,37 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
     return () => window.removeEventListener('hiro:outbound-message-logged', onLogged);
   }, [channel, clientId, load]);
 
-  const openComposer = () => {
+  const openComposer = async () => {
+    const current: MessageRecipientOption | null = contactId
+      ? {
+          id: contactId,
+          name: contactName,
+          email: contactEmail || '',
+          phone: contactPhone || '',
+          subtitle: organizationName || null,
+          clientId: clientId || null,
+          organizationId: organizationId || null,
+        }
+      : null;
+
+    let recipientOptions: MessageRecipientOption[] = current ? [current] : [];
+    const orgId = String(organizationId || '').trim();
+    const orgTmp = String(organizationTmpId || '').trim();
+    const hasOrgScope = Boolean(orgId || orgTmp);
+    if (clientId && hasOrgScope && apiBase) {
+      const fetched = await fetchClientContactRecipientOptions(
+        apiBase,
+        clientId,
+        organizationName || '',
+        { organizationId: orgId || null, organizationTmpId: orgTmp || null },
+      );
+      if (current) {
+        recipientOptions = mergeMessageRecipientOptions(fetched, current);
+      } else if (fetched.length) {
+        recipientOptions = fetched;
+      }
+    }
+
     openMessageModal({
       mode: channel,
       recipientType: 'client_contact',
@@ -123,18 +170,8 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
       linkedClientId: clientId || null,
       linkedContactId: contactId || null,
       linkedOrganizationId: organizationId || null,
-      recipientOptions: contactId
-        ? [
-            {
-              id: contactId,
-              name: contactName,
-              email: contactEmail || '',
-              phone: contactPhone || '',
-              clientId: clientId || null,
-              organizationId: organizationId || null,
-            },
-          ]
-        : undefined,
+      linkedOrganizationName: organizationName || null,
+      recipientOptions: recipientOptions.length ? recipientOptions : undefined,
       initialRecipientIds: contactId ? [contactId] : undefined,
     });
   };
@@ -151,7 +188,7 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
         </h3>
         <button
           type="button"
-          onClick={openComposer}
+          onClick={() => void openComposer()}
           className="flex items-center gap-2 bg-primary-600 text-white px-4 py-2 rounded-lg text-sm font-semibold hover:bg-primary-700 transition shadow-sm"
         >
           <PlusIcon className="w-4 h-4" />
@@ -194,6 +231,7 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
               </tr>
             ) : (
               items.map((item) => {
+                const isProposalEmail = channel === 'email' && Boolean(item.isProposal);
                 const primary =
                   channel === 'email'
                     ? item.subject || item.title || '(ללא נושא)'
@@ -202,11 +240,26 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
                 return (
                   <React.Fragment key={item.id}>
                     <tr
-                      className="border-b border-border-default hover:bg-bg-subtle/60 cursor-pointer"
+                      className={`border-b border-border-default hover:bg-bg-subtle/60 cursor-pointer ${
+                        isProposalEmail ? 'bg-violet-50/50 hover:bg-violet-50/80' : ''
+                      }`}
                       onClick={() => setExpandedId(isOpen ? null : item.id)}
                     >
-                      <td className="py-3 px-4 text-text-default max-w-xs truncate" title={primary}>
-                        {primary}
+                      <td className="py-3 px-4 text-text-default max-w-xs" title={primary}>
+                        <div className="flex flex-col gap-1 min-w-0">
+                          {isProposalEmail ? (
+                            <span className="inline-flex items-center gap-1 w-fit text-[10px] font-bold uppercase tracking-wide text-violet-800 bg-violet-100 border border-violet-200 rounded-md px-1.5 py-0.5">
+                              <DocumentTextIcon className="w-3 h-3 shrink-0" />
+                              הצעת מחיר
+                            </span>
+                          ) : null}
+                          <span className="truncate font-medium">{primary}</span>
+                          {isProposalEmail && item.proposalLabels?.length ? (
+                            <span className="text-[11px] text-violet-900/80 truncate">
+                              {item.proposalLabels.join(' · ')}
+                            </span>
+                          ) : null}
+                        </div>
                       </td>
                       {companyWide ? (
                         <td className="py-3 px-4 text-text-muted">{item.contactName || '—'}</td>
@@ -218,9 +271,22 @@ const ContactChannelHistoryTab: React.FC<Props> = ({
                       <td className="py-3 px-4 text-text-muted">{item.deliveryStatus || 'נשלח'}</td>
                     </tr>
                     {isOpen ? (
-                      <tr className="border-b border-border-default bg-bg-subtle/40">
+                      <tr
+                        className={`border-b border-border-default ${
+                          isProposalEmail ? 'bg-violet-50/40' : 'bg-bg-subtle/40'
+                        }`}
+                      >
                         <td colSpan={companyWide ? 5 : 4} className="py-3 px-4">
                           <div className="space-y-2 text-sm text-text-default whitespace-pre-wrap">
+                            {isProposalEmail ? (
+                              <div className="text-xs font-semibold text-violet-900 flex items-center gap-1.5 pb-1 border-b border-violet-100">
+                                <DocumentTextIcon className="w-4 h-4" />
+                                מייל עם הצעת מחיר
+                                {item.proposalLabels?.length
+                                  ? ` — ${item.proposalLabels.join(', ')}`
+                                  : ''}
+                              </div>
+                            ) : null}
                             <div className="text-text-muted">אל: {item.to || '—'}</div>
                             {channel === 'email' && item.subject ? (
                               <div className="font-semibold">{item.subject}</div>

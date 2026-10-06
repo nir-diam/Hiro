@@ -344,6 +344,21 @@ async function evaluateLink(candidate, jc, job, settings, clientId, groupPrecomp
   return { include: false, path: null, reasons: ['status_not_screening'], ...baseOut };
 }
 
+async function resolveCandidateInternalNotesForScreening(candidateId, candPlain) {
+  const direct = String(candPlain?.internalNotes || '').trim();
+  if (direct) return direct;
+  try {
+    const siblings = await candidateService.fetchCanonicalSiblingRows(candidateId, ['internalNotes']);
+    for (const row of siblings) {
+      const notes = String(row?.internalNotes || '').trim();
+      if (notes) return notes;
+    }
+  } catch (e) {
+    console.warn('[screeningPool] internalNotes lookup failed', e.message || e);
+  }
+  return '';
+}
+
 async function computeScreeningForCandidate(candidateId, opts = {}) {
   const staffTenantId = opts.tenantClientId ? String(opts.tenantClientId).trim() : '';
   const candidate = await candidateService.findByPkWithTagsForMatchScore(candidateId);
@@ -456,7 +471,12 @@ async function computeScreeningForCandidate(candidateId, opts = {}) {
     else excluded.push(row);
   }
 
-  return { included, excluded, presentationByClientId };
+  const candidateInternalNotes = await resolveCandidateInternalNotesForScreening(
+    candidateId,
+    candPlain,
+  );
+
+  return { included, excluded, presentationByClientId, candidateInternalNotes };
 }
 
 async function computeScreeningForJob(jobId) {

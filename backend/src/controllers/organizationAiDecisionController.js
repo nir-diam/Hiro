@@ -213,6 +213,19 @@ const resolve = async (req, res) => {
       updates.resolvedAt = new Date();
     }
 
+    const effectiveDecision = aiDecision !== undefined ? aiDecision : decision.aiDecision;
+    if (
+      effectiveDecision === 'create_company'
+      && reviewStatus
+      && reviewStatus !== 'pending_review'
+      && !decision.organizationId
+    ) {
+      const linkedOrgId = await organizationService.resolveOrganizationIdForTerm(decision.originalTerm);
+      if (linkedOrgId) {
+        updates.organizationId = linkedOrgId;
+      }
+    }
+
     // When escalating to manual review, ensure an OrganizationTmp staging record exists
     if (reviewStatus === 'manual' && !decision.organizationTmpId) {
       const tmpOrg = await OrganizationTmp.create({
@@ -242,6 +255,7 @@ const resolve = async (req, res) => {
     }
 
     if ((mergeDecision === 'merge_company' || mergeDecision === 'map_generic') && targetId) {
+      updates.organizationId = targetId;
       const targetOrg = await Organization.findByPk(targetId);
       if (!targetOrg) {
         console.warn(`[orgAiDecision] merge: org not found with id "${targetId}" — alias NOT added`);
@@ -325,8 +339,12 @@ const resolve = async (req, res) => {
       success: true,
       id: decision.id,
       reviewStatus: decision.reviewStatus,
+      organizationId: decision.organizationId || null,
       organizationTmpId: decision.organizationTmpId,
       aliasResult,
+      note: decision.aiDecision === 'create_company' && decision.reviewStatus === 'approved'
+        ? 'Decision closed; live organization already exists — no duplicate created.'
+        : undefined,
     });
   } catch (err) {
     console.error('[orgAiDecision] resolve error:', err);

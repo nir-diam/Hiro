@@ -1,5 +1,7 @@
 const CandidateApplication = require('../models/CandidateApplication');
 const Job = require('../models/Job');
+
+const PORTAL_APPLICATION_SOURCES = new Set(['candidate_portal', 'job_matching']);
 const { Op } = require('sequelize');
 const redis = require('./redisService');
 
@@ -29,7 +31,7 @@ const listByCandidate = async (candidateId) => {
       {
         model: Job,
         as: 'job',
-        attributes: ['id', 'title', 'client'],
+        attributes: ['id', 'title', 'client', 'digitalQuestions'],
       },
     ],
   });
@@ -55,7 +57,7 @@ const listByCandidates = async (candidateIds) => {
       {
         model: Job,
         as: 'job',
-        attributes: ['id', 'title', 'client'],
+        attributes: ['id', 'title', 'client', 'digitalQuestions'],
       },
     ],
   });
@@ -91,10 +93,40 @@ const remove = async (id) => {
   await appCacheInvalidate(candidateId);
 };
 
+/** Mirror portal / matching apply into the candidate's applications ledger. */
+const ensureForPortalApplication = async ({ candidateId, jobId, source }) => {
+  const cid = String(candidateId || '').trim();
+  const jid = String(jobId || '').trim();
+  const src = String(source || '').trim();
+  if (!cid || !jid || !PORTAL_APPLICATION_SOURCES.has(src)) return null;
+
+  const existing = await CandidateApplication.findOne({
+    where: { candidateId: cid, jobId: jid },
+  });
+  if (existing) return existing;
+
+  const job = await Job.findByPk(jid, {
+    attributes: ['id', 'title', 'client'],
+  });
+  if (!job) return null;
+  const plain = job.get ? job.get({ plain: true }) : job;
+
+  return create({
+    candidateId: cid,
+    jobId: jid,
+    company: String(plain.client || '').trim() || '—',
+    role: String(plain.title || '').trim() || '—',
+    status: src === 'candidate_portal' ? 'הוגש מהפורטל' : 'נשלח',
+    applicationDate: new Date().toISOString().slice(0, 10),
+  });
+};
+
 module.exports = {
   listByCandidate,
   listByCandidates,
   create,
   update,
   remove,
+  ensureForPortalApplication,
+  PORTAL_APPLICATION_SOURCES,
 };

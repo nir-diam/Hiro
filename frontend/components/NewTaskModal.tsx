@@ -12,6 +12,9 @@ import {
     PaperClipIcon,
     TrashIcon,
     ArrowUpTrayIcon,
+    PencilIcon,
+    PlusIcon,
+    CheckIcon,
 } from './Icons';
 import { formatAttachmentSize } from '../services/clientAttachmentsApi';
 import type { SendNotificationEmailAttachment } from '../services/emailSendApi';
@@ -31,6 +34,9 @@ import {
 import {
     fetchEventTypes,
     filterEventTypesForContext,
+    createEventType,
+    updateEventType,
+    deleteEventType,
     type EventTypeApiRow,
 } from '../services/eventTypesApi';
 import {
@@ -540,24 +546,34 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     const [contactsLoading, setContactsLoading] = useState(false);
     const [clientContactOptions, setClientContactOptions] = useState<StaffEmailOption[]>([]);
     const [flightCategories, setFlightCategories] = useState<EventTypeApiRow[]>([]);
+    const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false);
+    const [editingCategoryId, setEditingCategoryId] = useState<string | null>(null);
+    const [editingCategoryName, setEditingCategoryName] = useState('');
+    const [isCreatingCategory, setIsCreatingCategory] = useState(false);
+    const [newCategoryName, setNewCategoryName] = useState('');
+    const [categorySaving, setCategorySaving] = useState(false);
+    const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(null);
+    const [categoryError, setCategoryError] = useState<string | null>(null);
+    const categoryPickerRef = useRef<HTMLDivElement>(null);
+
+    const loadFlightCategories = useCallback(async () => {
+        if (!apiBase) {
+            setFlightCategories([]);
+            return;
+        }
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        try {
+            const rows = await fetchEventTypes(apiBase, token);
+            setFlightCategories(filterEventTypesForContext(rows, 'flight'));
+        } catch {
+            setFlightCategories([]);
+        }
+    }, [apiBase]);
 
     useEffect(() => {
-        if (!isOpen || !apiBase) return;
-        let cancelled = false;
-        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-        (async () => {
-            try {
-                const rows = await fetchEventTypes(apiBase, token);
-                if (cancelled) return;
-                setFlightCategories(filterEventTypesForContext(rows, 'flight'));
-            } catch {
-                if (!cancelled) setFlightCategories([]);
-            }
-        })();
-        return () => {
-            cancelled = true;
-        };
-    }, [isOpen, apiBase]);
+        if (!isOpen) return;
+        void loadFlightCategories();
+    }, [isOpen, loadFlightCategories]);
     const [formData, setFormData] = useState({
         messageText: '',
         assigneeEmails: [] as string[],
@@ -571,6 +587,15 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     });
     const modalRef = useRef<HTMLDivElement>(null);
     const assigneePickerRef = useRef<HTMLDivElement>(null);
+    const resetCategoryPickerState = useCallback(() => {
+        setCategoryDropdownOpen(false);
+        setEditingCategoryId(null);
+        setEditingCategoryName('');
+        setIsCreatingCategory(false);
+        setNewCategoryName('');
+        setDeletingCategoryId(null);
+        setCategoryError(null);
+    }, []);
     const closeButtonRef = useRef<HTMLButtonElement>(null);
     const [assigneeDropdownOpen, setAssigneeDropdownOpen] = useState(false);
     const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
@@ -606,6 +631,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
             });
             setIsTaskMode(false);
             setAttachmentFiles([]);
+            resetCategoryPickerState();
             if (attachmentFileInputRef.current) attachmentFileInputRef.current.value = '';
             
             previouslyFocusedElement.current = document.activeElement as HTMLElement;
@@ -642,7 +668,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                 previouslyFocusedElement.current?.focus();
             };
         }
-    }, [isOpen, onClose]);
+    }, [isOpen, onClose, resetCategoryPickerState]);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -744,8 +770,152 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     }, [formData.assigneeEmails, orderedContactOptions]);
 
     useEffect(() => {
-        if (!isOpen) setAssigneeDropdownOpen(false);
-    }, [isOpen]);
+        if (!isOpen) {
+            setAssigneeDropdownOpen(false);
+            resetCategoryPickerState();
+        }
+    }, [isOpen, resetCategoryPickerState]);
+
+    const selectCategory = useCallback((name: string) => {
+        const trimmed = String(name || '').trim() || 'כללי';
+        setFormData((prev) => ({ ...prev, category: trimmed }));
+        setCategoryDropdownOpen(false);
+        setEditingCategoryId(null);
+        setIsCreatingCategory(false);
+        setCategoryError(null);
+    }, []);
+
+    const startEditCategory = useCallback((cat: EventTypeApiRow) => {
+        setEditingCategoryId(cat.id);
+        setEditingCategoryName(cat.name);
+        setIsCreatingCategory(false);
+        setCategoryError(null);
+    }, []);
+
+    const cancelEditCategory = useCallback(() => {
+        setEditingCategoryId(null);
+        setEditingCategoryName('');
+        setCategoryError(null);
+    }, []);
+
+    const saveEditCategory = useCallback(async () => {
+        if (!editingCategoryId || !apiBase) return;
+        const trimmed = editingCategoryName.trim();
+        if (!trimmed) {
+            setCategoryError('יש להזין שם קטגוריה');
+            return;
+        }
+        const existing = flightCategories.find((c) => c.id === editingCategoryId);
+        if (!existing) return;
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setCategoryError('נדרשת התחברות לשמירה');
+            return;
+        }
+        setCategorySaving(true);
+        setCategoryError(null);
+        try {
+            const updated = await updateEventType(apiBase, token, editingCategoryId, {
+                name: trimmed,
+                isActive: existing.isActive,
+                textColor: existing.textColor,
+                bgColor: existing.bgColor,
+                forCandidate: existing.forCandidate,
+                forJob: existing.forJob,
+                forClient: existing.forClient,
+                forFlight: existing.forFlight,
+            });
+            setFlightCategories((prev) => prev.map((c) => (c.id === updated.id ? updated : c)));
+            setFormData((prev) => (
+                prev.category === existing.name ? { ...prev, category: updated.name } : prev
+            ));
+            setEditingCategoryId(null);
+            setEditingCategoryName('');
+        } catch (e: unknown) {
+            setCategoryError(e instanceof Error ? e.message : 'עדכון קטגוריה נכשל');
+        } finally {
+            setCategorySaving(false);
+        }
+    }, [apiBase, editingCategoryId, editingCategoryName, flightCategories]);
+
+    const saveNewCategory = useCallback(async () => {
+        if (!apiBase) return;
+        const trimmed = newCategoryName.trim();
+        if (!trimmed) {
+            setCategoryError('יש להזין שם קטגוריה');
+            return;
+        }
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setCategoryError('נדרשת התחברות ליצירה');
+            return;
+        }
+        setCategorySaving(true);
+        setCategoryError(null);
+        try {
+            const created = await createEventType(apiBase, token, {
+                name: trimmed,
+                isActive: true,
+                textColor: '#000000',
+                bgColor: '#ffffff',
+                forCandidate: false,
+                forJob: false,
+                forClient: false,
+                forFlight: true,
+            });
+            setFlightCategories((prev) => [...prev, created]);
+            setFormData((prev) => ({ ...prev, category: created.name }));
+            setNewCategoryName('');
+            setIsCreatingCategory(false);
+            setCategoryDropdownOpen(false);
+        } catch (e: unknown) {
+            setCategoryError(e instanceof Error ? e.message : 'יצירת קטגוריה נכשלה');
+        } finally {
+            setCategorySaving(false);
+        }
+    }, [apiBase, newCategoryName]);
+
+    const deleteCategory = useCallback(async (cat: EventTypeApiRow) => {
+        if (!window.confirm(`למחוק את הקטגוריה "${cat.name}"?`)) return;
+        if (!apiBase) return;
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setCategoryError('נדרשת התחברות למחיקה');
+            return;
+        }
+        setDeletingCategoryId(cat.id);
+        setCategoryError(null);
+        try {
+            await deleteEventType(apiBase, token, cat.id);
+            setFlightCategories((prev) => prev.filter((c) => c.id !== cat.id));
+            setFormData((prev) => (
+                prev.category === cat.name ? { ...prev, category: 'כללי' } : prev
+            ));
+            if (editingCategoryId === cat.id) {
+                setEditingCategoryId(null);
+                setEditingCategoryName('');
+            }
+        } catch (e: unknown) {
+            setCategoryError(e instanceof Error ? e.message : 'מחיקת קטגוריה נכשלה');
+        } finally {
+            setDeletingCategoryId(null);
+        }
+    }, [apiBase, editingCategoryId]);
+
+    useEffect(() => {
+        if (!categoryDropdownOpen) return;
+        const onDocMouseDown = (e: MouseEvent) => {
+            const el = categoryPickerRef.current;
+            if (el && !el.contains(e.target as Node)) {
+                setCategoryDropdownOpen(false);
+                setEditingCategoryId(null);
+                setIsCreatingCategory(false);
+                setCategoryError(null);
+            }
+        };
+        document.addEventListener('mousedown', onDocMouseDown);
+        return () => document.removeEventListener('mousedown', onDocMouseDown);
+    }, [categoryDropdownOpen]);
 
     useEffect(() => {
         if (!assigneeDropdownOpen) return;
@@ -1326,6 +1496,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         sla: isTaskMode ? formData.sla : null,
                         allocatedDays: isTaskMode ? formData.allocatedDays : null,
                         taskPayload,
+                        appendSystemLinks: formData.submissionEmail,
                         skipSmtp: !formData.submissionEmail,
                         attachments: emailAttachments.length ? emailAttachments : undefined,
                     }),
@@ -1370,7 +1541,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                 onClick={e => e.stopPropagation()}
                 style={{ animation: 'modalFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}
             >
-                <form onSubmit={handleSubmit} className="flex flex-col overflow-hidden">
+                <form onSubmit={handleSubmit} className="flex flex-col overflow-visible">
                     <header className="flex items-center justify-between px-4 py-3 border-b border-border-default/50 bg-bg-subtle/30 flex-shrink-0">
                         <div>
                             <h2 id={titleId} className="text-lg font-black text-text-default tracking-tight leading-tight">
@@ -1383,7 +1554,11 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         </button>
                     </header>
 
-                    <main className="px-4 py-3 bg-bg-card overflow-hidden">
+                    <main
+                        className={`px-4 py-3 bg-bg-card overflow-visible relative ${
+                            categoryDropdownOpen || assigneeDropdownOpen ? 'z-30' : 'z-0'
+                        }`}
+                    >
                         <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.15fr] gap-3">
                             {/* Controls column (RTL start) */}
                             <div className="space-y-2.5 order-2 lg:order-1 min-w-0">
@@ -1414,7 +1589,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                             {assigneeDropdownOpen && (
                                                 <div
                                                     role="listbox"
-                                                    className="absolute top-full left-0 right-0 z-50 mt-1 max-h-40 overflow-y-auto rounded-lg border border-border-default bg-bg-card shadow-lg p-1.5 space-y-0.5"
+                                                    className="absolute top-full left-0 right-0 z-[120] mt-1 max-h-40 overflow-y-auto rounded-lg border border-border-default bg-bg-card shadow-lg p-1.5 space-y-0.5"
                                                 >
                                                     {orderedContactOptions.map((opt) => {
                                                         const checked = formData.assigneeEmails.includes(opt.email);
@@ -1440,21 +1615,189 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                 </div>
 
                                 <div className="grid grid-cols-3 gap-2">
-                                    <div>
+                                    <div className="relative" ref={categoryPickerRef}>
                                         <label className={labelClass}>קטגוריה</label>
-                                        <select name="category" value={formData.category} onChange={handleChange} className={fieldClass}>
-                                            <option value="כללי">כללי</option>
-                                            {flightCategories.map((cat) => (
-                                                <option key={cat.id} value={cat.name}>
-                                                    {cat.name}
-                                                </option>
-                                            ))}
-                                            {formData.category &&
-                                                formData.category !== 'כללי' &&
-                                                !flightCategories.some((c) => c.name === formData.category) && (
-                                                <option value={formData.category}>{formData.category}</option>
-                                            )}
-                                        </select>
+                                        <button
+                                            type="button"
+                                            onClick={() => setCategoryDropdownOpen((o) => !o)}
+                                            aria-expanded={categoryDropdownOpen}
+                                            aria-haspopup="listbox"
+                                            className={`${fieldClass} min-h-[36px] flex items-center justify-between gap-2 text-right hover:border-primary-300`}
+                                        >
+                                            <span className="truncate flex-1 min-w-0">{formData.category || 'כללי'}</span>
+                                            <ChevronDownIcon
+                                                className={`w-4 h-4 shrink-0 text-text-muted transition-transform ${categoryDropdownOpen ? 'rotate-180' : ''}`}
+                                            />
+                                        </button>
+                                        {categoryDropdownOpen && (
+                                            <div
+                                                role="listbox"
+                                                className="absolute top-full left-0 right-0 z-[120] mt-1 max-h-52 overflow-y-auto rounded-lg border border-border-default bg-bg-card shadow-lg"
+                                            >
+                                                <div className="p-1.5 space-y-0.5">
+                                                    <button
+                                                        type="button"
+                                                        role="option"
+                                                        aria-selected={formData.category === 'כללי'}
+                                                        onClick={() => selectCategory('כללי')}
+                                                        className={`w-full text-right text-xs rounded-md px-2 py-1.5 font-bold transition-colors ${
+                                                            formData.category === 'כללי'
+                                                                ? 'bg-primary-50 text-primary-700'
+                                                                : 'text-text-default hover:bg-bg-subtle/80'
+                                                        }`}
+                                                    >
+                                                        כללי
+                                                    </button>
+                                                    {flightCategories.map((cat) => (
+                                                        <div key={cat.id} className="flex items-center gap-1">
+                                                            {editingCategoryId === cat.id ? (
+                                                                <>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={editingCategoryName}
+                                                                        onChange={(e) => setEditingCategoryName(e.target.value)}
+                                                                        onKeyDown={(e) => {
+                                                                            if (e.key === 'Enter') void saveEditCategory();
+                                                                            if (e.key === 'Escape') cancelEditCategory();
+                                                                        }}
+                                                                        className="flex-1 min-w-0 text-xs rounded-md border border-border-default bg-bg-input px-2 py-1"
+                                                                        autoFocus
+                                                                        disabled={categorySaving}
+                                                                    />
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => void saveEditCategory()}
+                                                                        disabled={categorySaving}
+                                                                        className="p-1 rounded-md text-primary-600 hover:bg-primary-50 disabled:opacity-50"
+                                                                        title="שמור"
+                                                                    >
+                                                                        <CheckIcon className="w-4 h-4" />
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={cancelEditCategory}
+                                                                        disabled={categorySaving || deletingCategoryId === cat.id}
+                                                                        className="p-1 rounded-md text-text-muted hover:bg-bg-subtle disabled:opacity-50"
+                                                                        title="ביטול"
+                                                                    >
+                                                                        <XMarkIcon className="w-4 h-4" />
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => void deleteCategory(cat)}
+                                                                        disabled={categorySaving || deletingCategoryId === cat.id}
+                                                                        className="p-1 rounded-md text-text-muted hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                                                        title="מחק קטגוריה"
+                                                                    >
+                                                                        <TrashIcon className="w-4 h-4" />
+                                                                    </button>
+                                                                </>
+                                                            ) : (
+                                                                <>
+                                                                    <button
+                                                                        type="button"
+                                                                        role="option"
+                                                                        aria-selected={formData.category === cat.name}
+                                                                        onClick={() => selectCategory(cat.name)}
+                                                                        className={`flex-1 min-w-0 text-right text-xs rounded-md px-2 py-1.5 font-bold transition-colors truncate ${
+                                                                            formData.category === cat.name
+                                                                                ? 'bg-primary-50 text-primary-700'
+                                                                                : 'text-text-default hover:bg-bg-subtle/80'
+                                                                        }`}
+                                                                    >
+                                                                        {cat.name}
+                                                                    </button>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            startEditCategory(cat);
+                                                                        }}
+                                                                        disabled={categorySaving || Boolean(editingCategoryId)}
+                                                                        className="p-1 rounded-md text-text-muted hover:text-primary-600 hover:bg-primary-50 shrink-0 disabled:opacity-50 opacity-0 hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                                                                        title="ערוך קטגוריה"
+                                                                    >
+                                                                        <PencilIcon className="w-3.5 h-3.5" />
+                                                                    </button>
+                                                                </>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                    {formData.category &&
+                                                        formData.category !== 'כללי' &&
+                                                        !flightCategories.some((c) => c.name === formData.category) && (
+                                                        <button
+                                                            type="button"
+                                                            role="option"
+                                                            aria-selected
+                                                            onClick={() => selectCategory(formData.category)}
+                                                            className="w-full text-right text-xs rounded-md px-2 py-1.5 font-bold bg-primary-50 text-primary-700 truncate"
+                                                        >
+                                                            {formData.category}
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                <div className="border-t border-border-subtle p-1.5">
+                                                    {isCreatingCategory ? (
+                                                        <div className="flex items-center gap-1">
+                                                            <input
+                                                                type="text"
+                                                                value={newCategoryName}
+                                                                onChange={(e) => setNewCategoryName(e.target.value)}
+                                                                onKeyDown={(e) => {
+                                                                    if (e.key === 'Enter') void saveNewCategory();
+                                                                    if (e.key === 'Escape') {
+                                                                        setIsCreatingCategory(false);
+                                                                        setNewCategoryName('');
+                                                                    }
+                                                                }}
+                                                                placeholder="שם קטגוריה חדשה"
+                                                                className="flex-1 min-w-0 text-xs rounded-md border border-border-default bg-bg-input px-2 py-1"
+                                                                autoFocus
+                                                                disabled={categorySaving}
+                                                            />
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => void saveNewCategory()}
+                                                                disabled={categorySaving}
+                                                                className="p-1 rounded-md text-primary-600 hover:bg-primary-50 disabled:opacity-50"
+                                                                title="צור"
+                                                            >
+                                                                <CheckIcon className="w-4 h-4" />
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => {
+                                                                    setIsCreatingCategory(false);
+                                                                    setNewCategoryName('');
+                                                                }}
+                                                                disabled={categorySaving}
+                                                                className="p-1 rounded-md text-text-muted hover:bg-bg-subtle disabled:opacity-50"
+                                                                title="ביטול"
+                                                            >
+                                                                <XMarkIcon className="w-4 h-4" />
+                                                            </button>
+                                                        </div>
+                                                    ) : (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => {
+                                                                setIsCreatingCategory(true);
+                                                                setEditingCategoryId(null);
+                                                                setCategoryError(null);
+                                                            }}
+                                                            className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-primary-700 hover:bg-primary-50 rounded-md py-1.5 transition-colors"
+                                                        >
+                                                            <PlusIcon className="w-4 h-4" />
+                                                            קטגוריה חדשה
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        )}
+                                        {categoryError && (
+                                            <p className="text-[10px] text-red-600 mt-0.5">{categoryError}</p>
+                                        )}
                                     </div>
                                     <div>
                                         <label className={labelClass}>במועד</label>
@@ -1637,7 +1980,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         </div>
                     </main>
 
-                    <footer className="flex justify-end items-center px-4 py-3 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 gap-2">
+                    <footer className="relative z-10 flex justify-end items-center px-4 py-3 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 gap-2">
                         <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-default hover:bg-bg-hover rounded-lg transition-colors">
                             ביטול
                         </button>

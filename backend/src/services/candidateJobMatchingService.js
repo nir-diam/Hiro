@@ -61,6 +61,25 @@ const runWithConcurrency = async (items, limit, fn) => {
   return results;
 };
 
+function normalizePortalRequirements(jobPlain) {
+  const raw = jobPlain?.requirements;
+  if (Array.isArray(raw)) {
+    const lines = raw.map((line) => String(line || '').trim()).filter(Boolean);
+    if (lines.length) return lines;
+  } else if (typeof raw === 'string' && raw.trim()) {
+    return raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+  const pubReq = String(jobPlain?.publicJobRequirements || '').trim();
+  if (pubReq) {
+    return pubReq.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+  return [];
+}
+
+function portalJobDescription(jobPlain) {
+  return String(jobPlain?.PublicDescription || jobPlain?.description || '').trim();
+}
+
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 /**
@@ -324,8 +343,8 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
         jobType:          Array.isArray(jobPlain.jobType) ? jobPlain.jobType : [],
         salaryMin:        jobPlain.salaryMin  || null,
         salaryMax:        jobPlain.salaryMax  || null,
-        description:      jobPlain.description || '',
-        requirements:     Array.isArray(jobPlain.requirements) ? jobPlain.requirements : [],
+        description:      portalJobDescription(jobPlain),
+        requirements:     normalizePortalRequirements(jobPlain),
         skills:           Array.isArray(jobPlain.skills)       ? jobPlain.skills       : [],
         languages:        Array.isArray(jobPlain.languages)    ? jobPlain.languages    : [],
         role:             jobPlain.role  || '',
@@ -336,7 +355,15 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
         matchType:        linkedInfo ? 'application' : 'ai',
         requirementsMet,
         jobCandidateId:   linkedInfo?.jcId || null,
-        lastAnalyzed:     new Date().toLocaleDateString('he-IL'),
+        jobUpdatedAt:     jobPlain.updatedAt || jobPlain.openDate || null,
+        jobOpenDate:      jobPlain.openDate || null,
+        jobUpdatedAtMs:   (() => {
+          const raw = jobPlain.updatedAt || jobPlain.openDate || null;
+          if (!raw) return 0;
+          const ms = new Date(raw).getTime();
+          return Number.isFinite(ms) ? ms : 0;
+        })(),
+        lastAnalyzed:     jobPlain.updatedAt || jobPlain.openDate || null,
       },
     };
   };

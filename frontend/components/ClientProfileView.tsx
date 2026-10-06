@@ -27,6 +27,7 @@ import ClientTasksTab from './ClientTasksTab';
 import ClientFinanceTab from './ClientFinanceTab'; // Changed import
 import ClientHistoryTab from './ClientHistoryTab';
 import AccordionSection from './AccordionSection';
+import ClientInterviewArrivalCard from './ClientInterviewArrivalCard';
 import DocumentViewerModal from './DocumentViewerModal';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
@@ -383,6 +384,11 @@ export const ClientInsightsDashboard: React.FC<{
             <CoordinatorLinksCard
                 clientId={clientId}
                 organizationId={organizationId}
+                clientMetadata={clientMetadata}
+            />
+
+            <ClientInterviewArrivalCard
+                clientId={clientId}
                 clientMetadata={clientMetadata}
             />
         </div>

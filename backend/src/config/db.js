@@ -49,6 +49,7 @@ const connectDb = async () => {
   require('../models/JobHealthRule');
   require('../models/JobHealthSetting');
   require('../models/JobPublication');
+  require('../models/CvForwardDelivery');
   require('../models/JobImage');
   require('../models/Tag');
   require('../models/TagHistory');
@@ -81,6 +82,7 @@ const connectDb = async () => {
   require('../models/SmsRsvpRequest');
   require('../models/SmsRsvpInboundLog');
   require('../models/SmsRsvpDeliveryLog');
+  require('../models/OrganizationProfileUpdate');
 
   const User = require('../models/User');
   const Client = require('../models/Client');
@@ -174,6 +176,17 @@ const connectDb = async () => {
       ADD COLUMN IF NOT EXISTS user_notes TEXT NULL;
   `).catch(() => {});
 
+  await sequelize.query(`
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS "listNotes" TEXT NULL,
+      ADD COLUMN IF NOT EXISTS "listNotesHistory" JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS "jobFields" JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+
   // Safe additive columns for job_publications (sync does not alter existing tables).
   await sequelize.query(`
     ALTER TABLE job_publications
@@ -187,6 +200,16 @@ const connectDb = async () => {
       ADD COLUMN IF NOT EXISTS "landingLayout" VARCHAR(32) DEFAULT 'detailed',
       ADD COLUMN IF NOT EXISTS "landingLayouts" JSONB NOT NULL DEFAULT '{}'::jsonb,
       ADD COLUMN IF NOT EXISTS "heroDesignInstructions" TEXT;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE job_publications
+      ADD COLUMN IF NOT EXISTS "heroBrandSource" VARCHAR(32) NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE job_publications
+      ADD COLUMN IF NOT EXISTS "heroBrandColorOverride" VARCHAR(32) NULL;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -268,6 +291,16 @@ const connectDb = async () => {
   `).catch(() => {});
 
   await sequelize.query(`
+    ALTER TABLE client_pipelines
+      ADD COLUMN IF NOT EXISTS default_contact_id UUID NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_pipelines
+      ADD COLUMN IF NOT EXISTS default_assignee_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+
+  await sequelize.query(`
     CREATE TABLE IF NOT EXISTS client_pipeline_stages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       pipeline_id UUID NOT NULL REFERENCES client_pipelines(id) ON DELETE CASCADE,
@@ -311,6 +344,16 @@ const connectDb = async () => {
   await sequelize.query(`
     CREATE INDEX IF NOT EXISTS idx_candidate_pipelines_client
       ON candidate_pipelines (client_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidate_pipelines
+      ADD COLUMN IF NOT EXISTS default_contact_id UUID NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidate_pipelines
+      ADD COLUMN IF NOT EXISTS default_assignee_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -462,6 +505,11 @@ const connectDb = async () => {
     CREATE INDEX IF NOT EXISTS idx_proposals_contact
       ON proposals (contact_id, date DESC)
       WHERE contact_id IS NOT NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE proposals
+      ADD COLUMN IF NOT EXISTS sent_history JSONB NOT NULL DEFAULT '[]'::jsonb;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -700,6 +748,57 @@ const connectDb = async () => {
   await sequelize.query(`
     ALTER TABLE login_email_codes
       ADD COLUMN IF NOT EXISTS delivery_channel VARCHAR(16) NOT NULL DEFAULT 'email';
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE organization_ai_decisions
+      ADD COLUMN IF NOT EXISTS organization_id UUID REFERENCES organizations(id) ON DELETE SET NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_org_ai_decisions_organization_id
+      ON organization_ai_decisions(organization_id);
+  `).catch(() => {});
+
+  try {
+    await sequelize.query(`
+      UPDATE organization_ai_decisions d
+      SET organization_id = o.id
+      FROM organizations o
+      WHERE d.organization_id IS NULL
+        AND d.ai_decision = 'create_company'
+        AND LOWER(TRIM(d.original_term)) = LOWER(TRIM(o.name));
+    `);
+  } catch (_) { /* non-fatal backfill */ }
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS organization_profile_updates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      "clientId" UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      "organizationId" UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      status VARCHAR(24) NOT NULL DEFAULT 'pending',
+      "previousFields" JSONB NOT NULL DEFAULT '{}'::jsonb,
+      "proposedFields" JSONB NOT NULL DEFAULT '{}'::jsonb,
+      "submittedByUserId" UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+      "submittedByName" TEXT NULL,
+      "reviewedByUserId" UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+      "reviewedByName" TEXT NULL,
+      "reviewedAt" TIMESTAMPTZ NULL,
+      "reviewNote" TEXT NULL,
+      "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_org_profile_updates_status
+      ON organization_profile_updates (status);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_org_profile_updates_client_pending
+      ON organization_profile_updates ("clientId")
+      WHERE status = 'pending';
   `).catch(() => {});
 
   try {

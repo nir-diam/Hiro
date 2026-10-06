@@ -10,6 +10,8 @@ const handleServiceError = (res, err) =>
   res.status(err.status || 500).json({
     message: err.message || 'Request failed',
     ...(err.code ? { code: err.code } : {}),
+    ...(err.allowedValues ? { allowedValues: err.allowedValues } : {}),
+    ...(err.existingOrganization ? { existingOrganization: err.existingOrganization } : {}),
   });
 
 const me = async (req, res) => {
@@ -150,6 +152,15 @@ const mergeTags = async (req, res) => {
   }
 };
 
+const enrichTag = async (req, res) => {
+  try {
+    const result = await agentTagService.enrichTag(req.params.id, req);
+    return res.json({ data: result });
+  } catch (err) {
+    return handleServiceError(res, err);
+  }
+};
+
 const executeTag = async (req, res) => {
   try {
     const result = await agentTagService.executeTag(req.params.id, req.body, req);
@@ -172,6 +183,24 @@ const listOrganizations = async (req, res) => {
   try {
     const payload = await agentOrganizationService.listOrganizations(req.query);
     return res.json(payload);
+  } catch (err) {
+    return handleServiceError(res, err);
+  }
+};
+
+const listOrganizationDuplicates = async (req, res) => {
+  try {
+    const payload = await agentOrganizationService.listOrganizationDuplicates(req.query);
+    return res.json(payload);
+  } catch (err) {
+    return handleServiceError(res, err);
+  }
+};
+
+const createOrganization = async (req, res) => {
+  try {
+    const result = await agentOrganizationService.createOrganization(req.body, req);
+    return res.status(201).json({ data: result });
   } catch (err) {
     return handleServiceError(res, err);
   }
@@ -274,10 +303,13 @@ module.exports = {
   listTags,
   getTag,
   listOrganizations,
+  listOrganizationDuplicates,
+  createOrganization,
   getOrganization,
   enrichOrganization,
   mergeOrganizations,
   mergeTags,
+  enrichTag,
   executeTag,
   executeOrganization,
   patchStagingCompany,

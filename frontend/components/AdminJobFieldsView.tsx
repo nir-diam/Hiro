@@ -7,6 +7,7 @@ import {
 } from './Icons';
 import { GoogleGenAI, FunctionDeclaration, Type, Chat } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
+import { authHeaders } from '../utils/authHeaders';
 
 // --- AI TOOLS DEFINITIONS ---
 
@@ -63,6 +64,36 @@ interface TagOption {
     id: string;
     tagKey: string;
     label: string;
+}
+
+const normalizeTagOption = (tag: any): TagOption => ({
+    id: tag.id,
+    tagKey: tag.tagKey,
+    label: tag.displayNameHe || tag.displayNameEn || tag.tagKey || 'תגית',
+});
+
+async function searchActiveTags(
+    apiBase: string,
+    search: string,
+    signal?: AbortSignal,
+    limit = 50,
+): Promise<TagOption[]> {
+    const q = search.trim();
+    if (!q) return [];
+    const params = new URLSearchParams({
+        statuses: 'active',
+        search: q,
+        limit: String(limit),
+        page: '1',
+    });
+    const res = await fetch(`${apiBase}/api/tags?${params}`, {
+        signal,
+        headers: authHeaders(),
+    });
+    if (!res.ok) throw new Error('חיפוש תגיות נכשל');
+    const payload = await res.json();
+    const rows = Array.isArray(payload) ? payload : (payload.data ?? []);
+    return rows.map(normalizeTagOption);
 }
 
 interface AdminColumnProps {
@@ -238,9 +269,7 @@ interface TaxonomyModalProps {
     targetId?: string;
     initialSynonyms?: string[];
     apiBase: string;
-    availableTags: TagOption[];
     initialTags?: TagOption[];
-    onTagCreated?: (tag: TagOption) => void;
 }
 
 const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
@@ -253,13 +282,14 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
     targetId,
     initialSynonyms = [],
     apiBase,
-    availableTags,
     initialTags = [],
-    onTagCreated,
 }) => {
     const [value, setValue] = useState(initialValue);
     const [selectedTags, setSelectedTags] = useState<TagOption[]>(initialTags);
     const [tagInput, setTagInput] = useState('');
+    const [tagSearchResults, setTagSearchResults] = useState<TagOption[]>([]);
+    const [isSearchingTags, setIsSearchingTags] = useState(false);
+    const [tagSearchError, setTagSearchError] = useState<string | null>(null);
     const [isSavingTag, setIsSavingTag] = useState(false);
     const [tagError, setTagError] = useState<string | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -271,18 +301,56 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
             setValue(initialValue);
             setSelectedTags(Array.isArray(initialTags) ? [...initialTags] : []);
             setTagInput('');
+            setTagSearchResults([]);
+            setTagSearchError(null);
             setTagError(null);
             setTimeout(() => inputRef.current?.focus(), 100);
         }
     }, [isOpen, initialValue, initialTags]);
 
+    useEffect(() => {
+        if (!isOpen || type !== 'role') return;
+        const query = tagInput.trim();
+        if (!query) {
+            setTagSearchResults([]);
+            setIsSearchingTags(false);
+            setTagSearchError(null);
+            return;
+        }
+
+        let canceled = false;
+        const controller = new AbortController();
+        setIsSearchingTags(true);
+        setTagSearchError(null);
+        const timer = setTimeout(async () => {
+            try {
+                const items = await searchActiveTags(apiBase, query, controller.signal);
+                if (!canceled) {
+                    setTagSearchResults(items);
+                }
+            } catch (err: any) {
+                if (!canceled && err?.name !== 'AbortError') {
+                    setTagSearchResults([]);
+                    setTagSearchError(err?.message || 'חיפוש תגיות נכשל');
+                }
+            } finally {
+                if (!canceled) {
+                    setIsSearchingTags(false);
+                }
+            }
+        }, 300);
+
+        return () => {
+            canceled = true;
+            controller.abort();
+            clearTimeout(timer);
+        };
+    }, [isOpen, type, tagInput, apiBase]);
+
     const matchingTags = useMemo(() => {
-        const query = tagInput.trim().toLowerCase();
-        if (!query) return availableTags;
-        return availableTags
-            .filter((tag) => (tag.label || tag.tagKey || '').toLowerCase().includes(query))
-            .slice(0, 50);
-    }, [availableTags, tagInput]);
+        const selectedIds = new Set(selectedTags.map((t) => t.id));
+        return tagSearchResults.filter((tag) => !selectedIds.has(tag.id));
+    }, [tagSearchResults, selectedTags]);
 
     if (!isOpen) return null;
 
@@ -302,8 +370,6 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
         }
     };
 
-    const datalistId = `${type}-tag-options`;
-
     const handleAddTag = async () => {
         const trimmed = tagInput.trim();
         if (!trimmed || isSavingTag) return;
@@ -314,14 +380,25 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
             return;
         }
 
-        const existing = availableTags.find(
-            (tag) =>
-                (tag.tagKey || '').toLowerCase() === lowerTrim ||
-                (tag.label || '').toLowerCase() === lowerTrim,
-        );
+        const pickExisting = (candidates: TagOption[]) =>
+            candidates.find(
+                (tag) =>
+                    (tag.tagKey || '').toLowerCase() === lowerTrim ||
+                    (tag.label || '').toLowerCase() === lowerTrim,
+            );
+
+        let existing = pickExisting(tagSearchResults);
+        if (!existing) {
+            try {
+                const fromApi = await searchActiveTags(apiBase, trimmed, undefined, 20);
+                existing = pickExisting(fromApi);
+            } catch {
+                /* continue to create */
+            }
+        }
 
         if (existing) {
-            setSelectedTags((prev) => [...prev, existing]);
+            setSelectedTags((prev) => [...prev, existing!]);
             setTagInput('');
             setTagError(null);
             return;
@@ -332,7 +409,7 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
         try {
             const response = await fetch(`${apiBase}/api/tags`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify({ tagKey: trimmed, displayNameHe: trimmed }),
             });
             if (!response.ok) {
@@ -340,12 +417,7 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                 throw new Error(payload || 'הוספת תגית נכשלה');
             }
             const created = await response.json();
-            const newTag: TagOption = {
-                id: created.id,
-                tagKey: created.tagKey,
-                label: created.displayNameHe || created.displayNameEn || created.tagKey || trimmed,
-            };
-            onTagCreated?.(newTag);
+            const newTag: TagOption = normalizeTagOption({ ...created, displayNameHe: created.displayNameHe || trimmed });
             setSelectedTags((prev) => [...prev, newTag]);
             setTagInput('');
         } catch (error: any) {
@@ -427,7 +499,7 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                                     onChange={(e) => setTagInput(e.target.value)}
                                     onKeyDown={handleKeyDownTag}
                                     className="flex-1 min-w-[220px] bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-1 focus:ring-primary-500 outline-none"
-                                    placeholder="הקלד או בחר תגית..."
+                                    placeholder="הקלד לחיפוש תגית..."
                                 />
                                 <button
                                     type="button"
@@ -447,8 +519,12 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                                 }}
                             >
                                 <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
-                                    {availableTags.length === 0 ? (
-                                        <div className="p-3 text-xs text-text-muted">טוען תגיות מהשרת...</div>
+                                    {!tagInput.trim() ? (
+                                        <div className="p-3 text-xs text-text-muted">הקלד בשדה למעלה לחיפוש תגיות בשרת</div>
+                                    ) : isSearchingTags ? (
+                                        <div className="p-3 text-xs text-text-muted">מחפש תגיות...</div>
+                                    ) : tagSearchError ? (
+                                        <div className="p-3 text-xs text-red-600">{tagSearchError}</div>
                                     ) : matchingTags.length === 0 ? (
                                         <div className="p-3 text-xs text-text-muted">לא נמצאו תגיות תואמות לחיפוש</div>
                                     ) : (
@@ -585,11 +661,6 @@ const AdminJobFieldsView: React.FC = () => {
         initialValue: ''
     });
 
-    const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
-    const handleTagCreated = (tag: TagOption) => {
-        setAvailableTags((prev) => (prev.some((item) => item.id === tag.id) ? prev : [...prev, tag]));
-    };
-
     // --- HELPERS ---
 const normalizeRole = (role: any): JobRole => ({
     id: role.id,
@@ -602,12 +673,6 @@ const normalizeRole = (role: any): JobRole => ({
               label: tag.displayNameHe || tag.displayNameEn || tag.tagKey,
           }))
         : [],
-});
-
-const normalizeTagOption = (tag: any): TagOption => ({
-    id: tag.id,
-    tagKey: tag.tagKey,
-    label: tag.displayNameHe || tag.displayNameEn || tag.tagKey || 'תגית',
 });
 
     const normalizeCluster = (cluster: any): JobFieldType => ({
@@ -755,27 +820,6 @@ const normalizeTagOption = (tag: any): TagOption => ({
             clearTimeout(timer);
         };
     }, [searchRole, selectedCluster?.id, searchJobFields]);
-
-    useEffect(() => {
-        let canceled = false;
-        const fetchTags = async () => {
-            try {
-                const response = await fetch(`${apiBase}/api/tags?statuses=active&limit=1000&page=1`);
-                if (!response.ok) throw new Error('לא ניתן לטעון תגיות');
-                const payload = await response.json();
-                const rows = Array.isArray(payload) ? payload : (payload.data ?? []);
-                if (!canceled && rows.length >= 0) {
-                    setAvailableTags(rows.map(normalizeTagOption));
-                }
-            } catch (err) {
-                console.error('Failed to load tags', err);
-            }
-        };
-        fetchTags();
-        return () => {
-            canceled = true;
-        };
-    }, [apiBase]);
 
     const jobFieldsContext = useMemo(() => ({
         categories: data.map((category) => ({
@@ -1525,8 +1569,6 @@ const normalizeTagOption = (tag: any): TagOption => ({
                initialValue={modalState.initialValue}
                initialSynonyms={modalState.initialSynonyms}
                initialTags={modalState.initialTags ?? []}
-               availableTags={availableTags}
-               onTagCreated={handleTagCreated}
                targetId={modalState.targetId}
                apiBase={apiBase}
              />

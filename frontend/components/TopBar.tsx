@@ -4,8 +4,10 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { 
     PaperAirplaneIcon, BellIcon, QuestionMarkCircleIcon, Cog6ToothIcon, PaintBrushIcon, Bars3Icon,
     BuildingOffice2Icon, UserGroupIcon, ChatBubbleBottomCenterTextIcon, TagIcon, ChevronLeftIcon,
-    WrenchScrewdriverIcon, UserCircleIcon, BriefcaseIcon, DocumentTextIcon
+    WrenchScrewdriverIcon, UserCircleIcon, BriefcaseIcon, DocumentTextIcon, TrophyIcon
 } from './Icons';
+import ClientProfileUpdatesHistoryModal from './ClientProfileUpdatesHistoryModal';
+import { useClientProfileGamification } from '../hooks/useClientProfileGamification';
 import { specs } from '../data/specs';
 import SpecDrawer from './SpecDrawer';
 import HelpCenterDrawer from './HelpCenterDrawer';
@@ -14,6 +16,7 @@ import {
     NOTIFICATION_MESSAGES_REFRESH_EVENT,
     countIncomingMessagesFromApiRows,
 } from '../services/notificationInboxCounts';
+import { fetchOrgProfileUpdatesPendingCount } from '../services/organizationProfileUpdatesApi';
 
 const ActionButton: React.FC<{
     children: React.ReactNode;
@@ -38,22 +41,45 @@ const ActionButton: React.FC<{
     </button>
 );
 
-const UserProfileAvatar: React.FC<{ initials: string; tooltip: string; onClick: () => void; 'aria-expanded': boolean; }> = ({ initials, tooltip, onClick, ...props }) => (
+const UserProfileAvatar: React.FC<{
+    initials: string;
+    tooltip: string;
+    onClick: () => void;
+    'aria-expanded': boolean;
+    showReviewDot?: boolean;
+}> = ({ initials, tooltip, onClick, showReviewDot, ...props }) => (
     <button
         onClick={onClick}
         title={tooltip}
-        className="w-11 h-11 flex items-center justify-center bg-bg-subtle text-text-muted rounded-full shadow-md border border-border-default font-bold text-lg hover:ring-2 hover:ring-primary-400 transition-all duration-200"
+        className="relative w-11 h-11 flex items-center justify-center bg-bg-subtle text-text-muted rounded-full shadow-md border border-border-default font-bold text-lg hover:ring-2 hover:ring-primary-400 transition-all duration-200"
         {...props}
     >
         {initials}
+        {showReviewDot && (
+            <span
+                className="absolute top-0 start-0 w-2.5 h-2.5 bg-amber-500 rounded-full border-2 border-bg-card shadow-sm"
+                aria-hidden
+            />
+        )}
     </button>
 );
 
-const MenuItem: React.FC<{ icon: React.ReactNode; label: string; onClick?: () => void; to?: string; disabled?: boolean; }> = ({ icon, label, onClick, to, disabled = false }) => {
+const userInitial = (name?: string | null, email?: string | null): string => {
+    const base = (name || email || '').trim();
+    if (!base) return '?';
+    return base[0].toUpperCase();
+};
+
+const MenuItem: React.FC<{ icon: React.ReactNode; label: string; onClick?: () => void; to?: string; disabled?: boolean; badgeCount?: number; }> = ({ icon, label, onClick, to, disabled = false, badgeCount }) => {
     const content = (
         <>
             {icon}
-            <span>{label}</span>
+            <span className="flex-1">{label}</span>
+            {badgeCount != null && badgeCount > 0 && (
+                <span className="min-w-[1.25rem] h-5 px-1.5 bg-amber-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center leading-none">
+                    {badgeCount > 99 ? '99+' : badgeCount}
+                </span>
+            )}
         </>
     );
 
@@ -95,8 +121,18 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
     const userMenuRef = useRef<HTMLDivElement>(null);
     const settingsMenuRef = useRef<HTMLDivElement>(null);
     const [inboxAttentionCount, setInboxAttentionCount] = useState(0);
+    const [orgProfilePendingCount, setOrgProfilePendingCount] = useState(0);
     const showNotificationsPage = canPage('page:notifications');
+    const showAdminPanel = canPage('page:admin');
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const tenantClientId = user?.clientId ? String(user.clientId) : null;
+    const {
+        points: clientGamificationPoints,
+        hasUnseenReview,
+        historyOpen: profilePointsHistoryOpen,
+        openHistory: openProfilePointsHistory,
+        closeHistory: closeProfilePointsHistory,
+    } = useClientProfileGamification(tenantClientId);
 
     const refreshInboxAttentionCount = useCallback(async () => {
         if (!showNotificationsPage || !apiBase) {
@@ -131,9 +167,25 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
         }
     }, [showNotificationsPage, apiBase, user?.email, user?.name, user?.id]);
 
+    const refreshOrgProfilePendingCount = useCallback(async () => {
+        if (!showAdminPanel || !apiBase) {
+            setOrgProfilePendingCount(0);
+            return;
+        }
+        try {
+            setOrgProfilePendingCount(await fetchOrgProfileUpdatesPendingCount());
+        } catch {
+            setOrgProfilePendingCount(0);
+        }
+    }, [showAdminPanel, apiBase]);
+
     useEffect(() => {
         void refreshInboxAttentionCount();
     }, [refreshInboxAttentionCount]);
+
+    useEffect(() => {
+        void refreshOrgProfilePendingCount();
+    }, [refreshOrgProfilePendingCount, location.pathname]);
 
     useEffect(() => {
         const onRefresh = () => {
@@ -169,7 +221,13 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                 {/* Left side (in RTL): Global Action Buttons */}
                 <div className="flex items-center gap-2">
                     <div className="relative" ref={userMenuRef}>
-                        <UserProfileAvatar initials="ג" tooltip="פרופיל משתמש" onClick={() => setIsUserMenuOpen(!isUserMenuOpen)} aria-expanded={isUserMenuOpen} />
+                        <UserProfileAvatar
+                            initials={userInitial(user?.name, user?.email)}
+                            tooltip="פרופיל משתמש"
+                            onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
+                            aria-expanded={isUserMenuOpen}
+                            showReviewDot={!!tenantClientId && hasUnseenReview}
+                        />
                         {isUserMenuOpen && (
                             <div className="absolute top-full right-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-50 animate-fade-in-down">
                                 <MenuItem 
@@ -180,15 +238,26 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                                         setIsUserMenuOpen(false);
                                     }}
                                 />
+                                {tenantClientId && (
+                                    <MenuItem
+                                        icon={<TrophyIcon className="w-5 h-5 text-amber-700" />}
+                                        label={`הנקודות שלי (${clientGamificationPoints})`}
+                                        onClick={() => {
+                                            openProfilePointsHistory();
+                                            setIsUserMenuOpen(false);
+                                        }}
+                                    />
+                                )}
                                 <div className="border-t border-border-default my-1"></div>
                                 <div className="p-2">
                                     <span className="px-2 py-1 text-xs font-semibold text-text-subtle">החלפת תפקיד</span>
                                 </div>
-                                {canPage('page:admin') && (
+                                {showAdminPanel && (
                                 <MenuItem 
                                     icon={<WrenchScrewdriverIcon className="w-5 h-5" />}
                                     label="פאנל ניהול"
-                                    to="/admin"
+                                    to={orgProfilePendingCount > 0 ? '/admin/companies?tab=quality&subtab=profile_updates' : '/admin'}
+                                    badgeCount={orgProfilePendingCount}
                                     onClick={() => setIsUserMenuOpen(false)}
                                 />
                                 )}
@@ -306,6 +375,14 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                 isOpen={isHelpCentreOpen}
                 onClose={() => setIsHelpCentreOpen(false)}
             />
+            {tenantClientId && (
+                <ClientProfileUpdatesHistoryModal
+                    isOpen={profilePointsHistoryOpen}
+                    onClose={closeProfilePointsHistory}
+                    clientId={tenantClientId}
+                    points={clientGamificationPoints}
+                />
+            )}
         </>
     );
 };

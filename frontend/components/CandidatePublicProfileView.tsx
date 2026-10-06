@@ -19,9 +19,9 @@ import ShareProfileModal from './ShareProfileModal';
 import HiroAIChat from './HiroAIChat'; 
 import { GoogleGenAI, Type, FunctionDeclaration, Chat } from '@google/genai'; 
 import ApplyModal from './ApplyModal';
-import CandidateApplicationsView from './CandidateApplicationsView';
-import JobSearchFilters from './JobSearchFilters';
-import CandidateScreeningWizard, { ScreeningQuestion } from './CandidateScreeningWizard'; // New Import
+import CandidateApplicationsView, { type PendingDigitalScreeningTask } from './CandidateApplicationsView';
+import JobSearchFilters, { EMPTY_JOB_SEARCH_FILTERS, type JobSearchFilterState } from './JobSearchFilters';
+import { filterAndSortPortalJobs, resolvePortalJobUpdatedAtMs } from '../utils/portalJobFilters';
 import { generateExperienceSummaryForCandidate } from '../services/experienceSummaryService';
 import { useLanguage } from '../context/LanguageContext';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
@@ -779,21 +779,36 @@ function profileMatchContextFromForm(formData: Record<string, unknown>): Candida
     };
 }
 
+function normalizePortalJobRequirements(raw?: string[] | null): string[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((line) => String(line || '').trim()).filter(Boolean);
+}
+
 function mapJobMatchToPortalCard(job: JobMatchResult, profile: CandidateProfileMatchContext) {
-    const jobTypes = Array.isArray(job.jobType) ? job.jobType.filter(Boolean) : [];
-    const analyzed = job.lastAnalyzed ? new Date(job.lastAnalyzed) : null;
+    const jobTypes = Array.isArray(job.jobType)
+        ? job.jobType.map((type) => String(type || '').trim()).filter(Boolean)
+        : [];
+    const updatedAtTs = resolvePortalJobUpdatedAtMs(job);
+    const analyzed = updatedAtTs > 0 ? new Date(updatedAtTs) : null;
     const match = buildCandidateMatchPresentation(job, profile);
+    const requirements = normalizePortalJobRequirements(job.requirements);
     return {
         id: job.id,
         title: job.title || '—',
         company: job.client || '—',
         location: job.city || '—',
+        region: job.region || '',
+        field: job.field || '',
+        role: job.role || '',
         type: jobTypes.length ? jobTypes.join(', ') : 'משרה',
+        jobTypes,
         date:
             analyzed && !Number.isNaN(analyzed.getTime())
                 ? analyzed.toLocaleDateString('he-IL')
                 : '—',
+        updatedAtTs,
         description: typeof job.description === 'string' ? job.description : '',
+        requirements,
         logo: null as string | null,
         matchScore: match.score,
         matchTier: match.tier,
@@ -811,6 +826,7 @@ const JobCard: React.FC<{
         type: string;
         date: string;
         description: string;
+        requirements?: string[];
         logo?: string | null;
         matchScore?: number;
         matchTier?: CandidateMatchTier;
@@ -859,9 +875,11 @@ const JobCard: React.FC<{
                             {job.matchTierLabel}
                         </div>
                     ) : null}
-                     <div className="w-12 h-12 rounded-lg bg-white border border-border-default flex items-center justify-center p-1 shadow-sm mr-auto">
-                        {job.logo ? <img src={job.logo} alt={job.company} className="max-w-full max-h-full object-contain" /> : <BriefcaseIcon className="w-6 h-6 text-gray-400" />}
-                    </div>
+                    {job.logo ? (
+                        <div className="w-12 h-12 rounded-lg bg-white border border-border-default flex items-center justify-center p-1 shadow-sm mr-auto">
+                            <img src={job.logo} alt={job.company} className="max-w-full max-h-full object-contain" />
+                        </div>
+                    ) : null}
                 </div>
                 
                 <h3 className="font-bold text-text-default text-lg mb-1 group-hover:text-primary-700 transition-colors leading-tight">{job.title}</h3>
@@ -896,11 +914,37 @@ const JobCard: React.FC<{
                             <p className="text-sm text-text-default leading-relaxed pr-7">{job.matchExplanation}</p>
                         </div>
                     ) : null}
-                    <p className="text-sm font-bold text-text-default mb-2">תיאור המשרה</p>
-                     <div 
-                        className="text-sm text-text-default mb-5 leading-relaxed prose prose-sm max-w-none [&>ul]:list-disc [&>ul]:pr-5 [&>strong]:text-primary-800"
-                        dangerouslySetInnerHTML={{ __html: job.description }} 
-                     />
+                    {job.description ? (
+                        <>
+                            <p className="text-sm font-bold text-text-default mb-2">תיאור המשרה</p>
+                            <div
+                                className="text-sm text-text-default mb-5 leading-relaxed prose prose-sm max-w-none [&>ul]:list-disc [&>ul]:pr-5 [&>strong]:text-primary-800"
+                                dangerouslySetInnerHTML={{ __html: job.description }}
+                            />
+                        </>
+                    ) : null}
+                    {job.requirements?.length ? (
+                        <>
+                            <p className="text-sm font-bold text-text-default mb-2">דרישות המשרה</p>
+                            <ul className="text-sm text-text-default mb-5 leading-relaxed list-disc pr-5 space-y-1.5">
+                                {job.requirements.map((req, index) => {
+                                    const looksLikeHtml = /<\/?[a-z][\s\S]*>/i.test(req);
+                                    return (
+                                        <li key={`${index}-${req.slice(0, 24)}`}>
+                                            {looksLikeHtml ? (
+                                                <span
+                                                    className="prose prose-sm max-w-none [&>ul]:list-disc [&>ul]:pr-5"
+                                                    dangerouslySetInnerHTML={{ __html: req }}
+                                                />
+                                            ) : (
+                                                req
+                                            )}
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        </>
+                    ) : null}
                      {applyError ? (
                         <p className="mb-3 text-sm text-red-600 text-center">{applyError}</p>
                      ) : null}
@@ -1545,9 +1589,9 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const [completenessBannerDismissed, setCompletenessBannerDismissed] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
     
-    // --- State for Pending Tasks (Screening) ---
-    const [isScreeningWizardOpen, setIsScreeningWizardOpen] = useState(false);
-    const [pendingTasks, setPendingTasks] = useState<any[]>([]);
+    // --- State for Pending Tasks (Digital Screening) ---
+    const [pendingTasks, setPendingTasks] = useState<PendingDigitalScreeningTask[]>([]);
+    const [externalScreeningTaskId, setExternalScreeningTaskId] = useState<string | null>(null);
 
     const filterVisibleProfiles = (items: any[]) => items.filter((item) => !item.isDeleted);
 
@@ -1902,8 +1946,9 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
 
     // --- Job Search & Favorites State ---
     const [jobSearchTerm, setJobSearchTerm] = useState('');
-    const [jobFilters, setJobFilters] = useState({ location: '', type: '', date: '' });
+    const [jobFilters, setJobFilters] = useState<JobSearchFilterState>(EMPTY_JOB_SEARCH_FILTERS);
     const [favoriteJobIds, setFavoriteJobIds] = useState<Set<string>>(new Set());
+    const [applicationsRefreshToken, setApplicationsRefreshToken] = useState(0);
 
     useEffect(() => {
         setJoinCandidatePool(Boolean(formData.consentToJobOffers));
@@ -1969,6 +2014,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 ),
             );
             setApplySuccessJobId(jobId);
+            setApplicationsRefreshToken((token) => token + 1);
             window.setTimeout(() => {
                 setApplySuccessJobId((current) => (current === jobId ? null : current));
             }, 2500);
@@ -2008,19 +2054,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         });
     };
 
-    // Filtered Jobs Logic
-    const filteredJobs = useMemo(() => {
-        const term = jobSearchTerm.trim().toLowerCase();
-        return portalJobs.filter((job) => {
-            if (term) {
-                const hay = `${job.title} ${job.company} ${job.location}`.toLowerCase();
-                if (!hay.includes(term)) return false;
-            }
-            if (jobFilters.location && job.location !== jobFilters.location) return false;
-            if (jobFilters.type && job.type !== jobFilters.type) return false;
-            return true;
-        });
-    }, [portalJobs, jobSearchTerm, jobFilters]);
+    const filteredJobs = useMemo(
+        () => filterAndSortPortalJobs(portalJobs, jobFilters, jobSearchTerm),
+        [portalJobs, jobSearchTerm, jobFilters],
+    );
 
     // Favorite Jobs Logic
     const favoriteJobsList = useMemo(
@@ -2901,19 +2938,16 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }
     };
     
-    // Task Handlers
-    const handleTaskClick = (task: any) => {
+    const handleTaskClick = (task: PendingDigitalScreeningTask) => {
         if (task.type === 'screening') {
-            setIsScreeningWizardOpen(true);
+            setActiveView('applications');
+            setExternalScreeningTaskId(task.id);
         }
     };
 
-    const handleScreeningSubmit = (answers: Record<number, any>) => {
-        console.log('Submitted Answers:', answers);
-        setIsScreeningWizardOpen(false);
-        // Remove task from list to simulate completion
-        setPendingTasks(prev => prev.slice(1));
-    };
+    const handlePendingDigitalScreeningsChange = useCallback((tasks: PendingDigitalScreeningTask[]) => {
+        setPendingTasks(tasks);
+    }, []);
 
 
     // --- PENDING TASKS SECTION (New) ---
@@ -3482,7 +3516,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 setFilters={setJobFilters}
                 onClear={() => {
                     setJobSearchTerm('');
-                    setJobFilters({ location: '', type: '', date: '' });
+                    setJobFilters(EMPTY_JOB_SEARCH_FILTERS);
                 }}
                 resultsCount={filteredJobs.length}
             />
@@ -3609,12 +3643,17 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         {activeView === 'profile' && renderProfileContent()}
                         {activeView === 'jobs' && renderJobs()}
                         {activeView === 'favorites' && renderFavorites()}
-                        {activeView === 'applications' && (
+                        <div className={activeView === 'applications' ? '' : 'hidden'}>
                             <CandidateApplicationsView
                                 candidateId={candidateId || formData.id?.toString()}
                                 relatedProfileIds={navigableProfiles.map((p) => String(p.id))}
+                                isActive={activeView === 'applications'}
+                                refreshToken={applicationsRefreshToken}
+                                onPendingDigitalScreeningsChange={handlePendingDigitalScreeningsChange}
+                                externalScreeningTaskId={externalScreeningTaskId}
+                                onExternalScreeningTaskHandled={() => setExternalScreeningTaskId(null)}
                             />
-                        )}
+                        </div>
                         {activeView === 'offers' && renderOffers()} 
                         </div>
                     )}
@@ -3655,15 +3694,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 onProfileUpdate={(patch, meta) => void saveNow(patch, meta)}
             />
 
-            {/* Screening Wizard Modal */}
-            {isScreeningWizardOpen && pendingTasks.length > 0 && (
-                <CandidateScreeningWizard 
-                    jobTitle={pendingTasks[0].data.jobTitle}
-                    questions={pendingTasks[0].data.questions}
-                    onClose={() => setIsScreeningWizardOpen(false)}
-                    onSubmit={handleScreeningSubmit}
-                />
-            )}
         </div>
         </>
     );

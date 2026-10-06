@@ -1,33 +1,35 @@
 
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, CheckCircleIcon } from './Icons';
-
-type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
+import {
+    JOB_STATUS_FORM_OPTIONS,
+    normalizeJobStatusFormLabel,
+    type JobStatusFormLabel,
+} from '../utils/jobStatusLabels';
 
 interface JobStatusModalProps {
     isOpen: boolean;
     onClose: () => void;
-    currentStatus: JobStatus;
+    /** API status (פתוחה / מאוישת) or form label — normalized on open. */
+    currentStatus: string;
     jobTitle: string;
-    onSave: (newStatus: JobStatus, note: string) => void;
+    onSave: (newStatus: JobStatusFormLabel, note: string) => void;
 }
 
-const statusOptions: JobStatus[] = ['פתוחה', 'מוקפאת', 'מאוישת', 'טיוטה'];
-
-const statusColors: Record<JobStatus, string> = {
-    'פתוחה': 'bg-green-100 text-green-800 border-green-200',
+const statusColors: Record<JobStatusFormLabel, string> = {
+    'פעילה': 'bg-green-100 text-green-800 border-green-200',
     'מוקפאת': 'bg-amber-100 text-amber-800 border-amber-200',
-    'מאוישת': 'bg-gray-100 text-gray-800 border-gray-200',
+    'סגורה': 'bg-gray-100 text-gray-800 border-gray-200',
     'טיוטה': 'bg-indigo-100 text-indigo-800 border-indigo-200',
 };
 
 const JobStatusModal: React.FC<JobStatusModalProps> = ({ isOpen, onClose, currentStatus, jobTitle, onSave }) => {
-    const [status, setStatus] = useState<JobStatus>(currentStatus);
+    const [status, setStatus] = useState<JobStatusFormLabel>(() => normalizeJobStatusFormLabel(currentStatus));
     const [note, setNote] = useState('');
 
     useEffect(() => {
         if (isOpen) {
-            setStatus(currentStatus);
+            setStatus(normalizeJobStatusFormLabel(currentStatus));
             setNote('');
         }
     }, [isOpen, currentStatus]);
@@ -60,7 +62,7 @@ const JobStatusModal: React.FC<JobStatusModalProps> = ({ isOpen, onClose, curren
                     <div>
                         <label className="block text-sm font-bold text-text-default mb-3">בחר סטטוס חדש</label>
                         <div className="grid grid-cols-2 gap-3">
-                            {statusOptions.map((opt) => (
+                            {JOB_STATUS_FORM_OPTIONS.map((opt) => (
                                 <button
                                     key={opt}
                                     type="button"

@@ -58,6 +58,12 @@ const Proposal = sequelize.define(
       allowNull: true,
       field: 'created_by_name',
     },
+    sentHistory: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+      field: 'sent_history',
+    },
   },
   {
     tableName: 'proposals',

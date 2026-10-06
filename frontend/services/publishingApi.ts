@@ -336,9 +336,12 @@ export async function removeHeroGalleryImage(imageId: string, clientId?: string 
   return res.json();
 }
 
+export type JobHeroBrandSource = 'company' | 'job_client';
+
 export type GenerateHeroImagePayload = {
   aspectRatio?: '16:9' | '4:3' | '3:4' | '1:1';
   landingLayout?: LandingLayout;
+  heroBrandSource?: JobHeroBrandSource;
   companyLogo?: string | null;
   /** Staffing agency / Hiro client name — never the employer organization. */
   clientName?: string;
@@ -359,7 +362,17 @@ export type GenerateHeroImagePayload = {
 export async function generateHeroImage(
   jobId: string,
   payload?: GenerateHeroImagePayload,
-): Promise<{ url: string; heroImageUrl: string }> {
+): Promise<{
+  url: string;
+  heroImageUrl: string;
+  heroBrand?: {
+    effectiveSource?: JobHeroBrandSource;
+    brandName?: string;
+    brandColor?: string;
+    hasLogo?: boolean;
+    warning?: string | null;
+  };
+}> {
   const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(jobId)}/publication/generate-hero-image`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
@@ -695,6 +708,7 @@ export type BoardPublicationRow = {
   publishedAt: string | null;
   unpublishedAt: string | null;
   candidatesCount: number;
+  views?: number;
 };
 
 export async function fetchBoardPublications(params?: {

@@ -377,11 +377,20 @@ const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
         );
       }
     } catch (autoMergeErr) {
-      console.warn(
-        '[tagCorrectionAgent] auto-merge failed for',
-        pendingTagId,
-        autoMergeErr?.message || autoMergeErr,
-      );
+      if (autoMergeErr?.code === 'TAG_PROTECTED') {
+        await tagDecision.update({
+          reviewStatus: 'manual_queue',
+          reviewerAction: 'manual',
+          aiReasoning: `${decision.reasoning || ''}\n\nתגית מוגנת — נדרש טיפול ידני.`.trim(),
+        });
+        console.warn('[tagCorrectionAgent] auto-merge deferred (protected tag)', pendingTagId);
+      } else {
+        console.warn(
+          '[tagCorrectionAgent] auto-merge failed for',
+          pendingTagId,
+          autoMergeErr?.message || autoMergeErr,
+        );
+      }
     }
   }
 
@@ -474,6 +483,35 @@ const schedulePendingIfNeeded = (pendingTagId, contextSample = '', options = {})
   });
 };
 
+/** Legacy snapshots stored only vector hits before fuzzy backfill shipped. */
+const snapshotNeedsHybridRefresh = (snapshot) => {
+  if (!Array.isArray(snapshot) || snapshot.length === 0) return true;
+  const fuzzyCount = snapshot.filter((h) => h?.source === 'fuzzy').length;
+  const vectorCount = snapshot.filter((h) => h?.source === 'vector').length;
+  return fuzzyCount === 0 && vectorCount > 0;
+};
+
+const refreshStaleHybridSnapshotsForRows = async (rows) => {
+  let updated = 0;
+  for (const row of rows) {
+    const plain = row.get ? row.get({ plain: true }) : row;
+    const snap = Array.isArray(plain.candidateTagsSnapshot) ? plain.candidateTagsSnapshot : [];
+    if (!snapshotNeedsHybridRefresh(snap)) continue;
+    const term = String(plain.originalTerm || '').trim();
+    if (!term) continue;
+    const tagType = plain.pendingTag?.type || plain.detectedType;
+    const hybrid = await tagHybridSearchService.findHybridCandidates(
+      term,
+      plain.contextSample || '',
+      { tagType },
+    );
+    await row.update({ candidateTagsSnapshot: hybrid });
+    if (row.set) row.set('candidateTagsSnapshot', hybrid);
+    updated += 1;
+  }
+  return updated;
+};
+
 const listDecisions = async ({
   page = 1,
   limit = 25,
@@ -489,6 +527,7 @@ const listDecisions = async ({
   sortOrder = 'desc',
   statusBuckets = [],
   approvalStatus = 'all',
+  autoRefreshHybrid = false,
 } = {}) => {
   const where = {};
 
@@ -583,7 +622,14 @@ const listDecisions = async ({
     offset,
   });
 
+  let hybridRefresh = null;
+  if (autoRefreshHybrid && rows.length > 0) {
+    const updated = await refreshStaleHybridSnapshotsForRows(rows);
+    hybridRefresh = { updated, total: rows.length };
+  }
+
   return {
+    hybridRefresh,
     data: rows.map((row) => {
       const plain = row.get ? row.get({ plain: true }) : row;
       const liveType = plain.pendingTag?.type;
@@ -687,6 +733,38 @@ const backfillPendingWithoutDecisions = async (limit = 40) => {
     }
   }
   return { processed, total: pendingTags.length, lastError: processed ? null : lastError };
+};
+
+/** Recompute candidateTagsSnapshot (vector + fuzzy) without calling Gemini. */
+const refreshHybridSnapshots = async (limit = 100) => {
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 100));
+  const rows = await TagAiDecision.findAll({
+    where: {
+      reviewStatus: { [Op.in]: ['pending_review', 'manual_queue'] },
+    },
+    order: [['createdAt', 'DESC']],
+    limit: safeLimit,
+    include: [{ model: Tag, as: 'pendingTag', required: false, attributes: ['id', 'type'] }],
+  });
+
+  let updated = 0;
+  for (const row of rows) {
+    const plain = row.get ? row.get({ plain: true }) : row;
+    const snap = Array.isArray(plain.candidateTagsSnapshot) ? plain.candidateTagsSnapshot : [];
+    if (!snapshotNeedsHybridRefresh(snap)) continue;
+    const term = String(plain.originalTerm || '').trim();
+    if (!term) continue;
+    const tagType = plain.pendingTag?.type || plain.detectedType;
+    const hybrid = await tagHybridSearchService.findHybridCandidates(
+      term,
+      plain.contextSample || '',
+      { tagType },
+    );
+    await row.update({ candidateTagsSnapshot: hybrid });
+    updated += 1;
+  }
+
+  return { updated, total: rows.length };
 };
 
 /**
@@ -865,6 +943,10 @@ const blacklistCatalogTags = async (tagIds = [], req = null) => {
       skipped.push({ id, reason: 'already_blacklisted' });
       continue;
     }
+    if (tag.isProtected === true) {
+      skipped.push({ id, reason: 'tag_protected' });
+      continue;
+    }
 
     tag.status = 'deprecated';
     await tag.save({ fields: ['status'] });
@@ -935,6 +1017,7 @@ module.exports = {
   runDecisionForPendingTag,
   listDecisions,
   backfillPendingWithoutDecisions,
+  refreshHybridSnapshots,
   backfillAutoMergeDecisions,
   resolveOccurrencesTagId,
   setApprovalStatus,

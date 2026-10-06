@@ -7,9 +7,13 @@ const authHeaders = (json = false): Record<string, string> => {
   return h;
 };
 
+export type JobHeroBrandSource = 'company' | 'job_client';
+
 export type ClientBranding = {
   logoUrl: string | null;
   primaryColor: string | null;
+  /** Default brand source for Nano Banana job images (`clients.metadata`). */
+  jobHeroBrandSource?: JobHeroBrandSource;
 };
 
 const GOOGLE_FAVICON_MARKER = 'google.com/s2/favicons';
@@ -64,9 +68,15 @@ export async function fetchClientBranding(clientId: string): Promise<ClientBrand
   });
   if (!res.ok) throw new Error('Failed to load client branding');
   const data = await res.json();
+  const meta =
+    data.metadata && typeof data.metadata === 'object' && !Array.isArray(data.metadata)
+      ? (data.metadata as Record<string, unknown>)
+      : {};
+  const sourceRaw = String(meta.jobHeroBrandSource || 'company').trim();
   return {
     logoUrl: trimLogo(data.logoUrl),
     primaryColor: trimLogo(data.primaryColor) || '#1e293b',
+    jobHeroBrandSource: sourceRaw === 'job_client' ? 'job_client' : 'company',
   };
 }
 
@@ -80,13 +90,22 @@ export async function saveClientBranding(
     body: JSON.stringify({
       logoUrl: branding.logoUrl ?? undefined,
       primaryColor: branding.primaryColor ?? undefined,
+      ...(branding.jobHeroBrandSource
+        ? { metadata: { jobHeroBrandSource: branding.jobHeroBrandSource } }
+        : {}),
     }),
   });
   if (!res.ok) throw new Error('Failed to save client branding');
   const data = await res.json();
+  const meta =
+    data.metadata && typeof data.metadata === 'object' && !Array.isArray(data.metadata)
+      ? (data.metadata as Record<string, unknown>)
+      : {};
+  const sourceRaw = String(meta.jobHeroBrandSource || 'company').trim();
   return {
     logoUrl: trimLogo(data.logoUrl),
     primaryColor: trimLogo(data.primaryColor) || '#1e293b',
+    jobHeroBrandSource: sourceRaw === 'job_client' ? 'job_client' : 'company',
   };
 }
 

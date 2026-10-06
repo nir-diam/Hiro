@@ -151,11 +151,10 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
                     normSynonyms.some((syn) => {
                         return typeof syn === 'string' && syn.toLowerCase().includes(lowerSearch);
                     });
-            const alreadySelected = selectedTags.some((selected) => selected.nameHe === tag.nameHe);
             const alreadyExisting = existingTags.some((existing) => existing === tag.nameHe);
-            return matchesCategory && matchesSearch && !alreadyExisting && !alreadySelected;
+            return matchesCategory && matchesSearch && !alreadyExisting;
         });
-    }, [availableTags, activeTab, searchTerm, existingTags, selectedTags]);
+    }, [availableTags, activeTab, searchTerm, existingTags]);
 
     const handleToggleTag = (tag: TagOption) => {
         setSelectedTags((prev) => {
@@ -283,6 +282,28 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
                             </div>
                         </div>
 
+                        {selectedTags.length > 0 ? (
+                            <div className="px-4 py-3 border-b border-border-default bg-primary-50/40">
+                                <p className="text-xs font-bold text-text-muted mb-2">
+                                    נבחרו לשמירה ({selectedTags.length}) — לחץ על תגית להסרה
+                                </p>
+                                <div className="flex flex-wrap gap-2 max-h-28 overflow-y-auto custom-scrollbar">
+                                    {selectedTags.map((tag) => (
+                                        <button
+                                            key={tag.id}
+                                            type="button"
+                                            onClick={() => handleToggleTag(tag)}
+                                            className="inline-flex items-center gap-1.5 rounded-full border-2 border-primary-400 bg-primary-100 text-primary-900 px-3 py-1 text-xs font-semibold hover:bg-primary-200 transition-colors"
+                                            title="הסר מהבחירה"
+                                        >
+                                            <span className="max-w-[12rem] truncate">{tag.nameHe}</span>
+                                            <XMarkIcon className="w-3.5 h-3.5 shrink-0 opacity-80" />
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : null}
+
                         {/* Results */}
                         <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
                             {filteredTags.length > 0 ? (
@@ -383,7 +404,11 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
                                 <div className="flex flex-col items-center justify-center h-full text-center text-text-muted">
                                     <MagnifyingGlassIcon className="w-12 h-12 mb-3 opacity-20"/>
                                     <p className="font-semibold">לא נמצאו תגיות</p>
-                                    <p className="text-sm mt-1">נסה חיפוש אחר או לחץ "הוסף" ליצירת תגית חדשה</p>
+                                    <p className="text-sm mt-1">
+                                        {selectedTags.length > 0
+                                            ? 'נסה קטגוריה אחרת או חיפוש אחר. התגיות שבחרת מופיעות למעלה.'
+                                            : 'נסה חיפוש אחר או לחץ "הוסף" ליצירת תגית חדשה'}
+                                    </p>
                                 </div>
                             )}
                         </div>

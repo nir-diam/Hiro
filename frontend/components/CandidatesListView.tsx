@@ -4731,6 +4731,44 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         ],
     );
 
+    /** Deep link from candidate profile tag "תואר אקדמי" — same as advanced "בעל תואר אקדמי". */
+    useEffect(() => {
+        const raw = searchParamsFromUrl.get('hasDegree');
+        if (raw !== '1' && raw !== 'true') return;
+
+        try {
+            sessionStorage.removeItem(VIEW_STATE_KEY);
+        } catch {
+            /* ignore */
+        }
+
+        setSuspendListPolling(false);
+        setSemanticBaselineCandidates(null);
+        setLoadedSearch(null);
+        setSmartSearchQuery('');
+        setIsSmartSearchOpen(false);
+        skipListFetchAfterHydrateRef.current = false;
+
+        const nextSearchParams: ListSearchParamsState = {
+            ...createDefaultListSearchParams(),
+            hasDegree: true,
+            includePracticalEngineers: false,
+        };
+        applyAdvancedFiltersAndRefetch({
+            searchParams: nextSearchParams,
+            languageFilters: [],
+            complexRules: [],
+            companyFilters: { ...EMPTY_COMPANY_FILTERS },
+        });
+        setIsAdvancedSearchOpen(true);
+
+        setUrlSearchParams((prev) => {
+            const params = new URLSearchParams(prev);
+            params.delete('hasDegree');
+            return params;
+        }, { replace: true });
+    }, [searchParamsFromUrl, applyAdvancedFiltersAndRefetch, setUrlSearchParams]);
+
     const clearSmartSearchFilters = useCallback(() => {
         setSuspendListPolling(false);
         setSemanticBaselineCandidates(null);

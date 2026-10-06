@@ -1,10 +1,13 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { UserGroupIcon, BriefcaseIcon, ChartPieIcon,BanknotesIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon, CalendarDaysIcon, ArrowLeftIcon, ArrowRightIcon, DocumentTextIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
+import ClientProfileUpdatesHistoryModal from './ClientProfileUpdatesHistoryModal';
+import { useClientProfileGamification } from '../hooks/useClientProfileGamification';
+import { TrophyIcon } from './Icons';
 
 // ... (Keep existing interfaces and NavItem/SubMenuLink components) ...
 interface NavItemProps {
@@ -95,10 +98,20 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const location = useLocation();
     const { savedSearches, deleteSearch, loadingSearchId, setLoadingSearchId } = useSavedSearches();
     const { t, dir } = useLanguage();
-    const { canPage } = useAuth();
+    const { canPage, user } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const tenantClientId = user?.clientId ? String(user.clientId) : null;
 
     const [connectedUser, setConnectedUser] = useState<ConnectedUser | null>(() => readStoredUser());
+    const [isSidebarUserMenuOpen, setIsSidebarUserMenuOpen] = useState(false);
+    const sidebarUserMenuRef = useRef<HTMLDivElement>(null);
+    const {
+        points: clientGamificationPoints,
+        hasUnseenReview,
+        historyOpen: profilePointsHistoryOpen,
+        openHistory: openProfilePointsHistory,
+        closeHistory: closeProfilePointsHistory,
+    } = useClientProfileGamification(tenantClientId);
 
     const [isMobileView, setIsMobileView] = useState(window.innerWidth < 1024);
     
@@ -143,6 +156,16 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         const onFocus = () => setConnectedUser(readStoredUser());
         window.addEventListener('focus', onFocus);
         return () => window.removeEventListener('focus', onFocus);
+    }, []);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (sidebarUserMenuRef.current && !sidebarUserMenuRef.current.contains(event.target as Node)) {
+                setIsSidebarUserMenuOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
     useEffect(() => {
@@ -748,25 +771,74 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                     )}
                     
                     <div className="p-4">
-                        <button className={`w-full flex items-center gap-3 p-2 rounded-lg hover:bg-bg-subtle transition-colors group ${!isOpen ? 'justify-center' : ''}`}>
-                             <div className="w-10 h-10 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center font-bold text-lg border-2 border-white shadow-sm group-hover:scale-105 transition-transform">
-                                 {getInitial(connectedUser)}
-                             </div>
-                             <div className={`flex flex-col text-start overflow-hidden transition-all duration-300 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0 hidden'}`}>
-                                 <span className="font-bold text-sm text-text-default truncate">
-                                     {connectedUser?.name || connectedUser?.email || 'משתמש'}
-                                 </span>
-                                 <span className="text-xs text-text-muted truncate">
-                                     {roleLabelHe(connectedUser?.role)}
-                                 </span>
-                             </div>
-                        </button>
-                        <div className={`mt-2 flex justify-center transition-all duration-300 ${isOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>
-                            <button onClick={handleLogout} className="text-xs text-text-subtle hover:text-red-500 flex items-center gap-1 p-1">
-                                 <ArrowTopRightOnSquareIcon className="w-3 h-3"/>
-                                 <span>התנתק</span>
-                             </button>
+                        <div className="relative" ref={sidebarUserMenuRef}>
+                            <button
+                                type="button"
+                                onClick={() => setIsSidebarUserMenuOpen((v) => !v)}
+                                className={`w-full flex items-center gap-3 p-2 rounded-lg hover:bg-bg-subtle transition-colors ${!isOpen ? 'justify-center' : ''}`}
+                                aria-expanded={isSidebarUserMenuOpen}
+                                title="תפריט משתמש"
+                            >
+                                <div className="relative shrink-0">
+                                    <div className="w-10 h-10 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center font-bold text-lg border-2 border-white shadow-sm">
+                                        {getInitial(connectedUser)}
+                                    </div>
+                                    {tenantClientId && hasUnseenReview && (
+                                        <span
+                                            className="absolute top-0 start-0 w-2.5 h-2.5 bg-amber-500 rounded-full border-2 border-white shadow-sm"
+                                            aria-hidden
+                                        />
+                                    )}
+                                </div>
+                                <div className={`flex flex-col text-start overflow-hidden transition-all duration-300 flex-1 min-w-0 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0 hidden'}`}>
+                                    <span className="font-bold text-sm text-text-default truncate">
+                                        {connectedUser?.name || connectedUser?.email || 'משתמש'}
+                                    </span>
+                                    <span className="text-xs text-text-muted truncate">
+                                        {roleLabelHe(connectedUser?.role)}
+                                    </span>
+                                </div>
+                            </button>
+                            {isSidebarUserMenuOpen && (
+                                <div className="absolute bottom-full left-0 right-0 mb-1 bg-bg-card rounded-lg shadow-xl border border-border-default z-50 py-1 animate-fade-in-down">
+                                    {tenantClientId && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                openProfilePointsHistory();
+                                                setIsSidebarUserMenuOpen(false);
+                                            }}
+                                            className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm text-text-default hover:bg-bg-hover hover:text-primary-700 transition-colors"
+                                        >
+                                            <TrophyIcon className="w-5 h-5 text-amber-700 shrink-0" />
+                                            <span className="flex-1">הנקודות שלי ({clientGamificationPoints})</span>
+                                            {hasUnseenReview && (
+                                                <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" aria-hidden />
+                                            )}
+                                        </button>
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setIsSidebarUserMenuOpen(false);
+                                            handleLogout();
+                                        }}
+                                        className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm text-text-subtle hover:bg-bg-hover hover:text-red-600 transition-colors border-t border-border-default"
+                                    >
+                                        <ArrowTopRightOnSquareIcon className="w-4 h-4 shrink-0" />
+                                        <span>התנתק</span>
+                                    </button>
+                                </div>
+                            )}
                         </div>
+                        {tenantClientId && (
+                            <ClientProfileUpdatesHistoryModal
+                                isOpen={profilePointsHistoryOpen}
+                                onClose={closeProfilePointsHistory}
+                                clientId={tenantClientId}
+                                points={clientGamificationPoints}
+                            />
+                        )}
                     </div>
                 </div>
             </aside>

@@ -609,6 +609,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                 reviewStatus: aiReviewStatus,
                 autoBackfill: isAgentOn && aiReviewStatus === 'pending_review' && aiPage === 1,
                 backfillLimit: 25,
+                autoRefreshHybrid: true,
                 search: aiDebouncedSearch || undefined,
                 type: aiFilterType !== 'all' ? aiFilterType : undefined,
                 hesitation: aiFilterHesitation.includes('all') ? undefined : aiFilterHesitation,
@@ -622,6 +623,8 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                 flashStatus(`סוכן AI: ${payload.backfill.lastError}`);
             } else if (payload.backfill?.processed) {
                 flashStatus(`סוכן AI עיבד ${payload.backfill.processed} תגיות ממתינות`);
+            } else if (payload.hybridRefresh?.updated) {
+                flashStatus(`עודכנו ${payload.hybridRefresh.updated} החלטות עם מועמדים FUZZY`);
             }
         } catch (err) {
             console.error('[AdminTagCorrectionsView] AI decisions load failed', err);
@@ -1921,6 +1924,21 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                 )}
                                             </td>
                                             <td className="p-4 align-top">
+                                                {(() => {
+                                                    const tags = decision.candidateTagsFromDB || [];
+                                                    const fuzzyCount = tags.filter((t) => t.source === 'fuzzy').length;
+                                                    const vectorCount = tags.filter((t) => t.source === 'vector').length;
+                                                    const legacyCount = tags.length - fuzzyCount - vectorCount;
+                                                    if (!tags.length) return null;
+                                                    return (
+                                                        <p className="text-[9px] text-text-muted mb-1.5 tabular-nums">
+                                                            {vectorCount + legacyCount} סמנטי
+                                                            {' · '}
+                                                            {fuzzyCount} FUZZY
+                                                            {tags.length > 0 ? ` · סה״כ ${tags.length}` : ''}
+                                                        </p>
+                                                    );
+                                                })()}
                                                 <div className="flex flex-wrap gap-1.5">
                                                     {decision.candidateTagsFromDB.slice(0, expandedAiRows.has(decision.id) ? undefined : 5).map((tag, tagIdx) => {
                                                         const isFuzzy = tag.source === 'fuzzy';
@@ -1939,6 +1957,9 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                             {isFuzzy ? (
                                                                 <div className="flex items-center gap-0.5 text-blue-800 bg-blue-100 border border-blue-300 px-1 py-[1.5px] rounded-[4px] shrink-0" title="Text Match (Fuzzy)">
                                                                     <MagnifyingGlassIcon className="w-2.5 h-2.5" />
+                                                                    {tag.score != null ? (
+                                                                        <span className="font-mono text-[9px] font-bold leading-none">{Math.round(tag.score * 100)}%</span>
+                                                                    ) : null}
                                                                     <span className="font-mono text-[9px] font-bold leading-none">FUZZY</span>
                                                                 </div>
                                                             ) : (

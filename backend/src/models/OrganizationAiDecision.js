@@ -24,6 +24,11 @@ const OrganizationAiDecision = sequelize.define(
       allowNull: true,
       field: 'organization_tmp_id',
     },
+    organizationId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      field: 'organization_id',
+    },
     /** 'create_company' | 'merge_company' | 'map_generic' | 'manual_review' */
     aiDecision: {
       type: DataTypes.STRING(32),
@@ -126,6 +131,7 @@ const OrganizationTmp = require('./OrganizationTmp');
 
 OrganizationAiDecision.belongsTo(Candidate, { foreignKey: 'candidate_id', as: 'candidate' });
 OrganizationAiDecision.belongsTo(Organization, { foreignKey: 'ai_suggested_target_id', as: 'suggestedOrg' });
+OrganizationAiDecision.belongsTo(Organization, { foreignKey: 'organization_id', as: 'linkedOrganization' });
 OrganizationAiDecision.belongsTo(OrganizationTmp, { foreignKey: 'organization_tmp_id', as: 'organizationTmp' });
 
 module.exports = OrganizationAiDecision;

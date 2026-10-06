@@ -6,6 +6,7 @@ const aiDecisionAuditService = require('./aiDecisionAuditService');
 const tagAiDecisionResolveService = require('./tagAiDecisionResolveService');
 const tagCorrectionAgentService = require('./tagCorrectionAgentService');
 const organizationAiDecisionController = require('../controllers/organizationAiDecisionController');
+const organizationService = require('./organizationService');
 const {
   TAG_PUBLIC_FIELDS,
   TAG_AGENT_READ_FIELDS,
@@ -13,7 +14,7 @@ const {
   toPublicTagAiDecisionDto,
   toTagAiDecisionCandidatesDto,
   toPublicOrganizationAiDecisionDto,
-  toPublicOrganizationAiDecisionDetailDto,
+  toStagingCompanyFieldGroupsDto,
   parseAgentPatchDto,
   parseExpectedUpdatedAt,
   toAgentPatchResponseDto,
@@ -107,6 +108,14 @@ const buildSharedListFilters = (query = {}) => {
 };
 
 const mergeWhere = (parts = []) => (parts.length ? { [Op.and]: parts } : {});
+
+const enrichOrganizationDecisionDto = async (row) => {
+  const dto = toPublicOrganizationAiDecisionDto(row);
+  if (!dto.organizationId && dto.originalTerm) {
+    dto.organizationId = await organizationService.resolveOrganizationIdForTerm(dto.originalTerm);
+  }
+  return dto;
+};
 
 const invokeControllerJson = async (handler, req) => {
   let statusCode = 200;
@@ -236,8 +245,9 @@ const listOrganizationAiDecisions = async (query = {}) => {
     offset,
   });
 
+  const data = await Promise.all(rows.map(enrichOrganizationDecisionDto));
   return {
-    data: rows.map(toPublicOrganizationAiDecisionDto),
+    data,
     total: count,
     page,
     limit,
@@ -262,7 +272,11 @@ const getOrganizationAiDecision = async (id) => {
     err.status = 404;
     throw err;
   }
-  return toPublicOrganizationAiDecisionDetailDto(row, row.organizationTmp || null);
+  const base = await enrichOrganizationDecisionDto(row);
+  return {
+    ...base,
+    stagingCompany: toStagingCompanyFieldGroupsDto(row.organizationTmp || null),
+  };
 };
 
 const patchOrganizationAiDecision = async (id, body, req = null) => {

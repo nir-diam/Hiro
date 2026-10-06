@@ -101,6 +101,7 @@ import AdminMatchingEngineView from './components/AdminMatchingEngineView';
 import AdminPicklistsView from './components/AdminPicklistsView';
 import AdminTagCorrectionsView from './components/AdminTagCorrectionsView';
 import AdminTagBlacklistView from './components/AdminTagBlacklistView';
+import AdminTagProtectedView from './components/AdminTagProtectedView';
 import AdminEventsView from './components/AdminEventsView';
 import AdminLogsView from './components/AdminLogsView';
 import AdminHelpCenterView from './components/AdminHelpCenterView';
@@ -1038,13 +1039,22 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     activeView={props.activeView}
                     setActiveView={handleNavClick}
                     candidateId={resolveCandidatePortalPreviewId(formData, formData.backendId || urlId)}
+                    onMatchJobsClick={props.handleMatchingClick}
+                    onScreenCandidateClick={props.handleScreeningClick}
+                    jobMatchesCount={
+                        typeof formData.jobMatchesCount === 'number'
+                            ? formData.jobMatchesCount
+                            : Array.isArray(formData.matchedJobs)
+                              ? formData.matchedJobs.length
+                              : 0
+                    }
+                    isMatchingJobs={props.isMatchingJobs}
+                    isScreening={props.isScreening}
                 />
             </div>
 
              <CandidateProfile 
                 candidateData={formData}
-                onMatchJobsClick={props.handleMatchingClick}
-                onScreenCandidateClick={props.handleScreeningClick}
                 onOpenMessageModal={props.openMessageModal}
                 onTagsChange={handleTagsChange}
                 onFormChange={handleFormChange}
@@ -1202,6 +1212,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                         { path: 'list', element: <AdminTagsView /> },
                         { path: 'corrections', element: <AdminTagCorrectionsView /> },
                         { path: 'blacklist', element: <AdminTagBlacklistView /> },
+                        { path: 'protected', element: <AdminTagProtectedView /> },
                         { path: 'candidates', element: <AdminCandidateTagsView /> },
                         { path: 'jobs', element: <AdminJobTagsView /> },
                     ],

@@ -28,6 +28,9 @@ import {
     stickyTableHeaderCellClass,
 } from '../utils/stickyTableHeader';
 import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
+import { fetchAllJobs, fetchJobsForTenantScope } from '../services/jobsApi';
+import { FormMultiSelect } from './FormMultiSelect';
+import { jobStatusFormToApi, JOB_STATUS_FORM_OPTIONS, type JobStatusFormLabel } from '../utils/jobStatusLabels';
 
 // --- TYPES ---
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
@@ -87,7 +90,109 @@ export interface Job {
   healthProfile: HealthProfile; 
   /** Raw HTML notes from API — used for working-hours token filter. */
   internalNotes?: string;
+  /** Editable grid notes (jobs table column). */
+  listNotes?: string;
+  listNotesHistory?: JobListNotesHistoryEntry[];
 }
+
+export type JobListNotesHistoryEntry = {
+  id: string;
+  at: string;
+  userId?: string | null;
+  userName: string;
+  previousText: string;
+  newText: string;
+  action: 'create' | 'edit' | 'clear';
+};
+
+const formatListNotesHistoryLine = (entry: JobListNotesHistoryEntry): string => {
+  const who = entry.userName || 'משתמש';
+  const when = new Date(entry.at).toLocaleString('he-IL', {
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  if (entry.action === 'clear') {
+    return `${who} מחק/ה (${when}) — היה: «${entry.previousText}»`;
+  }
+  if (entry.action === 'create') {
+    return `${who} הוסיף/ה (${when}): «${entry.newText}»`;
+  }
+  return `${who} ערך/ה (${when}): «${entry.previousText}» → «${entry.newText}»`;
+};
+
+const JobListNotesCell: React.FC<{
+  job: Job;
+  isSaving: boolean;
+  isHistoryOpen: boolean;
+  onToggleHistory: () => void;
+  onCloseHistory: () => void;
+  onChange: (value: string) => void;
+  onSave: (value: string) => void;
+}> = ({ job, isSaving, isHistoryOpen, onToggleHistory, onCloseHistory, onChange, onSave }) => {
+  const history = Array.isArray(job.listNotesHistory) ? job.listNotesHistory : [];
+  const historyRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isHistoryOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (historyRef.current && !historyRef.current.contains(e.target as Node)) {
+        onCloseHistory();
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [isHistoryOpen, onCloseHistory]);
+
+  return (
+    <div className="relative min-w-[160px] max-w-[220px]" onClick={(e) => e.stopPropagation()}>
+      <textarea
+        rows={2}
+        value={job.listNotes || ''}
+        onChange={(e) => onChange(e.target.value)}
+        onBlur={(e) => onSave(e.target.value)}
+        disabled={isSaving}
+        placeholder="הערות..."
+        className="w-full bg-bg-input border border-border-default rounded-lg px-2.5 py-1.5 text-xs text-text-default focus:ring-2 focus:ring-primary-500 outline-none resize-y disabled:opacity-60"
+      />
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleHistory();
+        }}
+        className="mt-1 inline-flex items-center gap-1 text-[10px] font-bold text-text-muted hover:text-primary-600 transition-colors"
+        title="היסטוריית עריכה"
+      >
+        <ClockIcon className="w-3.5 h-3.5" />
+        היסטוריה{history.length ? ` (${history.length})` : ''}
+      </button>
+      {isHistoryOpen && (
+        <div
+          ref={historyRef}
+          className="absolute z-50 top-full mt-1 left-0 right-0 min-w-[280px] max-h-56 overflow-y-auto rounded-xl border border-border-default bg-bg-card shadow-xl p-3 text-right"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <p className="text-xs font-bold text-text-default mb-2">היסטוריית הערות</p>
+          {history.length === 0 ? (
+            <p className="text-xs text-text-muted">אין עריכות עדיין.</p>
+          ) : (
+            <ul className="space-y-2">
+              {history.map((entry) => (
+                <li key={entry.id} className="text-[11px] text-text-muted leading-snug border-b border-border-subtle pb-2 last:border-0 last:pb-0">
+                  {formatListNotesHistoryLine(entry)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
 
 const statusStyles: { [key in JobStatus]: { text: string; bg: string; border: string; } } = {
   'פתוחה': { text: 'text-green-800', bg: 'bg-green-100', border: 'border-green-200' },
@@ -96,10 +201,32 @@ const statusStyles: { [key in JobStatus]: { text: string; bg: string; border: st
   'טיוטה': { text: 'text-indigo-800', bg: 'bg-indigo-100', border: 'border-indigo-200' },
 };
 
+/** When job row omits numeric fields (e.g. compose picker), do not apply default range filters. */
+const jobNumericRangeMatchesFilter = (
+    min: number | null | undefined,
+    max: number | null | undefined,
+    filterMin: number,
+    filterMax: number,
+) => {
+    const hasMin = min != null && !Number.isNaN(Number(min));
+    const hasMax = max != null && !Number.isNaN(Number(max));
+    if (!hasMin && !hasMax) return true;
+    const lo = hasMin ? Number(min) : hasMax ? Number(max) : filterMin;
+    const hi = hasMax ? Number(max) : hasMin ? Number(min) : filterMax;
+    return hi >= filterMin && lo <= filterMax;
+};
+
+/** Default jobs list: active only (UI «פעילה» → API «פתוחה»). */
+const DEFAULT_JOBS_STATUS_FILTER = jobStatusFormToApi('פעילה');
+
+const JOB_STATUS_FILTER_OPTIONS: JobStatus[] = JOB_STATUS_FORM_OPTIONS.map(
+    (label) => jobStatusFormToApi(label) as JobStatus,
+);
+
 const initialFilters = {
     searchTerm: '',
     client: '',
-    status: '',
+    statuses: [DEFAULT_JOBS_STATUS_FILTER] as JobStatus[],
     recruiter: '',
     fromDate: '',
     toDate: '',
@@ -518,29 +645,33 @@ const JobsView: React.FC = () => {
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [filters, setFilters] = useState(initialFilters);
     
-    const loadJobs = useCallback(async () => {
+    const loadJobs = useCallback(async (opts?: { active?: () => boolean }) => {
+        const isActive = () => opts?.active?.() ?? true;
         setLoadingJobs(true);
         try {
-            const url = isTenantUser
-                ? `${apiBase}/api/jobs/for-compose`
-                : `${apiBase}/api/jobs`;
-            const res = await fetch(url, {
-                headers: isTenantUser ? authHeaders(true) : undefined,
-                cache: 'no-store',
+            const payload = isTenantUser ? await fetchJobsForTenantScope() : await fetchAllJobs();
+            if (!isActive()) return;
+            const rows = payload as Job[];
+            setJobs(rows);
+            const baseline: Record<string, string> = {};
+            rows.forEach((job: Job) => {
+                baseline[String(job.id)] = String(job.listNotes || '');
             });
-            if (!res.ok) throw new Error('Failed to load jobs');
-            const payload = await res.json();
-            setJobs(Array.isArray(payload) ? payload : []);
+            setListNotesBaseline(baseline);
         } catch (err) {
-            console.error('[JobsView] loadJobs', err);
+            if (isActive()) console.error('[JobsView] loadJobs', err);
         } finally {
-            setLoadingJobs(false);
+            if (isActive()) setLoadingJobs(false);
         }
-    }, [apiBase, isTenantUser]);
+    }, [isTenantUser]);
 
     useEffect(() => {
         if (!authReady) return;
-        loadJobs();
+        let active = true;
+        void loadJobs({ active: () => active });
+        return () => {
+            active = false;
+        };
     }, [loadJobs, authReady]);
 
 
@@ -582,7 +713,9 @@ const JobsView: React.FC = () => {
     // --- NEW STATE FOR BULK ACTIONS & AI ---
     const [activeBulkAction, setActiveBulkAction] = useState<'none' | 'menu' | 'status' | 'priority'>('none');
     const [isAIAnalysisOpen, setIsAIAnalysisOpen] = useState(false);
-
+    const [listNotesBaseline, setListNotesBaseline] = useState<Record<string, string>>({});
+    const [savingListNotesId, setSavingListNotesId] = useState<string | number | null>(null);
+    const [openListNotesHistoryId, setOpenListNotesHistoryId] = useState<string | number | null>(null);
 
     const allColumns = useMemo(() => [
         { id: 'rating', header: t('jobs.col_rating') },
@@ -596,6 +729,7 @@ const JobsView: React.FC = () => {
         { id: 'activeProcess', header: t('jobs.col_process') },
         { id: 'openDate', header: t('jobs.col_open_date') },
         { id: 'recruiter', header: t('jobs.col_recruiter') },
+        { id: 'listNotes', header: t('jobs.col_list_notes') },
         { id: 'id', header: t('jobs.col_id') },
         { id: 'postingCode', header: t('jobs.col_posting_code') },
         { id: 'field', header: t('jobs.col_field') },
@@ -613,7 +747,10 @@ const JobsView: React.FC = () => {
         { id: 'licenseType', header: t('jobs.col_license') },
     ], [t]);
 
-    const defaultVisibleColumns = useMemo(() => ['rating', 'health', 'title', 'priority', 'client', 'status', 'associatedCandidates', 'waitingForScreening', 'activeProcess', 'openDate', 'recruiter'], []);
+    const defaultVisibleColumns = useMemo(
+        () => ['rating', 'health', 'title', 'priority', 'client', 'status', 'associatedCandidates', 'waitingForScreening', 'activeProcess', 'openDate', 'recruiter', 'listNotes'],
+        [],
+    );
     const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
     const {
         viewMode,
@@ -630,8 +767,15 @@ const JobsView: React.FC = () => {
 
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+    const columnSettingsWasOpenRef = useRef(false);
     useEffect(() => {
-        if (!isSettingsOpen) persistColumnsNow();
+        if (isSettingsOpen) {
+            columnSettingsWasOpenRef.current = true;
+            return;
+        }
+        if (columnSettingsWasOpenRef.current) {
+            persistColumnsNow();
+        }
     }, [isSettingsOpen, persistColumnsNow]);
 
     const settingsRef = useRef<HTMLDivElement>(null);
@@ -661,6 +805,49 @@ const JobsView: React.FC = () => {
             await persistJobUpdate(jobId, { rating: newRating });
         } catch (err) {
             alert((err as Error).message || 'Failed to update rating');
+        }
+    };
+
+    const handleListNotesChange = (jobId: string | number, value: string) => {
+        setJobs((prev) => prev.map((job) => (job.id === jobId ? { ...job, listNotes: value } : job)));
+    };
+
+    const saveListNotes = async (job: Job, value: string) => {
+        const key = String(job.id);
+        const baseline = listNotesBaseline[key] ?? '';
+        if (value === baseline) return;
+
+        setSavingListNotesId(job.id);
+        try {
+            const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(String(job.id))}/list-notes`, {
+                method: 'PATCH',
+                headers: authHeaders(true),
+                credentials: 'include',
+                body: JSON.stringify({ listNotes: value }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body?.message || 'Failed to save notes');
+            }
+            const updated = await res.json();
+            setJobs((prev) =>
+                prev.map((row) =>
+                    row.id === job.id
+                        ? {
+                            ...row,
+                            listNotes: updated.listNotes ?? value,
+                            listNotesHistory: Array.isArray(updated.listNotesHistory) ? updated.listNotesHistory : row.listNotesHistory,
+                        }
+                        : row,
+                ),
+            );
+            setListNotesBaseline((prev) => ({ ...prev, [key]: String(updated.listNotes ?? value) }));
+        } catch (err) {
+            console.error('[JobsView] saveListNotes', err);
+            alert(err instanceof Error ? err.message : 'שמירת הערות נכשלה');
+            setJobs((prev) => prev.map((row) => (row.id === job.id ? { ...row, listNotes: baseline } : row)));
+        } finally {
+            setSavingListNotesId(null);
         }
     };
 
@@ -786,10 +973,10 @@ const JobsView: React.FC = () => {
         setIsStatusModalOpen(true);
     };
 
-    const handleSaveStatus = async (newStatus: JobStatus, note: string) => {
+    const handleSaveStatus = async (newStatus: JobStatusFormLabel, note: string) => {
         if (!jobToEditStatus) return;
         try {
-            await persistJobUpdate(jobToEditStatus.id, { status: newStatus });
+            await persistJobUpdate(jobToEditStatus.id, { status: jobStatusFormToApi(newStatus) });
             console.log(`Updated job ${jobToEditStatus.id} status to ${newStatus}. Note: ${note}`);
         } catch (err) {
             alert((err as Error).message || 'Failed to update status');
@@ -852,16 +1039,15 @@ const JobsView: React.FC = () => {
 
     const sortedAndFilteredJobs = useMemo(() => {
         let filtered = jobs.filter(job => {
-            const search = filters.searchTerm.toLowerCase();
-            const matchesSearch = !search || 
-                job.title.toLowerCase().includes(search) ||
-                job.client.toLowerCase().includes(search) ||
-                job.location.toLowerCase().includes(search) ||
-                String(job.id).includes(search);
-
-            const checkRange = (min: number, max: number, filterMin: number, filterMax: number) => {
-                return max >= filterMin && min <= filterMax;
-            };
+            const search = filters.searchTerm.toLowerCase().trim();
+            const postingCodeHay = String(job.postingCode || '').toLowerCase();
+            const matchesSearch = !search ||
+                String(job.title || '').toLowerCase().includes(search) ||
+                String(job.client || '').toLowerCase().includes(search) ||
+                String(job.location || '').toLowerCase().includes(search) ||
+                String(job.id).includes(search) ||
+                postingCodeHay.includes(search);
+            const postingCodeFilter = String(filters.postingCode || '').trim().toLowerCase();
 
             const checkMobility = () => {
                 if (filters.mobility === '') return true;
@@ -886,7 +1072,7 @@ const JobsView: React.FC = () => {
 
             return matchesSearch &&
                 (!filters.client || job.client === filters.client) &&
-                (!filters.status || job.status === filters.status) &&
+                (filters.statuses.length === 0 || filters.statuses.includes(job.status)) &&
                 (!filters.recruiter || job.recruiter === filters.recruiter) &&
                 (!filters.fromDate || job.openDate >= filters.fromDate) &&
                 (!filters.toDate || job.openDate <= filters.toDate) &&
@@ -899,12 +1085,12 @@ const JobsView: React.FC = () => {
                 checkMobility() &&
                 (!filters.licenseType || job.licenseType === filters.licenseType) &&
                 (!filters.jobId || String(job.id) === filters.jobId) &&
-                (!filters.postingCode || job.postingCode === filters.postingCode) &&
+                (!postingCodeFilter || postingCodeHay.includes(postingCodeFilter)) &&
                 (!filters.recruitingCoordinator || job.recruitingCoordinator === filters.recruitingCoordinator) &&
                 (!filters.accountManager || job.accountManager === filters.accountManager) &&
-                checkRange(job.salaryMin, job.salaryMax, filters.salaryMin, filters.salaryMax) &&
-                checkRange(job.ageMin, job.ageMax, filters.ageMin, filters.ageMax) &&
-                checkRange(job.openPositions, job.openPositions, filters.positionsMin, filters.positionsMax) &&
+                jobNumericRangeMatchesFilter(job.salaryMin, job.salaryMax, filters.salaryMin, filters.salaryMax) &&
+                jobNumericRangeMatchesFilter(job.ageMin, job.ageMax, filters.ageMin, filters.ageMax) &&
+                jobNumericRangeMatchesFilter(job.openPositions, job.openPositions, filters.positionsMin, filters.positionsMax) &&
                 (() => {
                     const wh = String(filters.workingHours || '').trim();
                     if (!wh || wh === 'גמיש' || wh === 'ללא אילוצי שעות') return true;
@@ -1058,6 +1244,18 @@ const JobsView: React.FC = () => {
         case 'salaryRange': return `${job.salaryMin.toLocaleString()}₪ - ${job.salaryMax.toLocaleString()}₪`;
         case 'ageRange': return `${job.ageMin} - ${job.ageMax}`;
         case 'mobility': return job.mobility ? t('filter.status_active') : t('filter.status_inactive');
+        case 'listNotes':
+          return (
+            <JobListNotesCell
+              job={job}
+              isSaving={savingListNotesId === job.id}
+              isHistoryOpen={openListNotesHistoryId === job.id}
+              onToggleHistory={() => setOpenListNotesHistoryId((prev) => (prev === job.id ? null : job.id))}
+              onCloseHistory={() => setOpenListNotesHistoryId(null)}
+              onChange={(value) => handleListNotesChange(job.id, value)}
+              onSave={(value) => void saveListNotes(job, value)}
+            />
+          );
         default: return (job as any)[columnId];
       }
     };
@@ -1086,12 +1284,16 @@ const JobsView: React.FC = () => {
             });
         }
         pushText('לקוח', 'client');
-        if (filters.status) {
+        for (const apiStatus of filters.statuses) {
             chips.push({
-                id: `status:${filters.status}`,
+                id: `status:${apiStatus}`,
                 group: 'סטטוס',
-                label: t(`status.${filters.status}`),
-                onRemove: () => setFilters((prev) => ({ ...prev, status: '' })),
+                label: t(`status.${apiStatus}`),
+                onRemove: () =>
+                    setFilters((prev) => ({
+                        ...prev,
+                        statuses: prev.statuses.filter((s) => s !== apiStatus),
+                    })),
             });
         }
         if (filters.field || filters.role) {
@@ -1310,7 +1512,22 @@ const JobsView: React.FC = () => {
                                 icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}
                             />
                         ) : null}
-                        <FilterSelect placeholder={t('jobs.filter_status')} name="status" value={filters.status} onChange={handleFilterChange} options={filterOptions.statuses.map(s => t(`status.${s}`))} className="flex-grow min-w-[8rem] flex-shrink-0" />
+                        <FormMultiSelect
+                            compact
+                            placeholder={t('jobs.filter_status')}
+                            className="flex-grow min-w-[10rem] flex-shrink-0"
+                            options={JOB_STATUS_FILTER_OPTIONS.map((apiStatus) => ({
+                                value: apiStatus,
+                                label: t(`status.${apiStatus}`),
+                            }))}
+                            value={filters.statuses}
+                            onChange={(next) =>
+                                setFilters((prev) => ({
+                                    ...prev,
+                                    statuses: next as JobStatus[],
+                                }))
+                            }
+                        />
 
                         {/* Date Range Selector */}
                         <div className="min-w-[140px]">
@@ -1683,7 +1900,7 @@ const JobsView: React.FC = () => {
             <JobStatusModal 
                 isOpen={isStatusModalOpen}
                 onClose={() => { setIsStatusModalOpen(false); setJobToEditStatus(null); }}
-                currentStatus={jobToEditStatus?.status || 'טיוטה'}
+                currentStatus={jobToEditStatus?.status ?? 'טיוטה'}
                 jobTitle={jobToEditStatus?.title || ''}
                 onSave={handleSaveStatus}
             />

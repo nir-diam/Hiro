@@ -16,6 +16,7 @@ import {
     PhoneIcon,
     ClockIcon,
     ArrowPathIcon,
+    DocumentTextIcon,
 } from './Icons';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import ResumeViewer from './ResumeViewer';
@@ -346,6 +347,31 @@ function extractJobWorkingHoursFromNotes(notes: string | undefined | null): stri
     if (parsed) return parsed;
   }
   return '';
+}
+
+function stripWorkingHoursFromJobNotes(notes: string | undefined | null): string {
+  return String(notes || '').replace(/\s*\[WORKING_HOURS\][^\n\r]*/gi, '').trim();
+}
+
+function mergeWorkingHoursIntoJobNotes(
+  originalNotes: string | undefined | null,
+  editedNotes: string,
+): string {
+  const hours = extractJobWorkingHoursFromNotes(originalNotes);
+  const cleaned = stripWorkingHoursFromJobNotes(editedNotes);
+  const flex = !hours || hours === 'גמיש' || hours === 'ללא אילוצי שעות';
+  if (flex) return cleaned;
+  const suffix = `\n[WORKING_HOURS] ${hours}`;
+  return cleaned ? `${cleaned}${suffix}` : suffix.trim();
+}
+
+function isEmptyRichNotes(html: string | undefined | null): boolean {
+  const t = String(html || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return !t;
 }
 
 /** מועמד: שעות מועדפות + זמינות + מודלי עבודה מועדפים (להשוואה מול שעות המשרה). */
@@ -1192,6 +1218,7 @@ const CandidateScreeningView: React.FC<{
     resumeText?: string;
     resumeRaw?: string;
     resume?: string;
+    internalNotes?: string;
   };
 }> = ({ onBack, candidateId, candidate }) => {
     const { t } = useLanguage();
@@ -1230,6 +1257,15 @@ const CandidateScreeningView: React.FC<{
       string,
       unknown
     > | null>(null);
+    const [candidateInternalNotes, setCandidateInternalNotes] = useState('');
+    const [showCandidateInternalNotes, setShowCandidateInternalNotes] = useState(false);
+    const [isEditingCandidateInternalNotes, setIsEditingCandidateInternalNotes] = useState(false);
+    const [candidateInternalNotesDraft, setCandidateInternalNotesDraft] = useState('');
+    const [candidateInternalNotesSaving, setCandidateInternalNotesSaving] = useState(false);
+    const [editingJobInternalNotesId, setEditingJobInternalNotesId] = useState<number | string | null>(null);
+    const [jobInternalNotesDraft, setJobInternalNotesDraft] = useState('');
+    const [jobInternalNotesSavingId, setJobInternalNotesSavingId] = useState<number | string | null>(null);
+    const internalNotesTextareaRef = useRef<HTMLTextAreaElement>(null);
     const resumeSendCvAfterOpinionRef = useRef(false);
     const saveTimeoutByJobRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const candidateResumeData = useMemo(
@@ -1252,6 +1288,122 @@ const CandidateScreeningView: React.FC<{
         ...(tags !== undefined ? { tags } : {}),
       };
     }, [candidate, tagMatchCandidateSnapshot]);
+
+    useEffect(() => {
+      setCandidateInternalNotes(String(candidate?.internalNotes || '').trim());
+    }, [candidateId, candidate?.internalNotes]);
+
+    useEffect(() => {
+      setShowCandidateInternalNotes(false);
+      setIsEditingCandidateInternalNotes(false);
+    }, [candidateId]);
+
+    useEffect(() => {
+      if (!isEditingCandidateInternalNotes || !internalNotesTextareaRef.current) return;
+      internalNotesTextareaRef.current.focus();
+      const len = internalNotesTextareaRef.current.value.length;
+      internalNotesTextareaRef.current.setSelectionRange(len, len);
+    }, [isEditingCandidateInternalNotes]);
+
+    const openCandidateInternalNotesEditor = useCallback(() => {
+      setCandidateInternalNotesDraft(candidateInternalNotes);
+      setIsEditingCandidateInternalNotes(true);
+    }, [candidateInternalNotes]);
+
+    const cancelCandidateInternalNotesEdit = useCallback(() => {
+      setCandidateInternalNotesDraft(candidateInternalNotes);
+      setIsEditingCandidateInternalNotes(false);
+    }, [candidateInternalNotes]);
+
+    const saveCandidateInternalNotes = useCallback(async () => {
+      if (!candidateId || !apiBase) return;
+      const trimmed = candidateInternalNotesDraft.trim();
+      if (trimmed === candidateInternalNotes) {
+        setIsEditingCandidateInternalNotes(false);
+        return;
+      }
+      setCandidateInternalNotesSaving(true);
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      try {
+        const res = await fetch(`${apiBase}/api/candidates/${candidateId}`, {
+          method: 'PUT',
+          headers,
+          credentials: 'include',
+          body: JSON.stringify({ internalNotes: trimmed }),
+        });
+        if (!res.ok) throw new Error('save failed');
+        setCandidateInternalNotes(trimmed);
+        setIsEditingCandidateInternalNotes(false);
+        void import('../utils/staffCandidateApi').then(({ invalidateStaffCandidateCache }) => {
+          invalidateStaffCandidateCache(String(candidateId));
+        });
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('candidate-data-refreshed', { detail: { backendId: candidateId } }),
+          );
+        }
+      } catch {
+        alert('שמירת ההערות נכשלה. נסה שוב.');
+      } finally {
+        setCandidateInternalNotesSaving(false);
+      }
+    }, [candidateId, apiBase, candidateInternalNotes, candidateInternalNotesDraft]);
+
+    useEffect(() => {
+      if (editingJobInternalNotesId == null) return;
+      if (expandedJobId !== editingJobInternalNotesId) {
+        setEditingJobInternalNotesId(null);
+      }
+    }, [expandedJobId, editingJobInternalNotesId]);
+
+    const openJobInternalNotesEditor = useCallback((job: ScreeningJob) => {
+      setJobInternalNotesDraft(stripWorkingHoursFromJobNotes(job.internalNotes));
+      setEditingJobInternalNotesId(job.id);
+    }, []);
+
+    const cancelJobInternalNotesEdit = useCallback((job: ScreeningJob) => {
+      setJobInternalNotesDraft(stripWorkingHoursFromJobNotes(job.internalNotes));
+      setEditingJobInternalNotesId(null);
+    }, []);
+
+    const saveJobInternalNotes = useCallback(
+      async (job: ScreeningJob) => {
+        if (!apiBase) return;
+        const currentDisplay = stripWorkingHoursFromJobNotes(job.internalNotes);
+        const draftDisplay = isEmptyRichNotes(jobInternalNotesDraft)
+          ? ''
+          : stripWorkingHoursFromJobNotes(jobInternalNotesDraft);
+        if (draftDisplay === currentDisplay) {
+          setEditingJobInternalNotesId(null);
+          return;
+        }
+        const payloadNotes = mergeWorkingHoursIntoJobNotes(job.internalNotes, jobInternalNotesDraft);
+        setJobInternalNotesSavingId(job.id);
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        try {
+          const res = await fetch(`${apiBase}/api/jobs/${job.id}`, {
+            method: 'PUT',
+            headers,
+            credentials: 'include',
+            body: JSON.stringify({ internalNotes: payloadNotes }),
+          });
+          if (!res.ok) throw new Error('save failed');
+          setJobs((prev) =>
+            prev.map((j) => (j.id === job.id ? { ...j, internalNotes: payloadNotes } : j)),
+          );
+          setEditingJobInternalNotesId(null);
+        } catch {
+          alert('שמירת הערות המשרה נכשלה. נסה שוב.');
+        } finally {
+          setJobInternalNotesSavingId(null);
+        }
+      },
+      [apiBase, jobInternalNotesDraft],
+    );
 
     useEffect(() => {
       if (!selectedJobForTags || !candidateId || !apiBase) {
@@ -1290,7 +1442,11 @@ const CandidateScreeningView: React.FC<{
           (data: {
             included?: any[];
             excluded?: any[];
+            candidateInternalNotes?: string;
           }) => {
+          if (data?.candidateInternalNotes != null) {
+            setCandidateInternalNotes(String(data.candidateInternalNotes || '').trim());
+          }
           const inc = Array.isArray(data?.included) ? data.included : [];
           const exc = Array.isArray(data?.excluded) ? data.excluded : [];
           const mapChecks = (row: any) =>
@@ -2047,9 +2203,27 @@ const CandidateScreeningView: React.FC<{
                  {/* RTL: First child is Right. We want Jobs on Right. */}
                  {/* Mobile: Full width (CV hidden). Desktop: Half width. */}
                 <div className="w-full md:w-1/2 flex flex-col overflow-hidden bg-bg-subtle/30 md:border-l border-border-default">
-                     <div className="p-3 border-b border-border-default flex items-center justify-between bg-bg-subtle/50">
-                         <h4 className="font-bold text-text-muted text-sm">משרות לבדיקה ({jobs.length}){jobsLoading ? '...' : ''}</h4>
-                         <div className="flex items-center gap-2">
+                     <div className="p-3 border-b border-border-default flex items-center justify-between gap-2 bg-bg-subtle/50">
+                         <h4 className="font-bold text-text-muted text-sm shrink-0">משרות לבדיקה ({jobs.length}){jobsLoading ? '...' : ''}</h4>
+                         <div className="flex items-center gap-2 flex-wrap justify-end">
+                            <button
+                              type="button"
+                              onClick={() => setShowCandidateInternalNotes((v) => !v)}
+                              aria-pressed={showCandidateInternalNotes}
+                              className={`inline-flex items-center gap-1.5 text-sm font-bold px-3 py-1.5 rounded-lg border-2 shadow-sm transition-all ${
+                                showCandidateInternalNotes
+                                  ? 'bg-amber-500 border-amber-600 text-white hover:bg-amber-600'
+                                  : candidateInternalNotes
+                                    ? 'bg-amber-100 border-amber-400 text-amber-950 hover:bg-amber-200 hover:border-amber-500'
+                                    : 'bg-amber-50 border-amber-300 text-amber-800 hover:bg-amber-100 hover:border-amber-400'
+                              }`}
+                            >
+                              <DocumentTextIcon className="w-4 h-4 shrink-0" />
+                              <span>{showCandidateInternalNotes ? 'הסתר הערות' : 'הערות פנימיות'}</span>
+                              {candidateInternalNotes && !showCandidateInternalNotes ? (
+                                <span className="w-2 h-2 rounded-full bg-amber-600 shrink-0" aria-hidden />
+                              ) : null}
+                            </button>
                             <input
                                 type="checkbox"
                                 className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
@@ -2062,6 +2236,64 @@ const CandidateScreeningView: React.FC<{
                      </div>
                      
                     <div className="flex-1 overflow-y-auto p-4 space-y-3 pb-24 md:pb-4">
+                        {showCandidateInternalNotes ? (
+                          <div className="group relative rounded-lg border border-amber-200 bg-amber-50/90 p-3 shadow-sm">
+                            <div className="flex items-start justify-between gap-2 mb-1.5">
+                              <p className="text-xs font-bold text-amber-900">הערות פנימיות — מועמד</p>
+                              {!isEditingCandidateInternalNotes ? (
+                                <button
+                                  type="button"
+                                  onClick={openCandidateInternalNotesEditor}
+                                  className="p-1 rounded-md text-amber-800 hover:text-amber-950 hover:bg-amber-100/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity shrink-0"
+                                  title="ערוך הערות"
+                                  aria-label="ערוך הערות פנימיות"
+                                >
+                                  <PencilIcon className="w-4 h-4" />
+                                </button>
+                              ) : null}
+                            </div>
+                            {isEditingCandidateInternalNotes ? (
+                              <div className="space-y-2">
+                                <textarea
+                                  ref={internalNotesTextareaRef}
+                                  value={candidateInternalNotesDraft}
+                                  onChange={(e) => setCandidateInternalNotesDraft(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Escape') {
+                                      e.preventDefault();
+                                      cancelCandidateInternalNotesEdit();
+                                    }
+                                  }}
+                                  rows={4}
+                                  className="w-full text-sm text-amber-950 bg-white border border-amber-300 rounded-lg p-2 resize-y min-h-[80px] focus:ring-2 focus:ring-amber-400 focus:border-amber-400 outline-none"
+                                  disabled={candidateInternalNotesSaving}
+                                />
+                                <div className="flex items-center gap-2 justify-end">
+                                  <button
+                                    type="button"
+                                    onClick={cancelCandidateInternalNotesEdit}
+                                    disabled={candidateInternalNotesSaving}
+                                    className="text-xs font-bold px-2.5 py-1 rounded-md text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                                  >
+                                    ביטול
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void saveCandidateInternalNotes()}
+                                    disabled={candidateInternalNotesSaving}
+                                    className="text-xs font-bold px-2.5 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+                                  >
+                                    {candidateInternalNotesSaving ? 'שומר...' : 'שמור'}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : candidateInternalNotes ? (
+                              <p className="text-sm text-amber-950 whitespace-pre-wrap leading-relaxed">{candidateInternalNotes}</p>
+                            ) : (
+                              <p className="text-sm text-amber-800/80 italic">אין הערות פנימיות למועמד זה.</p>
+                            )}
+                          </div>
+                        ) : null}
                         {jobsLoading ? (
                             <div className="flex flex-col items-center justify-center min-h-[200px] gap-4 text-text-muted">
                                 <div className="w-10 h-10 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" aria-hidden />
@@ -2269,6 +2501,68 @@ const CandidateScreeningView: React.FC<{
                                                         </li>
                                                     ))}
                                                 </ul>
+                                                {(() => {
+                                                    const jobInternalNotes = stripWorkingHoursFromJobNotes(job.internalNotes);
+                                                    const isEditingJobNotes = editingJobInternalNotesId === job.id;
+                                                    const isSavingJobNotes = jobInternalNotesSavingId === job.id;
+                                                    return (
+                                                        <div className="group relative mt-3 rounded-lg border border-amber-200 bg-amber-50/80 p-3">
+                                                            <div className="flex items-start justify-between gap-2 mb-1.5">
+                                                                <h6 className="font-bold text-amber-900 text-xs uppercase">הערות פנימיות — משרה</h6>
+                                                                {!isEditingJobNotes ? (
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => openJobInternalNotesEditor(job)}
+                                                                        className="p-1 rounded-md text-amber-800 hover:text-amber-950 hover:bg-amber-100/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity shrink-0"
+                                                                        title="ערוך הערות"
+                                                                        aria-label="ערוך הערות פנימיות למשרה"
+                                                                    >
+                                                                        <PencilIcon className="w-4 h-4" />
+                                                                    </button>
+                                                                ) : null}
+                                                            </div>
+                                                            {isEditingJobNotes ? (
+                                                                <div className="space-y-2">
+                                                                    <OpinionQuillEditor
+                                                                        jobId={String(job.id)}
+                                                                        value={jobInternalNotesDraft}
+                                                                        onChange={setJobInternalNotesDraft}
+                                                                        placeholder="דגשים לצוות הגיוס..."
+                                                                        minHeight="120px"
+                                                                        rtl
+                                                                        className="rounded-lg border border-amber-300 bg-white overflow-hidden"
+                                                                    />
+                                                                    <div className="flex items-center gap-2 justify-end">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => cancelJobInternalNotesEdit(job)}
+                                                                            disabled={isSavingJobNotes}
+                                                                            className="text-xs font-bold px-2.5 py-1 rounded-md text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                                                                        >
+                                                                            ביטול
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => void saveJobInternalNotes(job)}
+                                                                            disabled={isSavingJobNotes}
+                                                                            className="text-xs font-bold px-2.5 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+                                                                        >
+                                                                            {isSavingJobNotes ? 'שומר...' : 'שמור'}
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            ) : jobInternalNotes ? (
+                                                                <div
+                                                                    className="text-amber-950 leading-relaxed prose prose-sm max-w-none text-right [&>ul]:list-disc [&>ul]:pr-5 [&>ol]:list-decimal [&>ol]:pr-5 [&>p]:mb-2"
+                                                                    dir="rtl"
+                                                                    dangerouslySetInnerHTML={jobDescriptionMarkup(jobInternalNotes)}
+                                                                />
+                                                            ) : (
+                                                                <p className="text-sm text-amber-800/80 italic">אין הערות פנימיות למשרה זו.</p>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })()}
                                             </div>
                                             <div className="bg-primary-50/50 p-3 rounded-lg border border-primary-100">
                                                 <h5 className="font-bold text-primary-800 mb-2 text-xs uppercase">שאלות סינון</h5>

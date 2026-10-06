@@ -75,8 +75,23 @@ export const UserPreferencesProvider: React.FC<{ children: React.ReactNode }> = 
     const globalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const screenTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const hydratedUserIdRef = useRef<string | null>(null);
+    const lastAuthUiPreferencesSigRef = useRef<string>('');
 
     preferencesRef.current = preferences;
+
+    const syncAuthUserUiPreferences = useCallback((prefs: UserPreferencesV2) => {
+        try {
+            const raw = localStorage.getItem('herouser') || localStorage.getItem('user');
+            if (!raw) return;
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            parsed.uiPreferences = prefs;
+            const next = JSON.stringify(parsed);
+            localStorage.setItem('herouser', next);
+            localStorage.setItem('user', next);
+        } catch {
+            /* ignore */
+        }
+    }, []);
 
     const persistPatch = useCallback(async (patch: Partial<UserPreferencesV2>) => {
         const token = localStorage.getItem('token');
@@ -85,8 +100,10 @@ export const UserPreferencesProvider: React.FC<{ children: React.ReactNode }> = 
         if (saved) {
             setPreferences(saved);
             preferencesRef.current = saved;
+            lastAuthUiPreferencesSigRef.current = JSON.stringify(saved);
+            syncAuthUserUiPreferences(saved);
         }
-    }, []);
+    }, [syncAuthUserUiPreferences]);
 
     const scheduleGlobalSave = useCallback(() => {
         if (globalTimerRef.current) clearTimeout(globalTimerRef.current);
@@ -116,17 +133,21 @@ export const UserPreferencesProvider: React.FC<{ children: React.ReactNode }> = 
         if (!authReady) return;
         if (!user?.id) {
             hydratedUserIdRef.current = null;
+            lastAuthUiPreferencesSigRef.current = '';
             setReady(true);
             return;
         }
-        if (hydratedUserIdRef.current === user.id) {
+        const authUi = (user as { uiPreferences?: UserPreferencesV2 }).uiPreferences;
+        const authSig = JSON.stringify(authUi ?? {});
+        const sameUser = hydratedUserIdRef.current === user.id;
+        const sameAuthPayload = sameUser && authSig === lastAuthUiPreferencesSigRef.current;
+        if (sameAuthPayload) {
             setReady(true);
             return;
         }
         hydratedUserIdRef.current = user.id;
-        const merged = mergePrefsFromUser(
-            (user as { uiPreferences?: UserPreferencesV2 }).uiPreferences,
-        );
+        lastAuthUiPreferencesSigRef.current = authSig;
+        const merged = mergePrefsFromUser(authUi);
         setPreferences(merged);
         preferencesRef.current = merged;
         applyGlobalToDom(merged.global);

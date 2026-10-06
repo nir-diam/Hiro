@@ -125,6 +125,23 @@ const removeProposal = async (req, res) => {
   }
 };
 
+const markSent = async (req, res) => {
+  try {
+    const raw = req.body?.proposalIds;
+    const proposalIds = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
+    const sentAt = req.body?.sentAt;
+    const data = await proposalService.markProposalsSent(
+      proposalIds,
+      actorFromReq(req),
+      sentAt,
+    );
+    res.json({ data });
+  } catch (err) {
+    console.error('[proposal][markSent]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed' });
+  }
+};
+
 module.exports = {
   listTemplates,
   createTemplate,
@@ -135,4 +152,5 @@ module.exports = {
   createProposal,
   updateProposal,
   removeProposal,
+  markSent,
 };

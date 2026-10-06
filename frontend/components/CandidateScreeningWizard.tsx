@@ -5,6 +5,7 @@ import {
     VideoCameraIcon, PlayIcon, XMarkIcon, SparklesIcon
 } from './Icons';
 import VideoRecorder from './VideoRecorder';
+import { hasWizardAnswer } from '../utils/digitalScreening';
 
 export interface ScreeningQuestion {
     id: number;
@@ -41,7 +42,7 @@ const CandidateScreeningWizard: React.FC<CandidateScreeningWizardProps> = ({ job
     };
 
     const handleNext = () => {
-        if (currentQuestion.isMandatory && !answers[currentQuestion.id]) {
+        if (currentQuestion.isMandatory && !hasWizardAnswer(answers[currentQuestion.id])) {
             alert('אנא ענה על שאלת החובה לפני שתמשיך.');
             return;
         }
@@ -219,11 +220,17 @@ const CandidateScreeningWizard: React.FC<CandidateScreeningWizardProps> = ({ job
 
                         {currentQuestion.type === 'video' && (
                             <div className="bg-black/5 rounded-2xl p-1 border border-border-default">
-                                <VideoRecorder 
+                                <VideoRecorder
+                                    key={currentQuestion.id}
                                     onRecordingComplete={(blob) => handleAnswerChange(blob)}
-                                    timeLimit={currentQuestion.timeLimit}
-                                    retriesAllowed={currentQuestion.retriesAllowed}
+                                    timeLimit={currentQuestion.timeLimit ?? 60}
+                                    retriesAllowed={currentQuestion.retriesAllowed !== false}
                                 />
+                                {currentQuestion.retriesAllowed !== false && (
+                                    <p className="text-xs text-text-muted text-center mt-3 px-2">
+                                        לאחר ההקלטה תוכל/י ללחוץ על &quot;הקלט שוב&quot; אם תרצה/י לנסות מחדש
+                                    </p>
+                                )}
                             </div>
                         )}
 

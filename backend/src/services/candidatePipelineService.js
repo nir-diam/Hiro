@@ -1,6 +1,10 @@
 const CandidatePipeline = require('../models/CandidatePipeline');
 const CandidatePipelineStage = require('../models/CandidatePipelineStage');
-const { isUuid, normalizeOutcomes } = require('./clientPipelineService');
+const {
+  isUuid,
+  normalizeOutcomes,
+  normalizeDefaultAssigneeUserIds,
+} = require('./clientPipelineService');
 const { normalizeSlaUnit } = require('../utils/slaDuration');
 
 /** Default candidate lifecycle pipelines (seeded when tenant has none). */
@@ -49,12 +53,24 @@ function pipelineToDto(row) {
         .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
         .map(stageToDto)
     : [];
+  const legacyContactId =
+    plain.defaultContactId && isUuid(plain.defaultContactId)
+      ? String(plain.defaultContactId)
+      : null;
+  const defaultAssigneeUserIds = normalizeDefaultAssigneeUserIds(
+    plain.defaultAssigneeUserIds,
+    legacyContactId,
+  );
+  const defaultContactId = defaultAssigneeUserIds[0] || legacyContactId;
+
   return {
     id: plain.id,
     clientId: plain.clientId,
     name: plain.name,
     description: plain.description || '',
     sortIndex: plain.sortIndex,
+    defaultContactId,
+    defaultAssigneeUserIds,
     stages,
   };
 }
@@ -130,18 +146,36 @@ async function syncClientCandidatePipelines(clientId, incoming = []) {
       if (!name) continue;
       const description = String(raw.description || '').trim();
       const stagesIn = Array.isArray(raw.stages) ? raw.stages : [];
+      const defaultAssigneeUserIds = normalizeDefaultAssigneeUserIds(
+        raw.defaultAssigneeUserIds,
+        raw.defaultContactId,
+      );
+      const defaultContactId = defaultAssigneeUserIds[0] || null;
 
       let pipelineId;
       const pid = raw.id;
       if (isUuid(pid) && pipelineById.has(String(pid))) {
         await CandidatePipeline.update(
-          { name, description, sortIndex: i },
+          {
+            name,
+            description,
+            sortIndex: i,
+            defaultContactId,
+            defaultAssigneeUserIds,
+          },
           { where: { id: pid, clientId }, transaction },
         );
         pipelineId = String(pid);
       } else {
         const created = await CandidatePipeline.create(
-          { clientId, name, description, sortIndex: i },
+          {
+            clientId,
+            name,
+            description,
+            sortIndex: i,
+            defaultContactId,
+            defaultAssigneeUserIds,
+          },
           { transaction },
         );
         pipelineId = String(created.id);

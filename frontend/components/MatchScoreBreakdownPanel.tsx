@@ -405,7 +405,7 @@ export const MatchScoreBreakdownPanel: React.FC<{
     );
 
     const layersBlock = (
-        <div className={compact ? 'space-y-3.5 max-h-[14rem] overflow-y-auto custom-scrollbar' : 'space-y-5 pt-2'}>
+        <div className={compact ? 'space-y-3.5' : 'space-y-5 pt-2'}>
             {layerBars.map((layer) => (
                 <LayerBarRow
                     key={layer.key}
@@ -474,7 +474,7 @@ export const MatchScoreBreakdownPanel: React.FC<{
         ) : null;
 
     const cardCls = compact
-        ? `bg-bg-card text-right overflow-hidden ${className}`
+        ? `bg-bg-card text-right flex flex-col min-h-0 ${className}`
         : `sticky top-6 space-y-6 bg-white p-8 rounded-3xl border border-border-default shadow-xl text-right ${className}`;
 
     if (loading) {
@@ -533,7 +533,7 @@ export const MatchScoreBreakdownPanel: React.FC<{
             <>
                 <div className={cardCls}>
                     {popupHeader}
-                    <div className="p-4">
+                    <div className="p-4 flex-1 min-h-0 overflow-y-auto custom-scrollbar">
                         {scoreBlock}
                         {layersBlock}
                         {penaltiesBlock}

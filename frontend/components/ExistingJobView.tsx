@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { GoogleGenAI, Chat, GenerateContentResponse, FunctionDeclaration, Type } from '@google/genai';
 import type { Candidate } from './CandidatesListView';
 import JobDetailsSidebar from './JobDetailsSidebar';
@@ -17,6 +17,7 @@ import PublishJobView from './PublishJobView';
 import HiroAIChat from './HiroAIChat';
 import InviteManagerModal from './InviteManagerModal';
 import { useLanguage } from '../context/LanguageContext';
+import { formatJobTagRelevanceScoreOnTenHe } from '../utils/tagWeightDisplay';
 
 interface Message {
     role: 'user' | 'model';
@@ -80,9 +81,20 @@ interface ExistingJobViewProps {
   openSummaryDrawer: (candidate: Candidate | number) => void;
 }
 
+type JobMainView = 'edit' | 'events' | 'candidates' | 'publish' | 'sonar';
+
+const jobMainViewFromQuery = (raw: string | null): JobMainView | null => {
+    const key = String(raw || '').trim().toLowerCase();
+    if (key === 'candidates' || key === 'edit' || key === 'events' || key === 'publish' || key === 'sonar') {
+        return key;
+    }
+    return null;
+};
+
 const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, openSummaryDrawer }) => {
     const { t } = useLanguage();
-    const [mainView, setMainView] = useState<'edit' | 'events' | 'candidates' | 'publish' | 'sonar'>('edit');
+    const [searchParams] = useSearchParams();
+    const [mainView, setMainView] = useState<JobMainView>('edit');
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
     const [isSidebarExpanded, setIsSidebarExpanded] = useState(window.innerWidth >= 1024);
@@ -116,6 +128,11 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
     }, []);
+
+    useEffect(() => {
+        const fromQuery = jobMainViewFromQuery(searchParams.get('view'));
+        if (fromQuery) setMainView(fromQuery);
+    }, [jobId, searchParams]);
 
     useEffect(() => {
         if (!jobId) {
@@ -342,7 +359,9 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                                 const tip = [
                                     s.tagType ? `סוג: ${s.tagType}` : null,
                                     s.mode || s.aiMode ? `מצב: ${s.mode || s.aiMode}` : null,
-                                    s.relevance_score != null ? `ציון: ${s.relevance_score}` : null,
+                                    s.relevance_score != null
+                                        ? `ציון: ${formatJobTagRelevanceScoreOnTenHe(Number(s.relevance_score))}`
+                                        : null,
                                     s.tag_reason ? `נימוק: ${s.tag_reason}` : null,
                                 ]
                                     .filter(Boolean)

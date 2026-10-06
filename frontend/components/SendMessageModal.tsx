@@ -30,11 +30,26 @@ import {
     createOutboundMessageClientEvent,
     type OutboundMessageAttachmentRef,
 } from '../services/clientOutboundMessageApi';
-import { applyMessageTemplatePlaceholders, loadMessagingPlaceholderValues } from '../services/messageTemplatePlaceholders';
+import {
+    applyMessageTemplatePlaceholders,
+    loadMessagingPlaceholderValues,
+    missingNavigationPlaceholderMessage,
+} from '../services/messageTemplatePlaceholders';
+import {
+    alignEmailSignatureHtml,
+    buildMainEmailHtmlFromCompose,
+    detectEmailTextDirection,
+    prepareEmailHtmlWithInlineImages,
+} from '../utils/emailSignature';
+import { htmlToPlainText } from '../utils/parsedSearchTextHtml';
+import { RichTextArea } from './RichTextArea';
 import {
     applyProposalTemplatePlaceholders,
     fetchProposalTemplates,
+    fetchProposals,
+    type ProposalDto,
     type ProposalTemplateDto,
+  dispatchProposalsUpdated,
 } from '../services/proposalsApi';
 import {
     fetchClientLogoForProposalExport,
@@ -51,7 +66,6 @@ import {
 import { authHeaders } from '../utils/authHeaders';
 import { useAuth } from '../context/AuthContext';
 import type { MessageRecipientOption } from '../hooks/useUIState';
-import { RichTextArea } from './RichTextArea';
 
 type MessageMode = 'whatsapp' | 'sms' | 'email';
 
@@ -119,24 +133,6 @@ function escapeHtml(s: string) {
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;');
-}
-
-/** Audit block from `message_templates` row (compose API / MessageTemplateDto). */
-function formatMessageTemplateAuditBlock(t: MessageTemplateDto): string {
-    const lines: string[] = [t.name];
-    if (t.templateKey) lines.push(`מפתח: ${t.templateKey}`);
-    lines.push(`נושא: ${t.subject}`);
-    if (t.lastUpdated) {
-        let d = t.lastUpdated;
-        try {
-            d = new Date(t.lastUpdated).toLocaleString('he-IL');
-        } catch {
-            /* keep raw */
-        }
-        lines.push(`עודכן: ${d}${t.updatedBy ? ` · ${t.updatedBy}` : ''}`);
-    }
-    lines.push(`מזהה: ${t.id}`);
-    return lines.join('\n');
 }
 
 function messageTemplateTaskLabel(t: MessageTemplateDto): string {
@@ -207,6 +203,23 @@ function sanitizeProposalPdfFilename(name: string): string {
         .replace(/[\\/:*?"<>|]/g, '_')
         .trim();
     return cleaned || 'proposal';
+}
+
+function showComposeToast(message: string, variant: 'success' | 'error' = 'error') {
+    const el = document.createElement('div');
+    el.setAttribute('role', 'status');
+    el.className = [
+        'fixed bottom-6 left-1/2 -translate-x-1/2 z-[9999] max-w-md px-4 py-3 rounded-xl shadow-lg',
+        'text-sm font-semibold text-center border',
+        variant === 'success'
+            ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+            : 'bg-red-50 text-red-900 border-red-200',
+    ].join(' ');
+    el.textContent = message;
+    document.body.appendChild(el);
+    window.setTimeout(() => {
+        el.remove();
+    }, variant === 'success' ? 4000 : 8000);
 }
 
 type ProposalRowCustomization = {
@@ -335,6 +348,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     recipientType,
 }) => {
     const [content, setContent] = useState('');
+    const contentPlainText = useMemo(() => htmlToPlainText(content), [content]);
     const [subject, setSubject] = useState('');
     const [attachments, setAttachments] = useState<string[]>(['']);
     const [localAttachmentFiles, setLocalAttachmentFiles] = useState<Record<string, File>>({});
@@ -351,7 +365,14 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [proposalEditModal, setProposalEditModal] = useState<{
         rowIndex: number;
         templateName: string;
+        source: 'template' | 'saved';
     } | null>(null);
+    const [savedProposalAttachmentIds, setSavedProposalAttachmentIds] = useState<string[]>(['']);
+    const [contactSavedProposals, setContactSavedProposals] = useState<ProposalDto[]>([]);
+    const [contactSavedProposalsLoading, setContactSavedProposalsLoading] = useState(false);
+    const [savedProposalRowCustomizations, setSavedProposalRowCustomizations] = useState<
+        Record<number, ProposalRowCustomization>
+    >({});
     const [proposalEditDraft, setProposalEditDraft] = useState('');
     const [proposalLogoPayload, setProposalLogoPayload] = useState<ExportImagePayload | null>(null);
     const [resolvedLinkedOrgName, setResolvedLinkedOrgName] = useState('');
@@ -375,6 +396,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [customRecipientEmails, setCustomRecipientEmails] = useState<string[]>([]);
     const [customEmailInputOpen, setCustomEmailInputOpen] = useState(false);
     const [customEmailDraft, setCustomEmailDraft] = useState('');
+    const [customEmailError, setCustomEmailError] = useState<string | null>(null);
     const customEmailInputRef = useRef<HTMLInputElement>(null);
     const recipientPickerRef = useRef<HTMLDivElement>(null);
     const baseTemplateRef = useRef<{ subject: string; content: string } | null>(null);
@@ -383,7 +405,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const titleId = useId();
     const config = modalConfig[mode];
     const smsBillableCount =
-        config.channel === 'sms' ? inforuSmsBillableMessages(content.length) : 0;
+        config.channel === 'sms' ? inforuSmsBillableMessages(contentPlainText.length) : 0;
     const { user } = useAuth();
     const senderDisplayName =
         (user as { fullName?: string; name?: string; email?: string } | null)?.fullName
@@ -789,9 +811,12 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setClientAttachments([]);
         setClientAttachmentsError(null);
         setProposalAttachmentIds(['']);
+        setSavedProposalAttachmentIds(['']);
+        setContactSavedProposals([]);
         setProposalTemplates([]);
         setProposalTemplatesError(null);
         setProposalRowCustomizations({});
+        setSavedProposalRowCustomizations({});
         setProposalLogoPayload(null);
         setResolvedLinkedOrgName('');
         closeProposalEditModal();
@@ -885,6 +910,45 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             cancelled = true;
         };
     }, [isOpen, mode, effectiveClientId]);
+
+    const effectiveContactId = useMemo(() => {
+        if (primaryCrmRecipient?.id) {
+            const id = String(primaryCrmRecipient.id).trim();
+            if (id && !id.startsWith(CUSTOM_EMAIL_ID_PREFIX)) return id;
+        }
+        const linked = String(linkedContactId || '').trim();
+        return linked;
+    }, [primaryCrmRecipient, linkedContactId]);
+
+    useEffect(() => {
+        if (!isOpen || mode !== 'email' || !effectiveClientId || !effectiveContactId) {
+            setContactSavedProposals([]);
+            setContactSavedProposalsLoading(false);
+            return;
+        }
+        let cancelled = false;
+        setContactSavedProposalsLoading(true);
+        void fetchProposals({ clientId: effectiveClientId, contactId: effectiveContactId })
+            .then((rows) => {
+                if (!cancelled) setContactSavedProposals(Array.isArray(rows) ? rows : []);
+            })
+            .catch(() => {
+                if (!cancelled) setContactSavedProposals([]);
+            })
+            .finally(() => {
+                if (!cancelled) setContactSavedProposalsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, mode, effectiveClientId, effectiveContactId]);
+
+    useEffect(() => {
+        if (!isOpen || mode !== 'email') return;
+        setSavedProposalAttachmentIds(['']);
+        setSavedProposalRowCustomizations({});
+        if (proposalEditModal?.source === 'saved') closeProposalEditModal();
+    }, [effectiveContactId, isOpen, mode]); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
         if (!isOpen || mode !== 'email') {
@@ -986,6 +1050,31 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             .filter(Boolean) as ProposalTemplateDto[];
     }, [proposalAttachmentIds, proposalTemplates]);
 
+    const selectedSavedProposals = useMemo(() => {
+        const byId = new Map(contactSavedProposals.map((p) => [p.id, p]));
+        return savedProposalAttachmentIds
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+            .map((id) => byId.get(id))
+            .filter(Boolean) as ProposalDto[];
+    }, [savedProposalAttachmentIds, contactSavedProposals]);
+
+    const resolveSavedProposalRawHtml = useCallback(
+        (proposal: ProposalDto, rowIndex: number): string => {
+            const override = savedProposalRowCustomizations[rowIndex]?.contentOverride;
+            const source = override !== undefined ? override : (proposal.contentHtml || '');
+            return applyProposalTemplatePlaceholders(source, {
+                ...proposalPlaceholderContext,
+                proposalNumber: proposal.number,
+                proposalDate: proposal.date,
+                proposalTotal: proposal.totalAmount || String(proposal.amount ?? ''),
+                proposalCurrency: proposal.currency || 'ILS',
+                proposalValidUntil: proposal.validUntil || '',
+            });
+        },
+        [savedProposalRowCustomizations, proposalPlaceholderContext],
+    );
+
     const selectedJobRow = useMemo(
         () => (selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined),
         [jobs, selectedJobId],
@@ -1031,6 +1120,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         user?.id,
         user?.email,
         user?.name,
+        user?.uiPreferences,
     ]);
 
     const applyTemplate = useCallback(
@@ -1053,15 +1143,25 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         const base = baseTemplateRef.current;
         if (!base || !selectedTemplateId) return;
         setSubject(applyMessageTemplatePlaceholders(base.subject, placeholderValues));
-        setContent(applyMessageTemplatePlaceholders(base.content, placeholderValues));
-    }, [placeholderValues, selectedTemplateId]);
+        setContent(
+            applyMessageTemplatePlaceholders(base.content, placeholderValues, {
+                emailCompose: config.channel === 'email',
+            }),
+        );
+    }, [placeholderValues, selectedTemplateId, config.channel]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setSubmitError(null);
 
-        if (!content.trim()) {
+        if (!contentPlainText.trim()) {
             setSubmitError('תוכן ההודעה חובה');
+            return;
+        }
+
+        const navPlaceholderError = missingNavigationPlaceholderMessage(subject, content, placeholderValues);
+        if (navPlaceholderError) {
+            setSubmitError(navPlaceholderError);
             return;
         }
 
@@ -1080,26 +1180,17 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             : undefined;
         const selectedJob = selectedJobRow;
 
-        const templateAuditPlain = selectedTpl ? formatMessageTemplateAuditBlock(selectedTpl) : '';
         const jobValuePlain = selectedJob ? jobComposeRowLabel(selectedJob) : '';
-        const composeScopeSubline =
-            composeScope === 'admin' ? 'תבניות מערכת (Hiro)' : composeScope === 'client' ? 'תבניות הארגון' : '';
 
         const templateFooterLine = selectedTpl ? `תבנית שמורה: ${messageTemplateTaskLabel(selectedTpl)}` : '';
         const jobFooterLine = selectedJob ? `משרה מקושרת: ${jobValuePlain}` : '';
 
-        const footerPlainParts: string[] = [];
-        if (selectedTpl) {
-            let block = `תבנית שמורה:\n${templateAuditPlain}`;
-            if (composeScopeSubline) block += `\n${composeScopeSubline}`;
-            footerPlainParts.push(block);
-        }
-        if (selectedJob) {
-            footerPlainParts.push(`משרה מקושרת:\n${jobValuePlain}`);
-        }
-        const textOut = `${trimmedContent}`;
         // Prefer config.channel (tied to modal UI) over mode prop to avoid channel mix-ups.
         const outboundChannel = config.channel;
+        const textOut =
+            outboundChannel === 'email'
+                ? htmlToPlainText(trimmedContent) || trimmedContent
+                : trimmedContent;
 
         if (outboundChannel === 'whatsapp') {
             const waPhone = toWhatsAppPhoneDigits(effectivePhone);
@@ -1184,183 +1275,190 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             return;
         }
 
-        const mainHtml = `<div dir="rtl" style="white-space:pre-wrap;font-family:sans-serif;">${escapeHtml(trimmedContent).replace(/\n/g, '<br/>')}</div>`;
+        onClose();
 
-        const proposalHtmlBlocks: string[] = [];
-        const proposalPdfAttachments: SendNotificationEmailAttachment[] = [];
-        const proposalEntries: { tpl: ProposalTemplateDto; rowIndex: number }[] = [];
-        proposalAttachmentIds.forEach((id, rowIndex) => {
-            const tid = String(id || '').trim();
-            if (!tid) return;
-            const tpl = proposalTemplates.find((t) => t.id === tid);
-            if (tpl) proposalEntries.push({ tpl, rowIndex });
-        });
+        void (async () => {
+            const sigRaw = String(placeholderValues.recruiter_signature ?? '').trim();
+            const dir = detectEmailTextDirection(htmlToPlainText(trimmedContent) || trimmedContent);
+            const signatureHtml = sigRaw ? alignEmailSignatureHtml(sigRaw, dir) : '';
+            const mainHtml = buildMainEmailHtmlFromCompose(trimmedContent, signatureHtml || undefined, dir);
 
-        try {
-            let deliveryLogoPayload = proposalLogoPayload;
-            if (!deliveryLogoPayload && proposalEntries.length > 0) {
-                const raw = await fetchClientLogoForProposalExport(effectiveClientId);
-                deliveryLogoPayload = raw ? await trimLogoForProposalPdf(raw) : null;
-            }
+            const proposalHtmlBlocks: string[] = [];
+            const proposalPdfAttachments: SendNotificationEmailAttachment[] = [];
+            const proposalEntries: { tpl: ProposalTemplateDto; rowIndex: number }[] = [];
+            proposalAttachmentIds.forEach((id, rowIndex) => {
+                const tid = String(id || '').trim();
+                if (!tid) return;
+                const tpl = proposalTemplates.find((t) => t.id === tid);
+                if (tpl) proposalEntries.push({ tpl, rowIndex });
+            });
+            const savedProposalEntries: { proposal: ProposalDto; rowIndex: number }[] = [];
+            savedProposalAttachmentIds.forEach((id, rowIndex) => {
+                const pid = String(id || '').trim();
+                if (!pid) return;
+                const proposal = contactSavedProposals.find((p) => p.id === pid);
+                if (proposal) savedProposalEntries.push({ proposal, rowIndex });
+            });
 
-            const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
-            for (const { tpl, rowIndex } of proposalEntries) {
-                const rawHtml = resolveProposalRawHtml(tpl, rowIndex);
-                const sendAsPdf = Boolean(proposalRowCustomizations[rowIndex]?.sendAsPdf);
-                if (sendAsPdf) {
-                    const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
-                    const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
-                    const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
-                    const baseName = sanitizeProposalPdfFilename(tpl.name);
-                    const filename =
-                        proposalEntries.filter((e) => e.tpl.id === tpl.id).length > 1
-                            ? `${baseName}-${rowIndex + 1}.pdf`
-                            : `${baseName}.pdf`;
-                    proposalPdfAttachments.push({
-                        filename,
-                        content: pdfBase64,
-                        contentType: 'application/pdf',
-                    });
-                } else {
-                    const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
-                    proposalHtmlBlocks.push(wrapProposalEmailBlock(bodyHtml, escapeHtml(tpl.name)));
+            try {
+                let deliveryLogoPayload = proposalLogoPayload;
+                if (!deliveryLogoPayload && (proposalEntries.length > 0 || savedProposalEntries.length > 0)) {
+                    const raw = await fetchClientLogoForProposalExport(effectiveClientId);
+                    deliveryLogoPayload = raw ? await trimLogoForProposalPdf(raw) : null;
                 }
-            }
-        } catch (pdfErr: unknown) {
-            setSubmitError(pdfErr instanceof Error ? pdfErr.message : 'יצירת PDF להצעת מחיר נכשלה');
-            return;
-        }
 
-        const proposalsHtml =
-            proposalHtmlBlocks.length > 0
-                ? `<div dir="rtl" style="margin-top:1.25em;font-family:sans-serif;line-height:1.55;color:#222;">${proposalHtmlBlocks.join('')}</div>`
-                : '';
+                const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
+                for (const { tpl, rowIndex } of proposalEntries) {
+                    const rawHtml = resolveProposalRawHtml(tpl, rowIndex);
+                    const sendAsPdf = Boolean(proposalRowCustomizations[rowIndex]?.sendAsPdf);
+                    if (sendAsPdf) {
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
+                        const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
+                        const baseName = sanitizeProposalPdfFilename(tpl.name);
+                        const filename =
+                            proposalEntries.filter((e) => e.tpl.id === tpl.id).length > 1
+                                ? `${baseName}-${rowIndex + 1}.pdf`
+                                : `${baseName}.pdf`;
+                        proposalPdfAttachments.push({
+                            filename,
+                            content: pdfBase64,
+                            contentType: 'application/pdf',
+                        });
+                    } else {
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        proposalHtmlBlocks.push(wrapProposalEmailBlock(bodyHtml, escapeHtml(tpl.name)));
+                    }
+                }
+                for (const { proposal, rowIndex } of savedProposalEntries) {
+                    const rawHtml = resolveSavedProposalRawHtml(proposal, rowIndex);
+                    const sendAsPdf = Boolean(savedProposalRowCustomizations[rowIndex]?.sendAsPdf);
+                    const blockTitle = escapeHtml(`הצעה ${proposal.number}`);
+                    if (sendAsPdf) {
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
+                        const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
+                        const baseName = sanitizeProposalPdfFilename(proposal.number || 'proposal');
+                        proposalPdfAttachments.push({
+                            filename: `${baseName}.pdf`,
+                            content: pdfBase64,
+                            contentType: 'application/pdf',
+                        });
+                    } else {
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        proposalHtmlBlocks.push(wrapProposalEmailBlock(bodyHtml, blockTitle));
+                    }
+                }
 
-        const footerBlocks: string[] = [];
-        if (selectedTpl) {
-            const scopeHtml = composeScopeSubline
-                ? `<div style="font-size:11px;color:#888;margin-top:0.35em;">${escapeHtml(composeScopeSubline)}</div>`
-                : '';
-            footerBlocks.push(
-                `<div style="margin-bottom:0.9em;">` +
-                    `<div style="font-weight:700;color:#333;font-size:13px;">תבנית שמורה:</div>` +
-                    `<div style="color:#555;margin-top:0.25em;white-space:pre-wrap;">${escapeHtml(templateAuditPlain)}</div>` +
-                    scopeHtml +
-                `</div>`,
-            );
-        }
-        if (selectedJob) {
-            footerBlocks.push(
-                `<div>` +
-                    `<div style="font-weight:700;color:#333;font-size:13px;">משרה מקושרת:</div>` +
-                    `<div style="color:#555;margin-top:0.25em;">${escapeHtml(jobValuePlain)}</div>` +
-                `</div>`,
-            );
-        }
-        const footerHtml =
-            footerBlocks.length > 0
-                ? `<div dir="rtl" style="margin-top:1.25em;padding-top:1em;border-top:1px solid #ccc;color:#444;font-size:13px;line-height:1.55;font-family:sans-serif;">${footerBlocks.join('')}</div>`
-                : '';
-        const html = `${mainHtml}${proposalsHtml}${footerHtml}`;
+                const proposalsHtml =
+                    proposalHtmlBlocks.length > 0
+                        ? `<div dir="rtl" style="margin-top:1.25em;font-family:sans-serif;line-height:1.55;color:#222;">${proposalHtmlBlocks.join('')}</div>`
+                        : '';
 
-        setIsSubmitting(true);
-        try {
-            let userEmailAttachments: SendNotificationEmailAttachment[] = [];
-            const selectedAttachmentRows = attachments.filter((row) => row.trim());
-            if (selectedAttachmentRows.length) {
-                try {
+                const prepared = prepareEmailHtmlWithInlineImages(`${mainHtml}${proposalsHtml}`);
+                const html = prepared.html;
+                const inlineImageAttachments: SendNotificationEmailAttachment[] =
+                    prepared.inlineAttachments.map((a) => ({
+                        filename: a.filename,
+                        content: a.content,
+                        contentType: a.contentType,
+                        cid: a.cid,
+                    }));
+
+                let userEmailAttachments: SendNotificationEmailAttachment[] = [];
+                const selectedAttachmentRows = attachments.filter((row) => row.trim());
+                if (selectedAttachmentRows.length) {
                     userEmailAttachments = await buildComposeEmailAttachments(
                         selectedAttachmentRows,
                         localAttachmentFiles,
                         clientAttachmentsById,
                     );
-                } catch (attachErr: unknown) {
-                    setSubmitError(
-                        attachErr instanceof Error ? attachErr.message : 'הכנת הקבצים המצורפים נכשלה',
-                    );
-                    setIsSubmitting(false);
-                    return;
+                    if (selectedAttachmentRows.length && userEmailAttachments.length === 0) {
+                        throw new Error('לא ניתן לצרף את הקבצים שנבחרו — נסו שוב או בחרו קבצים אחרים');
+                    }
                 }
-                if (selectedAttachmentRows.length && userEmailAttachments.length === 0) {
-                    setSubmitError('לא ניתן לצרף את הקבצים שנבחרו — נסו שוב או בחרו קבצים אחרים');
-                    setIsSubmitting(false);
-                    return;
-                }
-            }
-            if (userEmailAttachments.length) {
-                try {
+                if (userEmailAttachments.length) {
                     userEmailAttachments = await applyClientLogoToEmailAttachments(userEmailAttachments);
-                } catch (logoErr: unknown) {
-                    setSubmitError(
-                        logoErr instanceof Error ? logoErr.message : 'הוספת לוגו לקבצים המצורפים נכשלה',
-                    );
-                    setIsSubmitting(false);
-                    return;
                 }
-            }
-            let emailAttachments = [...userEmailAttachments, ...proposalPdfAttachments];
+                const emailAttachments = [
+                    ...inlineImageAttachments,
+                    ...userEmailAttachments,
+                    ...proposalPdfAttachments,
+                ];
 
-            const emailResults: {
-                to: string;
-                notificationMessageId?: string | null;
-                providerMessageId?: string | null;
-            }[] = [];
-            for (const toEmail of toEmails) {
-                const matchRecipient =
-                    crmRecipientsForLog.find(
-                        (r) => String(r.email || '').trim().toLowerCase() === toEmail.toLowerCase(),
-                    ) || crmRecipientsForLog[0];
-                const sendResult = await sendNotificationEmail({
-                    toEmail,
+                const emailResults: {
+                    to: string;
+                    notificationMessageId?: string | null;
+                    providerMessageId?: string | null;
+                }[] = [];
+                for (const toEmail of toEmails) {
+                    const matchRecipient =
+                        crmRecipientsForLog.find(
+                            (r) => String(r.email || '').trim().toLowerCase() === toEmail.toLowerCase(),
+                        ) || crmRecipientsForLog[0];
+                    const sendResult = await sendNotificationEmail({
+                        toEmail,
+                        subject: subject.trim(),
+                        text: textOut,
+                        html,
+                        isTask: false,
+                        messageType: 'message',
+                        attachments: emailAttachments.length ? emailAttachments : undefined,
+                        taskPayload: {
+                            source: 'SendMessageModal',
+                            candidateId: resolvedCandidateId,
+                            candidateName: effectiveName,
+                            bulkRecipientCount: toEmails.length,
+                            templateId: selectedTemplateId || null,
+                            jobId: selectedJobId || null,
+                            composeScope: composeScope,
+                            templateLabel: templateFooterLine || null,
+                            jobLabel: jobFooterLine || null,
+                            linkedClientId: matchRecipient?.clientId || linkedClientId || null,
+                            linkedOrganizationId: matchRecipient?.organizationId || linkedOrganizationId || null,
+                            linkedContactId: resolveContactIdForLog(matchRecipient),
+                            linkedContactName: matchRecipient?.name || effectiveName,
+                            proposalTemplateIds: selectedProposalTemplates.map((t) => t.id),
+                            savedProposalIds: selectedSavedProposals.map((p) => p.id),
+                            proposalTemplateNames: [
+                                ...selectedProposalTemplates.map((t) => t.name),
+                                ...selectedSavedProposals.map((p) => p.number),
+                            ],
+                            attachmentCount: emailAttachments.filter((a) => !a.cid).length,
+                            attachmentNames: emailAttachments.filter((a) => !a.cid).map((a) => a.filename),
+                        },
+                    });
+                    emailResults.push({
+                        to: toEmail,
+                        notificationMessageId: sendResult.notificationMessageId ?? null,
+                        providerMessageId: sendResult.messageId ?? null,
+                    });
+                }
+                await logCrmOutboundEvents({
+                    channel: 'email',
+                    body: textOut,
                     subject: subject.trim(),
-                    text: textOut,
-                    html,
-                    isTask: false,
-                    messageType: 'message',
-                    attachments: emailAttachments.length ? emailAttachments : undefined,
-                    taskPayload: {
-                        source: 'SendMessageModal',
-                        candidateId: resolvedCandidateId,
-                        candidateName: effectiveName,
-                        bulkRecipientCount: toEmails.length,
-                        templateId: selectedTemplateId || null,
-                        jobId: selectedJobId || null,
-                        composeScope: composeScope,
-                        templateLabel: templateFooterLine || null,
-                        jobLabel: jobFooterLine || null,
-                        linkedClientId: matchRecipient?.clientId || linkedClientId || null,
-                        linkedOrganizationId: matchRecipient?.organizationId || linkedOrganizationId || null,
-                        linkedContactId: resolveContactIdForLog(matchRecipient),
-                        linkedContactName: matchRecipient?.name || effectiveName,
-                        proposalTemplateIds: selectedProposalTemplates.map((t) => t.id),
-                        proposalTemplateNames: selectedProposalTemplates.map((t) => t.name),
-                        attachmentCount: emailAttachments.length,
-                        attachmentNames: emailAttachments.map((a) => a.filename),
-                    },
+                    emailResults,
+                    emailAttachments,
+                    proposalTemplateNames:
+                        selectedProposalTemplates.length || selectedSavedProposals.length
+                            ? [
+                                ...selectedProposalTemplates.map((t) => t.name),
+                                ...selectedSavedProposals.map((p) => `הצעה ${p.number}`),
+                            ]
+                            : undefined,
+                    isProposal: selectedProposalTemplates.length > 0 || selectedSavedProposals.length > 0,
                 });
-                emailResults.push({
-                    to: toEmail,
-                    notificationMessageId: sendResult.notificationMessageId ?? null,
-                    providerMessageId: sendResult.messageId ?? null,
-                });
+                if (selectedSavedProposals.length > 0) {
+                    dispatchProposalsUpdated();
+                }
+                showComposeToast('המייל נשלח בהצלחה', 'success');
+            } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : 'שליחת המייל נכשלה';
+                console.error('[SendMessageModal] background email send failed', err);
+                showComposeToast(msg, 'error');
             }
-            await logCrmOutboundEvents({
-                channel: 'email',
-                body: textOut,
-                subject: subject.trim(),
-                emailResults,
-                emailAttachments,
-                proposalTemplateNames: selectedProposalTemplates.length
-                    ? selectedProposalTemplates.map((t) => t.name)
-                    : undefined,
-                isProposal: selectedProposalTemplates.length > 0,
-            });
-            onClose();
-        } catch (err: unknown) {
-            setSubmitError(err instanceof Error ? err.message : 'שליחת המייל נכשלה');
-        } finally {
-            setIsSubmitting(false);
-        }
+        })();
     };
 
     const toggleRecipientId = (id: string) => {
@@ -1372,6 +1470,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const openCustomEmailInput = () => {
         setCustomEmailInputOpen(true);
+        setCustomEmailError(null);
         setSubmitError(null);
         window.setTimeout(() => customEmailInputRef.current?.focus(), 0);
     };
@@ -1379,25 +1478,27 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const commitCustomEmail = () => {
         const raw = customEmailDraft.trim();
         if (!raw) {
-            setCustomEmailInputOpen(false);
-            setCustomEmailDraft('');
+            setCustomEmailError('הזינו כתובת מייל');
             return;
         }
         const email = raw.toLowerCase();
         if (!EMAIL_RE.test(email)) {
-            setSubmitError('כתובת מייל לא תקינה');
+            const msg = 'כתובת המייל אינה תקינה (לדוגמה: name@company.com)';
+            setCustomEmailError(msg);
+            showComposeToast(msg, 'error');
             return;
         }
         const existing = collectRecipientEmailsFromBulkField(effectiveEmail, null);
         if (existing.includes(email)) {
-            setCustomEmailDraft('');
-            setCustomEmailInputOpen(false);
-            setSubmitError(null);
+            const msg = 'כתובת זו כבר ברשימת הנמענים';
+            setCustomEmailError(msg);
+            showComposeToast(msg, 'error');
             return;
         }
         setCustomRecipientEmails((prev) => [...prev, email]);
         setCustomEmailDraft('');
         setCustomEmailInputOpen(false);
+        setCustomEmailError(null);
         setSubmitError(null);
     };
 
@@ -1561,23 +1662,93 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         const tpl = proposalTemplates.find((t) => t.id === tplId);
         if (!tpl) return;
         setProposalEditDraft(resolveProposalBodyHtml(tpl, index));
-        setProposalEditModal({ rowIndex: index, templateName: tpl.name });
+        setProposalEditModal({ rowIndex: index, templateName: tpl.name, source: 'template' });
     };
 
     const saveProposalEdit = () => {
         if (!proposalEditModal) return;
-        setProposalRowCustomizations((prev) => ({
-            ...prev,
-            [proposalEditModal.rowIndex]: {
-                ...prev[proposalEditModal.rowIndex],
-                contentOverride: proposalEditDraft,
-            },
-        }));
+        if (proposalEditModal.source === 'saved') {
+            setSavedProposalRowCustomizations((prev) => ({
+                ...prev,
+                [proposalEditModal.rowIndex]: {
+                    ...prev[proposalEditModal.rowIndex],
+                    contentOverride: proposalEditDraft,
+                },
+            }));
+        } else {
+            setProposalRowCustomizations((prev) => ({
+                ...prev,
+                [proposalEditModal.rowIndex]: {
+                    ...prev[proposalEditModal.rowIndex],
+                    contentOverride: proposalEditDraft,
+                },
+            }));
+        }
         closeProposalEditModal();
     };
 
     const toggleProposalSendAsPdf = (index: number) => {
         setProposalRowCustomizations((prev) => ({
+            ...prev,
+            [index]: {
+                ...prev[index],
+                sendAsPdf: !prev[index]?.sendAsPdf,
+            },
+        }));
+    };
+
+    const handleSavedProposalAttachmentChange = (index: number, value: string) => {
+        const next = [...savedProposalAttachmentIds];
+        next[index] = value;
+        setSavedProposalAttachmentIds(next);
+        setSavedProposalRowCustomizations((prev) => {
+            if (!prev[index]) return prev;
+            const copy = { ...prev };
+            delete copy[index];
+            return copy;
+        });
+        if (proposalEditModal?.source === 'saved' && proposalEditModal.rowIndex === index) {
+            closeProposalEditModal();
+        }
+    };
+
+    const addSavedProposalAttachmentRow = () => {
+        setSavedProposalAttachmentIds([...savedProposalAttachmentIds, '']);
+    };
+
+    const removeSavedProposalAttachmentRow = (index: number) => {
+        const next = savedProposalAttachmentIds.filter((_, i) => i !== index);
+        setSavedProposalAttachmentIds(next.length > 0 ? next : ['']);
+        setSavedProposalRowCustomizations((prev) => {
+            const rebuilt: Record<number, ProposalRowCustomization> = {};
+            let newIdx = 0;
+            for (let oldIdx = 0; oldIdx < savedProposalAttachmentIds.length; oldIdx += 1) {
+                if (oldIdx === index) continue;
+                if (prev[oldIdx]) rebuilt[newIdx] = prev[oldIdx];
+                newIdx += 1;
+            }
+            return rebuilt;
+        });
+        if (proposalEditModal?.source === 'saved' && proposalEditModal.rowIndex === index) {
+            closeProposalEditModal();
+        }
+    };
+
+    const openSavedProposalEdit = (index: number) => {
+        const pid = String(savedProposalAttachmentIds[index] || '').trim();
+        const proposal = contactSavedProposals.find((p) => p.id === pid);
+        if (!proposal) return;
+        const rawHtml = resolveSavedProposalRawHtml(proposal, index);
+        setProposalEditDraft(prepareProposalHtmlForDelivery(rawHtml, proposalLogoPayload));
+        setProposalEditModal({
+            rowIndex: index,
+            templateName: `הצעה ${proposal.number}`,
+            source: 'saved',
+        });
+    };
+
+    const toggleSavedProposalSendAsPdf = (index: number) => {
+        setSavedProposalRowCustomizations((prev) => ({
             ...prev,
             [index]: {
                 ...prev[index],
@@ -1668,46 +1839,69 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                 )}
 
                                 {mode === 'email' && customEmailInputOpen ? (
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <input
-                                            ref={customEmailInputRef}
-                                            type="email"
-                                            dir="ltr"
-                                            value={customEmailDraft}
-                                            onChange={(e) => setCustomEmailDraft(e.target.value)}
-                                            onKeyDown={(e) => {
-                                                if (e.key === 'Enter') {
-                                                    e.preventDefault();
-                                                    commitCustomEmail();
-                                                }
-                                                if (e.key === 'Escape') {
+                                    <div className="mb-2 space-y-1.5">
+                                        <div className="flex items-center gap-2">
+                                            <input
+                                                ref={customEmailInputRef}
+                                                type="text"
+                                                inputMode="email"
+                                                dir="ltr"
+                                                value={customEmailDraft}
+                                                onChange={(e) => {
+                                                    setCustomEmailDraft(e.target.value);
+                                                    if (customEmailError) setCustomEmailError(null);
+                                                }}
+                                                onKeyDown={(e) => {
+                                                    if (e.key === 'Enter') {
+                                                        e.preventDefault();
+                                                        commitCustomEmail();
+                                                    }
+                                                    if (e.key === 'Escape') {
+                                                        setCustomEmailInputOpen(false);
+                                                        setCustomEmailDraft('');
+                                                        setCustomEmailError(null);
+                                                    }
+                                                }}
+                                                placeholder="name@example.com"
+                                                className={`flex-1 min-w-0 bg-bg-input border text-text-default text-sm rounded-lg px-2.5 py-2 ${
+                                                    customEmailError
+                                                        ? 'border-red-400 ring-1 ring-red-200'
+                                                        : 'border-border-default'
+                                                }`}
+                                                autoComplete="off"
+                                                aria-label="כתובת מייל חופשית"
+                                                aria-invalid={Boolean(customEmailError)}
+                                                aria-describedby={customEmailError ? 'custom-email-error' : undefined}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={commitCustomEmail}
+                                                className="shrink-0 px-3 py-2 rounded-lg bg-primary-600 text-white text-xs font-bold hover:bg-primary-700"
+                                            >
+                                                הוסף
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => {
                                                     setCustomEmailInputOpen(false);
                                                     setCustomEmailDraft('');
-                                                }
-                                            }}
-                                            placeholder="name@example.com"
-                                            className="flex-1 min-w-0 bg-bg-input border border-border-default text-text-default text-sm rounded-lg px-2.5 py-2"
-                                            autoComplete="off"
-                                            aria-label="כתובת מייל חופשית"
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={commitCustomEmail}
-                                            className="shrink-0 px-3 py-2 rounded-lg bg-primary-600 text-white text-xs font-bold hover:bg-primary-700"
-                                        >
-                                            הוסף
-                                        </button>
-                                        <button
-                                            type="button"
-                                            onClick={() => {
-                                                setCustomEmailInputOpen(false);
-                                                setCustomEmailDraft('');
-                                            }}
-                                            className="shrink-0 p-2 rounded-lg text-text-muted hover:bg-bg-hover"
-                                            aria-label="ביטול"
-                                        >
-                                            <XMarkIcon className="w-4 h-4" />
-                                        </button>
+                                                    setCustomEmailError(null);
+                                                }}
+                                                className="shrink-0 p-2 rounded-lg text-text-muted hover:bg-bg-hover"
+                                                aria-label="ביטול"
+                                            >
+                                                <XMarkIcon className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                        {customEmailError ? (
+                                            <p
+                                                id="custom-email-error"
+                                                className="text-xs font-semibold text-red-600 px-0.5"
+                                                role="alert"
+                                            >
+                                                {customEmailError}
+                                            </p>
+                                        ) : null}
                                     </div>
                                 ) : null}
 
@@ -1937,15 +2131,25 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
                         <div>
                              <label className="block text-sm font-semibold text-text-muted mb-1.5">תוכן ההודעה:</label>
-                            <textarea
-                                value={content}
-                                onChange={e => setContent(e.target.value)}
-                                rows={8}
-                                className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"
-                            ></textarea>
+                            {config.channel === 'email' ? (
+                                <RichTextArea
+                                    value={content}
+                                    onChange={setContent}
+                                    minHeight="220px"
+                                    placeholder="כתבו את תוכן המייל…"
+                                    className="bg-bg-input border border-border-default rounded-lg overflow-hidden"
+                                />
+                            ) : (
+                                <textarea
+                                    value={content}
+                                    onChange={(e) => setContent(e.target.value)}
+                                    rows={8}
+                                    className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"
+                                />
+                            )}
                             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-text-subtle mt-1">
-                                <span>{content.length} / 5000</span>
-                                {config.channel === 'sms' && content.length > 0 ? (
+                                <span>{contentPlainText.length} / 5000</span>
+                                {config.channel === 'sms' && contentPlainText.length > 0 ? (
                                     <span
                                         className={
                                             smsBillableCount > 1
@@ -2061,7 +2265,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                 </div>
 
                                 <div className="mt-4 pt-4 border-t border-border-subtle space-y-2">
-                                    <label className="block text-sm font-semibold text-text-muted mb-1">הצעות מחיר:</label>
+                                    <label className="block text-sm font-semibold text-text-muted mb-1">תבניות הצעת מחיר:</label>
                                     {!effectiveClientId && (
                                         <p className="text-xs text-text-subtle">
                                             לא ניתן לטעון תבניות — חסר הקשר לקוח (שליחה מאיש קשר / לקוח).
@@ -2143,7 +2347,102 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                         className="mt-1 flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:text-primary-700 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
                                     >
                                         <PlusIcon className="w-3.5 h-3.5" />
-                                        הוספת הצעת מחיר
+                                        הוספת תבנית
+                                    </button>
+                                </div>
+
+                                <div className="mt-4 pt-4 border-t border-border-subtle space-y-2">
+                                    <label className="block text-sm font-semibold text-text-muted mb-1">
+                                        הצעות מחיר שמורות לאיש קשר
+                                    </label>
+                                    {!effectiveContactId && (
+                                        <p className="text-xs text-text-subtle">
+                                            בחרו איש קשר אחד למעלה כדי לראות הצעות מחיר שמורות עבורו.
+                                        </p>
+                                    )}
+                                    {effectiveContactId && contactSavedProposalsLoading && (
+                                        <p className="text-xs text-text-subtle">טוען הצעות שמורות…</p>
+                                    )}
+                                    {effectiveContactId && !contactSavedProposalsLoading && contactSavedProposals.length === 0 && (
+                                        <p className="text-xs text-text-subtle">
+                                            אין הצעות שמורות לאיש קשר זה — ניתן ליצור בטאב «הצעות מחיר» בפרופיל איש הקשר.
+                                        </p>
+                                    )}
+                                    {savedProposalAttachmentIds.map((proposalId, index) => (
+                                        <div key={`saved-proposal-${index}`} className="flex items-center gap-2">
+                                            <DocumentTextIcon className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                                            <select
+                                                value={proposalId}
+                                                onChange={(e) => handleSavedProposalAttachmentChange(index, e.target.value)}
+                                                disabled={
+                                                    !effectiveContactId
+                                                    || contactSavedProposalsLoading
+                                                    || contactSavedProposals.length === 0
+                                                }
+                                                className="flex-grow bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 disabled:opacity-60"
+                                            >
+                                                <option value="">בחר הצעת מחיר שמורה…</option>
+                                                {contactSavedProposals.map((p) => (
+                                                    <option key={p.id} value={p.id}>
+                                                        {p.number}
+                                                        {p.totalAmount ? ` · ${p.totalAmount}` : ''}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            {proposalId && (
+                                                <>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openSavedProposalEdit(index)}
+                                                        title="עריכת תוכן להודעה זו בלבד"
+                                                        aria-label="עריכת הצעת מחיר"
+                                                        className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
+                                                            savedProposalRowCustomizations[index]?.contentOverride !== undefined
+                                                                ? 'text-primary-600 bg-primary-50 hover:bg-primary-100'
+                                                                : 'text-text-subtle hover:text-primary-600 hover:bg-primary-50'
+                                                        }`}
+                                                    >
+                                                        <PencilIcon className="w-4 h-4" />
+                                                    </button>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleSavedProposalSendAsPdf(index)}
+                                                        title="שליחה כקובץ PDF מצורף"
+                                                        aria-label="שליחה כ-PDF"
+                                                        aria-pressed={Boolean(savedProposalRowCustomizations[index]?.sendAsPdf)}
+                                                        className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
+                                                            savedProposalRowCustomizations[index]?.sendAsPdf
+                                                                ? 'text-primary-600 bg-primary-50 hover:bg-primary-100'
+                                                                : 'text-text-subtle hover:text-primary-600 hover:bg-primary-50'
+                                                        }`}
+                                                    >
+                                                        <DocumentIcon className="w-4 h-4" />
+                                                    </button>
+                                                </>
+                                            )}
+                                            {(savedProposalAttachmentIds.length > 1 || proposalId !== '') && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeSavedProposalAttachmentRow(index)}
+                                                    className="p-2 text-text-subtle hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"
+                                                >
+                                                    <TrashIcon className="w-4 h-4" />
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))}
+                                    <button
+                                        type="button"
+                                        onClick={addSavedProposalAttachmentRow}
+                                        disabled={
+                                            !effectiveContactId
+                                            || contactSavedProposalsLoading
+                                            || contactSavedProposals.length === 0
+                                        }
+                                        className="mt-1 flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:text-primary-700 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                                    >
+                                        <PlusIcon className="w-3.5 h-3.5" />
+                                        הוספת הצעה שמורה
                                     </button>
                                 </div>
                             </div>
@@ -2211,7 +2510,9 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         </header>
                         <div className="p-4 overflow-y-auto flex-1 min-h-0">
                             <p className="text-xs text-text-subtle mb-3">
-                                השינויים חלים רק על מייל זה — התבנית המקורית לא תישמר.
+                                {proposalEditModal.source === 'saved'
+                                    ? 'השינויים חלים רק על מייל זה — ההצעה השמורה לא תעודכן.'
+                                    : 'השינויים חלים רק על מייל זה — התבנית המקורית לא תישמר.'}
                             </p>
                             <RichTextArea
                                 key={proposalEditModal.rowIndex}

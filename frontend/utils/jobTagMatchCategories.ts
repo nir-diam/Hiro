@@ -1,6 +1,7 @@
 import type { TagMatchCategory } from '../components/TagMatchPanel';
 import {
   estimateStructuralWeightFromMeta,
+  jobTagRelevanceScoreUnit,
   TAG_WEIGHT_STRUCTURAL_MIN,
   TAG_WEIGHT_STRUCTURAL_MAX,
 } from './tagWeightDisplay';
@@ -129,10 +130,12 @@ function jobSkillRowStructuralWeight(s: ScreeningJobSkillRow): { weight: number;
   if (typeof cw === 'number' && Number.isFinite(cw)) return { weight: cw, estimated: false };
   const rs = o.relevance_score;
   if (typeof rs === 'number' && Number.isFinite(rs)) {
-    const t = Math.min(10, Math.max(0, rs)) / 10;
-    const w =
-      TAG_WEIGHT_STRUCTURAL_MIN + t * (TAG_WEIGHT_STRUCTURAL_MAX - TAG_WEIGHT_STRUCTURAL_MIN);
-    return { weight: w, estimated: true };
+    const t = jobTagRelevanceScoreUnit(rs);
+    if (Number.isFinite(t)) {
+      const w =
+        TAG_WEIGHT_STRUCTURAL_MIN + t * (TAG_WEIGHT_STRUCTURAL_MAX - TAG_WEIGHT_STRUCTURAL_MIN);
+      return { weight: w, estimated: true };
+    }
   }
   return {
     weight: estimateStructuralWeightFromMeta({

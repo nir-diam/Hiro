@@ -1,44 +1,53 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { LinkIcon, PencilIcon } from './Icons';
 import AccordionSection from './AccordionSection'; 
 import { useLanguage } from '../context/LanguageContext';
-import { authHeaders } from '../utils/authHeaders';
+import {
+    fetchPendingOrgProfileUpdate,
+    submitOrgProfileUpdate,
+    type OrgProfileAdditionalLocation,
+    type OrgProfileUpdateDto,
+} from '../services/organizationProfileUpdatesApi';
+import { dispatchClientGamificationUpdated, mergeClientProfileUpdatePoints } from '../utils/clientGamification';
+import ClientOrgProfileEditFields, {
+    businessProfileToOrgEditValues,
+    orgEditValuesToApiPayload,
+    type ClientOrgProfileEditValues,
+} from './ClientOrgProfileEditFields';
 
-// Reusable local components for this view
-const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; }> = ({ label, name, value, onChange }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <input type="text" name={name} value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5" />
-    </div>
-);
-
-const FormSelect: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode }> = ({ label, name, value, onChange, children }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <select name={name} value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5">
-            {children}
-        </select>
-    </div>
-);
-
-const FormTextArea: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void; rows?: number }> = ({ label, name, value, onChange, rows = 4 }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <textarea name={name} value={value} onChange={onChange} rows={rows} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"></textarea>
-    </div>
-);
-
-const InfoTag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
-    <span className="bg-secondary-100 text-secondary-800 text-xs font-semibold px-2.5 py-1 rounded-full">
+const InfoTag: React.FC<{ children: React.ReactNode; pending?: boolean }> = ({ children, pending }) => (
+    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${pending ? 'bg-amber-100 text-amber-800' : 'bg-secondary-100 text-secondary-800'}`}>
         {children}
     </span>
 );
+
+const EMPLOYEE_COUNT_OPTIONS = ['1-10', '11-50', '51-200', '201-1000', '1000+', '10000+'];
+const STRUCTURE_OPTIONS = [
+    'חברה עצמאית (ללא שיוך)',
+    'חברת בת (Subsidiary)',
+    'חברת אם (Parent/Holding)',
+];
 
 const getPrimaryOrg = (client: any): Record<string, any> => {
     const links: any[] = Array.isArray(client?.organizationLinks) ? client.organizationLinks : [];
     const primary = links.find((l) => l.isPrimary) || links[0];
     return (primary?.organization && typeof primary.organization === 'object') ? primary.organization : {};
+};
+
+const parseAdditionalLocations = (raw: unknown): OrgProfileAdditionalLocation[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .map((item) => {
+            if (!item || typeof item !== 'object') return null;
+            const row = item as Record<string, unknown>;
+            const description = String(row.description || '').trim();
+            const location = String(row.location || '').trim();
+            const address = String(row.address || '').trim();
+            if (!description && !location && !address) return null;
+            return { description, location, address: address || undefined };
+        })
+        .filter((x): x is OrgProfileAdditionalLocation => x != null);
 };
 
 const getClientBusinessProfile = (client: any) => {
@@ -65,85 +74,139 @@ const getClientBusinessProfile = (client: any) => {
     const website = String(org.website || meta.website || '').trim();
     const employeeCount = String(org.employeeCount || meta.employeeCount || '').trim();
     const ownership = String(org.structure || org.type || meta.ownership || '').trim();
-    const location = String(org.location || client?.city || org.address || meta.address || '').trim();
+    const location = String(org.location || client?.city || meta.address || '').trim();
+    const subsidiaries = Array.isArray(org.subsidiaries)
+        ? org.subsidiaries.map((v: unknown) => String(v || '').trim()).filter(Boolean)
+        : [];
+    const additionalLocations = parseAdditionalLocations(org.additionalLocations);
 
-    return { mainField, mainField2, subField, secondaryField, industryDisplay, description, products, website, employeeCount, ownership, location };
+    return {
+        mainField,
+        mainField2,
+        subField,
+        secondaryField,
+        industryDisplay,
+        description,
+        products,
+        website,
+        employeeCount,
+        ownership,
+        location,
+        subsidiaries,
+        additionalLocations,
+    };
+};
+
+const pendingToProfile = (pending: OrgProfileUpdateDto) => {
+    const f = pending.proposedFields || {};
+    const mainField2 = Array.isArray(f.mainField2) ? f.mainField2 : [];
+    const subField = Array.isArray(f.subField) ? f.subField : [];
+    const mainField = String(f.mainField || '').trim();
+    const subsidiaries = Array.isArray(f.subsidiaries)
+        ? f.subsidiaries.map((v) => String(v || '').trim()).filter(Boolean)
+        : [];
+    return {
+        mainField,
+        mainField2,
+        subField,
+        secondaryField: String(f.secondaryField || '').trim(),
+        industryDisplay: [mainField, ...mainField2].filter(Boolean).join(' · ') || '—',
+        website: String(f.website || '').trim(),
+        employeeCount: String(f.employeeCount || '').trim(),
+        ownership: String(f.structure || '').trim(),
+        location: String(f.location || '').trim(),
+        subsidiaries,
+        additionalLocations: parseAdditionalLocations(f.additionalLocations),
+    };
 };
 
 interface ClientDetailsTabProps {
     client: any;
+    /** When set (e.g. organization profile), pending updates are scoped to this org — not any org on the client. */
+    organizationId?: string | null;
     onClientUpdated?: (next: any) => void;
 }
 
-const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpdated }) => {
+const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, organizationId, onClientUpdated }) => {
     const { t } = useLanguage();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const businessProfile = getClientBusinessProfile(client);
-    const [formData, setFormData] = useState({
-        clientName: '',
-        clientStatus: 'פעיל',
-        accountManager: '',
-        recruiters: '',
-        internalNotes: '',
-    });
-    const [isSaving, setIsSaving] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [profileForm, setProfileForm] = useState<ClientOrgProfileEditValues>(() =>
+        businessProfileToOrgEditValues(businessProfile),
+    );
+    const [isEditingProfile, setIsEditingProfile] = useState(false);
+    const [pendingUpdate, setPendingUpdate] = useState<OrgProfileUpdateDto | null>(null);
+    const [isSubmittingProfile, setIsSubmittingProfile] = useState(false);
+    const [profileError, setProfileError] = useState<string | null>(null);
+
+    const scopedOrganizationId = organizationId?.trim() || null;
+
+    const loadPending = useCallback(async () => {
+        if (!client?.id) return;
+        try {
+            const row = await fetchPendingOrgProfileUpdate(client.id, scopedOrganizationId);
+            setPendingUpdate(row);
+            if (row?.clientGamificationPoints != null) {
+                dispatchClientGamificationUpdated(client.id, row.clientGamificationPoints);
+            }
+        } catch {
+            setPendingUpdate(null);
+        }
+    }, [client?.id, scopedOrganizationId]);
 
     useEffect(() => {
         if (!client) return;
-        const meta = (client.metadata && typeof client.metadata === 'object') ? client.metadata : {};
-        setFormData({
-            clientName: client.displayName || client.name || '',
-            clientStatus: client.status || 'פעיל',
-            accountManager: client.accountManager || '',
-            recruiters: Array.isArray(meta.recruiters) ? meta.recruiters.join(', ') : (meta.recruiters || ''),
-            internalNotes: meta.internalNotes || '',
-        });
-    }, [client]);
+        setPendingUpdate(null);
+        setProfileForm(businessProfileToOrgEditValues(getClientBusinessProfile(client)));
+        setIsEditingProfile(false);
+        loadPending();
+    }, [client, scopedOrganizationId, loadPending]);
 
-    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-        const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: value }));
+    const hasPending = Boolean(
+        pendingUpdate
+        && (
+            !scopedOrganizationId
+            || String(pendingUpdate.organizationId) === String(scopedOrganizationId)
+        ),
+    );
+
+    const displayProfile = hasPending && pendingUpdate && !isEditingProfile
+        ? pendingToProfile(pendingUpdate)
+        : businessProfile;
+
+    const startProfileEdit = () => {
+        if (hasPending && pendingUpdate) {
+            setProfileForm(businessProfileToOrgEditValues(pendingToProfile(pendingUpdate)));
+        } else {
+            setProfileForm(businessProfileToOrgEditValues(businessProfile));
+        }
+        setIsEditingProfile(true);
+        setProfileError(null);
     };
-    
-    const handleSave = async () => {
-        if (!client?.id || !apiBase) return;
-        setIsSaving(true);
-        setError(null);
+
+    const cancelProfileEdit = () => {
+        setIsEditingProfile(false);
+        setProfileForm(businessProfileToOrgEditValues(businessProfile));
+        setProfileError(null);
+    };
+
+    const handleSubmitProfile = async () => {
+        if (!client?.id) return;
+        setIsSubmittingProfile(true);
+        setProfileError(null);
         try {
-            const prevMeta = (client.metadata && typeof client.metadata === 'object') ? client.metadata : {};
-            const recruitersArr = String(formData.recruiters || '')
-                .split(',')
-                .map(s => s.trim())
-                .filter(Boolean);
-
-            const payload: any = {
-                name: formData.clientName || client.name,
-                displayName: formData.clientName || client.displayName,
-                status: formData.clientStatus,
-                accountManager: formData.accountManager,
-                metadata: {
-                    ...prevMeta,
-                    recruiters: recruitersArr,
-                    internalNotes: formData.internalNotes || '',
-                },
-            };
-
-            const res = await fetch(`${apiBase}/api/clients/${client.id}`, {
-                method: 'PUT',
-                headers: authHeaders(true),
-                body: JSON.stringify(payload),
-            });
-            if (!res.ok) {
-                const body = await res.json().catch(() => ({}));
-                throw new Error(body?.message || 'Update failed');
+            const payload = orgEditValuesToApiPayload(profileForm);
+            const row = await submitOrgProfileUpdate(client.id, payload, scopedOrganizationId);
+            setPendingUpdate(row);
+            setIsEditingProfile(false);
+            if (row.clientGamificationPoints != null) {
+                dispatchClientGamificationUpdated(client.id, row.clientGamificationPoints);
+                onClientUpdated?.(mergeClientProfileUpdatePoints(client, row.clientGamificationPoints));
             }
-            const updated = await res.json();
-            onClientUpdated?.(updated);
-        } catch (e: any) {
-            setError(e?.message || 'Update failed');
+        } catch (e: unknown) {
+            setProfileError(e instanceof Error ? e.message : 'שליחה נכשלה');
         } finally {
-            setIsSaving(false);
+            setIsSubmittingProfile(false);
         }
     };
 
@@ -151,6 +214,16 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpd
         <div className="space-y-6">
             <AccordionSection title={t('client_details.section_info')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                  <div className="space-y-4 text-sm">
+                    {hasPending && !isEditingProfile && (
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 font-semibold text-sm">
+                            עדכון ממתין לאישור
+                            {pendingUpdate?.createdAt && (
+                                <span className="font-normal text-amber-800 mr-2">
+                                    · הוגש {new Date(pendingUpdate.createdAt).toLocaleString('he-IL')}
+                                </span>
+                            )}
+                        </div>
+                    )}
                     <p className="text-text-muted leading-relaxed">
                         {businessProfile.description || '—'}
                     </p>
@@ -163,71 +236,126 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpd
                             {businessProfile.products.length === 0 && <InfoTag>—</InfoTag>}
                         </div>
                     </div>
-                    <dl className="space-y-2 pt-2 border-t border-border-default">
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.industry')}</dt><dd className="font-semibold text-right">{businessProfile.industryDisplay}</dd></div>
-                        <div className="flex justify-between gap-4">
-                            <dt className="text-text-muted shrink-0">תחום עיסוק:</dt>
-                            <dd className="font-semibold text-right">
-                                {businessProfile.subField.length > 0 ? (
-                                    <span className="inline-flex flex-wrap justify-end gap-1.5">
-                                        {businessProfile.subField.map((item) => (
-                                            <InfoTag key={item}>{item}</InfoTag>
-                                        ))}
-                                    </span>
-                                ) : '—'}
-                            </dd>
-                        </div>
-                        <div className="flex justify-between gap-4">
-                            <dt className="text-text-muted shrink-0">תחום עיסוק משני:</dt>
-                            <dd className="font-semibold text-right">{businessProfile.secondaryField || '—'}</dd>
-                        </div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className="font-semibold">{businessProfile.employeeCount || '—'}</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className="font-semibold">{businessProfile.ownership || '—'}</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className="font-semibold">{businessProfile.location || '—'}</dd></div>
-                        <div className="flex justify-between items-center">
-                            <dt className="text-text-muted">{t('client_details.website')}</dt>
-                            <dd>
-                                {businessProfile.website ? (
-                                    <a href={businessProfile.website} target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline font-semibold flex items-center gap-1">
-                                        <span>{businessProfile.website.replace('https://www.', '').replace('http://www.', '').replace('https://', '').replace('http://', '')}</span>
-                                        <LinkIcon className="w-4 h-4" />
-                                    </a>
-                                ) : (
-                                    <span className="font-semibold">—</span>
-                                )}
-                            </dd>
-                        </div>
-                    </dl>
+
+                    <div className="flex justify-end">
+                        {!isEditingProfile ? (
+                            <button
+                                type="button"
+                                onClick={startProfileEdit}
+                                className="inline-flex items-center gap-1.5 text-sm font-bold text-primary-600 hover:text-primary-700 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition-colors"
+                                title="עריכת פרטי ארגון"
+                            >
+                                <PencilIcon className="w-4 h-4" />
+                                עריכה
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={cancelProfileEdit}
+                                className="text-sm font-bold text-text-muted hover:text-text-default px-3 py-1.5"
+                            >
+                                ביטול
+                            </button>
+                        )}
+                    </div>
+
+                    {isEditingProfile ? (
+                        <>
+                            <ClientOrgProfileEditFields
+                                apiBase={apiBase}
+                                values={profileForm}
+                                onChange={setProfileForm}
+                                employeeCountOptions={EMPLOYEE_COUNT_OPTIONS}
+                                structureOptions={STRUCTURE_OPTIONS}
+                                labels={{
+                                    employees: t('client_details.employees'),
+                                    ownership: t('client_details.ownership'),
+                                    location: t('client_details.location'),
+                                    website: t('client_details.website'),
+                                }}
+                            />
+                            <div className="flex justify-end pt-2">
+                                <button
+                                    type="button"
+                                    disabled={isSubmittingProfile}
+                                    onClick={handleSubmitProfile}
+                                    className="bg-amber-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-amber-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                                >
+                                    {isSubmittingProfile ? 'שולח...' : 'שלח לאישור'}
+                                </button>
+                            </div>
+                            {profileError && <div className="text-sm font-semibold text-red-600">{profileError}</div>}
+                        </>
+                    ) : (
+                        <dl className="space-y-2 pt-2 border-t border-border-default">
+                            <div className="flex justify-between">
+                                <dt className="text-text-muted">{t('client_details.industry')}</dt>
+                                <dd className={`font-semibold text-right ${hasPending ? 'text-amber-800' : ''}`}>
+                                    {displayProfile.industryDisplay}
+                                    {hasPending && <span className="mr-2 text-xs font-bold text-amber-600">(ממתין)</span>}
+                                </dd>
+                            </div>
+                            <div className="flex justify-between gap-4">
+                                <dt className="text-text-muted shrink-0">תחום עיסוק:</dt>
+                                <dd className={`font-semibold text-right ${hasPending ? 'text-amber-800' : ''}`}>
+                                    {displayProfile.subField.length > 0 ? (
+                                        <span className="inline-flex flex-wrap justify-end gap-1.5">
+                                            {displayProfile.subField.map((item) => (
+                                                <InfoTag key={item} pending={hasPending}>{item}</InfoTag>
+                                            ))}
+                                        </span>
+                                    ) : '—'}
+                                </dd>
+                            </div>
+                            <div className="flex justify-between gap-4">
+                                <dt className="text-text-muted shrink-0">תחום עיסוק משני:</dt>
+                                <dd className={`font-semibold text-right ${hasPending ? 'text-amber-800' : ''}`}>{displayProfile.secondaryField || '—'}</dd>
+                            </div>
+                            <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className={`font-semibold ${hasPending ? 'text-amber-800' : ''}`}>{displayProfile.employeeCount || '—'}</dd></div>
+                            <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className={`font-semibold ${hasPending ? 'text-amber-800' : ''}`}>{displayProfile.ownership || '—'}</dd></div>
+                            <div className="flex justify-between gap-4">
+                                <dt className="text-text-muted shrink-0">חברות בנות:</dt>
+                                <dd className={`font-semibold text-right ${hasPending ? 'text-amber-800' : ''}`}>
+                                    {displayProfile.subsidiaries.length > 0 ? (
+                                        <span className="inline-flex flex-wrap justify-end gap-1.5">
+                                            {displayProfile.subsidiaries.map((item) => (
+                                                <InfoTag key={item} pending={hasPending}>{item}</InfoTag>
+                                            ))}
+                                        </span>
+                                    ) : '—'}
+                                </dd>
+                            </div>
+                            <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className={`font-semibold ${hasPending ? 'text-amber-800' : ''}`}>{displayProfile.location || '—'}</dd></div>
+                            <div className="flex justify-between gap-4">
+                                <dt className="text-text-muted shrink-0">מיקומים נוספים:</dt>
+                                <dd className={`font-semibold text-right text-sm ${hasPending ? 'text-amber-800' : ''}`}>
+                                    {displayProfile.additionalLocations.length > 0 ? (
+                                        <ul className="space-y-1">
+                                            {displayProfile.additionalLocations.map((loc, i) => (
+                                                <li key={`${loc.description}-${loc.location}-${i}`}>
+                                                    {[loc.description, loc.location, loc.address].filter(Boolean).join(' · ') || '—'}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    ) : '—'}
+                                </dd>
+                            </div>
+                            <div className="flex justify-between items-center">
+                                <dt className="text-text-muted">{t('client_details.website')}</dt>
+                                <dd>
+                                    {displayProfile.website ? (
+                                        <a href={displayProfile.website.startsWith('http') ? displayProfile.website : `https://${displayProfile.website}`} target="_blank" rel="noopener noreferrer" className={`hover:underline font-semibold flex items-center gap-1 ${hasPending ? 'text-amber-700' : 'text-primary-600'}`}>
+                                            <span>{displayProfile.website.replace('https://www.', '').replace('http://www.', '').replace('https://', '').replace('http://', '')}</span>
+                                            <LinkIcon className="w-4 h-4" />
+                                        </a>
+                                    ) : (
+                                        <span className="font-semibold">—</span>
+                                    )}
+                                </dd>
+                            </div>
+                        </dl>
+                    )}
                  </div>
-            </AccordionSection>
-            
-            <AccordionSection title={t('client_details.section_management')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
-                <div className="space-y-4">
-                     <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div><strong className="text-text-muted">{t('client_details.client_id')}</strong> <span className="font-semibold">{String(client?.id || '—')}</span></div>
-                        <div><strong className="text-text-muted">{t('client_details.created_at')}</strong> <span className="font-semibold">{client?.creationDate ? new Date(client.creationDate).toLocaleDateString('he-IL') : (client?.createdAt ? new Date(client.createdAt).toLocaleDateString('he-IL') : '—')}</span></div>
-                    </div>
-                    <FormInput label={t('client_details.field_client_name')} name="clientName" value={formData.clientName} onChange={handleChange} />
-                    <FormSelect label={t('client_details.field_client_type')} name="clientStatus" value={formData.clientStatus} onChange={handleChange}>
-                        <option value="פעיל">פעיל</option>
-                        <option value="בהקפאה">בהקפאה</option>
-                        <option value="לא פעיל">לא פעיל</option>
-                    </FormSelect>
-                     <FormInput label={t('client_details.field_account_manager')} name="accountManager" value={formData.accountManager} onChange={handleChange} />
-                    <FormInput label={t('client_details.field_recruiter')} name="recruiters" value={formData.recruiters} onChange={handleChange} />
-                     <FormTextArea label={t('client_details.field_internal_notes')} name="internalNotes" value={formData.internalNotes} onChange={handleChange} />
-                     <div className="flex justify-end pt-2">
-                        <button
-                            type="button"
-                            disabled={isSaving}
-                            onClick={handleSave}
-                            className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
-                        >
-                            {isSaving ? 'שומר...' : t('client_details.save_changes')}
-                        </button>
-                    </div>
-                    {error && <div className="text-sm font-semibold text-red-600">{error}</div>}
-                </div>
             </AccordionSection>
         </div>
     );

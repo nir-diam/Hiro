@@ -8,6 +8,27 @@ function isUuid(val) {
   return typeof val === 'string' && UUID_RE.test(val.trim());
 }
 
+function normalizeDefaultAssigneeUserIds(raw, legacyDefaultContactId = null) {
+  const fromList = Array.isArray(raw)
+    ? raw
+    : Array.isArray(raw?.defaultAssigneeUserIds)
+      ? raw.defaultAssigneeUserIds
+      : [];
+  const ids = [];
+  const seen = new Set();
+  for (const item of fromList) {
+    const id = String(item || '').trim();
+    if (!isUuid(id) || seen.has(id)) continue;
+    seen.add(id);
+    ids.push(id);
+  }
+  if (ids.length) return ids;
+  const legacy = legacyDefaultContactId && isUuid(legacyDefaultContactId)
+    ? String(legacyDefaultContactId).trim()
+    : null;
+  return legacy ? [legacy] : [];
+}
+
 function normalizeTrigger(raw) {
   if (!raw || typeof raw !== 'object') return { type: 'none' };
   const type = raw.type === 'system_event' ? 'system_event' : 'none';
@@ -136,12 +157,23 @@ function pipelineToDto(row) {
         .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
         .map(stageToDto)
     : [];
+  const legacyContactId =
+    plain.defaultContactId && isUuid(plain.defaultContactId)
+      ? String(plain.defaultContactId)
+      : null;
+  const defaultAssigneeUserIds = normalizeDefaultAssigneeUserIds(
+    plain.defaultAssigneeUserIds,
+    legacyContactId,
+  );
+  const defaultContactId = defaultAssigneeUserIds[0] || legacyContactId;
   return {
     id: plain.id,
     clientId: plain.clientId,
     name: plain.name,
     description: plain.description || '',
     sortIndex: plain.sortIndex,
+    defaultContactId,
+    defaultAssigneeUserIds,
     stages,
   };
 }
@@ -237,18 +269,36 @@ async function syncClientPipelines(clientId, incoming = []) {
       if (!name) continue;
       const description = String(raw.description || '').trim();
       const stagesIn = Array.isArray(raw.stages) ? raw.stages : [];
+      const defaultAssigneeUserIds = normalizeDefaultAssigneeUserIds(
+        raw.defaultAssigneeUserIds,
+        raw.defaultContactId,
+      );
+      const defaultContactId = defaultAssigneeUserIds[0] || null;
 
       let pipelineId;
       const pid = raw.id;
       if (isUuid(pid) && pipelineById.has(String(pid))) {
         await ClientPipeline.update(
-          { name, description, sortIndex: i },
+          {
+            name,
+            description,
+            sortIndex: i,
+            defaultContactId,
+            defaultAssigneeUserIds,
+          },
           { where: { id: pid, clientId }, transaction },
         );
         pipelineId = String(pid);
       } else {
         const created = await ClientPipeline.create(
-          { clientId, name, description, sortIndex: i },
+          {
+            clientId,
+            name,
+            description,
+            sortIndex: i,
+            defaultContactId,
+            defaultAssigneeUserIds,
+          },
           { transaction },
         );
         pipelineId = String(created.id);
@@ -340,4 +390,5 @@ module.exports = {
   DEFAULT_PIPELINES,
   isUuid,
   normalizeOutcomes,
+  normalizeDefaultAssigneeUserIds,
 };

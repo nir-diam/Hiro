@@ -38,7 +38,9 @@ const RecruitmentSource = require('../models/RecruitmentSource');
 const { Op, Sequelize, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
+const proposalService = require('../services/proposalService');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+const cvForwardService = require('../services/cvForwardService');
 const {
   recordCandidateIdentityMerge,
   recordDuplicateResumeHashIngest,
@@ -151,7 +153,8 @@ const stripHtmlMail = (s) =>
     .trim();
 
 /**
- * Clickable links (HTML + plain text) for linked candidate / job / client in outgoing task & message mail.
+ * Clickable links (HTML + plain text) for linked candidate / job / client.
+ * Only appended when the client sets `appendSystemLinks: true` (NewTaskModal email send).
  */
 function buildLinkedEntityMailAppend(taskPayload, origin) {
   const tp =
@@ -257,12 +260,38 @@ const postingCodeFromPlusAddressText = (text = '') => {
   return m ? m[1] : null;
 };
 
+/** Fallback when plus-tagging missed: first standalone number with value > 800000 in the text. */
+const extractPostingCodeFromLargeNumberInText = (text = '') => {
+  const src = String(text || '').trim();
+  if (!src) return null;
+  const re = /\b(\d+)\b/gu;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const digits = m[1];
+    if (digits.length > 8) continue;
+    const n = Number(digits);
+    if (Number.isFinite(n) && n > 800000) return digits;
+  }
+  return null;
+};
+
 const extractPostingCodeFromEmailAddress = (email = '') => {
   const raw = String(email || '').trim();
   if (!raw) return null;
   const angle = raw.match(/<([^>]+@[^>]+)>/i);
   const addr = angle ? angle[1].trim() : raw;
-  return postingCodeFromPlusAddressText(addr);
+  const fromPlus = postingCodeFromPlusAddressText(addr);
+  if (fromPlus) return fromPlus;
+  if (angle) {
+    const displayPart = raw
+      .replace(angle[0], '')
+      .trim()
+      .replace(/^["']|["']$/g, '')
+      .trim();
+    const fromNumber = extractPostingCodeFromLargeNumberInText(displayPart);
+    if (fromNumber) return fromNumber;
+  }
+  return extractPostingCodeFromLargeNumberInText(raw);
 };
 
 /** e.g. "Name - 603771.pdf" → 603771 */
@@ -285,6 +314,8 @@ const extractPostingCodeFromSubject = (subject = '') => {
   if (!text) return null;
   const fromPlus = postingCodeFromPlusAddressText(text);
   if (fromPlus) return fromPlus;
+  const fromLargeNumber = extractPostingCodeFromLargeNumberInText(text);
+  if (fromLargeNumber) return fromLargeNumber;
   const codeMatch = text.match(/\b(\d{4,8})\b/);
   return codeMatch ? codeMatch[1] : null;
 };
@@ -298,6 +329,7 @@ const formatJobForEmailUpload = (job) => {
     title: String(plain.title || '').trim(),
     client: String(plain.client || '').trim(),
     postingCode: String(plain.postingCode || '').trim(),
+    digitalQuestions: Array.isArray(plain.digitalQuestions) ? plain.digitalQuestions : [],
   };
 };
 
@@ -732,7 +764,9 @@ const processEmailUpload = async (record) => {
     const toRecipients = parsed.to?.value || [];
     let postingCode = null;
     for (const recipient of toRecipients) {
-      const code = extractPostingCodeFromEmailAddress(recipient.address);
+      const code =
+        extractPostingCodeFromEmailAddress(recipient.address) ||
+        extractPostingCodeFromLargeNumberInText(recipient.name);
       if (code) {
         postingCode = code;
         break;
@@ -740,6 +774,11 @@ const processEmailUpload = async (record) => {
     }
     if (!postingCode) {
       postingCode = postingCodeFromPlusAddressText(parsed.to?.text || '');
+    }
+    if (!postingCode) {
+      postingCode =
+        extractPostingCodeFromLargeNumberInText(parsed.to?.text || '') ||
+        extractPostingCodeFromLargeNumberInText(subject || '');
     }
     let resolvedJob = null;
     if (postingCode) {
@@ -1146,6 +1185,48 @@ const processEmailUpload = async (record) => {
           fullEnrichErr?.message || fullEnrichErr,
         );
       }
+    }
+
+    const forwardEligible =
+      (hasCvText || ranFullEnrichment) && uploaded[0] && resolvedJob?.id && candidate?.id;
+    if (forwardEligible) {
+      let forwardAssociation = null;
+      try {
+        forwardAssociation = await jobCandidateService.associateCandidateWithJob({
+          jobId: resolvedJob.id,
+          candidateId: candidate.id,
+          source: 'email',
+          manualOverride: false,
+        });
+      } catch (assocErr) {
+        console.warn('[email] early job association for CV forward failed', assocErr?.message || assocErr);
+      }
+      console.log('[email] scheduling CV forward', {
+        candidateId: candidate.id,
+        jobId: resolvedJob.id,
+        postingCode,
+        hasCvText,
+        ranFullEnrichment,
+      });
+      cvForwardService.scheduleCvForward({
+        candidateId: candidate.id,
+        jobId: resolvedJob.id,
+        intakeChannel: 'email',
+        candidate,
+        job: resolvedJob,
+        jobCandidate: forwardAssociation?.record,
+        resumeBuffer: resumeAttachments[0]?.content,
+        resumeUrl: uploaded[0]?.publicUrl,
+        resumeFileName: uploaded[0]?.fileLabel || resumeAttachments[0]?.filename,
+        resumeMimeType: resumeAttachments[0]?.contentType,
+        extractedText: combinedText,
+        hasCvText,
+        ranFullEnrichment,
+        originalEmailSubject: subject,
+        originalEmailText: parsed.text?.trim() || body,
+        originalEmailHtml: parsed.html?.trim() || null,
+        recruitmentSourceName: matchedRecruitmentSource?.name || emailIngestSource,
+      });
     }
 
     if (shouldRunAiParse && !ranFullEnrichment) {
@@ -1648,7 +1729,7 @@ async function fetchEmailUploadsForCandidates(candidateIds) {
     if (uuidJobIds.size) {
       const jobs = await Job.findAll({
         where: { id: { [Op.in]: [...uuidJobIds] } },
-        attributes: ['id', 'title', 'client', 'postingCode'],
+        attributes: ['id', 'title', 'client', 'postingCode', 'digitalQuestions'],
       });
       jobs.forEach(registerJob);
     }
@@ -1656,7 +1737,7 @@ async function fetchEmailUploadsForCandidates(candidateIds) {
     if (unresolvedPostingCodes.length) {
       const jobs = await Job.findAll({
         where: { postingCode: { [Op.in]: unresolvedPostingCodes } },
-        attributes: ['id', 'title', 'client', 'postingCode'],
+        attributes: ['id', 'title', 'client', 'postingCode', 'digitalQuestions'],
       });
       jobs.forEach(registerJob);
     }
@@ -1686,7 +1767,7 @@ async function fetchEmailUploadsForCandidates(candidateIds) {
       if (missingLinkJobIds.length) {
         const linkedJobs = await Job.findAll({
           where: { id: { [Op.in]: missingLinkJobIds } },
-          attributes: ['id', 'title', 'client', 'postingCode'],
+          attributes: ['id', 'title', 'client', 'postingCode', 'digitalQuestions'],
         });
         linkedJobs.forEach(registerJob);
       }
@@ -2313,6 +2394,7 @@ const send = async (req, res) => {
       allocatedDays,
       taskPayload,
       skipSmtp,
+      appendSystemLinks,
       attachments: rawAttachments,
     } = payload;
 
@@ -2325,10 +2407,12 @@ const send = async (req, res) => {
           try {
             const buf = Buffer.from(contentB64, 'base64');
             if (!buf.length) return null;
+            const cidRaw = typeof a?.cid === 'string' ? a.cid.trim() : '';
             return {
               filename: String(a.filename || 'attachment'),
               content: buf,
               contentType: typeof a.contentType === 'string' ? a.contentType : undefined,
+              ...(cidRaw ? { cid: cidRaw } : {}),
             };
           } catch {
             return null;
@@ -2350,10 +2434,9 @@ const send = async (req, res) => {
 
     if (!subject) return res.status(400).json({ message: 'subject is required' });
     const baseText = typeof text === 'string' ? text : '';
-    const { htmlAppend, storedTextSuffix } = buildLinkedEntityMailAppend(
-      taskPayload,
-      publicStaffAppOrigin(),
-    );
+    const { htmlAppend, storedTextSuffix } = Boolean(appendSystemLinks)
+      ? buildLinkedEntityMailAppend(taskPayload, publicStaffAppOrigin())
+      : { htmlAppend: '', storedTextSuffix: '' };
     const storedText = baseText + storedTextSuffix;
     const clientHtml = typeof html === 'string' && html.trim() ? html : null;
     let storedHtml = null;
@@ -2405,6 +2488,7 @@ const send = async (req, res) => {
     const composeCandidateName =
       tp.candidateName != null && String(tp.candidateName).trim() ? String(tp.candidateName).trim() : '';
 
+    let savedProposalsMarkedThisRequest = false;
     const logSendMessageModalAudit = async (resolvedToEmail, savedMessage, providerMessageId) => {
       if (!isSendMessageModal) return;
       const fromName =
@@ -2421,10 +2505,25 @@ const send = async (req, res) => {
       const proposalTemplateIds = Array.isArray(tp.proposalTemplateIds)
         ? tp.proposalTemplateIds.map((id) => String(id || '').trim()).filter(Boolean)
         : [];
+      const savedProposalIds = Array.isArray(tp.savedProposalIds)
+        ? tp.savedProposalIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [];
       const proposalTemplateNames = Array.isArray(tp.proposalTemplateNames)
         ? tp.proposalTemplateNames.map((name) => String(name || '').trim()).filter(Boolean)
         : [];
-      const hasProposalAttachment = proposalTemplateIds.length > 0;
+      const hasProposalAttachment = proposalTemplateIds.length > 0 || savedProposalIds.length > 0;
+
+      if (!savedProposalsMarkedThisRequest && savedProposalIds.length > 0) {
+        savedProposalsMarkedThisRequest = true;
+        try {
+          await proposalService.markProposalsSent(savedProposalIds, {
+            userId: req.user?.sub || req.dbUser?.id || null,
+            name: fromName,
+          });
+        } catch (markErr) {
+          console.warn('[email][send] markProposalsSent failed', markErr?.message || markErr);
+        }
+      }
       const proposalNamesSuffix =
         proposalTemplateNames.length > 0
           ? ` · תבניות: ${proposalTemplateNames.join(', ')}`

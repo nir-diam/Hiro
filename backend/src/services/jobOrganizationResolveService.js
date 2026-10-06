@@ -3,6 +3,10 @@ const { sequelize } = require('../config/db');
 const Organization = require('../models/Organization');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
 const Job = require('../models/Job');
+const {
+  companyNameLookupVariants,
+  resolveOrgIdFromLabelMap,
+} = require('../utils/companyNameMatch');
 
 const normalizeOrgLabel = (value) => String(value || '').toLowerCase().trim();
 
@@ -55,6 +59,7 @@ const buildOrganizationLabelMap = async ({ clientIds = [], extraLabels = [] } = 
 
   const missingLabels = [...new Set(
     (extraLabels || [])
+      .flatMap((label) => companyNameLookupVariants(label))
       .map(normalizeOrgLabel)
       .filter((label) => label && !map.has(label)),
   )];
@@ -65,6 +70,7 @@ const buildOrganizationLabelMap = async ({ clientIds = [], extraLabels = [] } = 
       or.push({ name: { [Op.iLike]: label } });
       or.push({ nameEn: { [Op.iLike]: label } });
       or.push({ legalName: { [Op.iLike]: label } });
+      or.push({ name: { [Op.iLike]: `%${label}%` } });
       // Avoid Sequelize ARRAY @> varchar[] (Postgres: text[] @> character varying[] fails).
       // Match aliases case-insensitively via unnest.
       or.push(
@@ -100,9 +106,9 @@ const resolveOrganizationIdForJob = async ({
 
   const map = await buildOrganizationLabelMap({
     clientIds: clientId ? [clientId] : [],
-    extraLabels: [clientName],
+    extraLabels: [client],
   });
-  return map.get(clientName) || null;
+  return resolveOrgIdFromLabelMap(client, map);
 };
 
 /**
@@ -134,7 +140,7 @@ const enrichJobsWithOrganizationIds = async (jobs, { persist = true } = {}) => {
   for (const job of needing) {
     const isModel = typeof job.get === 'function';
     const plain = isModel ? job.get({ plain: true }) : job;
-    const resolved = map.get(normalizeOrgLabel(plain.client));
+    const resolved = resolveOrgIdFromLabelMap(plain.client, map);
     if (!resolved) continue;
 
     if (isModel) {

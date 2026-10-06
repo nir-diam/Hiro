@@ -7,8 +7,14 @@ import { useAuth } from '../context/AuthContext';
 import { 
     ClipboardDocumentListIcon, ChatBubbleOvalLeftEllipsisIcon, InformationCircleIcon, ArchiveBoxIcon, 
     CheckCircleIcon, MagnifyingGlassIcon, ArrowLeftIcon, ArrowUturnLeftIcon, ChevronDownIcon, XMarkIcon,
-    ClockIcon, UserGroupIcon
+    ClockIcon, UserGroupIcon, PaperClipIcon, DocumentArrowDownIcon,
 } from './Icons';
+import { formatAttachmentSize } from '../services/clientAttachmentsApi';
+import {
+    downloadNotificationMessageAttachment,
+    fetchNotificationMessageAttachmentBlob,
+    type OutboundMessageAttachmentRef,
+} from '../services/clientOutboundMessageApi';
 
 import {
     NOTIFICATION_MESSAGES_REFRESH_EVENT,
@@ -74,6 +80,180 @@ interface Notification {
   deliveryStatus?: 'pending' | 'sent' | 'failed' | 'in_app_only' | string;
   /** Client-only: expanded once in ארכיון (tasks have no separate “read” API). */
   viewedInArchive?: boolean;
+  attachments: NotificationAttachment[];
+}
+
+type NotificationAttachment = {
+  filename: string;
+  contentType?: string | null;
+  size?: number | null;
+  index: number;
+};
+
+function isImageNotificationAttachment(att: Pick<NotificationAttachment, 'contentType' | 'filename'>): boolean {
+  const ct = att.contentType?.trim().toLowerCase() || '';
+  if (ct.startsWith('image/')) return true;
+  return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(att.filename);
+}
+
+function mapRowAttachments(
+  metadata: Record<string, unknown>,
+  taskPayload: Record<string, unknown>,
+): NotificationAttachment[] {
+  const raw = metadata.attachments;
+  if (Array.isArray(raw) && raw.length) {
+    return raw
+      .map((a, index) => {
+        if (!a || typeof a !== 'object') return null;
+        const row = a as Record<string, unknown>;
+        const filename = String(row.filename || '').trim();
+        if (!filename) return null;
+        return {
+          filename,
+          contentType: row.contentType != null ? String(row.contentType) : null,
+          size: typeof row.size === 'number' ? row.size : null,
+          index,
+        };
+      })
+      .filter((x): x is NotificationAttachment => Boolean(x));
+  }
+  const names = taskPayload.attachmentNames;
+  if (Array.isArray(names) && names.length) {
+    return names
+      .map((name, index) => {
+        const filename = String(name || '').trim();
+        if (!filename) return null;
+        return { filename, contentType: null, size: null, index };
+      })
+      .filter((x): x is NotificationAttachment => Boolean(x));
+  }
+  return [];
+}
+
+function NotificationAttachmentsSection({
+  messageId,
+  attachments,
+}: {
+  messageId: string;
+  attachments: NotificationAttachment[];
+}) {
+  const [previewUrlByIndex, setPreviewUrlByIndex] = useState<Record<number, string>>({});
+  const [downloadingIndex, setDownloadingIndex] = useState<number | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  const previewUrlsRef = useRef<string[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+    previewUrlsRef.current = [];
+    setPreviewUrlByIndex({});
+    setLoadError(null);
+    void (async () => {
+      const next: Record<number, string> = {};
+      for (const att of attachments) {
+        if (!isImageNotificationAttachment(att)) continue;
+        try {
+          const blob = await fetchNotificationMessageAttachmentBlob(messageId, att.index);
+          if (cancelled) return;
+          const url = URL.createObjectURL(blob);
+          previewUrlsRef.current.push(url);
+          next[att.index] = url;
+        } catch {
+          if (!cancelled) setLoadError('לא ניתן להציג חלק מהתמונות');
+        }
+      }
+      if (!cancelled) setPreviewUrlByIndex(next);
+    })();
+    return () => {
+      cancelled = true;
+      previewUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      previewUrlsRef.current = [];
+    };
+  }, [messageId, attachments]);
+
+  const handleDownload = async (att: NotificationAttachment) => {
+    setDownloadingIndex(att.index);
+    try {
+      const ref: OutboundMessageAttachmentRef = {
+        filename: att.filename,
+        contentType: att.contentType,
+        size: att.size,
+        notificationMessageId: messageId,
+        index: att.index,
+      };
+      await downloadNotificationMessageAttachment(ref);
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : 'הורדת הקובץ נכשלה');
+    } finally {
+      setDownloadingIndex(null);
+    }
+  };
+
+  if (!attachments.length) return null;
+
+  return (
+    <div className="mt-3 pt-3 border-t border-border-default">
+      <div className="text-text-muted text-xs font-semibold mb-2 flex items-center gap-1.5">
+        <PaperClipIcon className="w-4 h-4" />
+        קבצים מצורפים ({attachments.length})
+      </div>
+      {loadError ? <p className="text-xs text-amber-700 mb-2">{loadError}</p> : null}
+      <ul className="space-y-3">
+        {attachments.map((att) => {
+          const previewUrl = previewUrlByIndex[att.index];
+          const isImage = isImageNotificationAttachment(att);
+          const isDownloading = downloadingIndex === att.index;
+          return (
+            <li
+              key={`${messageId}-${att.index}`}
+              className="rounded-lg border border-border-default bg-bg-subtle/50 p-3"
+            >
+              <div className="flex flex-wrap items-center gap-2 mb-2">
+                <span className="font-medium text-xs text-text-default truncate max-w-[16rem]">
+                  {att.filename}
+                </span>
+                {att.size ? (
+                  <span className="text-xs text-text-muted shrink-0">
+                    {formatAttachmentSize(Math.max(1, Math.ceil(att.size / 1024)))}
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={isDownloading}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleDownload(att);
+                  }}
+                  className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-border-default bg-bg-card px-2 py-1 text-xs font-semibold text-text-default hover:bg-bg-subtle disabled:opacity-60"
+                >
+                  <DocumentArrowDownIcon className="w-3.5 h-3.5" />
+                  {isDownloading ? 'מוריד...' : 'הורדה'}
+                </button>
+              </div>
+              {isImage && previewUrl ? (
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="block"
+                >
+                  <img
+                    src={previewUrl}
+                    alt={att.filename}
+                    className="max-h-72 max-w-full rounded-md border border-border-default object-contain bg-bg-card"
+                  />
+                </a>
+              ) : isImage && !previewUrl ? (
+                <p className="text-xs text-text-muted">טוען תצוגה מקדימה…</p>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
 }
 
 type NotificationTab = 'all' | 'tasks' | 'unread' | 'sent' | 'archived';
@@ -464,6 +644,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                         linkedClientLabel,
                         backendStatus: row?.status === 'tasks' || row?.status === 'archived' || row?.status === 'deleted' ? row.status : 'unread',
                         deliveryStatus,
+                        attachments: mapRowAttachments(metadata as Record<string, unknown>, tp),
                     }];
                 });
 
@@ -1173,7 +1354,18 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                     <div className="flex-1 flex flex-col">
                                         <div className="flex justify-between items-start gap-2">
                                             <div className="min-w-0 flex-1">
-                                                <p className={`font-semibold text-sm ${urgencyState === 'overdue' ? 'text-red-800' : 'text-text-default'}`}>{formatNotificationDisplayTitle(notification.title)}</p>
+                                                <p className={`font-semibold text-sm flex flex-wrap items-center gap-1.5 ${urgencyState === 'overdue' ? 'text-red-800' : 'text-text-default'}`}>
+                                                    {notification.attachments.length > 0 ? (
+                                                        <span
+                                                            className="inline-flex items-center gap-0.5 text-[10px] font-semibold text-text-muted shrink-0"
+                                                            title="קבצים מצורפים"
+                                                        >
+                                                            <PaperClipIcon className="w-3.5 h-3.5" />
+                                                            {notification.attachments.length}
+                                                        </span>
+                                                    ) : null}
+                                                    <span>{formatNotificationDisplayTitle(notification.title)}</span>
+                                                </p>
                                                 {isOutgoing ? (
                                                     <div className="flex flex-wrap items-center gap-1.5 mt-1">
                                                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${deliveryBadge.className}`}>
@@ -1213,6 +1405,13 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                                 ? bodyWithoutLinked
                                                 : truncatedPreviewWords(bodyWithoutLinked)}
                                         </p>
+
+                                        {expandedId === notification.id && notification.attachments.length > 0 ? (
+                                            <NotificationAttachmentsSection
+                                                messageId={notification.id}
+                                                attachments={notification.attachments}
+                                            />
+                                        ) : null}
 
                                         {expandedId === notification.id && (
                                             <div className="mt-3 pt-3 border-t border-border-default animate-content-fade-in">

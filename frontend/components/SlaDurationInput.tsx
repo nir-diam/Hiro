@@ -29,10 +29,11 @@ const SlaDurationInput: React.FC<SlaDurationInputProps> = ({
   title,
 }) => {
   const normalizedUnit = normalizeSlaUnit(unit);
+  const numericValue = Number.isFinite(value) ? value : 0;
 
   return (
     <div
-      className={`flex items-center gap-2 bg-bg-subtle/50 px-2 py-1 rounded-lg border border-border-default ${className}`}
+      className={`flex items-center gap-1.5 bg-bg-subtle/50 px-2 py-1 rounded-lg border border-border-default min-w-[8.75rem] ${className}`}
     >
       <button
         type="button"
@@ -46,9 +47,9 @@ const SlaDurationInput: React.FC<SlaDurationInputProps> = ({
       <input
         type="number"
         min={min}
-        value={value}
+        value={numericValue}
         onChange={(e) => onValueChange(parseInt(e.target.value, 10) || 0)}
-        className={`w-full bg-transparent text-sm font-semibold text-center outline-none ${inputClassName}`}
+        className={`w-10 min-w-[2.5rem] shrink-0 bg-transparent text-sm font-semibold text-center outline-none ${inputClassName}`}
         title={title}
       />
       <span className="text-xs text-text-muted whitespace-nowrap shrink-0 min-w-[2.5rem]">

@@ -183,7 +183,37 @@ const getClientIdForJobClientLabel = async (label) => {
       attributes: ['id'],
     });
   }
-  return client ? String(client.id) : null;
+  if (client) return String(client.id);
+
+  const { namesLikelySameCompany, companyNameLookupVariants } = require('../utils/companyNameMatch');
+  const variants = companyNameLookupVariants(trimmed);
+  if (variants.length) {
+    const or = [];
+    for (const v of variants.slice(0, 20)) {
+      or.push({ name: { [Op.iLike]: `%${v}%` } });
+      or.push({ displayName: { [Op.iLike]: `%${v}%` } });
+    }
+    const candidates = await Client.findAll({
+      where: { [Op.or]: or },
+      attributes: ['id', 'name', 'displayName'],
+      limit: 50,
+    });
+    for (const row of candidates) {
+      const name = String(row.displayName || row.name || '').trim();
+      if (namesLikelySameCompany(trimmed, name)) return String(row.id);
+    }
+  }
+
+  const allClients = await Client.findAll({
+    where: { isActive: true },
+    attributes: ['id', 'name', 'displayName'],
+  });
+  for (const row of allClients) {
+    const name = String(row.displayName || row.name || '').trim();
+    if (namesLikelySameCompany(trimmed, name)) return String(row.id);
+  }
+
+  return null;
 };
 
 /** Job inbox local-part (e.g. humand+220029@… → humand, humand@app… → humand). */

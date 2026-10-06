@@ -6,8 +6,9 @@ import {
     PaintBrushIcon, CheckCircleIcon, ArrowLeftIcon, 
     LockClosedIcon, BanknotesIcon, BriefcaseIcon, CloudArrowUpIcon,
     PlusIcon, XMarkIcon, ClipboardDocumentListIcon, ChatBubbleBottomCenterTextIcon,
-    Cog6ToothIcon, CircleStackIcon, ViewColumnsIcon, Squares2X2Icon,
+    Cog6ToothIcon, CircleStackIcon, ViewColumnsIcon, Squares2X2Icon, ComputerDesktopIcon,
 } from './Icons';
+import { CLIENT_MODULE_DIGITAL_SCREENING } from '../utils/clientModules';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 
@@ -78,6 +79,7 @@ const DEFAULT_MODULES: Record<string, boolean> = {
     ai_parsing: false,
     hiro_ai: false,
     portal: false,
+    [CLIENT_MODULE_DIGITAL_SCREENING]: false,
 };
 
 const mergeModules = (raw: unknown): Record<string, boolean> => {
@@ -753,6 +755,7 @@ const AdminClientFormView: React.FC = () => {
             ai_parsing: false,
             hiro_ai: false,
             portal: false,
+            [CLIENT_MODULE_DIGITAL_SCREENING]: false,
         },
         users: []
     });
@@ -1173,6 +1176,14 @@ const AdminClientFormView: React.FC = () => {
                                             icon={<Cog6ToothIcon className="w-6 h-6"/>}
                                             isEnabled={!!formData.modules.settings}
                                             onToggle={() => toggleModule('settings')}
+                                        />
+                                        <ModuleCard
+                                            title="שאלון דיגיטלי (אוטומטי)"
+                                            description="שאלון סינון אוטומטי למועמדים לאחר הגשה — טקסט, כן/לא, וידאו ושאלות פוסלות."
+                                            icon={<ComputerDesktopIcon className="w-6 h-6" />}
+                                            isEnabled={!!formData.modules[CLIENT_MODULE_DIGITAL_SCREENING]}
+                                            onToggle={() => toggleModule(CLIENT_MODULE_DIGITAL_SCREENING)}
+                                            isPremium
                                         />
                                     </div>
                                 </div>

@@ -68,6 +68,27 @@ const Tag = sequelize.define(
       allowNull: true,
       field: 'updated_by',
     },
+    isProtected: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+      field: 'is_protected',
+    },
+    protectedAt: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      field: 'protected_at',
+    },
+    protectedBy: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      field: 'protected_by',
+    },
+    protectionNote: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: 'protection_note',
+    },
   },
   {
     tableName: 'tags',

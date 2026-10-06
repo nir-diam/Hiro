@@ -100,6 +100,7 @@ const list = async (req, res) => {
       activityTo: req.query.activityTo,
       sort: req.query.sort,
       direction: req.query.direction,
+      isProtected: req.query.isProtected ?? req.query.protected,
     };
     const { rows, total, page: currentPage, limit: currentLimit } = await tagService.list(options);
     const sanitized = rows.map(sanitizeTagPayload);
@@ -260,7 +261,10 @@ const update = async (req, res) => {
       });
     }
 
-    res.status(err.status || 400).json({ message: err.message || 'Update failed' });
+    res.status(err.status || 400).json({
+      message: err.message || 'Update failed',
+      ...(err.code ? { code: err.code } : {}),
+    });
   }
 };
 
@@ -307,7 +311,10 @@ const remove = async (req, res) => {
       });
     }
 
-    res.status(err.status || 400).json({ message: err.message || 'Delete failed' });
+    res.status(err.status || 400).json({
+      message: err.message || 'Delete failed',
+      ...(err.code ? { code: err.code } : {}),
+    });
   }
 };
 
@@ -817,7 +824,26 @@ const listAiDecisions = async (req, res) => {
       ? req.query.statusBuckets.split(',').filter(Boolean)
       : [];
     const approvalStatus = req.query.approvalStatus || 'all';
-    const listOpts = { page, limit, decision, date, dateFrom, dateTo, reviewStatus, reviewerAction, search, type, hesitation, sortOrder, statusBuckets, approvalStatus };
+    const autoRefreshHybrid =
+      req.query.autoRefreshHybrid === '1' ||
+      req.query.autoRefreshHybrid === 'true';
+    const listOpts = {
+      page,
+      limit,
+      decision,
+      date,
+      dateFrom,
+      dateTo,
+      reviewStatus,
+      reviewerAction,
+      search,
+      type,
+      hesitation,
+      sortOrder,
+      statusBuckets,
+      approvalStatus,
+      autoRefreshHybrid,
+    };
 
     let payload = await tagCorrectionAgentService.listDecisions(listOpts);
     let backfill = null;
@@ -834,7 +860,7 @@ const listAiDecisions = async (req, res) => {
       }
     }
 
-    res.json({ ...payload, backfill });
+    res.json({ ...payload, backfill, hybridRefresh: payload.hybridRefresh ?? null });
   } catch (err) {
     console.error('[tagController.listAiDecisions]', err);
     res.status(500).json({ message: 'Failed to load AI tag decisions' });
@@ -909,6 +935,17 @@ const backfillAutoMerge = async (req, res) => {
   }
 };
 
+const refreshHybridSnapshots = async (req, res) => {
+  try {
+    const limit = Number(req.body?.limit) || Number(req.query?.limit) || 100;
+    const result = await tagCorrectionAgentService.refreshHybridSnapshots(limit);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.refreshHybridSnapshots]', err);
+    res.status(500).json({ message: 'Failed to refresh hybrid tag snapshots' });
+  }
+};
+
 const rebuildEmbeddings = async (_req, res) => {
   try {
     await tagEmbeddingService.rebuildAllEmbeddings();
@@ -974,7 +1011,46 @@ const mergeTags = async (req, res) => {
     res.json(result);
   } catch (err) {
     console.error('[tagController.mergeTags]', err);
-    res.status(err.status || 500).json({ message: err.message || 'Failed to merge tags' });
+    res.status(err.status || 500).json({
+      message: err.message || 'Failed to merge tags',
+      ...(err.code ? { code: err.code } : {}),
+    });
+  }
+};
+
+const protectTags = async (req, res) => {
+  try {
+    const actor = resolveTagActor(req);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const note = req.body?.note ?? req.body?.protectionNote;
+    const result = await tagService.protectCatalogTags(ids, {
+      note,
+      actorUserId: actor.actingUser,
+      actorName: actor.actorName,
+      actorEmail: actor.actorEmail,
+      req,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.protectTags]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to protect tags' });
+  }
+};
+
+const unprotectTags = async (req, res) => {
+  try {
+    const actor = resolveTagActor(req);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const result = await tagService.unprotectCatalogTags(ids, {
+      actorUserId: actor.actingUser,
+      actorName: actor.actorName,
+      actorEmail: actor.actorEmail,
+      req,
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.unprotectTags]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to unprotect tags' });
   }
 };
 
@@ -1011,10 +1087,13 @@ module.exports = {
   getAiDecisionOccurrences,
   backfillAiDecisions,
   backfillAutoMerge,
+  refreshHybridSnapshots,
   approveAiDecision,
   updateAiDecisionComments,
   updateAiDecisionFields,
   mergeTags,
+  protectTags,
+  unprotectTags,
   blacklistTags,
 };
 

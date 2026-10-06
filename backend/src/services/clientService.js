@@ -4,6 +4,7 @@ const ClientOrganizationLink = require('../models/ClientOrganizationLink');
 const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const organizationService = require('./organizationService');
+const organizationClientLinkPipelineService = require('./organizationClientLinkPipelineService');
 const clientOrganizationSyncService = require('./clientOrganizationSyncService');
 
 const isPlatformAdmin = (dbUser) =>
@@ -255,11 +256,21 @@ const attachOrganizationAfterCreate = async (client, payload = {}, options = {})
 const linkOrganizationForClient = async (clientId, payload = {}) => {
   const client = await getById(clientId);
   const linkedId = coerceString(payload.linkedOrganizationId) || coerceString(payload.organizationId);
+  const companyName = coerceString(payload.name) || client?.name || '';
+
+  console.log('[orgLinkPipeline] linkOrganizationForClient called', {
+    clientId,
+    companyName,
+    linkedOrganizationId: linkedId || null,
+    mode: linkedId ? 'link_existing' : 'new_company',
+  });
 
   if (linkedId) {
+    console.log(`[orgLinkPipeline] linking client ${clientId} to existing org ${linkedId}`);
     await clientOrganizationSyncService.linkClientToOrganization(clientId, linkedId, { fullSync: true });
     const json = await getByIdWithLinks(clientId);
     json.lastLinkedOrganizationId = linkedId;
+    console.log(`[orgLinkPipeline] ✓ linked client ${clientId} → org ${linkedId}`);
     return json;
   }
 
@@ -275,20 +286,38 @@ const linkOrganizationForClient = async (clientId, payload = {}) => {
     await client.update(clientUpdates);
   }
 
-  const tmp = await organizationService.stageOrganizationFromClientCreate({
+  const pipelineResult = await organizationClientLinkPipelineService.processNewCompanyForClientLink({
     ...payload,
     clientId,
     name: payload.name || client.name,
   });
 
-  if (tmp?.id) {
-    await clientOrganizationSyncService.ensureOrganizationTmpLink(clientId, tmp.id, { isPrimary: true });
+  if (pipelineResult?.organization?.id) {
+    const orgId = String(pipelineResult.organization.id);
+    console.log(`[orgLinkPipeline] linking client ${clientId} to new org ${orgId} (post-enrichment)`);
+    await clientOrganizationSyncService.linkClientToOrganization(clientId, orgId, { fullSync: true });
     const json = await getByIdWithLinks(clientId);
-    json.lastLinkedOrganizationTmpId = String(tmp.id);
+    json.lastLinkedOrganizationId = orgId;
+    json.orgPipeline = pipelineResult.orgPipeline || null;
+    console.log(`[orgLinkPipeline] ✓ client ${clientId} linked to enriched org ${orgId}`, json.orgPipeline);
     return json;
   }
 
-  return getByIdWithLinks(clientId);
+  const tmp = pipelineResult?.organizationTmp;
+  if (tmp?.id) {
+    console.log(`[orgLinkPipeline] linking client ${clientId} to OrganizationTmp ${tmp.id}`);
+    await clientOrganizationSyncService.ensureOrganizationTmpLink(clientId, tmp.id, { isPrimary: true });
+    const json = await getByIdWithLinks(clientId);
+    json.lastLinkedOrganizationTmpId = String(tmp.id);
+    json.orgPipeline = pipelineResult.orgPipeline || null;
+    console.log(`[orgLinkPipeline] ✓ client ${clientId} staged via tmp ${tmp.id}`, json.orgPipeline);
+    return json;
+  }
+
+  console.warn(`[orgLinkPipeline] pipeline returned no org/tmp for client ${clientId}`, pipelineResult?.orgPipeline);
+  const json = await getByIdWithLinks(clientId);
+  json.orgPipeline = pipelineResult?.orgPipeline || null;
+  return json;
 };
 
 const getByIdWithLinks = async (id, opts = {}) => {

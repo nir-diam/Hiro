@@ -24,6 +24,8 @@ import {
     stickyTableHeaderCellClass,
 } from '../utils/stickyTableHeader';
 import { blacklistTags } from '../services/tagCorrectionsApi';
+import { protectTags, unprotectTags } from '../services/tagProtectionApi';
+import { TagProtectedLock } from './TagProtectedLock';
 
 const normalizePicklistOptions = (rows: { label?: string; value?: string }[]) =>
     rows
@@ -173,7 +175,21 @@ interface Tag {
     createdBy?: string;
     updatedBy?: string;
     internalNote?: string;
+    isProtected?: boolean;
+    protectionNote?: string | null;
+    protectedAt?: string | null;
 }
+
+const partitionSelectedByProtection = (allTags: Tag[], selected: Set<string>) => {
+    const protectedIds: string[] = [];
+    const mutableIds: string[] = [];
+    for (const id of selected) {
+        const tag = allTags.find((t) => t.id === id);
+        if (tag?.isProtected) protectedIds.push(id);
+        else mutableIds.push(id);
+    }
+    return { protectedIds, mutableIds };
+};
 
 interface TagHistoryEntry {
     id: string;
@@ -1486,7 +1502,12 @@ function clearAdminTagsFilterStorage() {
     }
 }
 
-const AdminTagsView: React.FC = () => {
+type AdminTagsViewProps = {
+    /** When true, list only isProtected tags (תגיות מוגנות tab). */
+    protectedOnly?: boolean;
+};
+
+const AdminTagsView: React.FC<AdminTagsViewProps> = ({ protectedOnly = false }) => {
     const [searchParams] = useSearchParams();
     const readUrlSearch = () => (searchParams.get('search') || searchParams.get('q') || '').trim();
     const navigationType = useNavigationType();
@@ -1514,6 +1535,10 @@ const AdminTagsView: React.FC = () => {
     const [isEnriching, setIsEnriching] = useState(false);
     const [isBulkDeleting, setIsBulkDeleting] = useState(false);
     const [isBulkBlacklisting, setIsBulkBlacklisting] = useState(false);
+    const [isProtectModalOpen, setIsProtectModalOpen] = useState(false);
+    const [protectNote, setProtectNote] = useState('');
+    const [isBulkProtecting, setIsBulkProtecting] = useState(false);
+    const [isBulkUnprotecting, setIsBulkUnprotecting] = useState(false);
     const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
     const [isMergingTags, setIsMergingTags] = useState(false);
     const [mergeError, setMergeError] = useState<string | null>(null);
@@ -1782,11 +1807,21 @@ const AdminTagsView: React.FC = () => {
         switch (key) {
             case 'tagKey':
                 return (
-                    <td className="p-4 font-mono text-xs text-primary-700 font-semibold truncate">{tag.tagKey}</td>
+                    <td className="p-4 font-mono text-xs text-primary-700 font-semibold truncate">
+                        <span className="inline-flex items-center gap-1.5 min-w-0">
+                            <TagProtectedLock tag={tag} />
+                            <span className="truncate">{tag.tagKey}</span>
+                        </span>
+                    </td>
                 );
             case 'displayNameHe':
                 return (
-                    <td className="p-4 font-bold text-text-default break-words">{tag.displayNameHe}</td>
+                    <td className="p-4 font-bold text-text-default break-words">
+                        <span className="inline-flex items-center gap-1.5">
+                            <TagProtectedLock tag={tag} />
+                            {tag.displayNameHe}
+                        </span>
+                    </td>
                 );
             case 'displayNameEn':
                 return (
@@ -1813,8 +1848,8 @@ const AdminTagsView: React.FC = () => {
                             value={tag.status}
                             onChange={(e) => { e.stopPropagation(); handleInlineUpdate(tag.id, { status: e.target.value as TagStatus }); }}
                             onClick={(e) => e.stopPropagation()}
-                            disabled={inlineLoading[tag.id]}
-                            className="w-full bg-bg-input border border-border-default rounded-xl py-1.5 px-3 text-xs text-text-default"
+                            disabled={inlineLoading[tag.id] || tag.isProtected}
+                            className="w-full bg-bg-input border border-border-default rounded-xl py-1.5 px-3 text-xs text-text-default disabled:opacity-60"
                         >
                             {statusOptions.map(option => (
                                 <option key={option} value={option}>{option}</option>
@@ -1824,8 +1859,8 @@ const AdminTagsView: React.FC = () => {
                             value={tag.qualityState}
                             onChange={(e) => { e.stopPropagation(); handleInlineUpdate(tag.id, { qualityState: e.target.value as QualityState }); }}
                             onClick={(e) => e.stopPropagation()}
-                            disabled={inlineLoading[tag.id]}
-                            className="w-full bg-bg-input border border-border-default rounded-xl py-1.5 px-3 text-xs text-text-default"
+                            disabled={inlineLoading[tag.id] || tag.isProtected}
+                            className="w-full bg-bg-input border border-border-default rounded-xl py-1.5 px-3 text-xs text-text-default disabled:opacity-60"
                         >
                             {qualityOptions.map(option => (
                                 <option key={option} value={option}>{option}</option>
@@ -1893,6 +1928,11 @@ const AdminTagsView: React.FC = () => {
     };
 
     const handleInlineUpdate = async (tagId: string, updates: Partial<Pick<Tag, 'status' | 'qualityState'>>) => {
+        const target = tags.find((t) => t.id === tagId);
+        if (target?.isProtected) {
+            alert('לא ניתן לעדכן את התגית כל עוד היא נמצאת בתגיות מוגנות');
+            return;
+        }
         setInlineLoading(prev => ({ ...prev, [tagId]: true }));
         try {
             const res = await fetch(`${apiBase}/api/tags/${tagId}`, {
@@ -1954,6 +1994,7 @@ const AdminTagsView: React.FC = () => {
             sortKey: sortConfig.key,
             sortDir: sortConfig.direction,
             pageSize,
+            protectedOnly,
         }),
         [
             debouncedSearchTerm,
@@ -1967,6 +2008,7 @@ const AdminTagsView: React.FC = () => {
             sortConfig.key,
             sortConfig.direction,
             pageSize,
+            protectedOnly,
         ],
     );
     const prevListQueryKeyRef = useRef(listQueryKey);
@@ -1995,6 +2037,7 @@ const AdminTagsView: React.FC = () => {
                 : currentSortKey;
             params.set('sort', serverSortKey);
             params.set('direction', sortConfig.direction);
+            if (protectedOnly) params.set('isProtected', 'true');
             const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, {
                 cache: 'no-store',
             });
@@ -2033,6 +2076,7 @@ const AdminTagsView: React.FC = () => {
         sortConfig.key,
         sortConfig.direction,
         refreshUsageCounts,
+        protectedOnly,
     ]);
 
     useEffect(() => {
@@ -2832,9 +2876,14 @@ const AdminTagsView: React.FC = () => {
 
     const handleBulkDelete = async () => {
         if (selectedTagIds.size === 0) return;
-        if (!window.confirm(`האם למחוק ${selectedTagIds.size} תגיות שנבחרו?`)) return;
+        const { mutableIds, protectedIds } = partitionSelectedByProtection(tags, selectedTagIds);
+        if (!mutableIds.length) {
+            alert(`${protectedIds.length} תגיות מוגנות דולגו — לא ניתן למחוק תגית מוגנת.`);
+            return;
+        }
+        if (!window.confirm(`האם למחוק ${mutableIds.length} תגיות שנבחרו?`)) return;
         setIsBulkDeleting(true);
-        const idsToDelete = Array.from(selectedTagIds) as string[];
+        const idsToDelete = mutableIds;
         const preserved = [...tags];
         setTags(prev => prev.filter(t => !selectedTagIds.has(t.id)));
         setSelectedTagIds(new Set<string>());
@@ -2847,6 +2896,9 @@ const AdminTagsView: React.FC = () => {
                     err.failingId = id;
                     throw err;
                 }
+            }
+            if (protectedIds.length) {
+                alert(`${protectedIds.length} תגיות מוגנות דולגו`);
             }
         } catch (err: any) {
             const message: string = err instanceof Error ? err.message : 'Delete failed';
@@ -2868,10 +2920,15 @@ const AdminTagsView: React.FC = () => {
 
     const handleBulkBlacklist = async () => {
         if (selectedTagIds.size === 0) return;
-        if (!window.confirm(`האם להעביר ${selectedTagIds.size} תגיות לרשימה שחורה?`)) return;
+        const { mutableIds, protectedIds } = partitionSelectedByProtection(tags, selectedTagIds);
+        if (!mutableIds.length) {
+            alert(`${protectedIds.length} תגיות מוגנות דולגו — לא ניתן להעביר תגית מוגנת לרשימה שחורה.`);
+            return;
+        }
+        if (!window.confirm(`האם להעביר ${mutableIds.length} תגיות לרשימה שחורה?`)) return;
 
         setIsBulkBlacklisting(true);
-        const idsToBlacklist = Array.from(selectedTagIds) as string[];
+        const idsToBlacklist = mutableIds;
         const preserved = [...tags];
 
         try {
@@ -2891,14 +2948,15 @@ const AdminTagsView: React.FC = () => {
             setSelectedTagIds(new Set<string>());
 
             const skippedCount = result.skipped?.length || 0;
+            const protectedMsg = protectedIds.length ? ` ${protectedIds.length} תגיות מוגנות דולגו.` : '';
             if (result.count > 0) {
                 alert(
                     skippedCount > 0
-                        ? `${result.count} תגיות הועברו לרשימה שחורה. ${skippedCount} דולגו (כבר ברשימה או לא נמצאו).`
-                        : `${result.count} תגיות הועברו לרשימה שחורה.`,
+                        ? `${result.count} תגיות הועברו לרשימה שחורה. ${skippedCount} דולגו (כבר ברשימה או לא נמצאו).${protectedMsg}`
+                        : `${result.count} תגיות הועברו לרשימה שחורה.${protectedMsg}`,
                 );
             } else {
-                alert('לא הועברו תגיות — ייתכן שכבר נמצאות ברשימה השחורה.');
+                alert(`לא הועברו תגיות — ייתכן שכבר נמצאות ברשימה השחורה.${protectedMsg}`);
             }
         } catch (err: unknown) {
             setTags(preserved);
@@ -2908,14 +2966,86 @@ const AdminTagsView: React.FC = () => {
         }
     };
 
+    const handleOpenProtectModal = () => {
+        const { mutableIds, protectedIds } = partitionSelectedByProtection(tags, selectedTagIds);
+        if (!mutableIds.length) {
+            alert(protectedIds.length ? 'כל התגיות שנבחרו כבר מוגנות.' : 'לא נבחרו תגיות.');
+            return;
+        }
+        setProtectNote('');
+        setIsProtectModalOpen(true);
+    };
+
+    const handleConfirmProtect = async () => {
+        const note = protectNote.trim();
+        if (!note) {
+            alert('יש להזין הערה — למה התגית מוגנת.');
+            return;
+        }
+        const { mutableIds } = partitionSelectedByProtection(tags, selectedTagIds);
+        if (!mutableIds.length) return;
+        setIsBulkProtecting(true);
+        try {
+            const result = await protectTags(mutableIds, note);
+            const protectedSet = new Set(result.protected || []);
+            setTags((prev) =>
+                prev.map((t) =>
+                    protectedSet.has(t.id)
+                        ? { ...t, isProtected: true, protectionNote: note }
+                        : t,
+                ),
+            );
+            setSelectedTagIds(new Set());
+            setIsProtectModalOpen(false);
+            alert(`${result.count} תגיות הוגדרו כמוגנות.`);
+        } catch (err: unknown) {
+            alert(err instanceof Error ? err.message : 'הוספה לתגיות מוגנות נכשלה');
+        } finally {
+            setIsBulkProtecting(false);
+        }
+    };
+
+    const handleBulkUnprotect = async () => {
+        if (selectedTagIds.size === 0) return;
+        const ids = Array.from(selectedTagIds);
+        if (!window.confirm(`לשחרר הגנה מ-${ids.length} תגיות?`)) return;
+        setIsBulkUnprotecting(true);
+        try {
+            const result = await unprotectTags(ids);
+            const unprotectedSet = new Set(result.unprotected || []);
+            if (protectedOnly) {
+                setTags((prev) => prev.filter((t) => !unprotectedSet.has(t.id)));
+            } else {
+                setTags((prev) =>
+                    prev.map((t) =>
+                        unprotectedSet.has(t.id)
+                            ? { ...t, isProtected: false, protectionNote: null }
+                            : t,
+                    ),
+                );
+            }
+            setSelectedTagIds(new Set());
+            alert(`${result.count} תגיות שוחררו מהגנה.`);
+        } catch (err: unknown) {
+            alert(err instanceof Error ? err.message : 'שחרור הגנה נכשל');
+        } finally {
+            setIsBulkUnprotecting(false);
+        }
+    };
+
     // --- AI Enrichment Logic ---
 
     const handleBulkEnrich = async () => {
         if (selectedTagIds.size === 0) return;
+        const { mutableIds, protectedIds } = partitionSelectedByProtection(tags, selectedTagIds);
+        if (!mutableIds.length) {
+            alert(`${protectedIds.length} תגיות מוגנות דולגו — לא ניתן להעשיר תגית מוגנת.`);
+            return;
+        }
         setIsEnriching(true);
         
         try {
-            const selectedTagsList = tags.filter(t => selectedTagIds.has(t.id));
+            const selectedTagsList = tags.filter(t => mutableIds.includes(t.id));
 
             const res = await fetch(`${apiBase}/api/tags/ai/enrich`, {
                 method: 'POST',
@@ -2981,10 +3111,19 @@ const AdminTagsView: React.FC = () => {
                 const payload = await res.json().catch(() => ({}));
                 throw new Error(payload.message || 'Merge failed');
             }
-            const mergedSourceIds = new Set(merges.map((entry) => entry.sourceTagId));
+            const payload = await res.json();
+            const mergedSourceIds = new Set(
+                (payload.results || merges).map((entry: { sourceTagId: string }) => entry.sourceTagId),
+            );
             setTags((prev) => prev.filter((tag) => !mergedSourceIds.has(tag.id)));
             setSelectedTagIds(new Set<string>());
             setIsMergeModalOpen(false);
+            const skippedProtected = Array.isArray(payload.skipped)
+                ? payload.skipped.filter((s: { reason?: string }) => s.reason === 'TAG_PROTECTED').length
+                : 0;
+            if (skippedProtected > 0) {
+                alert(`${skippedProtected} תגיות מוגנות דולגו`);
+            }
             await loadTags();
         } catch (err: any) {
             setMergeError(err?.message || 'מיזוג התגיות נכשל');
@@ -3236,6 +3375,26 @@ const AdminTagsView: React.FC = () => {
                     <div className="flex items-center gap-4">
                         <span className="font-bold text-primary-900 text-sm px-2">{selectedTagIds.size} נבחרו</span>
                         <div className="h-6 w-px bg-primary-200"></div>
+                        {protectedOnly ? (
+                            <button
+                                type="button"
+                                onClick={() => void handleBulkUnprotect()}
+                                disabled={isBulkUnprotecting}
+                                className="flex items-center gap-2 bg-white text-amber-800 font-bold py-1.5 px-4 rounded-lg shadow-sm border border-amber-200 hover:bg-amber-50 transition disabled:opacity-50"
+                            >
+                                {isBulkUnprotecting ? 'משחרר...' : 'שחרור מהגנה'}
+                            </button>
+                        ) : (
+                            <button
+                                type="button"
+                                onClick={handleOpenProtectModal}
+                                disabled={isBulkProtecting}
+                                className="flex items-center gap-2 bg-white text-amber-800 font-bold py-1.5 px-4 rounded-lg shadow-sm border border-amber-200 hover:bg-amber-50 transition disabled:opacity-50"
+                            >
+                                {isBulkProtecting ? 'שומר...' : 'הוספה לתגיות מוגנות'}
+                            </button>
+                        )}
+                        {!protectedOnly && (
                         <button
                             type="button"
                             onClick={() => void handleBulkBlacklist()}
@@ -3245,6 +3404,8 @@ const AdminTagsView: React.FC = () => {
                             <NoSymbolIcon className="w-4 h-4" />
                             {isBulkBlacklisting ? 'מעביר...' : 'העבר לרשימה שחורה'}
                         </button>
+                        )}
+                        {!protectedOnly && (
                         <button 
                             onClick={handleBulkEnrich} 
                             disabled={isEnriching}
@@ -3259,6 +3420,8 @@ const AdminTagsView: React.FC = () => {
                                 </>
                             )}
                         </button>
+                        )}
+                        {!protectedOnly && (
                         <button
                             onClick={handleBulkDelete}
                             disabled={isBulkDeleting}
@@ -3266,6 +3429,7 @@ const AdminTagsView: React.FC = () => {
                         >
                             {isBulkDeleting ? 'מוחק...' : 'מחק נבחרים'}
                         </button>
+                        )}
                         <button
                             onClick={handleDownloadSelectedXlsx}
                             className="flex items-center gap-2 bg-white text-text-default font-bold py-1.5 px-4 rounded-lg shadow-sm border border-border-default hover:bg-bg-hover transition"
@@ -3273,6 +3437,7 @@ const AdminTagsView: React.FC = () => {
                             <ArrowDownTrayIcon className="w-4 h-4" />
                             <span>הורד XLSX</span>
                         </button>
+                        {!protectedOnly && (
                         <button
                             onClick={handleOpenMergeModal}
                             className="flex items-center gap-2 bg-white text-primary-700 font-bold py-1.5 px-4 rounded-lg shadow-sm border border-primary-200 hover:bg-primary-50 transition"
@@ -3280,8 +3445,52 @@ const AdminTagsView: React.FC = () => {
                             <TagIcon className="w-4 h-4" />
                             <span>מיזוג לתגית אחרת</span>
                         </button>
+                        )}
                     </div>
                     <button onClick={() => setSelectedTagIds(new Set<string>())} className="text-text-muted hover:text-primary-600 text-sm font-medium">ביטול בחירה</button>
+                </div>
+            )}
+
+            {isProtectModalOpen && (
+                <div
+                    className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4"
+                    dir="rtl"
+                    onClick={() => !isBulkProtecting && setIsProtectModalOpen(false)}
+                >
+                    <div
+                        className="bg-bg-card rounded-2xl shadow-xl border border-border-default max-w-md w-full p-5 space-y-4"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <h3 className="text-lg font-bold text-text-default">הוספה לתגיות מוגנות</h3>
+                        <p className="text-sm text-text-muted">
+                            התגיות יישארו ברשימה הראשית עם סימן מנעול. יש להזין סיבת הגנה (חובה).
+                        </p>
+                        <textarea
+                            value={protectNote}
+                            onChange={(e) => setProtectNote(e.target.value)}
+                            rows={4}
+                            className="w-full bg-bg-input border border-border-default rounded-xl p-3 text-sm"
+                            placeholder="למה התגית מוגנת?"
+                        />
+                        <div className="flex gap-2 justify-end">
+                            <button
+                                type="button"
+                                disabled={isBulkProtecting}
+                                onClick={() => setIsProtectModalOpen(false)}
+                                className="px-4 py-2 rounded-xl border border-border-default font-semibold text-text-muted"
+                            >
+                                ביטול
+                            </button>
+                            <button
+                                type="button"
+                                disabled={isBulkProtecting}
+                                onClick={() => void handleConfirmProtect()}
+                                className="px-4 py-2 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 disabled:opacity-50"
+                            >
+                                {isBulkProtecting ? 'שומר...' : 'אישור'}
+                            </button>
+                        </div>
+                    </div>
                 </div>
             )}
 

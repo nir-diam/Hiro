@@ -64,6 +64,7 @@ export interface Contact {
     id: string;
     clientId?: string;
     organizationId?: string | null;
+    organizationTmpId?: string | null;
     name: string;
     role: string;
     clientName: string;

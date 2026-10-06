@@ -1,6 +1,7 @@
 const Tag = require('../models/Tag');
 const tagService = require('./tagService');
 const agentEntityAuditService = require('./agentEntityAuditService');
+const { isTagProtectedRow } = require('../utils/tagProtection');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -128,6 +129,13 @@ const mergeTags = async (body, req) => {
       err.status = 404;
       throw err;
     }
+    if (isTagProtectedRow(sourceTag)) {
+      const err = new Error('לא ניתן לעדכן את התגית כל עוד היא נמצאת בתגיות מוגנות');
+      err.status = 403;
+      err.code = 'TAG_PROTECTED';
+      err.skipped = [{ sourceTagId: entry.sourceTagId, reason: 'TAG_PROTECTED' }];
+      throw err;
+    }
     auditSnapshots.push({
       entry,
       sourceTag,
@@ -175,7 +183,114 @@ const mergeTags = async (body, req) => {
   return result;
 };
 
-const TAG_EXECUTE_OPERATIONS = new Set(['add_synonyms', 'remove_synonyms']);
+const TAG_EXECUTE_OPERATIONS = new Set(['add_synonyms', 'remove_synonyms', 'update_status']);
+
+const TAG_EXECUTE_STATUSES = new Set(['active', 'draft']);
+const TAG_EXECUTE_QUALITY_STATES = new Set(['verified', 'needs_review']);
+
+const pickTagEnrichSnapshot = (tag) => {
+  const dto = toPublicTagDto(tag);
+  return {
+    tagKey: dto.tagKey ?? null,
+    category: dto.category ?? null,
+    synonyms: Array.isArray(dto.synonyms) ? dto.synonyms : [],
+  };
+};
+
+const buildEnrichApplyPayload = (suggestion) => ({
+  tagKey: suggestion.tagKey,
+  displayNameHe: suggestion.displayNameHe,
+  displayNameEn: suggestion.displayNameEn,
+  category: suggestion.category,
+  type: suggestion.type,
+  descriptionHe: suggestion.descriptionHe || '',
+  domains: suggestion.domains || [],
+  synonyms: suggestion.synonyms || [],
+  status: 'draft',
+  qualityState: 'needs_review',
+  source: 'ai',
+});
+
+/**
+ * Deep enrichment for a single catalog tag — same AI path as AdminTagsView bulk enrich,
+ * with full tag context (not bare names). Persists like "apply suggestions" in the UI.
+ */
+const enrichTag = async (tagId, req) => {
+  const safeId = assertUuid(tagId, 'tagId');
+  const beforeRow = await Tag.findByPk(safeId);
+  if (!beforeRow) {
+    const err = new Error('Tag not found');
+    err.status = 404;
+    throw err;
+  }
+  if (isTagProtectedRow(beforeRow)) {
+    const err = new Error('לא ניתן לעדכן את התגית כל עוד היא נמצאת בתגיות מוגנות');
+    err.status = 403;
+    err.code = 'TAG_PROTECTED';
+    throw err;
+  }
+
+  const before = pickTagEnrichSnapshot(beforeRow);
+  const tagContext = toPublicTagDto(beforeRow);
+  const suggestions = await tagService.enrichSuggestions([tagContext]);
+  const suggestion =
+    suggestions.find((row) => String(row?.id || '') === safeId) || suggestions[0];
+  if (!suggestion) {
+    const err = new Error('AI enrichment returned no suggestion');
+    err.status = 502;
+    throw err;
+  }
+
+  const mergedSuggestion = { ...suggestion, id: safeId };
+  const applyPayload = buildEnrichApplyPayload(mergedSuggestion);
+
+  const afterRow = await tagService.update(safeId, applyPayload, {
+    actingUser: req?.agent?.username || 'agent',
+    updatedBy: req?.agent?.username || 'agent',
+  });
+
+  const after = pickTagEnrichSnapshot(afterRow);
+  const tagName =
+    afterRow.displayNameHe || afterRow.displayNameEn || afterRow.tagKey || safeId;
+
+  await agentEntityAuditService.recordAgentEntityAudit(req, {
+    action: 'update',
+    entityType: 'Tag',
+    entityId: safeId,
+    entityName: tagName,
+    description: `Agent deep enrichment for "${tagName}"`,
+    before: beforeRow,
+    after: afterRow,
+    trackedFields: [
+      'tagKey',
+      'category',
+      'synonyms',
+      'type',
+      'displayNameHe',
+      'displayNameEn',
+      'descriptionHe',
+      'domains',
+      'status',
+      'qualityState',
+      'source',
+    ],
+    metadata: {
+      operation: 'enrich',
+      before,
+      after,
+      tagKeyChanged: before.tagKey !== after.tagKey,
+      categoryChanged: before.category !== after.category,
+    },
+  });
+
+  return {
+    tagId: safeId,
+    enriched: true,
+    before,
+    after,
+    data: toPublicTagDto(afterRow),
+  };
+};
 
 const executeTag = async (tagId, body, req) => {
   const safeId = assertUuid(tagId, 'tagId');
@@ -246,6 +361,63 @@ const executeTag = async (tagId, body, req) => {
     };
   }
 
+  if (operation === 'update_status') {
+    const updates = {};
+    if (body?.status != null) {
+      const status = String(body.status).trim();
+      if (!TAG_EXECUTE_STATUSES.has(status)) {
+        const err = new Error(`Invalid status. Allowed: ${[...TAG_EXECUTE_STATUSES].join(', ')}`);
+        err.status = 400;
+        throw err;
+      }
+      updates.status = status;
+    }
+    if (body?.qualityState != null) {
+      const qualityState = String(body.qualityState).trim();
+      if (!TAG_EXECUTE_QUALITY_STATES.has(qualityState)) {
+        const err = new Error(
+          `Invalid qualityState. Allowed: ${[...TAG_EXECUTE_QUALITY_STATES].join(', ')}`,
+        );
+        err.status = 400;
+        throw err;
+      }
+      updates.qualityState = qualityState;
+    }
+    if (!Object.keys(updates).length) {
+      const err = new Error('At least one of status or qualityState is required');
+      err.status = 400;
+      throw err;
+    }
+
+    const after = await tagService.update(safeId, updates, {
+      actingUser: req?.agent?.username || 'agent',
+      updatedBy: req?.agent?.username || 'agent',
+    });
+    const tagName =
+      after.displayNameHe || after.displayNameEn || after.tagKey || safeId;
+
+    await agentEntityAuditService.recordAgentEntityAudit(req, {
+      action: 'update',
+      entityType: 'Tag',
+      entityId: safeId,
+      entityName: tagName,
+      description: `Agent updated status/quality for "${tagName}"`,
+      before,
+      after,
+      trackedFields: ['status', 'qualityState'],
+      metadata: {
+        operation: 'update_status',
+        ...updates,
+      },
+    });
+
+    return {
+      operation: 'update_status',
+      ...updates,
+      data: toPublicTagDto(after),
+    };
+  }
+
   if (operation === 'remove_synonyms') {
     const synonymIds = body?.synonymIds;
     if (!Array.isArray(synonymIds) || !synonymIds.length) {
@@ -292,5 +464,6 @@ module.exports = {
   listTags,
   getTag,
   mergeTags,
+  enrichTag,
   executeTag,
 };

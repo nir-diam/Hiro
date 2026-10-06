@@ -115,9 +115,26 @@ const linkOrganization = async (req, res) => {
       }
     }
 
+    const companyName = String(req.body?.name || req.body?.clientName || '').trim();
+    console.log('[orgLinkPipeline] POST /api/clients/:id/organization-link', {
+      clientId,
+      companyName: companyName || '(from client record)',
+      linkedOrganizationId: req.body?.linkedOrganizationId || req.body?.organizationId || null,
+      actorId: actor?.id || null,
+    });
+
     const client = await clientService.linkOrganizationForClient(clientId, req.body);
+
+    console.log('[orgLinkPipeline] organization-link response', {
+      clientId,
+      lastLinkedOrganizationId: client?.lastLinkedOrganizationId || null,
+      lastLinkedOrganizationTmpId: client?.lastLinkedOrganizationTmpId || null,
+      orgPipeline: client?.orgPipeline || null,
+    });
+
     res.json(client);
   } catch (err) {
+    console.error('[orgLinkPipeline] organization-link failed:', err?.message || err);
     res.status(err.status || 400).json({ message: err.message || 'Link failed' });
   }
 };

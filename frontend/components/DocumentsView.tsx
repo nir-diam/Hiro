@@ -1,5 +1,6 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ArrowDownTrayIcon, FolderIcon, DocumentIcon, PhotoIcon, ArchiveBoxIcon } from './Icons';
 import DocumentFormModal, { Document, DocumentType } from './DocumentFormModal';
 import { useLanguage } from '../context/LanguageContext';
@@ -53,6 +54,61 @@ const formatFileSize = (kilobytes: number) => {
 }
 
 const FILTER_ALL = 'הכול';
+const DOCUMENT_ACTIONS_MENU_WIDTH = 224;
+
+type DocumentActionsMenuProps = {
+    doc: BackendDoc;
+    position: { top: number; left: number; openAbove: boolean };
+    onEdit: (doc: BackendDoc) => void;
+    onDelete: (docId: string) => void;
+    t: (key: string) => string;
+};
+
+const DocumentActionsMenu: React.FC<DocumentActionsMenuProps> = ({ doc, position, onEdit, onDelete, t }) =>
+    createPortal(
+        <div
+            data-document-actions-menu
+            style={{
+                position: 'fixed',
+                top: position.top,
+                left: position.left,
+                width: DOCUMENT_ACTIONS_MENU_WIDTH,
+                transform: position.openAbove ? 'translateY(-100%)' : undefined,
+                zIndex: 9999,
+            }}
+            className="bg-bg-card rounded-xl shadow-2xl border border-border-default py-2 overflow-hidden"
+        >
+            <button
+                type="button"
+                onClick={() => onEdit(doc)}
+                className="w-full text-right flex items-center gap-3 px-5 py-3 text-base text-text-default hover:bg-bg-hover"
+            >
+                <PencilIcon className="w-5 h-5 shrink-0" /> {t('resume.edit')}
+            </button>
+            {doc.url ? (
+                <a
+                    href={doc.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full text-right flex items-center gap-3 px-5 py-3 text-base text-text-default hover:bg-bg-hover"
+                >
+                    <ArrowDownTrayIcon className="w-5 h-5 shrink-0" /> {t('resume.download')}
+                </a>
+            ) : (
+                <span className="w-full text-right flex items-center gap-3 px-5 py-3 text-base text-text-subtle opacity-60 cursor-not-allowed">
+                    <ArrowDownTrayIcon className="w-5 h-5 shrink-0" /> {t('resume.download')}
+                </span>
+            )}
+            <button
+                type="button"
+                onClick={() => onDelete(doc.id)}
+                className="w-full text-right flex items-center gap-3 px-5 py-3 text-base text-red-600 hover:bg-red-50"
+            >
+                <TrashIcon className="w-5 h-5 shrink-0" /> {t('resume.delete')}
+            </button>
+        </div>,
+        document.body,
+    );
 
 export interface DocumentsViewProps {
     candidateId?: string;
@@ -71,7 +127,28 @@ const DocumentsView: React.FC<DocumentsViewProps> = ({ candidateId, candidateNam
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingDoc, setEditingDoc] = useState<BackendDoc | null>(null);
     const [openMenuId, setOpenMenuId] = useState<string | null>(null);
-    const menuRef = useRef<HTMLDivElement>(null);
+    const [menuPos, setMenuPos] = useState<{ top: number; left: number; openAbove: boolean } | null>(null);
+    const menuButtonRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+
+    const updateMenuPos = useCallback((docId: string) => {
+        const btn = menuButtonRefs.current[docId];
+        if (!btn) return;
+        const rect = btn.getBoundingClientRect();
+        const left = Math.min(
+            Math.max(8, rect.right - DOCUMENT_ACTIONS_MENU_WIDTH),
+            window.innerWidth - DOCUMENT_ACTIONS_MENU_WIDTH - 8,
+        );
+        const openAbove = rect.top > 160;
+        setMenuPos({
+            top: openAbove ? rect.top - 8 : rect.bottom + 8,
+            left,
+            openAbove,
+        });
+    }, []);
+
+    const toggleMenu = (docId: string) => {
+        setOpenMenuId((prev) => (prev === docId ? null : docId));
+    };
 
     const resolvedId = candidateId && String(candidateId).trim() && String(candidateId) !== 'undefined' ? String(candidateId) : '';
 
@@ -167,14 +244,30 @@ const DocumentsView: React.FC<DocumentsViewProps> = ({ candidateId, candidateNam
     };
     
     useEffect(() => {
+        if (!openMenuId) {
+            setMenuPos(null);
+            return;
+        }
+        updateMenuPos(openMenuId);
+        const onScrollOrResize = () => updateMenuPos(openMenuId);
+        window.addEventListener('scroll', onScrollOrResize, true);
+        window.addEventListener('resize', onScrollOrResize);
+        return () => {
+            window.removeEventListener('scroll', onScrollOrResize, true);
+            window.removeEventListener('resize', onScrollOrResize);
+        };
+    }, [openMenuId, updateMenuPos]);
+
+    useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
-            if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-                setOpenMenuId(null);
-            }
+            const target = event.target as Node;
+            if ((target as Element).closest?.('[data-document-actions-menu]')) return;
+            if (openMenuId && menuButtonRefs.current[openMenuId]?.contains(target)) return;
+            setOpenMenuId(null);
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, []);
+    }, [openMenuId]);
 
     useEffect(() => {
         if (!apiBase || !resolvedId) {
@@ -212,6 +305,8 @@ const DocumentsView: React.FC<DocumentsViewProps> = ({ candidateId, candidateNam
             .filter(doc => filterType === FILTER_ALL || doc.type === filterType)
             .filter(doc => doc.name.toLowerCase().includes(searchTerm.toLowerCase()));
     }, [documents, searchTerm, filterType]);
+
+    const openMenuDoc = openMenuId ? filteredDocuments.find((d) => d.id === openMenuId) : null;
 
     if (!resolvedId) {
         return (
@@ -303,20 +398,14 @@ const DocumentsView: React.FC<DocumentsViewProps> = ({ candidateId, candidateNam
                                 <td className="px-4 py-3 text-text-muted">{formatFileSize(doc.fileSize)}</td>
                                 <td className="px-4 py-3 text-text-subtle truncate" title={doc.notes}>{doc.notes || '-'}</td>
                                 <td className="px-4 py-3 text-center">
-                                    <div className="relative inline-block" ref={openMenuId === doc.id ? menuRef : null}>
-                                        <button type="button" onClick={() => setOpenMenuId(openMenuId === doc.id ? null : doc.id)} className="p-2 rounded-full hover:bg-bg-hover text-text-subtle"><EllipsisVerticalIcon className="w-5 h-5"/></button>
-                                        {openMenuId === doc.id && (
-                                            <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10">
-                                                <button type="button" onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> {t('resume.edit')}</button>
-                                                {doc.url ? (
-                                                    <a href={doc.url} target="_blank" rel="noreferrer" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> {t('resume.download')}</a>
-                                                ) : (
-                                                    <span className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-subtle opacity-60 cursor-not-allowed"><ArrowDownTrayIcon className="w-4 h-4"/> {t('resume.download')}</span>
-                                                )}
-                                                <button type="button" onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> {t('resume.delete')}</button>
-                                            </div>
-                                        )}
-                                    </div>
+                                    <button
+                                        type="button"
+                                        ref={(el) => { menuButtonRefs.current[doc.id] = el; }}
+                                        onClick={() => toggleMenu(doc.id)}
+                                        className="p-2 rounded-full hover:bg-bg-hover text-text-subtle"
+                                    >
+                                        <EllipsisVerticalIcon className="w-5 h-5"/>
+                                    </button>
                                 </td>
                             </tr>
                         ))}
@@ -327,19 +416,15 @@ const DocumentsView: React.FC<DocumentsViewProps> = ({ candidateId, candidateNam
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
                     {filteredDocuments.map(doc => (
                         <div key={doc.id} className="bg-bg-card rounded-lg border border-border-default shadow-sm p-3 flex flex-col text-center group relative">
-                             <div className="absolute top-2 left-2" ref={openMenuId === doc.id ? menuRef : null}>
-                                <button type="button" onClick={() => setOpenMenuId(openMenuId === doc.id ? null : doc.id)} className="p-1.5 rounded-full hover:bg-bg-hover text-text-subtle opacity-0 group-hover:opacity-100 transition-opacity"><EllipsisVerticalIcon className="w-5 h-5"/></button>
-                                {openMenuId === doc.id && (
-                                    <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10">
-                                        <button type="button" onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> {t('resume.edit')}</button>
-                                        {doc.url ? (
-                                            <a href={doc.url} target="_blank" rel="noreferrer" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> {t('resume.download')}</a>
-                                        ) : (
-                                            <span className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-subtle opacity-60 cursor-not-allowed"><ArrowDownTrayIcon className="w-4 h-4"/> {t('resume.download')}</span>
-                                        )}
-                                        <button type="button" onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> {t('resume.delete')}</button>
-                                    </div>
-                                )}
+                             <div className="absolute top-2 left-2">
+                                <button
+                                    type="button"
+                                    ref={(el) => { menuButtonRefs.current[doc.id] = el; }}
+                                    onClick={() => toggleMenu(doc.id)}
+                                    className="p-1.5 rounded-full hover:bg-bg-hover text-text-subtle opacity-0 group-hover:opacity-100 transition-opacity"
+                                >
+                                    <EllipsisVerticalIcon className="w-5 h-5"/>
+                                </button>
                             </div>
                             <div className="flex-grow flex flex-col items-center justify-center py-4">
                                {getFileIcon(doc.name)}
@@ -369,6 +454,16 @@ const DocumentsView: React.FC<DocumentsViewProps> = ({ candidateId, candidateNam
                 </div>
             )}
             </main>
+
+            {openMenuDoc && menuPos && (
+                <DocumentActionsMenu
+                    doc={openMenuDoc}
+                    position={menuPos}
+                    onEdit={handleEditDoc}
+                    onDelete={handleDeleteDoc}
+                    t={t}
+                />
+            )}
 
             <DocumentFormModal 
                 isOpen={isModalOpen}

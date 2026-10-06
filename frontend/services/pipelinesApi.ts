@@ -81,6 +81,10 @@ export type PipelineDto = {
     name: string;
     description: string;
     sortIndex?: number;
+    /** @deprecated first default assignee; use defaultAssigneeUserIds */
+    defaultContactId?: string | null;
+    /** Staff user ids for «לטיפול» defaults when creating a process event. */
+    defaultAssigneeUserIds?: string[];
     stages: PipelineStageDto[];
 };
 
@@ -104,6 +108,12 @@ export async function syncPipelines(clientId: string, pipelines: PipelineDto[]):
                 name: p.name,
                 description: p.description || '',
                 sortIndex: index,
+                defaultContactId: p.defaultContactId ? String(p.defaultContactId) : null,
+                defaultAssigneeUserIds: Array.isArray(p.defaultAssigneeUserIds)
+                    ? p.defaultAssigneeUserIds.map((id) => String(id)).filter(Boolean)
+                    : p.defaultContactId
+                      ? [String(p.defaultContactId)]
+                      : [],
                 stages: (p.stages || []).map((s) => ({
                     id: s.id,
                     name: s.name,

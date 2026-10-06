@@ -28,9 +28,32 @@ interface JobFieldSelectorProps {
     onChange: (value: SelectedJobField | null) => void;
     isModalOpen: boolean;
     setIsModalOpen: (isOpen: boolean) => void;
+    multiSelect?: boolean;
+    selectedValues?: SelectedJobField[];
+    onToggleRole?: (value: SelectedJobField) => void;
+    /** When set with multiSelect, footer shows "אישור" and applies draft via callback (modal closes on success). */
+    onConfirm?: () => void;
+    confirmDisabled?: boolean;
+    confirmHint?: string | null;
+    selectionError?: string | null;
 }
 
-const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, isModalOpen, setIsModalOpen }) => {
+const roleSelectionKey = (field: SelectedJobField) =>
+    `${field.categoryId || field.category}::${field.roleId || field.role}`;
+
+const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({
+    value,
+    onChange,
+    isModalOpen,
+    setIsModalOpen,
+    multiSelect = false,
+    selectedValues = [],
+    onToggleRole,
+    onConfirm,
+    confirmDisabled = false,
+    confirmHint = null,
+    selectionError = null,
+}) => {
     const [selectedCategory, setSelectedCategory] = useState<JobCategory | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [categories, setCategories] = useState<JobCategory[]>([]);
@@ -100,25 +123,41 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
         if (!selectedCategory && categories.length) setSelectedCategory(categories[0]);
     };
 
+    const buildSelectedField = (
+        role: JobRole,
+        fieldType: JobFieldType,
+        category?: JobCategory | null,
+    ): SelectedJobField | null => {
+        const cat = category || selectedCategory;
+        const catName = cat?.name;
+        if (!catName) return null;
+        return {
+            category: catName,
+            fieldType: fieldType.name,
+            role: role.value,
+            categoryId: cat?.id != null ? String(cat.id) : undefined,
+            clusterId: fieldType?.id != null ? String(fieldType.id) : undefined,
+            roleId: role?.id != null ? String(role.id) : undefined,
+        };
+    };
+
+    const isRoleSelected = (field: SelectedJobField) =>
+        selectedValues.some((item) => roleSelectionKey(item) === roleSelectionKey(field));
+
     const handleSelectRole = (
         role: JobRole,
         fieldType: JobFieldType,
         category?: JobCategory | null,
     ) => {
-        const cat = category || selectedCategory;
-        const catName = cat?.name;
-        if (catName) {
-            onChange({
-                category: catName,
-                fieldType: fieldType.name,
-                role: role.value,
-                categoryId: cat?.id != null ? String(cat.id) : undefined,
-                clusterId: fieldType?.id != null ? String(fieldType.id) : undefined,
-                roleId: role?.id != null ? String(role.id) : undefined,
-            });
-            setIsModalOpen(false);
-            resetState();
+        const selected = buildSelectedField(role, fieldType, category);
+        if (!selected) return;
+        if (multiSelect && onToggleRole) {
+            onToggleRole(selected);
+            return;
         }
+        onChange(selected);
+        setIsModalOpen(false);
+        resetState();
     };
     
     const handleCloseModal = () => {
@@ -182,7 +221,9 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
                 {/* Header & Search - More compact */}
                 <header className="flex flex-col border-b border-border-default bg-bg-card z-10 shrink-0">
                     <div className="flex items-center justify-between px-5 py-3">
-                        <h2 className="text-lg font-bold text-text-default">בחר תחום משרה</h2>
+                        <h2 className="text-lg font-bold text-text-default">
+                            {multiSelect ? 'בחר תחומי משרה' : 'בחר תחום משרה'}
+                        </h2>
                         <button onClick={handleCloseModal} className="p-1.5 rounded-full text-text-muted hover:bg-bg-subtle hover:text-text-default transition-colors"><XMarkIcon className="w-5 h-5" /></button>
                     </div>
                     <div className="px-5 pb-4">
@@ -213,12 +254,19 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
                                                 {categoryName}
                                             </h3>
                                             <div className="grid grid-cols-1 gap-2">
-                                                {items.map(({ category, fieldType, role }) => (
+                                                {items.map(({ category, fieldType, role }) => {
+                                                    const selectedField = buildSelectedField(role, fieldType, category);
+                                                    const selected = selectedField ? isRoleSelected(selectedField) : false;
+                                                    return (
                                                     <button
                                                         key={`${role.id}-${fieldType.id}`}
                                                         type="button"
                                             onClick={() => handleSelectRole(role, fieldType, category)}
-                                            className="w-full text-right p-3 rounded-lg hover:bg-white hover:shadow-sm hover:border-primary-200 border border-transparent bg-bg-subtle/30 transition-all flex items-center gap-3 group"
+                                            className={`w-full text-right p-3 rounded-lg border transition-all flex items-center gap-3 group ${
+                                                selected
+                                                    ? 'bg-primary-50 border-primary-200 shadow-sm'
+                                                    : 'hover:bg-white hover:shadow-sm hover:border-primary-200 border-transparent bg-bg-subtle/30'
+                                            }`}
                                         >
                                             <div className="p-2 bg-white rounded-full text-text-subtle group-hover:text-primary-600 shadow-sm transition-colors border border-border-subtle">
                                                 <BriefcaseIcon className="w-4 h-4" />
@@ -246,7 +294,8 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
                                                             </p>
                                             </div>
                                         </button>
-                                                ))}
+                                                );
+                                                })}
                                             </div>
                                         </div>
                                     ))}
@@ -323,16 +372,24 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
                                                         </h4>
                                                     )}
                                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                                        {fieldType.roles.map(role => (
+                                                        {fieldType.roles.map(role => {
+                                                            const selectedField = buildSelectedField(role, fieldType, selectedCategory);
+                                                            const selected = selectedField ? isRoleSelected(selectedField) : false;
+                                                            return (
                                                             <button 
                                                                 key={role.value} 
                                                                 onClick={() => handleSelectRole(role, fieldType, selectedCategory)} 
-                                                                className="text-right px-3 py-2.5 rounded-lg text-sm text-text-default hover:bg-primary-50 hover:text-primary-700 transition-all border border-border-subtle hover:border-primary-200 hover:shadow-sm truncate bg-white"
+                                                                className={`text-right px-3 py-2.5 rounded-lg text-sm transition-all border hover:shadow-sm truncate ${
+                                                                    selected
+                                                                        ? 'bg-primary-50 text-primary-700 border-primary-200'
+                                                                        : 'text-text-default hover:bg-primary-50 hover:text-primary-700 border-border-subtle hover:border-primary-200 bg-white'
+                                                                }`}
                                                                 title={role.value}
                                                             >
                                                                 {role.value}
                                                             </button>
-                                                        ))}
+                                                            );
+                                                        })}
                                                     </div>
                                                 </div>
                                             )
@@ -349,10 +406,54 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
                     )}
                 </main>
                 
+                {multiSelect && selectedValues.length > 0 ? (
+                    <div className="shrink-0 px-4 py-3 border-t border-border-default bg-bg-subtle/20 max-h-[120px] overflow-y-auto custom-scrollbar">
+                        <p className="text-[11px] font-bold text-text-muted mb-2">נבחרו לפני אישור:</p>
+                        <div className="flex flex-wrap gap-2">
+                            {selectedValues.map((field) => (
+                                <button
+                                    key={roleSelectionKey(field)}
+                                    type="button"
+                                    onClick={() => onToggleRole?.(field)}
+                                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-primary-50 text-primary-800 border border-primary-200 hover:bg-primary-100"
+                                    title="הסר מהבחירה"
+                                >
+                                    <span className="truncate max-w-[200px]">{field.role}</span>
+                                    <XMarkIcon className="w-3 h-3 shrink-0 opacity-70" />
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                ) : null}
+
                 {/* Footer Hint */}
-                {!searchTerm && (
-                    <footer className="py-2.5 px-4 bg-bg-subtle/30 border-t border-border-default text-xs text-text-subtle text-center">
-                        טיפ: ניתן להשתמש בחיפוש למעלה כדי למצוא תפקיד ספציפי במהירות
+                {(!searchTerm || multiSelect) && (
+                    <footer className="py-2.5 px-4 bg-bg-subtle/30 border-t border-border-default text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                        <span className={selectionError ? 'text-red-600 font-semibold' : 'text-text-subtle'}>
+                            {selectionError ??
+                                (confirmHint ??
+                                    (multiSelect
+                                        ? onConfirm
+                                            ? 'בחר תפקידים — הבחירה תישמר רק לאחר לחיצה על «אישור»'
+                                            : `נבחרו ${selectedValues.length} תחומים — לחץ על תפקיד כדי להוסיף/להסיר`
+                                        : 'טיפ: ניתן להשתמש בחיפוש למעלה כדי למצוא תפקיד ספציפי במהירות'))}
+                        </span>
+                        {multiSelect ? (
+                            <button
+                                type="button"
+                                disabled={confirmDisabled}
+                                onClick={() => {
+                                    if (onConfirm) {
+                                        if (!confirmDisabled) onConfirm();
+                                        return;
+                                    }
+                                    handleCloseModal();
+                                }}
+                                className="shrink-0 px-4 py-2 rounded-lg bg-primary-600 text-white text-xs font-bold hover:bg-primary-700 disabled:opacity-50 disabled:pointer-events-none"
+                            >
+                                {onConfirm ? 'אישור' : 'סיום'}
+                            </button>
+                        ) : null}
                     </footer>
                 )}
             </div>

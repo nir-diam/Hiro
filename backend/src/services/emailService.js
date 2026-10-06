@@ -189,9 +189,13 @@ async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail, a
     body.attachments = attachments.map((a) => {
       const raw = a?.content;
       const b64 = Buffer.isBuffer(raw) ? raw.toString('base64') : String(raw || '');
+      const cid = typeof a?.cid === 'string' ? a.cid.trim() : '';
+      const contentType = typeof a?.contentType === 'string' ? a.contentType : undefined;
       return {
         filename: String(a?.filename || 'attachment'),
         content: b64,
+        ...(contentType ? { contentType } : {}),
+        ...(cid ? { inlineContentId: cid } : {}),
       };
     });
   }
@@ -276,10 +280,12 @@ const sendEmail = async ({
     mail.attachments = attachments.map((a) => {
       const c = a?.content;
       const buf = Buffer.isBuffer(c) ? c : Buffer.from(String(c || ''), 'base64');
+      const cid = typeof a?.cid === 'string' ? a.cid.trim() : '';
       return {
         filename: String(a?.filename || 'attachment'),
         content: buf,
         contentType: typeof a?.contentType === 'string' ? a.contentType : undefined,
+        ...(cid ? { cid, contentDisposition: 'inline' } : {}),
       };
     });
   }

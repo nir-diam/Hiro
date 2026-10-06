@@ -361,9 +361,24 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
         }).catch(() => null);
     };
 
+    const contactToRecipientOption = (c: ContactFormState) => {
+        const orgLabel = String(organizationName || '').trim();
+        const linkedOrgId = organizationId || organizationTmpId || null;
+        return {
+            id: c.id,
+            name: c.name,
+            email: primaryEmail(c) || '',
+            phone: primaryPhone(c, 'mobile') || primaryPhone(c, 'office') || '',
+            subtitle: orgLabel || null,
+            clientId,
+            organizationId: linkedOrgId,
+        };
+    };
+
     const handleActionClick = (mode: 'email' | 'sms' | 'whatsapp', contact: ContactFormState) => {
         const orgLabel = String(organizationName || '').trim();
         const linkedOrgId = organizationId || organizationTmpId || null;
+        const allRecipientOptions = contacts.map(contactToRecipientOption);
         onOpenMessageModal({
             mode,
             recipientType: 'client_contact',
@@ -374,17 +389,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
             linkedContactId: contact.id,
             linkedOrganizationId: linkedOrgId,
             linkedOrganizationName: orgLabel || null,
-            recipientOptions: [
-                {
-                    id: contact.id,
-                    name: contact.name,
-                    email: primaryEmail(contact) || '',
-                    phone: primaryPhone(contact, 'mobile') || primaryPhone(contact, 'office') || '',
-                    subtitle: orgLabel || null,
-                    clientId,
-                    organizationId: linkedOrgId,
-                },
-            ],
+            recipientOptions: allRecipientOptions.length ? allRecipientOptions : [contactToRecipientOption(contact)],
             initialRecipientIds: [contact.id],
         });
     };

@@ -10,6 +10,9 @@ const candidatePortalAccessService = require('./candidatePortalAccessService');
 const { findExistingByIdentity } = require('./candidateIdentityService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+const clientNavigationLinks = require('../utils/clientNavigationLinks');
+const User = require('../models/User');
+const userPreferencesService = require('./userPreferencesService');
 
 const ALLOWED_CHANNELS = new Set(['email', 'sms', 'whatsapp']);
 const ALLOWED_RECIPIENT_TYPES = new Set(['candidate', 'client_contact', 'team_member']);
@@ -403,7 +406,12 @@ const MESSAGE_TEMPLATE_NAMED_KEYS = [
   'privacy_policy_link',
   'thank_you_page_link',
   'job_public_page_link',
+  'waze_link',
+  'google_maps_link',
+  'recruiter_signature',
 ];
+
+const HTML_RAW_PLACEHOLDER_KEYS = new Set(['recruiter_signature']);
 
 const escapeRegExp = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -416,12 +424,64 @@ const placeholderTokenRegex = (key) =>
  * @param {string} template
  * @param {Record<string, string>} map
  */
+const stripHtmlToPlain = (html) =>
+  String(html || '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+const detectEmailTextDirection = (text) => {
+  const sample = String(text || '').replace(/<[^>]+>/g, '');
+  const hebrew = (sample.match(/[\u0590-\u05FF]/g) || []).length;
+  const latin = (sample.match(/[A-Za-z]/g) || []).length;
+  if (hebrew === 0 && latin === 0) return 'rtl';
+  return hebrew >= latin ? 'rtl' : 'ltr';
+};
+
+const buildEmailSignatureHtmlFromPrefs = (uiPreferences, dir = 'rtl') => {
+  const prefs = userPreferencesService.sanitizePreferences(uiPreferences || {});
+  const sig = prefs.emailSignature;
+  if (!sig) return '';
+  const html = String(sig.html || '').trim();
+  const logo = String(sig.logoUrl || '').trim();
+  if (!html && !logo) return '';
+  const direction = dir === 'ltr' ? 'ltr' : 'rtl';
+  const align = direction === 'rtl' ? 'right' : 'left';
+  const logoMargin = direction === 'rtl' ? '0 0 10px auto' : '0 auto 10px 0';
+  const logoBlock = logo
+    ? `<img src="${escapeHtmlAttr(logo)}" alt="" style="max-height:52px;max-width:180px;display:block;margin:${logoMargin};" />`
+    : '';
+  return (
+    `<table cellpadding="0" cellspacing="0" border="0" dir="${direction}" style="margin-top:16px;padding-top:12px;border-top:1px solid #e5e7eb;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.45;color:#374151;width:100%;text-align:${align};">` +
+    `<tr><td align="${align}" style="text-align:${align};">${logoBlock}${html}</td></tr></table>`
+  );
+};
+
+async function resolveRecruiterSignatureHtml(recruiterCtx) {
+  if (!recruiterCtx || typeof recruiterCtx !== 'object') return '';
+  const id = recruiterCtx.id != null ? String(recruiterCtx.id).trim() : '';
+  const email = recruiterCtx.email != null ? String(recruiterCtx.email).trim() : '';
+  let user = null;
+  if (id) {
+    user = await User.findByPk(id, { attributes: ['uiPreferences'] });
+  } else if (email) {
+    user = await User.findOne({ where: { email }, attributes: ['uiPreferences'] });
+  }
+  if (!user) return '';
+  return buildEmailSignatureHtmlFromPrefs(user.uiPreferences);
+}
+
 const applyNamedPlaceholders = (template, map) => {
   let out = String(template || '');
   const safe = map && typeof map === 'object' ? map : {};
   for (const key of MESSAGE_TEMPLATE_NAMED_KEYS) {
     const re = placeholderTokenRegex(key);
-    const val = safe[key] != null ? String(safe[key]) : '';
+    let val = safe[key] != null ? String(safe[key]) : '';
+    if (key === 'recruiter_signature' && val) {
+      val = stripHtmlToPlain(val);
+    }
     out = out.replace(re, val);
   }
   return out;
@@ -448,6 +508,8 @@ const LINK_PLACEHOLDER_KEYS = new Set([
   'privacy_policy_link',
   'thank_you_page_link',
   'job_public_page_link',
+  'waze_link',
+  'google_maps_link',
 ]);
 
 const LINK_LABEL_HE = {
@@ -456,6 +518,8 @@ const LINK_LABEL_HE = {
   privacy_policy_link: 'מדיניות פרטיות',
   thank_you_page_link: 'דף תודה',
   job_public_page_link: 'דף משרה ציבורי',
+  waze_link: 'ניווט ב-Waze',
+  google_maps_link: 'ניווט ב-Google Maps',
 };
 
 const applyNumberedPlaceholdersHtml = (template, values) => {
@@ -476,7 +540,9 @@ const applyNamedPlaceholdersHtml = (template, map) => {
   for (const key of MESSAGE_TEMPLATE_NAMED_KEYS) {
     const re = placeholderTokenRegex(key);
     const val = safe[key] != null ? String(safe[key]) : '';
-    if (LINK_PLACEHOLDER_KEYS.has(key)) {
+    if (HTML_RAW_PLACEHOLDER_KEYS.has(key)) {
+      out = out.replace(re, val);
+    } else if (LINK_PLACEHOLDER_KEYS.has(key)) {
       const url = val.trim();
       const replacement =
         url && /^https?:\/\//i.test(url)
@@ -676,6 +742,33 @@ async function buildNamedPlaceholdersFromCandidate(cand, ctx = {}) {
     if (n) base.recruiter_name = n;
     if (e) base.recruiter_email = e;
     if (p) base.recruiter_phone = p;
+    if (rec.uiPreferences && typeof rec.uiPreferences === 'object') {
+      base.recruiter_signature = buildEmailSignatureHtmlFromPrefs(rec.uiPreferences);
+    }
+  }
+
+  if (!base.recruiter_signature) {
+    try {
+      base.recruiter_signature = await resolveRecruiterSignatureHtml(rec);
+    } catch (sigErr) {
+      console.warn('[message-templates] recruiter signature failed:', sigErr?.message || sigErr);
+      base.recruiter_signature = '';
+    }
+  }
+
+  const jobClientId =
+    primaryJob && primaryJob.clientId != null && String(primaryJob.clientId).trim()
+      ? String(primaryJob.clientId).trim()
+      : '';
+  if (jobClientId) {
+    try {
+      const clientRow = await Client.findByPk(jobClientId, { attributes: ['id', 'metadata'] });
+      const nav = clientNavigationLinks.navigationPlaceholdersFromMetadata(clientRow?.metadata);
+      base.waze_link = nav.waze_link || '';
+      base.google_maps_link = nav.google_maps_link || '';
+    } catch (e) {
+      console.warn('[message-templates] client navigation placeholders failed:', e?.message || e);
+    }
   }
 
   return base;

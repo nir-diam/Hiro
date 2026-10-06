@@ -352,6 +352,9 @@ const TemplateForm: React.FC<{
 
             <div className="bg-bg-card border border-border-default rounded-lg p-6">
                 <h3 className="text-base font-bold text-text-default mb-3">{t('templates.params_title')}</h3>
+                <p className="text-xs text-text-subtle mb-3">
+                    לחתימת הרכז בתחתית המייל (עם לוגו ועיצוב) — הוסיפו בסוף התוכן את הפרמטר «חתימת רכז»; החתימה מוגדרת בפרופיל הרכז → לשונית חתימה.
+                </p>
                 <div className="flex flex-wrap gap-2">
                     {messageTemplateParameters.map((param) => (
                         <button

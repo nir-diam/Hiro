@@ -2,6 +2,31 @@
 export const TAG_WEIGHT_STRUCTURAL_MIN = 0.5;
 export const TAG_WEIGHT_STRUCTURAL_MAX = 1.65;
 
+/**
+ * Job-tag LLM `relevance_score` is usually 0–1 (1 = max). Legacy rows may store 0–10.
+ * Values in (0, 1] are treated as fractions; values > 1 are clamped to a 0–10 scale.
+ */
+export function jobTagRelevanceScoreOnTenScale(raw: number): number {
+  if (!Number.isFinite(raw)) return NaN;
+  const n = Math.max(0, raw);
+  if (n <= 1) return n * 10;
+  return Math.min(10, n);
+}
+
+/** Unit interval 0–1 for structural-weight interpolation from relevance. */
+export function jobTagRelevanceScoreUnit(raw: number): number {
+  const ten = jobTagRelevanceScoreOnTenScale(raw);
+  return Number.isFinite(ten) ? ten / 10 : NaN;
+}
+
+export function formatJobTagRelevanceScoreOnTenHe(raw: number): string {
+  const ten = jobTagRelevanceScoreOnTenScale(raw);
+  if (!Number.isFinite(ten)) return '—';
+  const rounded = Math.round(ten * 10) / 10;
+  const label = Number.isInteger(rounded) ? String(Math.round(rounded)) : rounded.toFixed(1);
+  return `${label}/10`;
+}
+
 /** Mirrors backend/src/services/tagScoringEngine.js (defaults when env not set). */
 const BASE_WEIGHT_TABLE: Record<string, number> = {
   'role:core': 1.0,

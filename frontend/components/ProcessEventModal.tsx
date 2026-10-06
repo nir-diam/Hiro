@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { XMarkIcon } from './Icons';
 import SlaDurationInput from './SlaDurationInput';
 import { FormMultiSelect } from './FormMultiSelect';
@@ -8,6 +8,10 @@ import { fetchStaffUsers } from '../services/usersApi';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import { normalizeSlaUnit, slaFieldLabel, type SlaUnit } from '../utils/slaDuration';
+import {
+  resolvePipelineDefaultAssigneeNames,
+  resolvePipelineDefaultAssigneeUserIds,
+} from '../utils/pipelineDefaultAssignees';
 
 const ASSIGNEE_LIST_SPLIT_RE = /[,;|\n]+/;
 
@@ -45,6 +49,20 @@ export type ProcessEventSavePayload = {
 };
 
 type ContactOption = { id: string; name: string };
+
+function shouldApplyPipelineDefaultAssignee(
+  initialAssignee: string | null | undefined,
+  currentValues: string[],
+  loggedInAssigneeName: string,
+): boolean {
+  if (parseAssigneeList(initialAssignee).length > 0) return false;
+  if (currentValues.length === 0) return true;
+  if (currentValues.length === 1) {
+    const only = currentValues[0];
+    if (only === loggedInAssigneeName || only === 'אני') return true;
+  }
+  return false;
+}
 
 interface ProcessEventModalProps {
   isOpen: boolean;
@@ -177,8 +195,18 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     description: '',
   });
 
+  const modalOpenSessionRef = useRef(false);
+  /** When staff list loads after process change, apply pipeline default assignees for this process. */
+  const pendingAssigneeProcessIdRef = useRef<string | null>(null);
+
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      modalOpenSessionRef.current = false;
+      return;
+    }
+    if (modalOpenSessionRef.current) return;
+    modalOpenSessionRef.current = true;
+    pendingAssigneeProcessIdRef.current = null;
     setFormData({
       title: initialData?.title || '',
       processId: initialData?.processId || '',
@@ -198,7 +226,15 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
       description: initialData?.description || '',
     });
     setError(null);
-  }, [isOpen, initialData, displayClientName, contactId, contactName, isOrganizationScoped, defaultAssigneeName]);
+  }, [
+    isOpen,
+    initialData,
+    displayClientName,
+    contactId,
+    contactName,
+    isOrganizationScoped,
+    defaultAssigneeName,
+  ]);
 
   useEffect(() => {
     if (!isOpen || !staffClientId) {
@@ -212,7 +248,9 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
         const names = rows
           .map((u) => String(u.name || u.email || '').trim())
           .filter(Boolean);
-        setAssigneeOptions(Array.from(new Set([defaultAssigneeName, 'אני', ...names])));
+        setAssigneeOptions((prev) =>
+          Array.from(new Set([defaultAssigneeName, 'אני', ...names, ...prev])),
+        );
       })
       .catch(() => {
         if (!cancelled) {
@@ -233,8 +271,19 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     });
   }, [isOpen, displayClientName, isOrganizationScoped]);
 
+  const [staffAssigneeUsers, setStaffAssigneeUsers] = useState<ContactOption[]>([]);
+
+  const assigneesForPipeline = useCallback(
+    (pipeline: PipelineDto | undefined): string[] => {
+      const fromPipeline = resolvePipelineDefaultAssigneeNames(pipeline, staffAssigneeUsers);
+      if (fromPipeline.length) return fromPipeline;
+      return [defaultAssigneeName];
+    },
+    [staffAssigneeUsers, defaultAssigneeName],
+  );
+
   const applyPipelineDefaults = useCallback(
-    (client: PipelineDto[], candidate: PipelineDto[], cts: ContactOption[]) => {
+    (client: PipelineDto[], candidate: PipelineDto[], cts: ContactOption[], staff: ContactOption[]) => {
       const allFlat: PipelineWithKind[] = [
         ...candidate.map((p) => ({ ...p, kind: 'candidate' as const })),
         ...client.map((p) => ({ ...p, kind: 'client' as const })),
@@ -261,12 +310,39 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
         if (pipelineKind === 'candidate') {
           nextContactId = '';
           nextContactName = linkedEntityName || prev.contactName || contactName || '';
-        } else if (nextContactId) {
-          const match = cts.find((c) => c.id === nextContactId);
-          if (match) nextContactName = match.name;
-        } else if (nextContactName) {
-          const match = cts.find((c) => c.name === nextContactName);
-          if (match) nextContactId = match.id;
+        } else {
+          const explicitId = contactId || initialData?.contactId || prev.contactId;
+          if (explicitId) {
+            nextContactId = explicitId;
+            const match = cts.find((c) => c.id === explicitId);
+            if (match) nextContactName = match.name;
+          } else if (nextContactId) {
+            const match = cts.find((c) => c.id === nextContactId);
+            if (match) nextContactName = match.name;
+          } else if (nextContactName) {
+            const match = cts.find((c) => c.name === nextContactName);
+            if (match) nextContactId = match.id;
+          }
+        }
+        let assigneeValues = prev.assigneeValues;
+        if (pipeline?.kind === pipelineKind) {
+          const initialAssignees = parseAssigneeList(initialData?.assignee);
+          if (initialAssignees.length === 0) {
+            const defaultAssignees = resolvePipelineDefaultAssigneeNames(pipeline, staff);
+            assigneeValues = defaultAssignees.length ? defaultAssignees : [defaultAssigneeName];
+            if (resolvePipelineDefaultAssigneeUserIds(pipeline).length && !staff.length) {
+              pendingAssigneeProcessIdRef.current = processId;
+            }
+          } else if (
+            shouldApplyPipelineDefaultAssignee(
+              initialData?.assignee,
+              prev.assigneeValues,
+              defaultAssigneeName,
+            )
+          ) {
+            const defaultAssignees = resolvePipelineDefaultAssigneeNames(pipeline, staff);
+            if (defaultAssignees.length) assigneeValues = defaultAssignees;
+          }
         }
         return {
           ...prev,
@@ -274,11 +350,22 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
           stageId,
           contactId: nextContactId,
           contactName: nextContactName,
+          assigneeValues,
           clientName: isOrganizationScoped ? displayClientName : displayClientName || prev.clientName,
         };
       });
     },
-    [pipelineKind, linkedEntityName, contactName, displayClientName, isOrganizationScoped],
+    [
+      pipelineKind,
+      linkedEntityName,
+      contactName,
+      contactId,
+      initialData?.contactId,
+      initialData?.assignee,
+      displayClientName,
+      isOrganizationScoped,
+      defaultAssigneeName,
+    ],
   );
 
   useEffect(() => {
@@ -289,10 +376,14 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     const settingsClientId = pipelineClientId || clientId;
     if (!settingsClientId || !apiBase) return;
 
-    const hasPreloaded =
-      clientPipelinesProp !== undefined && candidatePipelinesProp !== undefined;
-
     let cancelled = false;
+
+    if (clientPipelinesProp !== undefined) {
+      setClientPipelines(clientPipelinesProp);
+    }
+    if (candidatePipelinesProp !== undefined) {
+      setCandidatePipelines(candidatePipelinesProp);
+    }
 
     const contactsQuery = (() => {
       if (contactsOrganizationId) {
@@ -329,36 +420,42 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
             .catch(() => [] as ContactOption[]);
     };
 
-    if (hasPreloaded) {
-      setClientPipelines(clientPipelinesProp);
-      setCandidatePipelines(candidatePipelinesProp);
-      void loadContacts().then((cts) => {
-        if (cancelled) return;
-        setContacts(cts);
-        applyPipelineDefaults(clientPipelinesProp, candidatePipelinesProp, cts);
-      });
-      return () => {
-        cancelled = true;
-      };
-    }
+    const loadStaffAssignees = (): Promise<ContactOption[]> =>
+      fetchStaffUsers(staffClientId)
+        .then((rows) =>
+          rows
+            .filter((u) => u.isActive !== false)
+            .map((u) => ({
+              id: String(u.id || ''),
+              name: String(u.name || u.email || '').trim(),
+            }))
+            .filter((u) => u.id && u.name),
+        )
+        .catch(() => [] as ContactOption[]);
 
     setLoadingMeta(true);
     setError(null);
 
     const pipelinesPromise = Promise.all([
-      fetchPipelines(settingsClientId).catch(() => [] as PipelineDto[]),
-      fetchCandidatePipelines(settingsClientId).catch(() => [] as PipelineDto[]),
+      fetchPipelines(settingsClientId).catch(
+        () => (clientPipelinesProp !== undefined ? clientPipelinesProp : []) as PipelineDto[],
+      ),
+      fetchCandidatePipelines(settingsClientId).catch(
+        () =>
+          (candidatePipelinesProp !== undefined ? candidatePipelinesProp : []) as PipelineDto[],
+      ),
     ]).then(([client, candidate]) => ({ client, candidate }));
 
-    Promise.all([pipelinesPromise, loadContacts()])
-      .then(([pipelineGroups, cts]) => {
+    Promise.all([pipelinesPromise, loadContacts(), loadStaffAssignees()])
+      .then(([pipelineGroups, cts, staff]) => {
         if (cancelled) return;
         const client = pipelineGroups.client;
         const candidate = pipelineGroups.candidate;
         setClientPipelines(client);
         setCandidatePipelines(candidate);
         setContacts(cts);
-        applyPipelineDefaults(client, candidate, cts);
+        setStaffAssigneeUsers(staff);
+        applyPipelineDefaults(client, candidate, cts, staff);
       })
       .finally(() => {
         if (!cancelled) setLoadingMeta(false);
@@ -378,6 +475,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     apiBase,
     pipelineKind,
     pipelineClientId,
+    staffClientId,
     clientPipelinesProp,
     candidatePipelinesProp,
     applyPipelineDefaults,
@@ -390,6 +488,33 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     ],
     [clientPipelines, candidatePipelines],
   );
+
+  useEffect(() => {
+    const pendingProcessId = pendingAssigneeProcessIdRef.current;
+    if (!isOpen || !pendingProcessId || !staffAssigneeUsers.length) {
+      return;
+    }
+    const pipeline = allPipelines.find((p) => p.id === pendingProcessId);
+    if (!pipeline || pipeline.kind !== pipelineKind) {
+      pendingAssigneeProcessIdRef.current = null;
+      return;
+    }
+    if (!resolvePipelineDefaultAssigneeUserIds(pipeline).length) {
+      pendingAssigneeProcessIdRef.current = null;
+      return;
+    }
+    const names = assigneesForPipeline(pipeline);
+    pendingAssigneeProcessIdRef.current = null;
+    setFormData((prev) =>
+      prev.processId !== pendingProcessId ? prev : { ...prev, assigneeValues: names },
+    );
+  }, [
+    isOpen,
+    pipelineKind,
+    staffAssigneeUsers,
+    allPipelines,
+    assigneesForPipeline,
+  ]);
 
   if (!isOpen) return null;
 
@@ -496,10 +621,23 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                         const nextStageId = newPipeline?.stages?.[0]?.id || '';
                         const nextStages = newPipeline?.stages || [];
                         const stage = nextStages.find((s) => s.id === nextStageId);
+                        let nextAssigneeValues = formData.assigneeValues;
+                        if (newPipeline?.kind === pipelineKind) {
+                          const pipelineDefaultIds = resolvePipelineDefaultAssigneeUserIds(
+                            newPipeline,
+                          );
+                          if (pipelineDefaultIds.length && !staffAssigneeUsers.length) {
+                            pendingAssigneeProcessIdRef.current = newProcess;
+                          } else {
+                            pendingAssigneeProcessIdRef.current = null;
+                          }
+                          nextAssigneeValues = assigneesForPipeline(newPipeline);
+                        }
                         setFormData({
                           ...formData,
                           processId: newProcess,
                           stageId: nextStageId,
+                          assigneeValues: nextAssigneeValues,
                           slaValue: stage?.slaLimit ?? formData.slaValue,
                           slaUnit: normalizeSlaUnit(stage?.slaLimitUnit ?? formData.slaUnit),
                         });
@@ -595,13 +733,14 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                   <div>
                     <FormMultiSelect
-                      label="הקצאה ל-"
+                      label="לטיפול"
                       options={assigneeOptions.map((name) => ({ value: name, label: name }))}
                       value={formData.assigneeValues}
                       onChange={(assigneeValues) => setFormData({ ...formData, assigneeValues })}
                       placeholder="בחר אנשים לטיפול"
                       searchable
                       searchPlaceholder="חיפוש שם…"
+                      dropdownClassName="right-0 left-auto w-max min-w-[18rem] sm:min-w-[22rem] max-w-[min(28rem,calc(100vw-2rem))]"
                       className="[&>span]:text-sm [&>span]:font-bold [&>span]:text-text-default [&>span]:mb-2 [&>div]:rounded-xl [&>div]:p-3.5"
                     />
                   </div>

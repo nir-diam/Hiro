@@ -1153,7 +1153,7 @@ const submitApplication = async (slug, body = {}) => {
   let enrichError = null;
   let runEnrichmentAfterResponse = null;
 
-  const { created } = await jobCandidateService.associateCandidateWithJob({
+  const { record: jobCandidateRecord, created } = await jobCandidateService.associateCandidateWithJob({
     jobId: job.id,
     candidateId: candidate.id,
     status: 'חדש',
@@ -1165,6 +1165,28 @@ const submitApplication = async (slug, body = {}) => {
       submittedAt: new Date().toISOString(),
     },
   });
+
+  if (body.cvBase64) {
+    let cvBuffer = null;
+    try {
+      cvBuffer = Buffer.from(String(body.cvBase64), 'base64');
+    } catch {
+      cvBuffer = null;
+    }
+    const cvForwardService = require('./cvForwardService');
+    cvForwardService.scheduleCvForward({
+      candidateId: candidate.id,
+      jobId: job.id,
+      intakeChannel: 'public_apply',
+      candidate,
+      job: job.get ? job.get({ plain: true }) : job,
+      jobCandidate: jobCandidateRecord?.get ? jobCandidateRecord.get({ plain: true }) : jobCandidateRecord,
+      resumeBuffer: cvBuffer,
+      resumeFileName: body.cvFileName,
+      resumeMimeType: body.cvMimeType,
+      recruitmentSourceName: buildLandingPageSource(srcKey),
+    });
+  }
 
   const client = await resolveClientForJob(job);
 
@@ -1315,11 +1337,30 @@ const publicationToResponse = async (job, publication) => {
   const enriched = await enrichPublicationTrackingLinks(job, publication, client);
   const clientLandingContact = resolveClientLandingContact(client);
   const { trackingLinks, submissionCount } = enriched;
+  const companyBrand = buildCompanyBrandFromClient(client);
+  const employerBrand = await resolveJobEmployerBrand(job);
+  const defaultHeroBrandSource = readClientJobHeroBrandSource(client);
   return {
     ...plain,
     submissionCount,
     trackingLinks,
     clientLandingContact,
+    defaultHeroBrandSource,
+    tenantBranding: companyBrand
+      ? {
+          clientName: companyBrand.brandName,
+          logoUrl: companyBrand.logoUrl,
+          primaryColor: companyBrand.primaryColor,
+          domain: client?.domain || null,
+        }
+      : null,
+    employerBranding: employerBrand
+      ? {
+          clientName: employerBrand.brandName,
+          logoUrl: employerBrand.logoUrl,
+          primaryColor: employerBrand.primaryColor,
+        }
+      : null,
     clientBranding: {
       clientName: client?.displayName || client?.name || '',
       logoUrl: client?.logoUrl || null,
@@ -1372,6 +1413,8 @@ const updatePublicationForJob = async (jobId, payload = {}) => {
     'landingLayout',
     'landingLayouts',
     'heroDesignInstructions',
+    'heroBrandSource',
+    'heroBrandColorOverride',
   ];
   for (const key of allowed) {
     if (payload[key] !== undefined) pubData[key] = payload[key];
@@ -2071,6 +2114,122 @@ const resolveClientNameForHeroPoster = (client, options = {}) => {
   return String(client?.displayName || client?.name || '').trim();
 };
 
+const JOB_HERO_BRAND_SOURCES = new Set(['company', 'job_client']);
+
+const normalizeHexColor = (raw) => {
+  const s = String(raw || '').trim();
+  return /^#[0-9a-fA-F]{6}$/.test(s) ? s : null;
+};
+
+const readClientJobHeroBrandSource = (client) => {
+  const meta = client?.metadata && typeof client.metadata === 'object' ? client.metadata : {};
+  const v = String(meta.jobHeroBrandSource || 'company').trim();
+  return JOB_HERO_BRAND_SOURCES.has(v) ? v : 'company';
+};
+
+const buildCompanyBrandFromClient = (client) => {
+  if (!client) return null;
+  return {
+    brandName: String(client.displayName || client.name || '').trim(),
+    logoUrl: client.logoUrl || null,
+    primaryColor: client.primaryColor || null,
+  };
+};
+
+const resolveJobEmployerBrand = async (job) => {
+  const label = String(job?.client || '').trim();
+  if (!label) return null;
+  const employerClientId = await clientUsageSettingService.getClientIdForJobClientLabel(label);
+  if (employerClientId) {
+    const row = await Client.findByPk(employerClientId, { attributes: CLIENT_BRAND_ATTRIBUTES });
+    if (row && (row.logoUrl || row.primaryColor)) {
+      return {
+        brandName: String(row.displayName || row.name || label).trim(),
+        logoUrl: row.logoUrl || null,
+        primaryColor: row.primaryColor || null,
+      };
+    }
+  }
+  try {
+    const org = await organizationService.findByName(label);
+    if (org?.logo) {
+      return {
+        brandName: String(org.name || label).trim(),
+        logoUrl: org.logo || null,
+        primaryColor: null,
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+};
+
+const brandHasAssets = (brand) =>
+  Boolean(
+    brand
+      && (String(brand.logoUrl || '').trim() || normalizeHexColor(brand.primaryColor)),
+  );
+
+const resolveHeroBrandForGeneration = async (job, tenantClient, publication, options = {}) => {
+  const defaultSource = readClientJobHeroBrandSource(tenantClient);
+  const sourceRaw = options.heroBrandSource ?? publication?.heroBrandSource ?? defaultSource;
+  const requestedSource = sourceRaw === 'job_client' ? 'job_client' : 'company';
+  const companyBrand = buildCompanyBrandFromClient(tenantClient);
+  const employerBrand = await resolveJobEmployerBrand(job);
+
+  let effectiveSource = requestedSource;
+  let picked = requestedSource === 'job_client' ? employerBrand : companyBrand;
+  let usedCompanyFallback = false;
+
+  if (!brandHasAssets(picked)) {
+    if (requestedSource === 'job_client' && brandHasAssets(companyBrand)) {
+      picked = companyBrand;
+      effectiveSource = 'company';
+      usedCompanyFallback = true;
+    } else {
+      picked = companyBrand || employerBrand || { brandName: '', logoUrl: null, primaryColor: null };
+    }
+  }
+
+  const overrideColor = normalizeHexColor(
+    options.brandColor ?? options.heroBrandColorOverride ?? publication?.heroBrandColorOverride,
+  );
+  const baseColor = normalizeHexColor(picked?.primaryColor);
+  const brandColor = overrideColor || baseColor || '#1e293b';
+  const logoUrl = String(picked?.logoUrl || '').trim() || null;
+
+  let clientName = '';
+  if (effectiveSource === 'job_client') {
+    clientName = String(picked?.brandName || '').trim();
+  } else {
+    clientName =
+      String(companyBrand?.brandName || '').trim()
+      || resolveClientNameForHeroPoster(tenantClient, options);
+  }
+
+  let warning = null;
+  if (!logoUrl && !normalizeHexColor(picked?.primaryColor)) {
+    warning = 'neutral_no_brand';
+  } else if (usedCompanyFallback) {
+    warning = 'fallback_company_brand';
+  }
+
+  return {
+    requestedSource,
+    effectiveSource,
+    brandName: String(picked?.brandName || companyBrand?.brandName || '').trim(),
+    clientName,
+    logoUrl,
+    brandColor,
+    hasLogo: Boolean(logoUrl),
+    warning,
+    companyBrand,
+    employerBrand,
+    defaultHeroBrandSource: defaultSource,
+  };
+};
+
 const generateHeroImageForJob = async (jobId, options = {}) => {
   const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills', 'embedding'] } });
   if (!job) {
@@ -2086,8 +2245,10 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
     || publication.publicJobTitle
     || job.publicJobTitle
     || job.title;
-  const brandColor = options.brandColor || client?.primaryColor || '#1e293b';
-  const clientName = resolveClientNameForHeroPoster(client, options);
+  const pubPlain = publication.get ? publication.get({ plain: true }) : publication;
+  const heroBrand = await resolveHeroBrandForGeneration(job, client, pubPlain, options);
+  const brandColor = heroBrand.brandColor;
+  const clientName = heroBrand.clientName || resolveClientNameForHeroPoster(client, options);
   const landingContact = resolveClientLandingContact(client);
   const contactEmail = options.contactEmail || landingContact.contactEmail || '';
   const contactPhone1 = options.contactPhone1 || landingContact.contactPhone1 || '';
@@ -2106,7 +2267,7 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
     ?? publication.heroDesignInstructions
     ?? '';
   const promptStyle = mapLayoutToPromptStyle(layout);
-  const logoDataUrl = options.companyLogo || null;
+  const logoDataUrl = options.companyLogo || heroBrand.logoUrl || null;
   const apiKey = geminiService.resolveGeminiApiKey?.() || '';
 
   let buffer = null;
@@ -2125,7 +2286,7 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
       contactEmail,
       contactPhone1,
       contactPhone2,
-      hasLogo: Boolean(logoDataUrl),
+      hasLogo: Boolean(logoDataUrl && heroBrand.hasLogo),
       additionalDesignInstructions,
     });
 
@@ -2168,7 +2329,17 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
     JobImage.create({ jobId: job.id, url, label: title }),
   ]);
 
-  return { url, heroImageUrl: url };
+  return {
+    url,
+    heroImageUrl: url,
+    heroBrand: {
+      effectiveSource: heroBrand.effectiveSource,
+      brandName: heroBrand.brandName,
+      brandColor: heroBrand.brandColor,
+      hasLogo: heroBrand.hasLogo,
+      warning: heroBrand.warning,
+    },
+  };
 };
 
 const listCompanyCreatedImages = async (clientRow) => {

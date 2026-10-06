@@ -6,13 +6,20 @@ const FUZZY_LIMIT = 5;
 /** Over-fetch fuzzy rows so we can still fill FUZZY_LIMIT after dedup. */
 const FUZZY_FETCH_LIMIT = 30;
 
+const hitDedupeKey = (hit) => {
+  const id = hit?.tagId != null ? String(hit.tagId).trim() : '';
+  if (id) return `id:${id}`;
+  const name = String(hit?.name || '').trim().toLowerCase();
+  return name ? `name:${name}` : '';
+};
+
 /** Merge vector hits first, then up to `fuzzyLimit` fuzzy hits not already present. */
 const mergeHybridCandidateHits = (vectorHits, fuzzyHits, fuzzyLimit = FUZZY_LIMIT) => {
   const seen = new Set();
   const merged = [];
 
   for (const hit of vectorHits) {
-    const key = (hit.name || '').toLowerCase();
+    const key = hitDedupeKey(hit);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     merged.push(hit);
@@ -21,7 +28,7 @@ const mergeHybridCandidateHits = (vectorHits, fuzzyHits, fuzzyLimit = FUZZY_LIMI
   let fuzzyAdded = 0;
   for (const hit of fuzzyHits) {
     if (fuzzyAdded >= fuzzyLimit) break;
-    const key = (hit.name || '').toLowerCase();
+    const key = hitDedupeKey(hit);
     if (!key || seen.has(key)) continue;
     seen.add(key);
     merged.push(hit);

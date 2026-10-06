@@ -9,7 +9,9 @@ const router = express.Router();
 router.get('/', jobController.list);
 router.get('/for-picker', jobController.listForPicker);
 router.get('/for-compose', authMiddleware, attachDbUser, jobController.listForCompose);
+router.get('/for-list', authMiddleware, attachDbUser, jobController.listForTenantGrid);
 router.get('/board-publications', authMiddleware, attachDbUser, jobController.listBoardPublications);
+router.get('/cv-forward-variables', authMiddleware, attachDbUser, jobController.listCvForwardVariables);
 router.post('/log-smart-import-open', authMiddleware, attachDbUser, jobController.logSmartImportModalOpen);
 router.get('/:id/referral-client-contacts', authMiddleware, jobController.getReferralClientContacts);
 router.get('/:id/candidates', optionalAuth, jobController.getCandidates);
@@ -22,6 +24,7 @@ router.post('/:id/events', authMiddleware, attachDbUser, jobEventController.crea
 router.put('/:id/events/:eventId', authMiddleware, attachDbUser, jobEventController.update);
 router.delete('/:id/events/:eventId', authMiddleware, attachDbUser, jobEventController.remove);
 router.patch('/:id/board-sources', authMiddleware, attachDbUser, jobController.patchBoardSources);
+router.patch('/:id/list-notes', authMiddleware, attachDbUser, jobController.patchListNotes);
 router.get('/:id', jobController.get);
 router.post('/', optionalAuth, optionalAttachDbUser, jobController.create);
 router.post('/ai/analyze', jobController.analyzeDescription);

@@ -56,6 +56,8 @@ const SYSTEM_EVENTS = {
   // 8. דיוור ודיווח
   MAIL_SENT:       { triggerName: 'דיוור ודיווח', eventName: 'נשלח דיוור' },
   STAFF_EMAIL_SENT:{ triggerName: 'דיוור ודיווח', eventName: 'נשלח מייל' },
+  CV_FORWARD_SENT: { triggerName: 'דיוור ודיווח', eventName: 'שיגור קו״ח לנמען נוסף' },
+  CV_FORWARD_FAILED: { triggerName: 'דיוור ודיווח', eventName: 'כשל בשיגור קו״ח לנמען נוסף' },
   PROPOSAL_SENT:   { triggerName: 'דיוור ודיווח', eventName: 'הצעת מחיר' },
   MAIL_STATUS_BULK:{ triggerName: 'דיוור ודיווח', eventName: 'נשלח סטטוס מועמדים' },
 };

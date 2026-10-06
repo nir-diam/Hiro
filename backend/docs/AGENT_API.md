@@ -998,6 +998,9 @@ List live organizations with pagination, free-text search, and date filters. Sam
 | `q` | string | — | Alias for `search` |
 | `id` | UUID | — | If set, returns only that organization (single row) |
 | `mainField` | string | — | Filter by main field |
+| `registrationNumber` | string | — | Exact match on ח.פ (9 digits) |
+| `dataConfidence` | string | — | Exact match on data confidence |
+| `activityStatus` | string | — | Exact match: `פעילה`, `לא פעילה`, `בפירוק`, `לא ידוע` |
 | `location` | string | — | Filter by primary location (partial match) |
 | `includeMerged` | boolean | `false` | Include merged organizations |
 | `dateFrom` | `YYYY-MM-DD` | — | Start of date range (inclusive) |
@@ -1230,6 +1233,94 @@ curl -s -X PATCH "http://localhost:4000/api/agent/organizations/990e8400-e29b-41
 
 Errors: `400` if body invalid; `404` with `code: "ALIAS_NOT_FOUND"` if any alias string is not present on the organization.
 
+#### `operation: "update_fields"`
+
+Partial update of any writable organization profile field. Send only fields that change. **`null` clears a value** (e.g. wrong ח.פ, website, logo).
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `operation` | yes | `"update_fields"` |
+| `fields` | yes | Object with one or more writable fields |
+| `expectedUpdatedAt` | recommended | ISO timestamp from last `GET`; mismatch → `409 OPTIMISTIC_LOCK` |
+
+Writable fields include: `name`, `nameEn`, `legalName`, `registrationNumber`, `activityStatus`, `dataConfidence`, `lastVerified`, `location`, `address`, `hqCountry`, `website`, `linkedinUrl`, `email`, `phone`, `logo`, `foundedYear`, `employeeCount`, industry/structure fields, `tags`, `techTags`, `description`, `comments`, `additionalLocations` (full replace).
+
+**Restrictions:**
+- `dataConfidence`: agent may set only `Verified by Agent`, `Missing`, `Pending Review` (Hebrew aliases accepted). `Verified by User` → **`403 FORBIDDEN_DATA_CONFIDENCE`**.
+- `registrationNumber`: exactly 9 digits, or `null`.
+- `activityStatus`: `פעילה` \| `לא פעילה` \| `בפירוק` \| `לא ידוע` (not `merged`).
+- `location` / additional-location cities: validated against cities catalog.
+- Read-only: `id`, `createdAt`, `updatedAt`, `dataCompleteness`, `candidateCount`, `snippet`, `aliases`.
+
+```bash
+curl -s -X PATCH "$BASE/api/agent/organizations/{id}/execute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "update_fields",
+    "expectedUpdatedAt": "2026-09-29T10:00:00.000Z",
+    "fields": {
+      "registrationNumber": null,
+      "activityStatus": "לא פעילה",
+      "dataConfidence": "Verified by Agent",
+      "comments": "ח.פ שגוי — נוקה על ידי סוכן"
+    }
+  }'
+```
+
+**Response `200`:** `{ "operation": "update_fields", "updatedFields": [...], "data": { ...full org... } }`
+
+Audit: agent entity audit with `metadata.operation: "update_fields"` and per-field before/after in `changes`.
+
+#### Additional location operations
+
+| Operation | Body |
+|-----------|------|
+| `add_additional_location` | `description`, `location` (city), optional `address`, `sortIndex`, `expectedUpdatedAt` |
+| `update_additional_location` | `locationId`, any of `description`, `location`, `address`, `sortIndex`, `expectedUpdatedAt` |
+| `remove_additional_location` | `locationId`, `expectedUpdatedAt` |
+
+---
+
+### POST `/api/agent/organizations`
+
+Scope: `agent:organizations:write`
+
+Create a live organization directly (e.g. split a real company out of a generic bucket). Same field validation as `update_fields`. **`name` is required.**
+
+Duplicate check by ח.פ and normalized name → **`409 DUPLICATE_ORGANIZATION`** with `existingOrganization`.
+
+```bash
+curl -s -X POST "$BASE/api/agent/organizations" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "fields": {
+      "name": "ישרוטל",
+      "registrationNumber": "512491846",
+      "activityStatus": "פעילה"
+    }
+  }'
+```
+
+---
+
+### GET `/api/agent/organizations/duplicates`
+
+Scope: `agent:organizations:read`
+
+Returns groups of live organizations sharing the same **registration number** or **normalized name**.
+
+Query: `limit` (default 50, max 200).
+
+---
+
+### Organization AI decisions — `organizationId`
+
+`GET /api/agent/organization-ai-decisions` and `GET .../:id` now include read-only **`organizationId`**: the live `Organization` created or linked for that decision (backfilled from `originalTerm` when missing).
+
+**Closing `create_company` without re-creating:** use `PATCH .../execute` with `operation: "resolve"`, `reviewStatus: "approved"`. The company already exists from the pipeline; resolve links `organizationId` and sets `reviewStatus` — **no duplicate org**. `approve` with `agent_approved` only updates `manualApprovalStatus`; use `resolve` to close review status.
+
 ---
 
 ## Tag catalog (write)
@@ -1281,6 +1372,60 @@ Errors: `400` if `merges` is empty, UUIDs invalid, or source equals target; `404
 
 ---
 
+### POST `/api/agent/tags/:id/enrich` {#post-apiagenttagsidenrich}
+
+Scope: `agent:tags:write`
+
+Run **deep AI enrichment** on a single catalog tag using the same pipeline as the admin UI “העשרה עמוקה” button: loads the full tag record from the database and passes it to `tag_ai_enriched` (not bare tag names — avoids mismatched suggestions).
+
+Persists the enrichment like applying AI suggestions in the UI:
+
+- `status` → `draft`
+- `qualityState` → `needs_review`
+- `source` → `ai`
+- May update `tagKey`, `category`, `synonyms`, display names, `type`, `descriptionHe`, `domains`
+
+Audit logged with `metadata.operation: "enrich"` and `before` / `after` snapshots.
+
+```bash
+curl -s -X POST "http://localhost:4000/api/agent/tags/1731549b-dac2-4f6b-ad54-fd28f164cc9c/enrich" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+**Response `200`:**
+
+```json
+{
+  "data": {
+    "tagId": "1731549b-dac2-4f6b-ad54-fd28f164cc9c",
+    "enriched": true,
+    "before": {
+      "tagKey": "react",
+      "category": "Software",
+      "synonyms": []
+    },
+    "after": {
+      "tagKey": "react_js",
+      "category": "Software Development",
+      "synonyms": [
+        {
+          "id": "syn_1789549747785_0_e2o1s",
+          "phrase": "React.js",
+          "language": "en",
+          "type": "alias",
+          "priority": 4
+        }
+      ]
+    },
+    "data": { "...": "full tag DTO from GET /api/agent/tags/:id" }
+  }
+}
+```
+
+Errors: `404` tag not found; `502` if AI returns no parseable suggestion; `400` on unique constraint if suggested `tagKey` collides with another tag.
+
+---
+
 ### PATCH `/api/agent/tags/:id/execute` {#patch-apiagenttagsidexecute}
 
 Scope: `agent:tags:write`
@@ -1295,6 +1440,7 @@ Execute catalog tag maintenance operations. Audit logged per agent actor (`metad
 |-------------|-------------|
 | `add_synonyms` | Add synonyms/aliases by phrase (returns stable `synonyms[].id` for new entries) |
 | `remove_synonyms` | Remove synonyms by stable `synonyms[].id` from `GET /api/agent/tags/:id` |
+| `update_status` | Set `status` (`active` \| `draft`) and/or `qualityState` (`verified` \| `needs_review`) |
 
 #### `operation: "add_synonyms"`
 
@@ -1358,6 +1504,45 @@ curl -s -X PATCH "http://localhost:4000/api/agent/tags/1731549b-dac2-4f6b-ad54-f
 ```
 
 When every requested phrase already exists (normalized), `addedSynonyms` is empty and no audit row is written; `data` still returns the current tag.
+
+#### `operation: "update_status"`
+
+Update catalog tag lifecycle fields without running AI enrichment.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `operation` | yes | `"update_status"` |
+| `status` | no* | `"active"` or `"draft"` |
+| `qualityState` | no* | `"verified"` or `"needs_review"` |
+
+\* At least one of `status` or `qualityState` must be provided.
+
+```bash
+curl -s -X PATCH "http://localhost:4000/api/agent/tags/1731549b-dac2-4f6b-ad54-fd28f164cc9c/execute" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "operation": "update_status",
+    "status": "active",
+    "qualityState": "verified"
+  }'
+```
+
+**Response `200`:**
+
+```json
+{
+  "operation": "update_status",
+  "status": "active",
+  "qualityState": "verified",
+  "data": {
+    "id": "1731549b-dac2-4f6b-ad54-fd28f164cc9c",
+    "tagKey": "react",
+    "status": "active",
+    "qualityState": "verified"
+  }
+}
+```
 
 #### `operation: "remove_synonyms"`
 
@@ -1676,10 +1861,13 @@ Errors: `400` if UUIDs invalid; `404` if client or contact not found, or contact
 | GET | `/api/agent/tags` | `agent:tags:read` | List catalog tags |
 | GET | `/api/agent/tags/:id` | `agent:tags:read` | Get catalog tag |
 | POST | `/api/agent/tags/merge` | `agent:tags:write` | Merge catalog tags |
-| PATCH | `/api/agent/tags/:id/execute` | `agent:tags:write` | Tag maintenance (`add_synonyms`, `remove_synonyms`) |
-| GET | `/api/agent/organizations` | `agent:organizations:read` | List live organizations |
+| POST | `/api/agent/tags/:id/enrich` | `agent:tags:write` | Deep AI enrich (full tag context) |
+| PATCH | `/api/agent/tags/:id/execute` | `agent:tags:write` | Tag maintenance (`add_synonyms`, `remove_synonyms`, `update_status`) |
+| GET | `/api/agent/organizations` | `agent:organizations:read` | List live organizations (filters: `registrationNumber`, `dataConfidence`, `activityStatus`) |
+| GET | `/api/agent/organizations/duplicates` | `agent:organizations:read` | Duplicate org groups (same ח.פ or normalized name) |
+| POST | `/api/agent/organizations` | `agent:organizations:write` | Create live organization |
 | GET | `/api/agent/organizations/:id` | `agent:organizations:read` | Get live organization |
-| PATCH | `/api/agent/organizations/:id/execute` | `agent:organizations:write` | Org maintenance (`add_aliases`, `remove_aliases`) |
+| PATCH | `/api/agent/organizations/:id/execute` | `agent:organizations:write` | Org maintenance (`update_fields`, aliases, additional locations) |
 | POST | `/api/agent/organizations/:id/enrich` | `agent:organizations:write` | AI enrich → live org |
 | POST | `/api/agent/organizations/merge` | `agent:organizations:write` | Merge two organizations |
 | POST | `/api/agent/clients/:clientId/organization-link` | `agent:clients:write` | Link catalog org to client |
@@ -1699,7 +1887,7 @@ Errors: `400` if UUIDs invalid; `404` if client or contact not found, or contact
 | `comments`, `userVerdict` | Both (in list/get; writable via `/execute`) |
 | `reviewerAction`, `resolvedAt`, `resolvedTargetTagId` | Both |
 | `pendingTagId` | Tag decisions |
-| `organizationTmpId`, `aiSuggestedTargetId` | Organization decisions |
+| `organizationTmpId`, `aiSuggestedTargetId` | Organization decisions (use read-only `organizationId` for live org link) |
 | Live `Organization` record | Organization **AI decisions** list/get (use `GET /api/agent/organizations` for live orgs) |
 
 **Now exposed (tag decisions):** `candidateTagsSnapshot`, `candidateCount`, `retrieval` — see [Retrieval diagnostics](#retrieval-diagnostics).
@@ -1723,6 +1911,7 @@ Errors: `400` if UUIDs invalid; `404` if client or contact not found, or contact
 | `OPTIMISTIC_LOCK` | Decision row changed since `expectedUpdatedAt` |
 | `SYNONYM_NOT_FOUND` | One or more `synonymIds` not on the tag (`PATCH .../tags/:id/execute`) |
 | `ALIAS_NOT_FOUND` | One or more alias strings not on the organization (`PATCH .../organizations/:id/execute`) |
+| `TAG_PROTECTED` | Catalog tag is in **תגיות מוגנות** — block merge-as-source, delete, status change, deep enrich; skip and do not retry. Merging *into* a protected tag (aliases only) is allowed. |
 
 ```json
 { "message": "Synonym id(s) not found on tag: syn_missing_id", "code": "SYNONYM_NOT_FOUND" }
@@ -1754,6 +1943,21 @@ Errors: `400` if UUIDs invalid; `404` if client or contact not found, or contact
 ---
 
 ## Changelog
+
+### 2026-10-06
+
+- **Protected catalog tags (`isProtected`)** — staff: `POST /api/tags/protect` / `unprotect` (admin). Agents receive `403` + `TAG_PROTECTED` when a blocked mutation targets a protected tag; use `PATCH .../execute` `add_synonyms` only, or merge other tags *into* the protected target.
+
+### 2026-09-29
+
+- **`PATCH /api/agent/organizations/:id/execute`** — `update_fields` (partial profile edit, null clears values, optimistic lock)
+- **Additional location ops** — `add_additional_location`, `update_additional_location`, `remove_additional_location`
+- **`POST /api/agent/organizations`** — create live organization with duplicate detection (`409 DUPLICATE_ORGANIZATION`)
+- **`GET /api/agent/organizations/duplicates`** — groups by shared ח.פ or normalized name
+- **List filters** — `registrationNumber`, `dataConfidence`, `activityStatus` on `GET /api/agent/organizations`
+- **Organization AI decisions** — read-only `organizationId`; `resolve` on `create_company` closes without re-creating org
+- **Pipeline dedup** — advisory lock on concurrent `create_company` in `findOrCreateByName`
+- **`GET /api/agent/capabilities`** — organization + org-decision capability entries added
 
 ### 2026-09-23
 

@@ -74,7 +74,11 @@ export interface JobMatchResult {
     salary: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
   };
   jobCandidateId?: string | null;
-  lastAnalyzed?: string;
+  /** Job record updatedAt / openDate — used for portal date sorting. */
+  jobUpdatedAt?: string | null;
+  jobOpenDate?: string | null;
+  jobUpdatedAtMs?: number;
+  lastAnalyzed?: string | null;
 }
 
 export interface MatchQuery {

@@ -315,7 +315,7 @@ const ReferralsView: React.FC<{
         (async () => {
             try {
                 const url = isTenantUser
-                    ? `${apiBase}/api/jobs/for-compose`
+                    ? `${apiBase}/api/jobs/for-list`
                     : `${apiBase}/api/jobs`;
                 const res = await fetch(url, {
                     headers: authHeaders(true),

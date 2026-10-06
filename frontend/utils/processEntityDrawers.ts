@@ -1,5 +1,6 @@
 import type { Client, Contact } from '../components/ClientsListView';
 import type { Candidate } from '../components/CandidatesListView';
+import type { MessageRecipientOption } from '../hooks/useUIState';
 import { authHeaders } from './authHeaders';
 import { contactFromApi, primaryEmail, primaryPhone } from './contactFormModel';
 
@@ -75,6 +76,9 @@ function normalizeContactFromApi(raw: Record<string, unknown>, fallback: Contact
       ? (raw.organization as Record<string, unknown>)
       : null;
   const organizationId = raw.organizationId ? String(raw.organizationId) : fallback.organizationId || null;
+  const organizationTmpId = raw.organizationTmpId
+    ? String(raw.organizationTmpId)
+    : fallback.organizationTmpId || null;
   const orgName = String(
     raw.organizationName || orgRow?.name || orgRow?.nameEn || '',
   ).trim();
@@ -102,6 +106,7 @@ function normalizeContactFromApi(raw: Record<string, unknown>, fallback: Contact
     id: String(raw.id || fallback.id),
     clientId: String(raw.clientId || clientRow?.id || fallback.clientId || ''),
     organizationId,
+    organizationTmpId,
     name: nm || fallback.name,
     role: String(raw.role || fallback.role || ''),
     clientName,
@@ -115,6 +120,104 @@ function normalizeContactFromApi(raw: Record<string, unknown>, fallback: Contact
     pipelineId: raw.pipelineId ? String(raw.pipelineId) : fallback.pipelineId,
     stageId: raw.processStage ? String(raw.processStage) : fallback.stageId,
   };
+}
+
+function contactRawToRecipientOption(
+  raw: Record<string, unknown>,
+  clientId: string,
+  fallbackSubtitle = '',
+): MessageRecipientOption | null {
+  if (raw.isActive === false) return null;
+  const id = String(raw.id || '').trim();
+  if (!id) return null;
+  const form = contactFromApi(raw);
+  const name = String(raw.name || '').trim()
+    || [form.firstName, form.lastName].filter(Boolean).join(' ').trim();
+  if (!name) return null;
+  const orgRow =
+    raw.organization && typeof raw.organization === 'object' && !Array.isArray(raw.organization)
+      ? (raw.organization as Record<string, unknown>)
+      : null;
+  const clientRow =
+    raw.client && typeof raw.client === 'object' && !Array.isArray(raw.client)
+      ? (raw.client as Record<string, unknown>)
+      : null;
+  const subtitle = String(
+    raw.organizationName
+      || orgRow?.name
+      || orgRow?.nameEn
+      || clientRow?.displayName
+      || clientRow?.name
+      || fallbackSubtitle
+      || '',
+  ).trim() || null;
+  return {
+    id,
+    name,
+    email: primaryEmail(form) || String(raw.email || raw.mainContactEmail || '').trim() || '',
+    phone:
+      primaryPhone(form, 'mobile')
+      || primaryPhone(form, 'office')
+      || String(raw.mobilePhone || raw.phone || '').trim()
+      || '',
+    subtitle,
+    clientId,
+    organizationId: raw.organizationId ? String(raw.organizationId) : null,
+  };
+}
+
+export type OrganizationContactRecipientScope = {
+  organizationId?: string | null;
+  organizationTmpId?: string | null;
+};
+
+/** Active contacts for one organization (SendMessageModal recipient picker). */
+export async function fetchClientContactRecipientOptions(
+  apiBase: string,
+  clientId: string,
+  fallbackSubtitle = '',
+  scope?: OrganizationContactRecipientScope,
+): Promise<MessageRecipientOption[]> {
+  if (!apiBase || !clientId) return [];
+  const organizationId = String(scope?.organizationId || '').trim();
+  const organizationTmpId = String(scope?.organizationTmpId || '').trim();
+  const orgQs = organizationId
+    ? `?organizationId=${encodeURIComponent(organizationId)}`
+    : organizationTmpId
+      ? `?organizationTmpId=${encodeURIComponent(organizationTmpId)}`
+      : '';
+  if (!orgQs) return [];
+  const res = await fetch(
+    `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts${orgQs}`,
+    {
+      credentials: 'include',
+      headers: authHeaders(),
+      cache: 'no-store',
+    },
+  );
+  if (!res.ok) return [];
+  const json = await res.json().catch(() => []);
+  const rows = Array.isArray(json) ? json : json?.data ?? [];
+  return rows
+    .map((row: Record<string, unknown>) =>
+      contactRawToRecipientOption(row, clientId, fallbackSubtitle),
+    )
+    .filter((opt): opt is MessageRecipientOption => Boolean(opt))
+    .sort((a, b) => a.name.localeCompare(b.name, 'he'));
+}
+
+/** Merge fetched org contacts with the current contact (ensures profile row is selected). */
+export function mergeMessageRecipientOptions(
+  loaded: MessageRecipientOption[],
+  current: MessageRecipientOption,
+): MessageRecipientOption[] {
+  if (!current.id) return loaded.length ? loaded : [];
+  const byId = new Map<string, MessageRecipientOption>();
+  for (const opt of loaded) {
+    if (opt?.id) byId.set(opt.id, opt);
+  }
+  byId.set(current.id, { ...byId.get(current.id), ...current });
+  return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name, 'he'));
 }
 
 async function fetchContactRow(

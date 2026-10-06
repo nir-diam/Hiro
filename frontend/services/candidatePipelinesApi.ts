@@ -46,6 +46,12 @@ export async function syncCandidatePipelines(clientId: string, pipelines: Pipeli
                 name: p.name,
                 description: p.description || '',
                 sortIndex: index,
+                defaultContactId: p.defaultContactId ? String(p.defaultContactId) : null,
+                defaultAssigneeUserIds: Array.isArray(p.defaultAssigneeUserIds)
+                    ? p.defaultAssigneeUserIds.map((id) => String(id)).filter(Boolean)
+                    : p.defaultContactId
+                      ? [String(p.defaultContactId)]
+                      : [],
                 stages: (p.stages || []).map((s) => ({
                     id: s.id,
                     name: s.name,

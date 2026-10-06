@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, useId, useLayoutEffect } from 'react';
-import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon, VideoCameraIcon, ShareIcon } from './Icons';
+import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon, VideoCameraIcon, ShareIcon } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
@@ -33,6 +33,12 @@ import {
     mergeCandidateProfileIdentity,
 } from '../utils/candidateProfileDuplicate';
 import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
+import {
+    CANDIDATES_HAS_DEGREE_LIST_PATH,
+    clearCandidatesListViewSessionState,
+    isAcademicDegreeCatalogTag,
+} from '../utils/academicDegreeCatalogTag';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
   <button onClick={onClick} title={title} className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors relative z-20 ${className || 'bg-primary-100/70 text-primary-600 hover:bg-primary-200'}`}>
@@ -377,8 +383,6 @@ interface MultiProfileOption {
 
 interface CandidateProfileProps {
     candidateData: any;
-    onMatchJobsClick: () => void;
-    onScreenCandidateClick: () => void;
     onOpenMessageModal: (config: {
         mode: MessageMode;
         candidateName: string;
@@ -757,8 +761,6 @@ function formatRecruitmentSourceDisplayDate(value: unknown): string {
 
 const CandidateProfile: React.FC<CandidateProfileProps> = ({
   candidateData,
-  onMatchJobsClick,
-  onScreenCandidateClick,
   onOpenMessageModal,
   onTagsChange,
   onFormChange,
@@ -787,13 +789,17 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   approveCorrectionsLoading = false,
 }) => {
   const { t } = useLanguage();
+  const navigate = useNavigate();
   const summaryId = useId();
-  const jobMatchesCount =
-    typeof candidateData.jobMatchesCount === 'number'
-      ? candidateData.jobMatchesCount
-      : Array.isArray(candidateData.matchedJobs)
-        ? candidateData.matchedJobs.length
-        : 0; 
+
+  const handleSmartTagSearch = useCallback(
+    (tag: SmartTagData) => {
+      if (!isAcademicDegreeCatalogTag(tag.label, tag.tagKey)) return;
+      clearCandidatesListViewSessionState();
+      navigate(CANDIDATES_HAS_DEGREE_LIST_PATH);
+    },
+    [navigate],
+  );
   const getInitials = (name: string) => (name || '').split(' ').map(n => n[0]).join('');
   const displayFullName =
     buildCandidateFullName(candidateData.firstName, candidateData.lastName) || candidateData.fullName || '';
@@ -1125,6 +1131,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       const entry: SmartTagData = {
         label,
         type,
+        tagKey: detail.tagKey?.trim() || undefined,
         isVerified: Boolean(detail.isCurrent),
         isAiSuggested: false,
         customTooltip: getTagTooltip(label),
@@ -1146,6 +1153,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       const entry: SmartTagData = {
         label,
         type,
+        tagKey: detail?.tagKey?.trim() || undefined,
         isVerified: Boolean(detail?.isCurrent),
         isAiSuggested: false,
         customTooltip: getTagTooltip(tag),
@@ -1974,7 +1982,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       ) : null;
 
   return (
-      <div className={`space-y-4${showSaveFooter ? ' pb-28 md:pb-32' : ''}`}>
+      <div className={`space-y-4${showSaveFooter ? ' pb-28 md:pb-2' : ''}`}>
       <div className="flex justify-center gap-2">
           <button
             type="button"
@@ -1998,7 +2006,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       </div>
 
       <div
-        className={`candidate-profile-card clear-both flex flex-col bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border ${originalPrimaryCandidateProfileCardClass(isViewingOriginalPrimaryProfile)}`}
+        className={`candidate-profile-card clear-both flex flex-col bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative border ${originalPrimaryCandidateProfileCardClass(isViewingOriginalPrimaryProfile)}`}
       >
          {/* Favorite Button */}
          <button 
@@ -2275,18 +2283,53 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                       </div>
 
                       <div className="w-full mt-auto relative z-[1000]">
-                      <TagRowGroup
-                          groupedSmartTags={groupedSmartTags}
-                          onQualificationAdd={() => {
-                              const target = document.getElementById('education');
-                              if (target) {
-                                  target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                              }
-                          }}
-                          onRowAdd={handleRowTagSelectorOpen}
-                          onTagRemove={canEditTagsInPlace ? handleTagRemove : undefined}
-                          onTagToggle={handleTagModeToggle}
-                      />
+                      <div className="mt-6 flex flex-col gap-4">
+                          <div className="flex items-center justify-between gap-3">
+                                {candidateData.phone && (
+                                <a href={`tel:${candidateData.phone}`} title={candidateData.phone} className="w-10 h-10 flex items-center justify-center bg-white border border-border-default text-text-muted rounded-xl hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm">
+                                    <PhoneIcon className="w-5 h-5" />
+                                </a>
+                                )}
+                                {canUseDistributionEmail ? (
+                                    <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}>
+                                        <EnvelopeIcon className="w-5 h-5" />
+                                    </SocialButton>
+                                ) : null}
+                                {canUseDistributionWhatsapp ? (
+                                    <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}>
+                                        <WhatsappIcon className="w-5 h-5" />
+                                    </SocialButton>
+                                ) : null}
+                                {canUseDistributionSms ? (
+                                    <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}>
+                                        <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />
+                                    </SocialButton>
+                                ) : null}
+                                {(canUseDistributionEmail || canUseDistributionWhatsapp || canUseDistributionSms) &&
+                                (candidateData.linkedInUrl || candidateData.linkedIn) ? (
+                                    <div className="h-6 w-px bg-border-default" />
+                                ) : null}
+                                <a href={candidateData.linkedInUrl || candidateData.linkedIn || '#'} target="_blank" rel="noopener noreferrer" title="LinkedIn Profile" className="w-10 h-10 flex items-center justify-center bg-[#0077b5]/10 text-[#0077b5] rounded-xl hover:bg-[#0077b5]/20 transition-all">
+                                    <LinkedInIcon className="w-5 h-5" />
+                                </a>
+                          </div>
+                      </div>
+
+                      <div className="lg:hidden mt-4">
+                          <TagRowGroup
+                              groupedSmartTags={groupedSmartTags}
+                              onQualificationAdd={() => {
+                                  const target = document.getElementById('education');
+                                  if (target) {
+                                      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                                  }
+                              }}
+                              onRowAdd={handleRowTagSelectorOpen}
+                              onTagRemove={canEditTagsInPlace ? handleTagRemove : undefined}
+                              onTagToggle={handleTagModeToggle}
+                              onTagSearch={handleSmartTagSearch}
+                          />
+                      </div>
 
                       <div className="mt-4 rounded-2xl border border-border-default/90 bg-gradient-to-br from-bg-card via-bg-card to-bg-subtle/35 p-3 text-sm shadow-sm">
                           <div className="-mx-1 flex flex-nowrap items-end gap-x-3 gap-y-0 overflow-x-auto overflow-y-visible px-1 pb-0.5 sm:gap-x-5">
@@ -2463,62 +2506,20 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                  smartTags={candidateData.industryAnalysis?.smartTags}
               />
 
-              {/* --- ACTION BUTTONS (same as tmp/CandidateProfile) --- */}
-              <div className="mt-6 flex flex-col gap-4">
-                  <div className="flex items-center justify-between gap-3">
-                        {candidateData.phone && (
-                        <a href={`tel:${candidateData.phone}`} title={candidateData.phone} className="w-10 h-10 flex items-center justify-center bg-white border border-border-default text-text-muted rounded-xl hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm">
-                            <PhoneIcon className="w-5 h-5" />
-                        </a>
-                        )}
-                        {canUseDistributionEmail ? (
-                            <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}>
-                                <EnvelopeIcon className="w-5 h-5" />
-                            </SocialButton>
-                        ) : null}
-                        {canUseDistributionWhatsapp ? (
-                            <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}>
-                                <WhatsappIcon className="w-5 h-5" />
-                            </SocialButton>
-                        ) : null}
-                        {canUseDistributionSms ? (
-                            <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}>
-                                <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />
-                            </SocialButton>
-                        ) : null}
-                        {(canUseDistributionEmail || canUseDistributionWhatsapp || canUseDistributionSms) &&
-                        (candidateData.linkedInUrl || candidateData.linkedIn) ? (
-                            <div className="h-6 w-px bg-border-default" />
-                        ) : null}
-                        <a href={candidateData.linkedInUrl || candidateData.linkedIn || '#'} target="_blank" rel="noopener noreferrer" title="LinkedIn Profile" className="w-10 h-10 flex items-center justify-center bg-[#0077b5]/10 text-[#0077b5] rounded-xl hover:bg-[#0077b5]/20 transition-all">
-                            <LinkedInIcon className="w-5 h-5" />
-                        </a>
-                  </div>
-                  {!hideActions && (
-                      <div className="flex flex-col gap-3">
-                          <DevAnnotation
-                              title="AI Matching"
-                              description="Calculates relevance score based on candidate skills vs job requirements."
-                              logic={["Vectors Embedding for skills", "Industry overlap analysis"]}
-                              position="top-left"
-                          >
-                              <button
-                                  onClick={(e) => { e.stopPropagation(); onMatchJobsClick(); }}
-                                  className="w-full flex items-center justify-center gap-2 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition-all shadow-lg shadow-primary-500/20"
-                              >
-                                  <MatchIcon className="w-5 h-5" />
-                                  <span>{t('profile.matches')} ({jobMatchesCount})</span>
-                              </button>
-                          </DevAnnotation>
-                          <button
-                              onClick={(e) => { e.stopPropagation(); onScreenCandidateClick(); }}
-                              className="w-full flex items-center justify-center gap-2 bg-white border border-border-default text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition-all shadow-sm"
-                          >
-                              <ClipboardDocumentListIcon className="w-5 h-5 text-text-muted" />
-                              <span>{t('profile.screen_candidate')}</span>
-                          </button>
-                      </div>
-                  )}
+              <div className="mt-6 relative z-[1000] hidden lg:block">
+                  <TagRowGroup
+                      groupedSmartTags={groupedSmartTags}
+                      onQualificationAdd={() => {
+                          const target = document.getElementById('education');
+                          if (target) {
+                              target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                          }
+                      }}
+                      onRowAdd={handleRowTagSelectorOpen}
+                      onTagRemove={canEditTagsInPlace ? handleTagRemove : undefined}
+                      onTagToggle={handleTagModeToggle}
+                      onTagSearch={handleSmartTagSearch}
+                  />
               </div>
           </div>
         </div>

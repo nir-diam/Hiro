@@ -48,6 +48,7 @@ import {
 import { fetchPipelines, type PipelineDto, type PipelineStageDto } from '../services/pipelinesApi';
 import { fetchCandidatePipelines, patchCandidatePipelineStage } from '../services/candidatePipelinesApi';
 import { fetchStaffUsers } from '../services/usersApi';
+import { resolvePipelineDefaultAssigneeNames } from '../utils/pipelineDefaultAssignees';
 import { fetchSystemEvents } from '../services/systemEventsApi';
 import {
   buildSystemEventGroupsFromApiRows,
@@ -65,6 +66,12 @@ import { applyOutcomeDueDate, outcomeActionSubtitle, summarizeAutomationResults 
 import { dueDateTimeAfterSla, normalizeSlaUnit } from '../utils/slaDuration';
 import { approvePipelineAutomations, executePipelineOutcome } from '../services/pipelineOutcomesApi';
 import { dispatchClientJournalUpdated } from '../utils/clientJournalEvents';
+import {
+  extractOutboundRecipientTo,
+  isOutboundClientMessageEvent,
+  outboundEventLooksLikeEmail,
+  recipientMatchesContactEmails,
+} from '../utils/contactEmailMatch';
 import { fetchCandidateLinkedJobs, fetchJobLinkProcessJournal, patchJobLinkProcessJournalEntry, type CandidateJobLink, type ProcessJournalResponse } from '../utils/candidateLinkedJobs';
 import {
   automationErrors,
@@ -76,6 +83,8 @@ import OutcomeAutomationsInfoModal from './OutcomeAutomationsInfoModal';
 import { fetchClientMessageTemplates, type MessageTemplateDto } from '../services/messageTemplatesApi';
 import {
   buildMoveTargetOptions,
+  isOutcomeTarget,
+  type MoveTargetOption,
   resolveMoveTarget,
   resolveStageIdFromMoveTargetLabel,
 } from '../utils/pipelineMoveTargets';
@@ -110,6 +119,7 @@ export type JournalEvent = {
   process: string;
   processId?: string | null;
   organizationId?: string | null;
+  organizationTmpId?: string | null;
   stage: string;
   stageId?: string | null;
   type?: string[];
@@ -1093,6 +1103,7 @@ const formatJournalPersonList = (
 const getEventHandlingAssignees = (event: JournalEvent): string[] =>
   parseAssigneeList(event.coordinator ?? '');
 
+
 const formatAssigneeList = (names: string[]): string => {
   const unique = Array.from(new Set(names.map((name) => String(name || '').trim()).filter(Boolean)));
   return unique.join(', ');
@@ -1336,6 +1347,7 @@ const normalizeRow = (raw: Record<string, unknown>): JournalEvent => {
     process: String(raw.process || types[0] || ''),
     processId: raw.processId ? String(raw.processId) : null,
     organizationId: raw.organizationId != null ? String(raw.organizationId) : null,
+    organizationTmpId: raw.organizationTmpId != null ? String(raw.organizationTmpId) : null,
     stage: String(raw.stage || types[1] || ''),
     stageId: raw.stageId ? String(raw.stageId) : null,
     type: types,
@@ -1391,6 +1403,7 @@ const eventMatchesContact = (
   contactId?: string | null,
   contactName?: string | null,
   candidateId?: string | null,
+  scopeContactEmails?: string[] | null,
 ): boolean => {
   if (candidateId) {
     const fromMeta = resolveCandidateIdFromEvent(event);
@@ -1398,6 +1411,23 @@ const eventMatchesContact = (
     if (event.contactId && String(event.contactId) === String(candidateId)) return true;
   }
   if (!contactId && !contactName && !candidateId) return true;
+
+  const contactEmails = Array.isArray(scopeContactEmails)
+    ? scopeContactEmails.map((e) => String(e || '').trim()).filter((e) => e.includes('@'))
+    : [];
+
+  if (contactId && isOutboundClientMessageEvent(event)) {
+    if (outboundEventLooksLikeEmail(event) && contactEmails.length > 0) {
+      const toField = extractOutboundRecipientTo(event);
+      if (recipientMatchesContactEmails(toField, contactEmails)) return true;
+      return false;
+    }
+    const linked = parseEventLinkedContacts(event);
+    if (linked.some((c) => String(c.id) === String(contactId))) return true;
+    if (event.contactId && String(event.contactId) === String(contactId)) return true;
+    return false;
+  }
+
   if (contactId) {
     const linked = parseEventLinkedContacts(event);
     if (linked.some((c) => String(c.id) === String(contactId))) return true;
@@ -1411,15 +1441,10 @@ const eventMatchesContact = (
   return false;
 };
 
-const eventMatchesOrganization = (
+const eventMatchesOrganizationName = (
   event: JournalEvent,
-  organizationId?: string | null,
   organizationName?: string | null,
 ): boolean => {
-  const orgId = String(organizationId || '').trim();
-  if (!orgId) return true;
-  if (String(event.organizationId || '') === orgId) return true;
-
   const orgName = String(organizationName || '').trim().toLowerCase();
   if (!orgName) return false;
 
@@ -1433,6 +1458,39 @@ const eventMatchesOrganization = (
 
   const blob = `${event.title || ''} ${event.description || ''} ${event.process || ''}`.toLowerCase();
   return blob.includes(orgName);
+};
+
+const eventMatchesOrganization = (
+  event: JournalEvent,
+  organizationId?: string | null,
+  organizationName?: string | null,
+): boolean => {
+  const orgId = String(organizationId || '').trim();
+  if (!orgId) return true;
+  if (String(event.organizationId || '') === orgId) return true;
+  return eventMatchesOrganizationName(event, organizationName);
+};
+
+const eventMatchesOrganizationScope = (
+  event: JournalEvent,
+  scopeOrganizationId?: string | null,
+  scopeOrganizationTmpId?: string | null,
+  scopeOrganizationName?: string | null,
+): boolean => {
+  const orgId = String(scopeOrganizationId || '').trim();
+  const tmpId = String(scopeOrganizationTmpId || '').trim();
+  if (!orgId && !tmpId) return true;
+
+  const eventOrgId = String(event.organizationId || '').trim();
+  const eventTmpId = String(event.organizationTmpId || '').trim();
+
+  if (tmpId) {
+    if (eventTmpId) return eventTmpId === tmpId;
+    if (eventOrgId) return false;
+    return eventMatchesOrganizationName(event, scopeOrganizationName);
+  }
+
+  return eventMatchesOrganization(event, orgId, scopeOrganizationName);
 };
 
 const resolveEventCompanyLabel = (
@@ -1497,12 +1555,18 @@ const scopeEventsForProcessLookup = (
   scopeCandidateId?: string | null,
   scopeOrganizationId?: string | null,
   scopeOrganizationName?: string | null,
+  scopeOrganizationTmpId?: string | null,
 ): JournalEvent[] =>
   events.filter((event) => {
     if (!eventMatchesContact(event, scopeContactId, scopeContactName, scopeCandidateId)) return false;
     if (
-      scopeOrganizationId
-      && !eventMatchesOrganization(event, scopeOrganizationId, scopeOrganizationName)
+      (scopeOrganizationId || scopeOrganizationTmpId)
+      && !eventMatchesOrganizationScope(
+        event,
+        scopeOrganizationId,
+        scopeOrganizationTmpId,
+        scopeOrganizationName,
+      )
     ) {
       return false;
     }
@@ -1518,6 +1582,7 @@ const findExistingProcessEventsForPipeline = (
   scopeCandidateId?: string | null,
   scopeOrganizationId?: string | null,
   scopeOrganizationName?: string | null,
+  scopeOrganizationTmpId?: string | null,
 ): JournalEvent[] => {
   const pid = String(pipelineId || '').trim();
   if (!pid) return [];
@@ -1529,6 +1594,7 @@ const findExistingProcessEventsForPipeline = (
     scopeCandidateId,
     scopeOrganizationId,
     scopeOrganizationName,
+    scopeOrganizationTmpId,
   );
 
   const byProcessId = scoped.filter((event) => String(event.processId || '') === pid);
@@ -1564,6 +1630,7 @@ const findActiveProcessEventsForPipeline = (
   scopeCandidateId?: string | null,
   scopeOrganizationId?: string | null,
   scopeOrganizationName?: string | null,
+  scopeOrganizationTmpId?: string | null,
   scopeJobId?: string | null,
   scopeJobLinkId?: string | null,
   scopeJobTitle?: string | null,
@@ -1578,6 +1645,7 @@ const findActiveProcessEventsForPipeline = (
     scopeCandidateId,
     scopeOrganizationId,
     scopeOrganizationName,
+    scopeOrganizationTmpId,
   ).filter((event) => {
     if (event.isActive === false) return false;
     if (scopeJobId || scopeJobLinkId || scopeJobTitle || scopeJobCompany) {
@@ -1595,6 +1663,7 @@ const findProcessEventForPipeline = (
   scopeCandidateId?: string | null,
   scopeOrganizationId?: string | null,
   scopeOrganizationName?: string | null,
+  scopeOrganizationTmpId?: string | null,
 ): JournalEvent | null =>
   pickBestProcessEvent(
     findExistingProcessEventsForPipeline(
@@ -1606,6 +1675,7 @@ const findProcessEventForPipeline = (
       scopeCandidateId,
       scopeOrganizationId,
       scopeOrganizationName,
+      scopeOrganizationTmpId,
     ),
   );
 
@@ -1672,7 +1742,7 @@ function resolveStagesForEvent(
   clientPipelines: PipelineDto[],
   candidatePipelines: PipelineDto[] = [],
   actionPipelineId: string | null = null,
-): Array<{ id: string; title: string }> {
+): MoveTargetOption[] {
   const ctx = resolveActionPipelineContext(
     event,
     actionPipelineId,
@@ -1681,10 +1751,7 @@ function resolveStagesForEvent(
     null,
   );
   if (!ctx) return [];
-  return buildMoveTargetOptions(ctx.pipeline.stages || []).map((option) => ({
-    id: option.value,
-    title: option.label,
-  }));
+  return buildMoveTargetOptions(ctx.pipeline.stages || []);
 }
 
 type ClientOption = {
@@ -1709,6 +1776,8 @@ type Props = {
   /** When set, only events for this contact are shown (contact profile tab). */
   scopeContactId?: string | null;
   scopeContactName?: string | null;
+  /** Known contact emails — outbound mail must match `אל:` / metadata.to, not body text. */
+  scopeContactEmails?: string[] | null;
   /** Match events by metadata.candidateId (candidate process modal). */
   scopeCandidateId?: string | null;
   scopeJobId?: string | null;
@@ -1749,6 +1818,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   preferredOrganizationLabel = null,
   scopeContactId = null,
   scopeContactName = null,
+  scopeContactEmails = null,
   scopeCandidateId = null,
   scopeJobId = null,
   scopeJobLinkId = null,
@@ -2036,6 +2106,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const processDuplicateOrganizationScope = useMemo((): {
     organizationId: string;
+    organizationTmpId: string;
     organizationName: string;
   } => {
     const organizationId = String(
@@ -2045,12 +2116,21 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         || defaultOrganizationId
         || '',
     ).trim();
-    if (!organizationId) {
-      return { organizationId: '', organizationName: '' };
+    const organizationTmpId = organizationId
+      ? ''
+      : String(
+          eventModalScope?.organizationTmpId
+            || effectiveCreateOrganizationTmpId
+            || scopeOrganizationTmpId
+            || defaultOrganizationTmpId
+            || '',
+        ).trim();
+    if (!organizationId && !organizationTmpId) {
+      return { organizationId: '', organizationTmpId: '', organizationName: '' };
     }
-    const matched = organizationOptions.find(
-      (opt) => String(opt.organizationId || '') === organizationId,
-    );
+    const matched = organizationId
+      ? organizationOptions.find((opt) => String(opt.organizationId || '') === organizationId)
+      : organizationOptions.find((opt) => String(opt.organizationTmpId || '') === organizationTmpId);
     const organizationName = String(
       eventModalScope?.organizationName
         || matched?.name
@@ -2058,12 +2138,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         || defaultOrganizationName
         || '',
     ).trim();
-    return { organizationId, organizationName };
+    return { organizationId, organizationTmpId, organizationName };
   }, [
     eventModalScope,
     effectiveCreateOrganizationId,
+    effectiveCreateOrganizationTmpId,
     scopeOrganizationId,
+    scopeOrganizationTmpId,
     defaultOrganizationId,
+    defaultOrganizationTmpId,
     organizationOptions,
     scopeOrganizationName,
     defaultOrganizationName,
@@ -2074,6 +2157,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       buildEventsJournalFilterStorageKey({
         crossClientJournal,
         scopeOrganizationId,
+        scopeOrganizationTmpId,
         scopeContactId,
         scopeCandidateId,
         scopeJobId,
@@ -2083,6 +2167,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     [
       crossClientJournal,
       scopeOrganizationId,
+      scopeOrganizationTmpId,
       scopeContactId,
       scopeCandidateId,
       scopeJobId,
@@ -2290,6 +2375,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
   const [candidateJobLinksById, setCandidateJobLinksById] = useState<Record<string, CandidateJobLink[]>>({});
   const [contactLookupRows, setContactLookupRows] = useState<ContactLookupRow[]>([]);
+  const [staffUserRows, setStaffUserRows] = useState<
+    Array<{ id: string; name?: string | null; email?: string | null }>
+  >([]);
   const fetchedCandidateLinksRef = useRef<Set<string>>(new Set());
   const fetchingCandidateLinksRef = useRef<Set<string>>(new Set());
   const contactDrawerSessionRef = useRef(0);
@@ -2476,6 +2564,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     void fetchStaffUsers(clientId)
       .then((rows) => {
         if (!active) return;
+        setStaffUserRows(
+          rows.map((row) => ({
+            id: String(row.id || ''),
+            name: row.name,
+            email: row.email,
+          })),
+        );
         const names = new Set<string>();
         for (const row of rows) {
           const name = String(row.name || row.email || '').trim();
@@ -2492,6 +2587,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       })
       .catch(() => {
         if (active) {
+          setStaffUserRows([]);
           const fallback = new Set<string>();
           const me = user?.name?.trim();
           if (me) fallback.add(me);
@@ -2517,6 +2613,14 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     }
     return map;
   }, [contactLookupRows]);
+
+  const staffUserById = useMemo(() => {
+    const map = new Map<string, { name?: string | null; email?: string | null }>();
+    for (const row of staffUserRows) {
+      if (row.id) map.set(row.id, row);
+    }
+    return map;
+  }, [staffUserRows]);
 
   const closeContactDrawer = useCallback(() => {
     contactDrawerSessionRef.current += 1;
@@ -2601,10 +2705,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
       const scopedClientId = String(defaultClientId || clientOptions[0]?.id || '').trim();
       const scopedOrganizationId = String(scopeOrganizationId || '').trim();
+      const scopedOrganizationTmpId = String(scopeOrganizationTmpId || '').trim();
 
       if (scopedClientId && !crossClientJournal) {
         const qs = new URLSearchParams({ summary: '1', limit: '1200' });
         if (scopedOrganizationId) qs.set('organizationId', scopedOrganizationId);
+        if (scopedOrganizationTmpId) qs.set('organizationTmpId', scopedOrganizationTmpId);
         const res = await fetch(
           `${apiBase}/api/clients/${encodeURIComponent(scopedClientId)}/events?${qs.toString()}`,
           {
@@ -2627,6 +2733,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       const allQs = new URLSearchParams({ summary: '1', limit: '800' });
       if (scopedClientId) allQs.set('clientId', scopedClientId);
       if (scopedOrganizationId) allQs.set('organizationId', scopedOrganizationId);
+      if (scopedOrganizationTmpId) allQs.set('organizationTmpId', scopedOrganizationTmpId);
       const res = await fetch(`${apiBase}/api/clients/all-events?${allQs.toString()}`, {
         credentials: 'include',
         headers: authHeaders(),
@@ -2647,6 +2754,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     apiBase,
     defaultClientId,
     scopeOrganizationId,
+    scopeOrganizationTmpId,
     scopeOrganizationName,
     clientOptionsSignature,
     scopeContactName,
@@ -3147,11 +3255,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   }, [staffEditorNames, events]);
   const assigneeOptionsForEdit = useMemo(() => {
     if (canSelectOtherCoordinators) {
-      const options = assigneeOptions.length > 0 ? assigneeOptions : [selfCoordinatorName];
-      return Array.from(new Set(options.filter(Boolean)));
+      const contactNames = contactLookupRows
+        .map((row) => String(row.name || '').trim())
+        .filter(Boolean);
+      const options =
+        assigneeOptions.length > 0 ? assigneeOptions : [selfCoordinatorName];
+      return Array.from(new Set([...options, ...contactNames].filter(Boolean)));
     }
     return [selfCoordinatorName];
-  }, [canSelectOtherCoordinators, assigneeOptions, selfCoordinatorName]);
+  }, [canSelectOtherCoordinators, assigneeOptions, selfCoordinatorName, contactLookupRows]);
   const filteredHandlingCoordinatorGroups = useMemo(() => {
     const q = handlingCoordinatorDropdownSearch.trim().toLowerCase();
     const filterNames = (names: string[]) =>
@@ -3187,12 +3299,27 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const eventPassesFilters = useCallback(
     (event: JournalEvent) => {
-      if (!eventMatchesContact(event, scopeContactId, scopeContactName, scopeCandidateId)) return false;
       if (
-        scopeOrganizationId
+        !eventMatchesContact(
+          event,
+          scopeContactId,
+          scopeContactName,
+          scopeCandidateId,
+          scopeContactEmails,
+        )
+      ) {
+        return false;
+      }
+      if (
+        (scopeOrganizationId || scopeOrganizationTmpId)
         && !scopeContactId
         && !scopeCandidateId
-        && !eventMatchesOrganization(event, scopeOrganizationId, scopeOrganizationName)
+        && !eventMatchesOrganizationScope(
+          event,
+          scopeOrganizationId,
+          scopeOrganizationTmpId,
+          scopeOrganizationName,
+        )
       ) {
         return false;
       }
@@ -3251,25 +3378,28 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         if (selectedSystemEventIds.size > 0 && !matchesSelectedSystemEvent) return false;
         if (dateFrom && new Date(event.date) < new Date(dateFrom)) return false;
         if (dateTo && new Date(event.date) > new Date(`${dateTo}T23:59:59`)) return false;
-        if (
-          !eventMatchesJournalSearch(
-            event,
-            entitySearchQuery,
-            resolveCompanyLabel(event),
-            candidateJobLinksById,
-            scopeCandidateId,
-          )
-        ) {
-          return false;
-        }
+      }
+      if (
+        !embeddedInModal
+        && !eventMatchesJournalSearch(
+          event,
+          entitySearchQuery,
+          resolveCompanyLabel(event),
+          candidateJobLinksById,
+          scopeCandidateId,
+        )
+      ) {
+        return false;
       }
       return true;
     },
     [
       scopeContactId,
       scopeContactName,
+      scopeContactEmails,
       scopeCandidateId,
       scopeOrganizationId,
+      scopeOrganizationTmpId,
       scopeOrganizationName,
       embeddedInModal,
       hideFilters,
@@ -3337,6 +3467,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       scopeCandidateId,
       scopeOrganizationId,
       scopeOrganizationName,
+      scopeOrganizationTmpId,
     );
 
     if (!match) return;
@@ -3362,6 +3493,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     scopeContactName,
     scopeCandidateId,
     scopeOrganizationId,
+    scopeOrganizationTmpId,
     scopeOrganizationName,
     apiBase,
   ]);
@@ -4022,14 +4154,28 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setEditTitleValue(mergedEvent.title || '');
     setEditDescriptionValue(event.description || '');
     setEditNextStageValue('');
-    const assignees = canSelectOtherCoordinators
-      ? getEventHandlingAssignees(event).map((name) =>
+    const assigneesFromEvent = canSelectOtherCoordinators
+      ? getEventHandlingAssignees(mergedEvent).map((name) =>
           name === JOURNAL_SELF_LABEL ? selfCoordinatorName : name,
         )
       : [selfCoordinatorName];
-    setEditAssigneeValues(
-      assignees.length > 0 ? assignees : [selfCoordinatorName],
-    );
+    let editAssignees = assigneesFromEvent.length > 0 ? assigneesFromEvent : [];
+    if (canSelectOtherCoordinators && editAssignees.length === 0) {
+      const clientPipelines = pipelinesByClient[event.clientId] || [];
+      const candidatePipelines = candidatePipelinesByClient[event.clientId] || [];
+      const pipeline =
+        clientPipelines.find((p) => p.id === mergedEvent.processId) ||
+        candidatePipelines.find((p) => p.id === mergedEvent.processId);
+      const staffList = staffUserRows.map((row) => ({
+        id: row.id,
+        name: String(row.name || row.email || '').trim(),
+      }));
+      const pipelineDefaults = resolvePipelineDefaultAssigneeNames(pipeline, staffList);
+      editAssignees = pipelineDefaults.length ? pipelineDefaults : [selfCoordinatorName];
+    } else if (editAssignees.length === 0) {
+      editAssignees = [selfCoordinatorName];
+    }
+    setEditAssigneeValues(editAssignees);
     setEditDueDateValue(mergedEvent.dueDate || '');
     setEditIsActiveValue(mergedEvent.isActive !== false);
     setEditStatusUpdates(
@@ -4060,6 +4206,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       void fetchPipelines(event.clientId)
         .then((rows) => setPipelinesByClient((prev) => ({ ...prev, [event.clientId]: rows })))
         .catch(() => setPipelinesByClient((prev) => ({ ...prev, [event.clientId]: [] })));
+    }
+    if (event.clientId && !candidatePipelinesByClient[event.clientId]) {
+      void fetchCandidatePipelines(event.clientId)
+        .then((rows) =>
+          setCandidatePipelinesByClient((prev) => ({ ...prev, [event.clientId]: rows })),
+        )
+        .catch(() =>
+          setCandidatePipelinesByClient((prev) => ({ ...prev, [event.clientId]: [] })),
+        );
     }
     void fetchStaffUsers(event.clientId)
       .then((rows) => {
@@ -4397,6 +4552,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     const targetClientId = eventModalScope?.clientId || effectiveCreateClientId;
     const targetOrganizationId =
       eventModalScope?.organizationId || effectiveCreateOrganizationId || '';
+    const targetOrganizationTmpId = targetOrganizationId
+      ? ''
+      : String(
+          eventModalScope?.organizationTmpId
+            || effectiveCreateOrganizationTmpId
+            || scopeOrganizationTmpId
+            || defaultOrganizationTmpId
+            || '',
+        ).trim();
     if (!apiBase || !targetClientId) throw new Error('יש לבחור לקוח');
     const typeParts = [data.processName, data.stageName].filter(Boolean);
     const slaDue = dueDateTimeAfterSla(
@@ -4413,6 +4577,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       status: 'עתידי',
       isActive: true,
       ...(targetOrganizationId ? { organizationId: targetOrganizationId } : {}),
+      ...(targetOrganizationTmpId ? { organizationTmpId: targetOrganizationTmpId } : {}),
       process: data.processName,
       processId: data.processId,
       stage: data.stageName,
@@ -4471,6 +4636,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       scopeCandidateId,
       processDuplicateOrganizationScope.organizationId,
       processDuplicateOrganizationScope.organizationName,
+      processDuplicateOrganizationScope.organizationTmpId,
       scopeJobId,
       scopeJobLinkId,
       scopeJobTitle,
@@ -4673,6 +4839,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         || defaultOrganizationId
         || '',
     ).trim();
+    const duplicateOrgTmpId = duplicateOrgId
+      ? ''
+      : String(
+          resolvedOrgTmpId
+            || effectiveCreateOrganizationTmpId
+            || scopeOrganizationTmpId
+            || defaultOrganizationTmpId
+            || '',
+        ).trim();
     const duplicateOrgName = String(
       resolvedOrgName || scopeOrganizationName || defaultOrganizationName || '',
     ).trim();
@@ -4688,6 +4863,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         scopeCandidateId,
         duplicateOrgId,
         duplicateOrgName,
+        duplicateOrgTmpId,
         scopeJobId,
         scopeJobLinkId,
         scopeJobTitle,
@@ -5006,8 +5182,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             : 'flex flex-col flex-1 min-h-0 bg-bg-default rounded-2xl border border-border-default'
         }
       >
-        {/* Filters */}
-        {!hideFilters && !embeddedInModal ? (
+        {/* Search + filters (search also on org / contact scoped tabs) */}
+        {!embeddedInModal ? (
         <div className="bg-bg-card px-3 py-3 md:px-4 md:py-3 border-b border-border-default shadow-sm relative z-40 space-y-3">
           <div className="flex flex-wrap items-center gap-2 md:gap-3">
             <div className="relative w-full sm:w-auto sm:min-w-[220px] sm:max-w-[320px] flex-1 sm:flex-none">
@@ -5033,7 +5209,21 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               ) : null}
             </div>
 
-            {hasFilters ? (
+            {hideFilters ? (
+              entitySearchQuery.trim() ? (
+                <button
+                  type="button"
+                  onClick={() => setEntitySearchQuery('')}
+                  className="text-xs font-semibold text-text-muted hover:text-red-600 flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-red-50 transition-colors shrink-0"
+                >
+                  <XMarkIcon className="w-3.5 h-3.5" /> נקה חיפוש
+                </button>
+              ) : (
+                <span className="text-[11px] text-text-muted hidden sm:inline">
+                  מועמד · איש קשר · משרה · חברה
+                </span>
+              )
+            ) : hasFilters ? (
               <button
                 type="button"
                 onClick={clearAllJournalFilters}
@@ -5048,10 +5238,21 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             )}
           </div>
 
-          {activeFilterChips.length > 0 ? (
-            <ActiveFilterChips chips={activeFilterChips} className="pt-0.5" />
+          {(hideFilters
+            ? activeFilterChips.filter((c) => c.id === 'search')
+            : activeFilterChips
+          ).length > 0 ? (
+            <ActiveFilterChips
+              chips={
+                hideFilters
+                  ? activeFilterChips.filter((c) => c.id === 'search')
+                  : activeFilterChips
+              }
+              className="pt-0.5"
+            />
           ) : null}
 
+          {!hideFilters ? (
           <div className="rounded-xl border border-border-subtle bg-gray-50/60 p-2.5 md:p-3 space-y-2.5">
             <div className="flex items-center gap-1.5 text-[11px] font-bold text-text-muted uppercase tracking-wide px-0.5">
               <FunnelIcon className="w-3.5 h-3.5 text-primary-600" />
@@ -5412,6 +5613,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           </div>
             </div>
           </div>
+          ) : null}
         </div>
         ) : null}
 
@@ -5925,19 +6127,52 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                   <select
                                     value={editNextStageValue}
                                     onChange={(e) => setEditNextStageValue(e.target.value)}
-                                    className="w-full text-[13px] border border-primary-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white"
+                                    className={`w-full text-[13px] border border-primary-200 rounded-lg p-2.5 focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white ${
+                                      editNextStageValue && !isOutcomeTarget(editNextStageValue)
+                                        ? 'font-bold'
+                                        : ''
+                                    }`}
                                   >
                                     <option value="">-- ללא שינוי שלב --</option>
-                                    {resolveStagesForEvent(
-                                      event,
-                                      pipelinesByClient[event.clientId] || [],
-                                      candidatePipelinesByClient[event.clientId] || [],
-                                      event.id === selectedEvent?.id ? actionPipelineId : null,
-                                    ).map((o) => (
-                                      <option key={o.id} value={o.id}>
-                                        {o.title}
-                                      </option>
-                                    ))}
+                                    {(() => {
+                                      const nextStageOptions = resolveStagesForEvent(
+                                        event,
+                                        pipelinesByClient[event.clientId] || [],
+                                        candidatePipelinesByClient[event.clientId] || [],
+                                        event.id === selectedEvent?.id ? actionPipelineId : null,
+                                      );
+                                      return (
+                                        <>
+                                          {nextStageOptions.some((o) => o.kind === 'stage') ? (
+                                            <optgroup label="שלבים">
+                                              {nextStageOptions
+                                                .filter((o) => o.kind === 'stage')
+                                                .map((option) => (
+                                                  <option
+                                                    key={option.value}
+                                                    value={option.value}
+                                                    className="font-bold"
+                                                    style={{ fontWeight: 700 }}
+                                                  >
+                                                    {option.label}
+                                                  </option>
+                                                ))}
+                                            </optgroup>
+                                          ) : null}
+                                          {nextStageOptions.some((o) => o.kind === 'outcome') ? (
+                                            <optgroup label="תוצאות">
+                                              {nextStageOptions
+                                                .filter((o) => o.kind === 'outcome')
+                                                .map((option) => (
+                                                  <option key={option.value} value={option.value}>
+                                                    {option.label}
+                                                  </option>
+                                                ))}
+                                            </optgroup>
+                                          ) : null}
+                                        </>
+                                      );
+                                    })()}
                                   </select>
                                 </div>
                                 {canSelectOtherCoordinators ? (
@@ -6273,7 +6508,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                             טיוטה
                                           </span>
                                         ) : null}
-                                        {!isInactive ? (
+                                        {!isInactive || isDraftUpdate ? (
                                           <button
                                             type="button"
                                             onClick={() => handleStartEditStatusUpdate(event, update)}
@@ -6302,7 +6537,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                           )}
                         </div>
 
-                        {hasPendingOutcomeDraft && isExpanded && !isInactive ? (
+                        {hasPendingOutcomeDraft && isExpanded ? (
                           <div
                             className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-xl flex flex-wrap items-center justify-between gap-3"
                             onClick={(e) => e.stopPropagation()}

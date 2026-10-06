@@ -1,5 +1,10 @@
 const apiBase = () => import.meta.env.VITE_API_BASE || '';
 
+export type EmailSignatureDto = {
+    html?: string;
+    logoUrl?: string;
+};
+
 export type StaffUserDto = {
     id: string;
     email: string;
@@ -11,6 +16,7 @@ export type StaffUserDto = {
     clientId?: string | null;
     dataScope?: { candidates?: string; jobs?: string };
     permissions?: Record<string, boolean>;
+    uiPreferences?: Record<string, unknown> & { emailSignature?: EmailSignatureDto };
     createdAt?: string;
     updatedAt?: string;
 };
@@ -145,6 +151,7 @@ export async function updateStaffUser(
         permissions: Record<string, boolean>;
         password: string;
         clientId: string | null;
+        emailSignature?: EmailSignatureDto | null;
     }>,
 ): Promise<StaffUserDto> {
     const res = await fetch(`${apiBase()}/api/users/${id}`, {

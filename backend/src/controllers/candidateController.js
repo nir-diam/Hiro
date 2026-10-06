@@ -690,6 +690,43 @@ function welcomePlaceholderContextFromRequest(req) {
   return { jobId, recruiter };
 }
 
+const DEFAULT_STUB_CANDIDATE_NAMES = new Set(['מועמד חדש', 'candidate']);
+
+function isStubCandidateDisplayName(name) {
+  const t = String(name || '').trim();
+  if (!t) return true;
+  if (DEFAULT_STUB_CANDIDATE_NAMES.has(t)) return true;
+  if (DEFAULT_STUB_CANDIDATE_NAMES.has(t.toLowerCase())) return true;
+  return false;
+}
+
+/** True when CV upload should re-parse instead of returning a duplicate hash row as-is. */
+function candidateNeedsUploadNameRepair(row) {
+  if (!row) return false;
+  if (row.ingestPending === true) return true;
+  const full = String(row.fullName || '').trim();
+  const fromParts = [row.firstName, row.lastName].filter(Boolean).join(' ').trim();
+  if (fromParts && !isStubCandidateDisplayName(fromParts)) return false;
+  return isStubCandidateDisplayName(full);
+}
+
+function scheduleCvForwardFromRequest(req, input = {}) {
+  try {
+    const { jobId } = welcomePlaceholderContextFromRequest(req);
+    if (!jobId) return;
+    const cvForwardService = require('../services/cvForwardService');
+    cvForwardService.scheduleCvForward({
+      jobId,
+      intakeChannel: 'staff_upload',
+      req,
+      recruitmentSourceName: req.body?.source ? String(req.body.source).trim() : null,
+      ...input,
+    });
+  } catch (err) {
+    console.warn('[cvForward] schedule skipped (non-fatal)', err?.message || err);
+  }
+}
+
 /**
  * Tenant UUID for client-scoped welcome templates when staff is authenticated.
  * Returns null if no/invalid JWT, user missing, or user has no clientId — in those cases
@@ -2965,6 +3002,15 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     await candidateCompletenessService.refreshCandidateDataStatusAfterSave(finalCandidateId, req);
 
     const enrichedCandidate = await candidateService.getById(finalCandidateId);
+    scheduleCvForwardFromRequest(req, {
+      candidateId: finalCandidateId,
+      candidate: enrichedCandidate,
+      resumeBuffer: buffer,
+      resumeFileName: fileName,
+      resumeMimeType: mimeType,
+      extractedText: text,
+      hasCvText: Boolean(String(text || '').trim()),
+    });
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     const portalAccountExists = await candidateService.identityHasPortalAccount({
       email: enrichedCandidate?.email,
@@ -3026,6 +3072,44 @@ const createFromAi = async (req, res) => {
             console.warn('[createFromAi] duplicate hash journal failed', evtErr?.message || evtErr);
           }
           const enriched = await candidateService.getById(primary.id);
+          if (candidateNeedsUploadNameRepair(enriched)) {
+            console.log('[createFromAi] duplicate hash — re-parsing placeholder/stuck candidate', {
+              candidateId: enriched.id,
+              fullName: enriched.fullName,
+            });
+            const repairCtx = {
+              buffer,
+              mimeType,
+              fileName,
+              resumeText: text,
+            };
+            if (!syncEnrich) {
+              void runUploadNameRepairEnrichment(enriched.id, enriched, repairCtx, req).catch((err) => {
+                console.error('[createFromAi-name-repair-bg]', enriched.id, err?.message || err);
+              });
+              const pendingView = await candidateService.getById(enriched.id);
+              return res.status(202).json({
+                candidate: { ...pendingView, ingestPending: true },
+                ingestPending: true,
+                processing: true,
+                resumeHashReused: true,
+                nameRepair: true,
+                identityAttached: true,
+                identityReused: true,
+                identityLinked: Boolean(enriched?.canonicalCandidateId),
+              });
+            }
+            const repaired = await runUploadNameRepairEnrichment(enriched.id, enriched, repairCtx, req);
+            return res.status(200).json({
+              candidate: repaired,
+              parsed: null,
+              resumeHashReused: true,
+              nameRepair: true,
+              identityAttached: true,
+              identityReused: true,
+              identityLinked: Boolean(repaired?.canonicalCandidateId),
+            });
+          }
           return res.status(200).json({
             candidate: enriched,
             parsed: null,
@@ -3473,9 +3557,13 @@ const attachMedia = async (req, res) => {
       void (async () => {
         let extraText = '';
         let pdfBuffer = null;
+        let resumeBuffer = null;
+        let resumeMimeType = null;
         try {
           const bin = await fetchResumeBinaryForMail(url, candidateId);
           if (bin?.buffer?.length) {
+            resumeBuffer = bin.buffer;
+            resumeMimeType = bin.contentType || null;
             if (isPdfUploadBuffer(bin.buffer, bin.contentType)) pdfBuffer = bin.buffer;
             if ((bin.contentType || '').startsWith('image/')) {
               extraText = await extractTextFromImageBuffer(bin.buffer);
@@ -3493,12 +3581,22 @@ const attachMedia = async (req, res) => {
           hasPdfBuffer: Boolean(pdfBuffer),
           unreliableText: isUnreliableResumeTextExtract(extraText),
         });
-        await runAttachMediaResumeEnrichment(
+        const enrichedCandidate = await runAttachMediaResumeEnrichment(
           candidateId,
           baseCandidate,
           { extraText, pdfBuffer, fileName: resumeFileName },
           req,
         );
+        scheduleCvForwardFromRequest(req, {
+          candidateId,
+          candidate: enrichedCandidate || baseCandidate,
+          resumeBuffer,
+          resumeUrl: url,
+          resumeFileName,
+          resumeMimeType,
+          extractedText: extraText,
+          hasCvText: Boolean(String(extraText || '').trim()),
+        });
       })().catch((err) => {
         console.error('[attachMedia-enrich-bg-unhandled]', candidateId, err?.message || err);
       });
@@ -3756,6 +3854,44 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
   void ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id);
   return refreshedCandidate;
 };
+
+async function extractUploadTextFromBuffer(buffer, mimeType) {
+  if (!buffer?.length) return '';
+  if ((mimeType || '').startsWith('image/')) {
+    return extractTextFromImageBuffer(buffer);
+  }
+  return extractFromBuffer(buffer, mimeType);
+}
+
+/** Re-parse CV for an existing row stuck on placeholder name or ingestPending. */
+async function runUploadNameRepairEnrichment(candidateId, baseCandidate, ctx, req) {
+  const { buffer, mimeType, fileName, resumeText } = ctx;
+  try {
+    await candidateService.update(candidateId, { ingestPending: true });
+    let extraText = typeof resumeText === 'string' ? resumeText : '';
+    if (!String(extraText || '').trim() && buffer?.length) {
+      extraText = await extractUploadTextFromBuffer(buffer, mimeType);
+    }
+    const pdfBuffer = buffer && isPdfUploadBuffer(buffer, mimeType) ? buffer : null;
+    const refreshed = await enrichCandidateFromResumeText(baseCandidate, extraText || '', {
+      pdfBuffer,
+      fileName,
+    });
+    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidateId, req);
+    scheduleCvForwardFromRequest(req, {
+      candidateId,
+      candidate: refreshed,
+      resumeBuffer: buffer,
+      resumeFileName: fileName,
+      resumeMimeType: mimeType,
+      extractedText: extraText,
+      hasCvText: Boolean(String(extraText || '').trim()),
+    });
+    return refreshed;
+  } finally {
+    await clearCandidateIngestPending(candidateId);
+  }
+}
 
 /** Background CV parse after resume URL is saved — keeps attachMedia HTTP fast. */
 const runAttachMediaResumeEnrichment = async (candidateId, baseCandidate, enrichCtx, req) => {
@@ -4680,6 +4816,18 @@ const linkCandidateToJob = async (req, res) => {
       workflowMetaPatch,
       manualOverride,
     });
+
+    try {
+      const candidateApplicationService = require('../services/candidateApplicationService');
+      await candidateApplicationService.ensureForPortalApplication({
+        candidateId,
+        jobId,
+        source,
+      });
+    } catch (appErr) {
+      console.warn('[linkCandidateToJob] ensure portal application failed (non-fatal):', appErr?.message || appErr);
+    }
+
     res.status(201).json({ ok: true });
   } catch (err) {
     console.error('[linkCandidateToJob]', err.message || err);
@@ -5046,7 +5194,7 @@ const getRelevantJobs = async (req, res) => {
 // Get all screening data for a candidate (keyed by jobId)
 const getScreeningData = async (req, res) => {
   const candidateId = req.params.id;
-  const baseAttrs = ['jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
+  const baseAttrs = ['jobId', 'screeningAnswers', 'digitalAnswers', 'telephoneImpression', 'internalOpinion'];
   const load = async (forceCoreOnly) => {
     const hasReject = forceCoreOnly
       ? false
@@ -5063,6 +5211,7 @@ const getScreeningData = async (req, res) => {
       const jid = r.jobId;
       byJob[jid] = {
         screeningAnswers: r.screeningAnswers || [],
+        digitalAnswers: r.digitalAnswers || [],
         telephoneImpression: r.telephoneImpression || '',
         internalOpinion: r.internalOpinion || '',
         screeningStatus: hasReject ? (r.screeningStatus || 'open') : 'open',
@@ -5094,6 +5243,7 @@ const saveScreeningData = async (req, res) => {
   const {
     jobId,
     screeningAnswers,
+    digitalAnswers,
     telephoneImpression,
     internalOpinion,
     screeningStatus,
@@ -5107,16 +5257,43 @@ const saveScreeningData = async (req, res) => {
       e.status = 400;
       throw e;
     }
-    const answers = Array.isArray(screeningAnswers) ? screeningAnswers : [];
-    const impression = typeof telephoneImpression === 'string' ? telephoneImpression : '';
+    const answers = Array.isArray(screeningAnswers) ? screeningAnswers : null;
+    const digital = Array.isArray(digitalAnswers) ? digitalAnswers : null;
+    const impression = typeof telephoneImpression === 'string' ? telephoneImpression : null;
     const opinion = typeof internalOpinion === 'string' ? internalOpinion : null;
     const hasReject = forceCoreOnly
       ? false
       : await jobCandidateScreeningHasRejectionColumns({ forceRefresh: true });
 
-    const coreFields = ['candidateId', 'jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
+    const coreFields = [
+      'candidateId',
+      'jobId',
+      'screeningAnswers',
+      'digitalAnswers',
+      'telephoneImpression',
+      'internalOpinion',
+    ];
     /** Sequelize needs primary key `id` on the instance for `.update()` — never omit it in attributes. */
     const coreAttrsForLoad = ['id', ...coreFields];
+
+    const buildResponse = (row) => ({
+      jobId,
+      screeningAnswers: row.screeningAnswers || [],
+      digitalAnswers: row.digitalAnswers || [],
+      telephoneImpression: row.telephoneImpression || '',
+      internalOpinion: row.internalOpinion || '',
+      screeningStatus: hasReject ? (row.screeningStatus || 'open') : 'open',
+      rejectionReason: hasReject ? (row.rejectionReason || '') : '',
+      rejectionNotes: hasReject ? (row.rejectionNotes || '') : '',
+    });
+
+    const applyCoreUpdates = (updates) => {
+      if (Array.isArray(screeningAnswers)) updates.screeningAnswers = answers;
+      if (Array.isArray(digitalAnswers)) updates.digitalAnswers = digital;
+      if (typeof telephoneImpression === 'string') updates.telephoneImpression = impression;
+      if (typeof internalOpinion === 'string') updates.internalOpinion = opinion;
+      return updates;
+    };
 
     if (!hasReject) {
       let row = await JobCandidateScreening.findOne({
@@ -5124,31 +5301,26 @@ const saveScreeningData = async (req, res) => {
         attributes: coreAttrsForLoad,
       });
       if (row) {
-        await row.update(
-          { screeningAnswers: answers, telephoneImpression: impression, internalOpinion: opinion },
-          { fields: ['screeningAnswers', 'telephoneImpression', 'internalOpinion'] },
-        );
+        const updates = applyCoreUpdates({});
+        const fields = Object.keys(updates);
+        if (fields.length > 0) {
+          await row.update(updates, { fields });
+          await row.reload({ attributes: coreAttrsForLoad });
+        }
       } else {
         row = await JobCandidateScreening.create(
           {
             candidateId,
             jobId,
-            screeningAnswers: answers,
-            telephoneImpression: impression,
+            screeningAnswers: answers || [],
+            digitalAnswers: digital || [],
+            telephoneImpression: impression || '',
             internalOpinion: opinion,
           },
           { fields: coreFields },
         );
       }
-      return {
-        jobId,
-        screeningAnswers: row.screeningAnswers,
-        telephoneImpression: row.telephoneImpression,
-        internalOpinion: row.internalOpinion || '',
-        screeningStatus: 'open',
-        rejectionReason: '',
-        rejectionNotes: '',
-      };
+      return buildResponse(row);
     }
 
     const rejectFields = ['screeningStatus', 'rejectionReason', 'rejectionNotes'];
@@ -5163,10 +5335,7 @@ const saveScreeningData = async (req, res) => {
       attributes: allAttrsForLoad,
     });
     if (row) {
-      const updates = {};
-      if (Array.isArray(screeningAnswers)) updates.screeningAnswers = answers;
-      if (typeof telephoneImpression === 'string') updates.telephoneImpression = impression;
-      if (typeof internalOpinion === 'string') updates.internalOpinion = internalOpinion;
+      const updates = applyCoreUpdates({});
       if (typeof screeningStatus === 'string') updates.screeningStatus = screeningStatus;
       if (typeof rejectionReason === 'string') updates.rejectionReason = rejectionReason;
       if (typeof rejectionNotes === 'string') updates.rejectionNotes = rejectionNotes;
@@ -5180,8 +5349,9 @@ const saveScreeningData = async (req, res) => {
         {
           candidateId,
           jobId,
-          screeningAnswers: answers,
-          telephoneImpression: impression,
+          screeningAnswers: answers || [],
+          digitalAnswers: digital || [],
+          telephoneImpression: impression || '',
           internalOpinion: opinion,
           screeningStatus: st,
           rejectionReason: rr,
@@ -5190,15 +5360,7 @@ const saveScreeningData = async (req, res) => {
         { fields: allAttrs },
       );
     }
-    return {
-      jobId,
-      screeningAnswers: row.screeningAnswers,
-      telephoneImpression: row.telephoneImpression,
-      internalOpinion: row.internalOpinion || '',
-      screeningStatus: row.screeningStatus || 'open',
-      rejectionReason: row.rejectionReason || '',
-      rejectionNotes: row.rejectionNotes || '',
-    };
+    return buildResponse(row);
   };
 
   try {

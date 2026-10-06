@@ -279,16 +279,8 @@ async function findPresetRowForClientId(clientId) {
 async function resolveClientIdFromJobLabel(jobPlain) {
   const name = String(jobPlain?.client || '').trim();
   if (!name) return null;
-  const Client = require('../models/Client');
-  const client = await Client.findOne({
-    where: {
-      [Op.or]: [
-        { name: { [Op.iLike]: name } },
-        { displayName: { [Op.iLike]: name } },
-      ],
-    },
-  });
-  return client?.id ? String(client.id) : null;
+  const { getClientIdForJobClientLabel } = require('./clientUsageSettingService');
+  return getClientIdForJobClientLabel(name);
 }
 
 /**

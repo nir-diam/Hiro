@@ -12,6 +12,7 @@ const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const Candidate = require('../models/Candidate');
 const JobCandidate = require('../models/JobCandidate');
+const JobCandidateScreening = require('../models/JobCandidateScreening');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
@@ -26,6 +27,9 @@ const {
 const { resolveEngineConfigForJob } = require('../services/matchingEngineService');
 
 const isMissingValue = (v) => v === undefined || v === null || v === '';
+
+const JOB_ID_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /**
  * Merges publication timestamps into a new recruitmentSources array.
@@ -117,6 +121,7 @@ const JOB_UPDATE_AUDIT_LABELS = {
   internalNotes: 'הערות פנימיות',
   uniqueEmail: 'מייל ייחודי',
   contacts: 'אנשי קשר',
+  cvForwardSettings: 'שיגור קורות חיים לנמען נוסף',
   recruitmentSources: 'מקורות גיוס',
   telephoneQuestions: 'שאלות טלפוניות',
   digitalQuestions: 'שאלות דיגיטליות',
@@ -221,62 +226,36 @@ const listForCompose = async (req, res) => {
     const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
 
-    if (!effectiveClientId || isPlatformAdmin) {
-      return res.json(isPlatformAdmin ? await jobService.list() : []);
+    if (!isPlatformAdmin) {
+      if (!effectiveClientId) return res.json([]);
+      const client = await Client.findByPk(effectiveClientId, { attributes: ['id'] });
+      if (!client) return res.json([]);
     }
 
-    const client = await Client.findByPk(effectiveClientId, {
-      attributes: ['id', 'name', 'displayName', 'domain', 'metadata'],
+    const rows = await jobService.listForComposePicker({
+      clientId: effectiveClientId,
+      platformAdmin: isPlatformAdmin,
     });
-    if (!client) {
+    return res.json(rows);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
+  }
+};
+
+/** Tenant jobs grid (JobsView, referrals filters) — slim rows, no screening/questions payload. */
+const listForTenantGrid = async (req, res) => {
+  try {
+    res.set('Cache-Control', 'private, no-store');
+    const user = req.dbUser;
+    const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    if (isPlatformAdmin || !effectiveClientId) {
       return res.json([]);
     }
-
-    // All jobs for this client account.
-    const rows = await Job.findAll({
-      where: { clientId: effectiveClientId },
-      attributes: { exclude: ['events', 'skills', 'embedding'] },
-      order: [['openDate', 'DESC']],
-    });
-
-    // Scope to linked organizations if any are configured.
-    // This prevents a tenant managing multiple companies from seeing every company's jobs.
-    const linkedOrgs = await ClientOrganizationLink.findAll({
-      where: { clientId: effectiveClientId },
-      include: [
-        { model: Organization, as: 'organization', required: false, attributes: ['id', 'name'] },
-        { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
-      ],
-    });
-
-    let scopedRows = rows;
-    if (linkedOrgs.length > 0) {
-      const linkedOrgIds = new Set();
-      const linkedOrgNames = new Set();
-      for (const link of linkedOrgs) {
-        const org = link.organization || link.organizationTmp;
-        if (!org) continue;
-        linkedOrgIds.add(String(org.id));
-        const nm = (org.name || '').toLowerCase().trim();
-        if (nm) linkedOrgNames.add(nm);
-      }
-
-      const filtered = rows.filter((job) => {
-        const plain = job.toJSON ? job.toJSON() : job;
-        if (plain.organizationId && linkedOrgIds.has(String(plain.organizationId))) return true;
-        const clientName = String(plain.client || '').toLowerCase().trim();
-        return clientName && linkedOrgNames.has(clientName);
-      });
-
-      // Only apply the org-scope filter if it yields results; otherwise fall back to all jobs.
-      if (filtered.length > 0) scopedRows = filtered;
-    }
-
-    await jobService.hydrateJobsSkills(scopedRows);
-    await jobService.enrichJobsWithCandidateCounts(scopedRows);
-    const { enrichJobsWithOrganizationIds } = require('../services/jobOrganizationResolveService');
-    await enrichJobsWithOrganizationIds(scopedRows);
-    return res.json(scopedRows.map(jobService.toApiJob));
+    const client = await Client.findByPk(effectiveClientId, { attributes: ['id'] });
+    if (!client) return res.json([]);
+    const rows = await jobService.listForTenantGrid(effectiveClientId);
+    return res.json(rows);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
   }
@@ -284,7 +263,11 @@ const listForCompose = async (req, res) => {
 
 const get = async (req, res) => {
   try {
-    const job = await jobService.getById(req.params.id);
+    const id = String(req.params.id || '').trim();
+    if (!JOB_ID_UUID_RE.test(id)) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    const job = await jobService.getById(id);
     res.json(jobService.toApiJob(job));
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
@@ -697,6 +680,47 @@ const getCandidates = async (req, res) => {
       console.warn('[getCandidates] live scoring skipped:', e.message || e);
     }
 
+    const digitalQuestions = Array.isArray(jobPlain?.digitalQuestions)
+      ? jobPlain.digitalQuestions
+      : Array.isArray(job?.digitalQuestions)
+        ? job.digitalQuestions
+        : [];
+    if (digitalQuestions.length && candidates.length) {
+      try {
+        const candidateIds = candidates.map((c) => c.id).filter(Boolean);
+        const screeningRows = await JobCandidateScreening.findAll({
+          where: { jobId, candidateId: candidateIds },
+          attributes: ['candidateId', 'digitalAnswers', 'screeningStatus', 'rejectionReason', 'rejectionNotes'],
+        });
+        const screeningByCandidate = new Map(
+          screeningRows.map((r) => {
+            const plain = r.get ? r.get({ plain: true }) : r;
+            return [String(plain.candidateId), plain];
+          }),
+        );
+        for (const cView of candidates) {
+          const row = screeningByCandidate.get(String(cView.id));
+          if (!row) {
+            cView.digitalScreening = {
+              digitalAnswers: [],
+              screeningStatus: 'open',
+              rejectionReason: '',
+              rejectionNotes: '',
+            };
+            continue;
+          }
+          cView.digitalScreening = {
+            digitalAnswers: Array.isArray(row.digitalAnswers) ? row.digitalAnswers : [],
+            screeningStatus: row.screeningStatus || 'open',
+            rejectionReason: row.rejectionReason || '',
+            rejectionNotes: row.rejectionNotes || '',
+          };
+        }
+      } catch (screenErr) {
+        console.warn('[getCandidates] digital screening load skipped:', screenErr.message || screenErr);
+      }
+    }
+
     const visibleCandidates = [];
     for (const cView of candidates) {
       const candPlain = candidateMap.get(String(cView.id));
@@ -911,7 +935,30 @@ const listBoardPublications = async (req, res) => {
              FROM candidates c
              WHERE c."recruitmentSourceId"::text = src->>'id'),
             0
-          )                                           AS "candidatesCount"
+          )                                           AS "candidatesCount",
+          COALESCE(
+            (
+              SELECT GREATEST(
+                COALESCE(NULLIF(tl->>'visits', '')::int, 0),
+                COALESCE(NULLIF(tl->>'views', '')::int, 0)
+              )
+              FROM job_publications jp
+              CROSS JOIN LATERAL jsonb_array_elements(
+                COALESCE(jp."trackingLinks", '[]'::jsonb)
+              ) AS tl
+              WHERE jp."jobId" = j.id
+                AND (
+                  tl->>'id' = src->>'id'
+                  OR tl->>'srcKey' = src->>'id'
+                  OR lower(COALESCE(tl->>'srcKey', '')) = lower(
+                    regexp_replace(COALESCE(src->>'name', ''), '\s+', '_', 'g')
+                  )
+                )
+              ORDER BY 1 DESC
+              LIMIT 1
+            ),
+            0
+          )                                           AS "views"
        FROM jobs j,
             jsonb_array_elements(j."recruitmentSources") AS src
        WHERE ${conditions.join(' AND ')}
@@ -932,6 +979,90 @@ const listBoardPublications = async (req, res) => {
  * PATCH /api/jobs/:id/board-sources
  * Quick-save just the recruitmentSources JSONB field without a full job PUT.
  */
+/** GET /api/jobs/cv-forward-variables — metadata for subject-prefix placeholders. */
+const listCvForwardVariables = async (req, res) => {
+  try {
+    const { listCvForwardSubjectVariablesForApi } = require('../utils/cvForwardSubjectVariables');
+    return res.json(listCvForwardSubjectVariablesForApi());
+  } catch (err) {
+    console.error('[jobController.listCvForwardVariables]', err.message || err);
+    return res.status(500).json({ message: err.message || 'Failed to list CV forward variables' });
+  }
+};
+
+const resolveActorDisplayName = (user) => {
+  if (!user) return 'משתמש';
+  const name = String(user.name || user.fullName || '').trim();
+  if (name) return name;
+  const email = String(user.email || '').trim();
+  if (email) return email;
+  return 'משתמש';
+};
+
+const buildListNotesHistoryEntry = ({ previousText, newText, user }) => {
+  const prev = String(previousText || '');
+  const next = String(newText || '');
+  let action = 'edit';
+  if (!prev && next) action = 'create';
+  else if (prev && !next) action = 'clear';
+
+  return {
+    id: require('crypto').randomUUID(),
+    at: new Date().toISOString(),
+    userId: user?.id ? String(user.id) : null,
+    userName: resolveActorDisplayName(user),
+    previousText: prev,
+    newText: next,
+    action,
+  };
+};
+
+/**
+ * PATCH /api/jobs/:id/list-notes
+ * Quick-save grid notes with edit history (all authenticated tenant users).
+ */
+const patchListNotes = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { listNotes } = req.body || {};
+    const nextText = listNotes == null ? '' : String(listNotes);
+
+    const job = await Job.findByPk(id, { attributes: ['id', 'clientId', 'listNotes', 'listNotesHistory'] });
+    if (!job) return res.status(404).json({ message: 'Job not found' });
+
+    const u = req.dbUser;
+    if (u && u.role !== 'admin' && u.role !== 'super_admin') {
+      if (u.clientId && String(u.clientId) !== String(job.clientId)) {
+        return res.status(403).json({ message: 'Forbidden' });
+      }
+    }
+
+    const previousText = String(job.listNotes || '');
+    if (previousText === nextText) {
+      return res.json({
+        listNotes: previousText,
+        listNotesHistory: Array.isArray(job.listNotesHistory) ? job.listNotesHistory : [],
+      });
+    }
+
+    const history = Array.isArray(job.listNotesHistory) ? [...job.listNotesHistory] : [];
+    history.unshift(buildListNotesHistoryEntry({ previousText, newText: nextText, user: u }));
+
+    await job.update({
+      listNotes: nextText,
+      listNotesHistory: history.slice(0, 200),
+    });
+
+    return res.json({
+      listNotes: job.listNotes,
+      listNotesHistory: job.listNotesHistory,
+    });
+  } catch (err) {
+    console.error('[jobController.patchListNotes]', err.message || err);
+    return res.status(500).json({ message: err.message || 'Failed to save list notes' });
+  }
+};
+
 const patchBoardSources = async (req, res) => {
   try {
     const { id } = req.params;
@@ -975,6 +1106,7 @@ module.exports = {
   list,
   listForPicker,
   listForCompose,
+  listForTenantGrid,
   get,
   create,
   update,
@@ -988,6 +1120,8 @@ module.exports = {
   listSonarIgnores,
   clearSonarIgnore,
   listBoardPublications,
+  listCvForwardVariables,
   patchBoardSources,
+  patchListNotes,
 };
 

@@ -2,10 +2,11 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import {
     PlusIcon, XMarkIcon, CheckCircleIcon,
     Bars3Icon, BriefcaseIcon, UserGroupIcon, TrashIcon,
-    ChevronUpIcon, ChevronDownIcon,
+    ChevronUpIcon, ChevronDownIcon, Cog6ToothIcon,
 } from './Icons';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
+import { fetchStaffUsers } from '../services/usersApi';
 import {
     fetchPipelines,
     syncPipelines,
@@ -22,6 +23,8 @@ import {
 import { buildMoveTargetOptions } from '../utils/pipelineMoveTargets';
 import SlaDurationInput from './SlaDurationInput';
 import { slaFieldLabel, normalizeSlaUnit, type SlaUnit } from '../utils/slaDuration';
+import { FormMultiSelect } from './FormMultiSelect';
+import { resolvePipelineDefaultAssigneeUserIds } from '../utils/pipelineDefaultAssignees';
 import {
     fetchClientMessageTemplates,
     type MessageTemplateDto,
@@ -57,6 +60,8 @@ interface Pipeline {
     name: string;
     description: string;
     sortIndex?: number;
+    defaultContactId?: string | null;
+    defaultAssigneeUserIds?: string[];
     stages: Stage[];
 }
 
@@ -575,12 +580,14 @@ function dtoToPipeline(d: PipelineDto): Pipeline {
         name: d.name,
         description: d.description || '',
         sortIndex: d.sortIndex,
+        defaultContactId: d.defaultContactId ? String(d.defaultContactId) : null,
+        defaultAssigneeUserIds: resolvePipelineDefaultAssigneeUserIds(d),
         stages: (d.stages || []).map((s: PipelineStageDto) => ({
             id: s.id,
             name: s.name,
             color: s.color,
             order: s.order,
-            slaLimit: s.slaLimit,
+            slaLimit: Math.max(0, Number(s.slaLimit) || 0),
             slaLimitUnit: normalizeSlaUnit(s.slaLimitUnit),
             outcomes: Array.isArray(s.outcomes) ? s.outcomes : [],
         })),
@@ -599,6 +606,10 @@ function pipelineToDto(p: Pipeline, sortIndex: number): PipelineDto {
         name: p.name,
         description: p.description || '',
         sortIndex,
+        defaultContactId: p.defaultContactId ? String(p.defaultContactId) : null,
+        defaultAssigneeUserIds: Array.isArray(p.defaultAssigneeUserIds)
+            ? p.defaultAssigneeUserIds.map((id) => String(id)).filter(Boolean)
+            : [],
         stages: (p.stages || []).map((s) => ({
             id: s.id,
             name: s.name,
@@ -725,6 +736,19 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
     const [systemEventGroups, setSystemEventGroups] = useState(SYSTEM_EVENT_GROUPS);
     const [recruitmentStatuses, setRecruitmentStatuses] = useState<RecruitmentStatusDto[]>([]);
     const [isPipelineOrderHelpExpanded, setIsPipelineOrderHelpExpanded] = useState(false);
+    const [isPipelineSettingsOpen, setIsPipelineSettingsOpen] = useState(false);
+    const [pipelineSettingsAssigneeUserIds, setPipelineSettingsAssigneeUserIds] = useState<string[]>([]);
+    const [pipelineStaffOptions, setPipelineStaffOptions] = useState<
+        Array<{ id: string; name: string }>
+    >([]);
+    const [pipelineStaffLoading, setPipelineStaffLoading] = useState(false);
+    const [pipelineSettingsSaving, setPipelineSettingsSaving] = useState(false);
+    const [pipelineSettingsSaveError, setPipelineSettingsSaveError] = useState<string | null>(null);
+
+    const contactsTenantClientId = useMemo(
+        () => String(isPlatformAdmin ? clientId || '' : ownClientId || clientId || '').trim(),
+        [isPlatformAdmin, clientId, ownClientId],
+    );
 
     const emailTemplates = useMemo(
         () => messageTemplates.filter((t) => t.channels.includes('email')),
@@ -916,56 +940,92 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
         setAdminClientId(clientOptions[0].id);
     }, [isPlatformAdmin, adminClientId, clientOptions]);
 
-    const schedulePersist = useCallback((snapshot: Pipeline[]) => {
-        if (!clientId || !persistEnabled.current) return;
-        setSaveError(null);
-        const rev = ++persistRevision.current;
-        if (persistTimer.current) clearTimeout(persistTimer.current);
-        persistTimer.current = setTimeout(async () => {
-            persistTimer.current = null;
-            // Only persist the latest scheduled revision.
-            if (rev !== persistRevision.current) return;
+    const applyPersistResult = useCallback(
+        (snapshot: Pipeline[], mapped: Pipeline[], forceFromServer: boolean) => {
+            const hadTempIds = snapshot.some(
+                (p) => isTempId(p.id) || p.stages.some((s) => isTempId(s.id)),
+            );
+            if (!forceFromServer && !hadTempIds) return;
+            const nextExpanded = remapExpandedAfterSync(
+                expandedStageIdRef.current,
+                snapshot,
+                mapped,
+                activePipelineIdRef.current,
+            );
+            setPipelines(mapped);
+            setExpandedStageId(nextExpanded);
+            setActivePipelineId((prev) => {
+                if (mapped.some((p) => p.id === prev)) return prev;
+                const idx = snapshot.findIndex((p) => p.id === prev);
+                if (idx >= 0 && mapped[idx]) return mapped[idx].id;
+                return mapped[0]?.id || '';
+            });
+        },
+        [],
+    );
+
+    const executePersist = useCallback(
+        async (snapshot: Pipeline[], rev: number, forceFromServer = false) => {
+            if (!clientId) return;
             try {
                 setSaving(true);
                 const saved = isCandidateKind
                     ? await syncCandidatePipelines(
-                        clientId,
-                        snapshot.map((p, i) => pipelineToDto(p, i)),
-                    )
+                          clientId,
+                          snapshot.map((p, i) => pipelineToDto(p, i)),
+                      )
                     : await syncPipelines(clientId, snapshot.map((p, i) => pipelineToDto(p, i)));
-                // Ignore stale responses — user kept editing while save was in flight.
                 if (rev !== persistRevision.current) return;
-
                 const mapped = sortPipelinesByIndex(saved.map(dtoToPipeline));
-                const hadTempIds = snapshot.some(
-                    (p) => isTempId(p.id) || p.stages.some((s) => isTempId(s.id)),
-                );
-
-                if (hadTempIds) {
-                    const nextExpanded = remapExpandedAfterSync(
-                        expandedStageIdRef.current,
-                        snapshot,
-                        mapped,
-                        activePipelineIdRef.current,
-                    );
-                    setPipelines(mapped);
-                    setExpandedStageId(nextExpanded);
-                    setActivePipelineId((prev) => {
-                        if (mapped.some((p) => p.id === prev)) return prev;
-                        const idx = snapshot.findIndex((p) => p.id === prev);
-                        if (idx >= 0 && mapped[idx]) return mapped[idx].id;
-                        return mapped[0]?.id || '';
-                    });
-                }
-                // If all IDs were already real UUIDs, keep local state so inputs keep focus.
+                applyPersistResult(snapshot, mapped, forceFromServer);
             } catch (e: unknown) {
                 if (rev !== persistRevision.current) return;
-                setSaveError(e instanceof Error ? e.message : 'שמירה נכשלה');
+                throw e;
             } finally {
                 if (rev === persistRevision.current) setSaving(false);
             }
-        }, 1200);
-    }, [clientId, isCandidateKind]);
+        },
+        [clientId, isCandidateKind, applyPersistResult],
+    );
+
+    const schedulePersist = useCallback(
+        (snapshot: Pipeline[]) => {
+            if (!clientId || !persistEnabled.current) return;
+            setSaveError(null);
+            const rev = ++persistRevision.current;
+            if (persistTimer.current) clearTimeout(persistTimer.current);
+            persistTimer.current = setTimeout(async () => {
+                persistTimer.current = null;
+                if (rev !== persistRevision.current) return;
+                try {
+                    await executePersist(snapshot, rev, false);
+                } catch (e: unknown) {
+                    if (rev !== persistRevision.current) return;
+                    setSaveError(e instanceof Error ? e.message : 'שמירה נכשלה');
+                }
+            }, 1200);
+        },
+        [clientId, executePersist],
+    );
+
+    const persistPipelinesNow = useCallback(
+        async (snapshot: Pipeline[]) => {
+            if (!clientId) {
+                throw new Error('לא נבחר לקוח');
+            }
+            if (!persistEnabled.current) {
+                throw new Error('ההגדרות עדיין נטענות — נסו שוב בעוד רגע');
+            }
+            if (persistTimer.current) {
+                clearTimeout(persistTimer.current);
+                persistTimer.current = null;
+            }
+            setSaveError(null);
+            const rev = ++persistRevision.current;
+            await executePersist(snapshot, rev, true);
+        },
+        [clientId, executePersist],
+    );
 
     useEffect(() => {
         persistEnabled.current = false;
@@ -1209,6 +1269,80 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
         const next = pipelines.filter(p => p.id !== activePipelineId).map((p, i) => ({ ...p, sortIndex: i }));
         setActivePipelineId(next[0]?.id || '');
         updatePipelines(next);
+    };
+
+    const openPipelineSettings = () => {
+        if (!activePipeline) return;
+        setPipelineSettingsAssigneeUserIds(
+            Array.isArray(activePipeline.defaultAssigneeUserIds)
+                ? [...activePipeline.defaultAssigneeUserIds]
+                : activePipeline.defaultContactId
+                  ? [activePipeline.defaultContactId]
+                  : [],
+        );
+        setPipelineStaffOptions([]);
+        setPipelineSettingsSaveError(null);
+        setIsPipelineSettingsOpen(true);
+    };
+
+    useEffect(() => {
+        if (!isPipelineSettingsOpen || !contactsTenantClientId) {
+            setPipelineStaffOptions([]);
+            return;
+        }
+        let cancelled = false;
+        setPipelineStaffLoading(true);
+        void fetchStaffUsers(contactsTenantClientId)
+            .then((rows) => {
+                if (cancelled) return;
+                const opts = rows
+                    .filter((u) => u.isActive !== false)
+                    .map((u) => ({
+                        id: String(u.id || ''),
+                        name: String(u.name || u.email || '').trim(),
+                    }))
+                    .filter((u) => u.id && u.name)
+                    .sort((a, b) => a.name.localeCompare(b.name, 'he'));
+                setPipelineStaffOptions(opts);
+            })
+            .catch(() => {
+                if (!cancelled) setPipelineStaffOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setPipelineStaffLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isPipelineSettingsOpen, contactsTenantClientId]);
+
+    const savePipelineDefaultContact = () => {
+        if (!activePipeline || pipelineSettingsSaving) return;
+        const ids = pipelineSettingsAssigneeUserIds.map((id) => String(id).trim()).filter(Boolean);
+        const next = pipelines.map((p) =>
+            p.id === activePipelineId
+                ? {
+                      ...p,
+                      defaultAssigneeUserIds: ids,
+                      defaultContactId: ids[0] || null,
+                  }
+                : p,
+        );
+        setPipelines(next);
+        setPipelineSettingsSaving(true);
+        setPipelineSettingsSaveError(null);
+        void persistPipelinesNow(next)
+            .then(() => {
+                setIsPipelineSettingsOpen(false);
+            })
+            .catch((e: unknown) => {
+                const message = e instanceof Error ? e.message : 'שמירה נכשלה';
+                setPipelineSettingsSaveError(message);
+                setSaveError(message);
+            })
+            .finally(() => {
+                setPipelineSettingsSaving(false);
+            });
     };
 
     const handlePipelineDragStart = (e: React.DragEvent, position: number) => {
@@ -1512,6 +1646,14 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                             <div className="flex items-center gap-2">
                                 <button
                                     type="button"
+                                    onClick={openPipelineSettings}
+                                    className="p-2 text-text-subtle hover:text-primary-600 hover:bg-primary-50 rounded-xl transition-colors"
+                                    title="הגדרות תהליך — רכזים ברירת מחדל"
+                                >
+                                    <Cog6ToothIcon className="w-5 h-5" />
+                                </button>
+                                <button
+                                    type="button"
                                     onClick={handleDeletePipeline}
                                     className="p-2 text-text-subtle hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
                                     title="מחק תהליך"
@@ -1530,7 +1672,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                         </header>
 
                         <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar" ref={stagesContainerRef}>
-                             <div className="grid grid-cols-[40px_2fr_2fr_1fr_40px_40px] gap-4 px-4 py-2 text-xs font-bold text-text-muted uppercase tracking-wider mb-2">
+                             <div className="grid grid-cols-[40px_minmax(0,2fr)_minmax(0,2fr)_minmax(140px,1fr)_40px_40px] gap-4 px-4 py-2 text-xs font-bold text-text-muted uppercase tracking-wider mb-2">
                                  <div></div>
                                  <div>שם השלב (תצוגה)</div>
                                  <div>צבע תווית</div>
@@ -1549,7 +1691,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                             if (el) stageRowRefs.current.set(stage.id, el);
                                             else stageRowRefs.current.delete(stage.id);
                                         }}
-                                        className={`bg-white border border-border-default rounded-xl group hover:shadow-md transition-all flex flex-col overflow-hidden ${
+                                        className={`bg-white border border-border-default rounded-xl group hover:shadow-md transition-all flex flex-col overflow-visible ${
                                             highlightStageId === stage.id
                                                 ? 'pipeline-item-new-highlight ring-4 ring-primary-500/50 border-2 border-primary-500 shadow-lg shadow-primary-500/20'
                                                 : ''
@@ -1561,7 +1703,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                         onDragEnter={(e) => handleDragEnter(e, index)}
                                         onDragOver={(e) => e.preventDefault()}
                                     >
-                                        <div className="grid grid-cols-[40px_2fr_2fr_1fr_40px_40px] gap-4 items-center p-3 cursor-default">
+                                        <div className="grid grid-cols-[40px_minmax(0,2fr)_minmax(0,2fr)_minmax(140px,1fr)_40px_40px] gap-4 items-center p-3 cursor-default">
                                         <div
                                             draggable
                                             onDragStart={(e) => handleDragStart(e, index)}
@@ -1600,14 +1742,16 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                             })}
                                         </div>
 
-                                        <SlaDurationInput
-                                            value={stage.slaLimit}
-                                            unit={stage.slaLimitUnit}
-                                            onValueChange={(value) => handleUpdateStage(stage.id, 'slaLimit', value)}
-                                            onUnitChange={(unit) => handleUpdateStage(stage.id, 'slaLimitUnit', unit)}
-                                            className="max-w-[140px]"
-                                            title="התראה לאחר X זמן ללא שינוי"
-                                        />
+                                        <div className="min-w-[140px]">
+                                            <SlaDurationInput
+                                                value={stage.slaLimit}
+                                                unit={stage.slaLimitUnit}
+                                                onValueChange={(value) => handleUpdateStage(stage.id, 'slaLimit', value)}
+                                                onUnitChange={(unit) => handleUpdateStage(stage.id, 'slaLimitUnit', unit)}
+                                                className="w-full max-w-[140px]"
+                                                title="התראה לאחר X זמן ללא שינוי"
+                                            />
+                                        </div>
 
                                         <div className="flex items-center justify-center">
                                             <button
@@ -1869,6 +2013,82 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                 </div>
             </div>
             </div>
+
+            {isPipelineSettingsOpen && activePipeline ? (
+                <div
+                    className="fixed inset-0 bg-black/50 z-[200] flex items-center justify-center p-4 backdrop-blur-sm"
+                    onClick={() => setIsPipelineSettingsOpen(false)}
+                >
+                    <div
+                        className="bg-bg-card rounded-2xl shadow-2xl border border-border-default w-full max-w-md p-6 space-y-4"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex justify-between items-start gap-3">
+                            <div>
+                                <h3 className="text-lg font-bold text-text-default">הגדרות תהליך</h3>
+                                <p className="text-sm text-text-muted mt-1">{activePipeline.name}</p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => setIsPipelineSettingsOpen(false)}
+                                className="p-1.5 rounded-lg text-text-muted hover:bg-bg-hover"
+                                aria-label="סגור"
+                            >
+                                <XMarkIcon className="w-5 h-5" />
+                            </button>
+                        </div>
+                        <p className="text-xs text-text-muted leading-relaxed">
+                            בחרו רכזים מהלקוח שלכם. ברירת המחדל תופיע בשדה «לטיפול» ביצירת אירוע{' '}
+                            {isCandidateKind ? 'תהליך מועמד' : 'תהליכי'} חדש עבור תהליך זה (ניתן לבחור
+                            יותר מאחד).
+                        </p>
+                        <div>
+                            <FormMultiSelect
+                                label="רכזים ברירת מחדל (לטיפול)"
+                                options={pipelineStaffOptions.map((c) => ({
+                                    value: c.id,
+                                    label: c.name,
+                                }))}
+                                value={pipelineSettingsAssigneeUserIds}
+                                onChange={setPipelineSettingsAssigneeUserIds}
+                                placeholder="בחר רכזים…"
+                                searchable
+                                searchPlaceholder="חיפוש שם…"
+                                disabled={pipelineStaffLoading || !contactsTenantClientId}
+                                className="[&>span]:text-sm [&>span]:font-semibold [&>span]:text-text-muted"
+                            />
+                            {pipelineStaffLoading ? (
+                                <p className="text-xs text-text-muted mt-2">טוען רכזים…</p>
+                            ) : !pipelineStaffLoading && pipelineStaffOptions.length === 0 ? (
+                                <p className="text-xs text-text-muted mt-2">אין רכזים פעילים ללקוח זה.</p>
+                            ) : null}
+                        </div>
+                        {pipelineSettingsSaveError ? (
+                            <p className="text-xs text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">
+                                {pipelineSettingsSaveError}
+                            </p>
+                        ) : null}
+                        <div className="flex justify-end gap-2 pt-2">
+                            <button
+                                type="button"
+                                onClick={() => setIsPipelineSettingsOpen(false)}
+                                disabled={pipelineSettingsSaving}
+                                className="px-4 py-2 rounded-lg text-sm font-semibold text-text-muted hover:bg-bg-hover disabled:opacity-50"
+                            >
+                                ביטול
+                            </button>
+                            <button
+                                type="button"
+                                onClick={savePipelineDefaultContact}
+                                disabled={pipelineSettingsSaving || pipelineStaffLoading}
+                                className="px-4 py-2 rounded-lg text-sm font-bold bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
+                            >
+                                {pipelineSettingsSaving ? 'שומר…' : 'שמור'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
 
             <AddPipelineModal
                 isOpen={isAddModalOpen}

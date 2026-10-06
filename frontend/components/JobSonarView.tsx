@@ -965,7 +965,9 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
     const [ignoreItems, setIgnoreItems] = useState<SonarIgnoreItem[]>([]);
     const [ignoreCount, setIgnoreCount] = useState(0);
     const [restoringId, setRestoringId] = useState<string | null>(null);
-    const [activeMatchPopup, setActiveMatchPopup] = useState<{ candidateId: string; x: number; y: number } | null>(null);
+    const [activeMatchPopup, setActiveMatchPopup] = useState<
+        { candidateId: string } & ReturnType<typeof matchScorePopupPositionFromEvent>
+    | null>(null);
     const ignorePanelRef = useRef<HTMLDivElement>(null);
 
     const jidKey = jobId != null ? String(jobId).trim() : '';
@@ -1606,7 +1608,12 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
 
             {activeMatchPopup && activeMatchRow ? (
                 <MatchScorePopup
-                    position={{ x: activeMatchPopup.x, y: activeMatchPopup.y }}
+                    position={{
+                        x: activeMatchPopup.x,
+                        y: activeMatchPopup.y,
+                        anchorTop: activeMatchPopup.anchorTop,
+                        anchorBottom: activeMatchPopup.anchorBottom,
+                    }}
                     onClose={() => setActiveMatchPopup(null)}
                     matchScore={activeMatchRow.matchPercentage}
                     jobTitle={jobTitle}

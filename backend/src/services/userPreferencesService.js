@@ -33,6 +33,18 @@ const sanitizeGlobal = (raw) => {
   };
 };
 
+const sanitizeEmailSignature = (raw) => {
+  if (!isPlainObject(raw)) return null;
+  const html = String(raw.html || '').trim().slice(0, 50000);
+  let logoUrl = raw.logoUrl != null ? String(raw.logoUrl).trim() : '';
+  if (logoUrl.length > 600000) logoUrl = logoUrl.slice(0, 600000);
+  if (!html && !logoUrl) return null;
+  const out = {};
+  if (html) out.html = html;
+  if (logoUrl) out.logoUrl = logoUrl;
+  return out;
+};
+
 const sanitizeScreen = (raw) => {
   if (!isPlainObject(raw)) return null;
   const out = {};
@@ -61,6 +73,8 @@ const sanitizePreferences = (stored) => {
       }
     });
   }
+  const emailSignature = sanitizeEmailSignature(stored.emailSignature);
+  if (emailSignature) base.emailSignature = emailSignature;
   return base;
 };
 
@@ -90,6 +104,16 @@ const deepMergePreferences = (current, patch) => {
     next.screens = screens;
   }
 
+  if (Object.prototype.hasOwnProperty.call(patch, 'emailSignature')) {
+    if (patch.emailSignature == null) {
+      delete next.emailSignature;
+    } else {
+      const sig = sanitizeEmailSignature(patch.emailSignature);
+      if (sig) next.emailSignature = sig;
+      else delete next.emailSignature;
+    }
+  }
+
   return next;
 };
 
@@ -108,6 +132,8 @@ const updateForUser = async (userId, patch) => {
 module.exports = {
   DEFAULT_PREFERENCES,
   sanitizePreferences,
+  sanitizeEmailSignature,
+  deepMergePreferences,
   getForUser,
   updateForUser,
 };

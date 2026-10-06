@@ -129,8 +129,20 @@ export function summarizeAutomationResults(results: AutomationResultRow[] | unde
   const skipped = results.filter((r) => r.status === 'skipped').length;
   const errors = results.filter((r) => r.status === 'error').length;
   const pending = results.filter((r) => r.status === 'pending_approval').length;
+  const openedAdditional = results.filter(
+    (r) =>
+      r.status === 'applied' &&
+      String((r as { action?: string }).action || '') === 'open_additional_process',
+  ).length;
   const parts: string[] = [];
   if (applied) parts.push(`${applied} אוטומציות בוצעו`);
+  if (openedAdditional) {
+    parts.push(
+      openedAdditional === 1
+        ? 'נפתח תהליך נוסף (מופיע ביומן האירועים)'
+        : `נפתחו ${openedAdditional} תהליכים נוספים`,
+    );
+  }
   if (pending) parts.push(`${pending} ממתינות לאישור`);
   if (skipped) parts.push(`${skipped} דולגו`);
   if (errors) parts.push(`${errors} שגיאות`);

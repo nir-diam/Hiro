@@ -80,6 +80,17 @@ export async function backfillTagAiDecisions(limit = 20): Promise<{ processed: n
     return res.json();
 }
 
+/** Rebuild vector+fuzzy candidateTagsSnapshot on open AI decisions (no Gemini call). */
+export async function refreshHybridTagSnapshots(limit = 100): Promise<{ updated: number; total: number }> {
+    const res = await fetch(`${apiBase()}/api/tags/ai-decisions/refresh-hybrid-snapshots`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ limit }),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
 export async function fetchTagAiDecisions(params: {
     page?: number;
     limit?: number;
@@ -97,12 +108,14 @@ export async function fetchTagAiDecisions(params: {
     hesitation?: string[];
     statusBuckets?: string[];
     approvalStatus?: 'all' | TagManualApprovalStatus;
+    autoRefreshHybrid?: boolean;
 }): Promise<{
     data: TagAiDecisionDto[];
     total: number;
     page: number;
     totalPages: number;
     backfill?: { processed: number; total: number; lastError?: string | null };
+    hybridRefresh?: { updated: number; total: number } | null;
 }> {
     const q = new URLSearchParams();
     if (params.page) q.set('page', String(params.page));
@@ -129,6 +142,9 @@ export async function fetchTagAiDecisions(params: {
     if (params.approvalStatus && params.approvalStatus !== 'all') {
         q.set('approvalStatus', params.approvalStatus);
     }
+    if (params.autoRefreshHybrid) {
+        q.set('autoRefreshHybrid', '1');
+    }
     const res = await fetch(`${apiBase()}/api/tags/ai-decisions?${q.toString()}`, {
         headers: authHeaders(),
         cache: 'no-store',
@@ -142,6 +158,7 @@ export async function fetchTagAiDecisions(params: {
         page: typeof body.page === 'number' ? body.page : 1,
         totalPages: typeof body.totalPages === 'number' ? body.totalPages : 1,
         backfill: body.backfill,
+        hybridRefresh: body.hybridRefresh ?? null,
     };
 }
 

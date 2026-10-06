@@ -22,6 +22,10 @@ const JobPublication = sequelize.define(
     videoUrl: DataTypes.STRING,
     /** Extra user instructions injected into Nano Banana hero poster prompt. */
     heroDesignInstructions: DataTypes.TEXT,
+    /** Per-job override: `company` | `job_client` (null = tenant default). */
+    heroBrandSource: DataTypes.STRING(32),
+    /** Per-job hero color only; does not change client primaryColor. */
+    heroBrandColorOverride: DataTypes.STRING(32),
     contactEmail: DataTypes.STRING,
     contactPhone1: DataTypes.STRING,
     contactPhone2: DataTypes.STRING,

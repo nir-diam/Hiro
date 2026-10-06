@@ -26,7 +26,12 @@ import {
   saveClientBranding,
   uploadClientLogo,
   type ClientBranding,
+  type JobHeroBrandSource,
 } from '../services/clientBrandingApi';
+import {
+  extractBrandColorFromLogoFile,
+  extractBrandColorFromLogoUrl,
+} from '../utils/extractBrandColorFromLogo';
 import { authHeaders } from '../utils/authHeaders';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
@@ -203,12 +208,33 @@ const ClientBrandingSection: React.FC<{
     const [isSavingBranding, setIsSavingBranding] = useState(false);
     const [isUploadingLogo, setIsUploadingLogo] = useState(false);
     const [brandingSaveSuccess, setBrandingSaveSuccess] = useState(false);
+    const [colorSuggestionNote, setColorSuggestionNote] = useState<string | null>(null);
+    const [isExtractingColor, setIsExtractingColor] = useState(false);
     const logoInputRef = React.useRef<HTMLInputElement>(null);
+
+    const applySuggestedBrandColor = (hex: string | null) => {
+        if (!hex) return;
+        setBranding((prev) => ({ ...prev, primaryColor: hex }));
+        setColorSuggestionNote('הוצע צבע מותג מהלוגו — ניתן לערוך לפני שמירה');
+    };
+
+    const extractColorFromCurrentLogo = async () => {
+        if (!branding.logoUrl) return;
+        setIsExtractingColor(true);
+        setColorSuggestionNote(null);
+        try {
+            const hex = await extractBrandColorFromLogoUrl(branding.logoUrl);
+            if (hex) applySuggestedBrandColor(hex);
+            else setColorSuggestionNote('לא נמצא צבע בולט בלוגו (לבן/שחור/אפור מסוננים)');
+        } finally {
+            setIsExtractingColor(false);
+        }
+    };
 
     useEffect(() => {
         if (!clientId) {
-            setBranding({ logoUrl: null, primaryColor: '#1e293b' });
-            setSavedBranding({ logoUrl: null, primaryColor: '#1e293b' });
+            setBranding({ logoUrl: null, primaryColor: '#1e293b', jobHeroBrandSource: 'company' });
+            setSavedBranding({ logoUrl: null, primaryColor: '#1e293b', jobHeroBrandSource: 'company' });
             return;
         }
         let cancelled = false;
@@ -217,12 +243,14 @@ const ClientBrandingSection: React.FC<{
         fetchClientBranding(clientId)
             .then((data) => {
                 if (cancelled) return;
-                const normalized = {
+                const normalized: ClientBranding = {
                     logoUrl: data.logoUrl,
                     primaryColor: data.primaryColor || '#1e293b',
+                    jobHeroBrandSource: data.jobHeroBrandSource || 'company',
                 };
                 setBranding(normalized);
                 setSavedBranding(normalized);
+                setColorSuggestionNote(null);
             })
             .catch((e: Error) => {
                 if (!cancelled) setBrandingLoadError(e.message || 'טעינת מיתוג נכשלה');
@@ -240,7 +268,8 @@ const ClientBrandingSection: React.FC<{
 
     const brandingDirty =
         (branding.logoUrl || null) !== (savedBranding.logoUrl || null) ||
-        normalizeBrandColor(branding.primaryColor) !== normalizeBrandColor(savedBranding.primaryColor);
+        normalizeBrandColor(branding.primaryColor) !== normalizeBrandColor(savedBranding.primaryColor) ||
+        (branding.jobHeroBrandSource || 'company') !== (savedBranding.jobHeroBrandSource || 'company');
 
     const handleSaveBranding = async () => {
         if (!clientId) return;
@@ -251,13 +280,16 @@ const ClientBrandingSection: React.FC<{
             const saved = await saveClientBranding(clientId, {
                 logoUrl: branding.logoUrl,
                 primaryColor: branding.primaryColor.trim() || '#1e293b',
+                jobHeroBrandSource: branding.jobHeroBrandSource || 'company',
             });
-            const normalized = {
+            const normalized: ClientBranding = {
                 logoUrl: saved.logoUrl,
                 primaryColor: saved.primaryColor || '#1e293b',
+                jobHeroBrandSource: saved.jobHeroBrandSource || 'company',
             };
             setBranding(normalized);
             setSavedBranding(normalized);
+            setColorSuggestionNote(null);
             setBrandingSaveSuccess(true);
             setTimeout(() => setBrandingSaveSuccess(false), 2500);
         } catch (e: unknown) {
@@ -273,17 +305,30 @@ const ClientBrandingSection: React.FC<{
         setBrandingSaveSuccess(false);
         setIsUploadingLogo(true);
         try {
+            const suggestedFromFile = await extractBrandColorFromLogoFile(file);
             const publicUrl = await uploadClientLogo(clientId, file);
             const saved = await saveClientBranding(clientId, {
                 logoUrl: publicUrl,
                 primaryColor: branding.primaryColor.trim() || '#1e293b',
+                jobHeroBrandSource: branding.jobHeroBrandSource || 'company',
             });
-            const normalized = {
+            const normalized: ClientBranding = {
                 logoUrl: saved.logoUrl,
                 primaryColor: saved.primaryColor || '#1e293b',
+                jobHeroBrandSource: saved.jobHeroBrandSource || 'company',
             };
+            if (suggestedFromFile) {
+                normalized.primaryColor = suggestedFromFile;
+                applySuggestedBrandColor(suggestedFromFile);
+            } else {
+                setColorSuggestionNote(null);
+            }
             setBranding(normalized);
-            setSavedBranding(normalized);
+            setSavedBranding({
+                logoUrl: saved.logoUrl,
+                primaryColor: saved.primaryColor || '#1e293b',
+                jobHeroBrandSource: saved.jobHeroBrandSource || 'company',
+            });
             setBrandingSaveSuccess(true);
             setTimeout(() => setBrandingSaveSuccess(false), 2500);
         } catch (e: unknown) {
@@ -387,27 +432,80 @@ const ClientBrandingSection: React.FC<{
                             </div>
                         </div>
                     </div>
+                    <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-start">
+                        <label className="font-semibold text-text-muted pt-2">מקור מותג בתמונות משרה</label>
+                        <div className="space-y-2">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="radio"
+                                    name="jobHeroBrandSource"
+                                    checked={(branding.jobHeroBrandSource || 'company') === 'company'}
+                                    onChange={() =>
+                                        setBranding((prev) => ({ ...prev, jobHeroBrandSource: 'company' as JobHeroBrandSource }))
+                                    }
+                                    className="text-primary-600"
+                                />
+                                <span className="text-sm text-text-default">הגדרות החברה (סוכנות)</span>
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="radio"
+                                    name="jobHeroBrandSource"
+                                    checked={branding.jobHeroBrandSource === 'job_client'}
+                                    onChange={() =>
+                                        setBranding((prev) => ({ ...prev, jobHeroBrandSource: 'job_client' as JobHeroBrandSource }))
+                                    }
+                                    className="text-primary-600"
+                                />
+                                <span className="text-sm text-text-default">הלקוח של המשרה (מעסיק)</span>
+                            </label>
+                            <p className="text-xs text-text-muted">
+                                ברירת המחדל לפרסום משרה חדשה. ניתן לשנות למשרה בודדת בעמוד הפרסום.
+                            </p>
+                        </div>
+                    </div>
                     <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
                         <label className="font-semibold text-text-muted">צבע מותג ראשי</label>
-                        <div className="flex items-center gap-3 flex-wrap">
-                            <input
-                                type="color"
-                                value={/^#[0-9a-fA-F]{6}$/.test(branding.primaryColor) ? branding.primaryColor : '#1e293b'}
-                                onChange={(e) => setBranding((prev) => ({ ...prev, primaryColor: e.target.value }))}
-                                className="w-12 h-10 rounded border border-border-default cursor-pointer"
-                            />
-                            <input
-                                type="text"
-                                value={branding.primaryColor}
-                                onChange={(e) => setBranding((prev) => ({ ...prev, primaryColor: e.target.value }))}
-                                placeholder="#1e293b"
-                                className="w-32 bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 font-mono dir-ltr"
-                                dir="ltr"
-                            />
-                            <div
-                                className="h-10 flex-1 min-w-[120px] rounded-lg border border-border-default"
-                                style={{ backgroundColor: branding.primaryColor || '#1e293b' }}
-                            />
+                        <div className="flex flex-col gap-2 w-full">
+                            <div className="flex items-center gap-3 flex-wrap">
+                                <input
+                                    type="color"
+                                    value={/^#[0-9a-fA-F]{6}$/.test(branding.primaryColor) ? branding.primaryColor : '#1e293b'}
+                                    onChange={(e) => {
+                                        setColorSuggestionNote(null);
+                                        setBranding((prev) => ({ ...prev, primaryColor: e.target.value }));
+                                    }}
+                                    className="w-12 h-10 rounded border border-border-default cursor-pointer"
+                                />
+                                <input
+                                    type="text"
+                                    value={branding.primaryColor}
+                                    onChange={(e) => {
+                                        setColorSuggestionNote(null);
+                                        setBranding((prev) => ({ ...prev, primaryColor: e.target.value }));
+                                    }}
+                                    placeholder="#1e293b"
+                                    className="w-32 bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 font-mono dir-ltr"
+                                    dir="ltr"
+                                />
+                                <div
+                                    className="h-10 flex-1 min-w-[120px] rounded-lg border border-border-default"
+                                    style={{ backgroundColor: branding.primaryColor || '#1e293b' }}
+                                />
+                                {branding.logoUrl && (
+                                    <button
+                                        type="button"
+                                        disabled={isExtractingColor || isUploadingLogo || isSavingBranding}
+                                        onClick={() => void extractColorFromCurrentLogo()}
+                                        className="text-sm font-semibold text-primary-700 hover:text-primary-800 disabled:opacity-60 whitespace-nowrap"
+                                    >
+                                        {isExtractingColor ? 'מחלץ...' : 'חלץ צבע מהלוגו'}
+                                    </button>
+                                )}
+                            </div>
+                            {colorSuggestionNote && (
+                                <p className="text-xs text-primary-700 font-medium">{colorSuggestionNote}</p>
+                            )}
                         </div>
                     </div>
                     <div className="flex flex-col items-end gap-1">
@@ -1381,10 +1479,12 @@ const CompanySettingsView: React.FC = () => {
                     </div>
                 );
             case 'quota':
-                if (!isPlatformAdmin) {
+                if (!usageClientId) {
                     return (
                         <p className="text-sm text-text-muted text-right py-4">
-                            מכסות שימוש זמינות למנהלי מערכת בלבד.
+                            {isPlatformAdmin
+                                ? 'בחרו לקוח מהרשימה למעלה כדי לצפות במכסות שימוש.'
+                                : 'אין לחשבון משתמש מזהה לקוח — לא ניתן להציג מכסות שימוש.'}
                         </p>
                     );
                 }

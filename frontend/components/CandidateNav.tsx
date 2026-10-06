@@ -7,6 +7,11 @@ interface CandidateNavProps {
     activeView: string;
     setActiveView: (view: string) => void;
     candidateId?: string | null;
+    onMatchJobsClick?: () => void;
+    onScreenCandidateClick?: () => void;
+    jobMatchesCount?: number;
+    isMatchingJobs?: boolean;
+    isScreening?: boolean;
 }
 
 const NavButton: React.FC<{ title: string; isActive: boolean; onClick: () => void; }> = ({ title, isActive, onClick }) => (
@@ -22,7 +27,16 @@ const NavButton: React.FC<{ title: string; isActive: boolean; onClick: () => voi
     </button>
 );
 
-const CandidateNav: React.FC<CandidateNavProps> = ({ activeView, setActiveView, candidateId }) => {
+const CandidateNav: React.FC<CandidateNavProps> = ({
+    activeView,
+    setActiveView,
+    candidateId,
+    onMatchJobsClick,
+    onScreenCandidateClick,
+    jobMatchesCount = 0,
+    isMatchingJobs = false,
+    isScreening = false,
+}) => {
   const { t } = useLanguage();
   const { user } = useAuth();
   const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
@@ -41,11 +55,45 @@ const CandidateNav: React.FC<CandidateNavProps> = ({ activeView, setActiveView, 
     <>
         <style>{`.no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }`}</style>
         <nav className="flex items-center gap-1 p-1.5 bg-bg-card border border-border-default rounded-full shadow-xl overflow-x-auto max-w-[calc(100vw-2rem)] md:max-w-fit mx-auto no-scrollbar">
-            <NavButton title={t('candidate_nav.details')} isActive={activeView === 'details'} onClick={() => setActiveView('details')} />
-            <NavButton title={t('candidate_nav.jobs')} isActive={activeView === 'jobs'} onClick={() => setActiveView('jobs')} />
-            <NavButton title={t('candidate_nav.referrals')} isActive={activeView === 'referrals'} onClick={() => setActiveView('referrals')} />
-            <NavButton title={t('candidate_nav.events')} isActive={activeView === 'events'} onClick={() => setActiveView('events')} />
-            <NavButton title={t('candidate_nav.documents')} isActive={activeView === 'documents'} onClick={() => setActiveView('documents')} />
+            <NavButton
+                title={t('candidate_nav.details')}
+                isActive={activeView === 'details' && !isMatchingJobs && !isScreening}
+                onClick={() => setActiveView('details')}
+            />
+            {onMatchJobsClick ? (
+                <NavButton
+                    title={`${t('profile.matches')} (${jobMatchesCount})`}
+                    isActive={isMatchingJobs}
+                    onClick={onMatchJobsClick}
+                />
+            ) : null}
+            {onScreenCandidateClick ? (
+                <NavButton
+                    title={t('profile.screen_candidate')}
+                    isActive={isScreening}
+                    onClick={onScreenCandidateClick}
+                />
+            ) : null}
+            <NavButton
+                title={t('candidate_nav.jobs')}
+                isActive={activeView === 'jobs' && !isMatchingJobs && !isScreening}
+                onClick={() => setActiveView('jobs')}
+            />
+            <NavButton
+                title={t('candidate_nav.referrals')}
+                isActive={activeView === 'referrals' && !isMatchingJobs && !isScreening}
+                onClick={() => setActiveView('referrals')}
+            />
+            <NavButton
+                title={t('candidate_nav.events')}
+                isActive={activeView === 'events' && !isMatchingJobs && !isScreening}
+                onClick={() => setActiveView('events')}
+            />
+            <NavButton
+                title={t('candidate_nav.documents')}
+                isActive={activeView === 'documents' && !isMatchingJobs && !isScreening}
+                onClick={() => setActiveView('documents')}
+            />
             {isPlatformAdmin && previewCandidateId ? (
                 <NavButton title="תצוגת מועמד" isActive={false} onClick={openCandidatePublicView} />
             ) : null}

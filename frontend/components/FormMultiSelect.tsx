@@ -16,6 +16,8 @@ type FormMultiSelectProps = {
     searchPlaceholder?: string;
     accentColor?: string;
     className?: string;
+    /** Panel positioning/width (default: same width as the trigger). */
+    dropdownClassName?: string;
 };
 
 export const FormMultiSelect: React.FC<FormMultiSelectProps> = ({
@@ -30,6 +32,7 @@ export const FormMultiSelect: React.FC<FormMultiSelectProps> = ({
     searchPlaceholder = 'חיפוש...',
     accentColor,
     className = '',
+    dropdownClassName,
 }) => {
     const [open, setOpen] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
@@ -134,7 +137,9 @@ export const FormMultiSelect: React.FC<FormMultiSelectProps> = ({
             </div>
             {open && (
                 <div
-                    className="absolute top-full left-0 right-0 mt-1 bg-bg-card border border-border-default rounded-lg shadow-xl z-[300] max-h-56 overflow-hidden flex flex-col py-1"
+                    className={`absolute top-full mt-1 bg-bg-card border border-border-default rounded-lg shadow-xl z-[300] max-h-56 overflow-hidden flex flex-col py-1 ${
+                        dropdownClassName ?? 'left-0 right-0'
+                    }`}
                     role="listbox"
                 >
                     {searchable && (

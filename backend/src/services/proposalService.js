@@ -30,6 +30,24 @@ function toTemplatePublic(row) {
   };
 }
 
+function normalizeSentHistory(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const sentAt = entry.sentAt || entry.sent_at;
+      if (!sentAt) return null;
+      const t = new Date(sentAt);
+      if (Number.isNaN(t.getTime())) return null;
+      return {
+        sentAt: t.toISOString(),
+        sentByUserId: entry.sentByUserId || entry.sent_by_user_id || null,
+        sentByName: entry.sentByName || entry.sent_by_name || null,
+      };
+    })
+    .filter(Boolean);
+}
+
 function toProposalPublic(row) {
   const p = row?.get ? row.get({ plain: true }) : row;
   if (!p) return null;
@@ -37,6 +55,7 @@ function toProposalPublic(row) {
   const currency = p.currency || 'ILS';
   const contact = p.contact || null;
   const client = p.client || null;
+  const sentHistory = normalizeSentHistory(p.sentHistory);
   return {
     id: p.id,
     clientId: p.clientId,
@@ -58,6 +77,8 @@ function toProposalPublic(row) {
     totalAmount: formatMoney(amount, currency),
     createdByUserId: p.createdByUserId || null,
     createdByName: p.createdByName || '',
+    sentHistory,
+    lastSentAt: sentHistory.length ? sentHistory[sentHistory.length - 1].sentAt : null,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
   };
@@ -309,6 +330,36 @@ async function removeProposal(id) {
   return { ok: true };
 }
 
+/** After email send: draft → sent, append sent_history row (repeat sends add rows). */
+async function markProposalsSent(proposalIds = [], actor = {}, sentAtInput) {
+  const ids = [...new Set(proposalIds.map((id) => str(id)).filter(Boolean))];
+  if (!ids.length) return [];
+
+  const sentAt = sentAtInput ? new Date(sentAtInput) : new Date();
+  const sentAtIso = Number.isNaN(sentAt.getTime()) ? new Date().toISOString() : sentAt.toISOString();
+  const entry = {
+    sentAt: sentAtIso,
+    sentByUserId: actor.userId || null,
+    sentByName: actor.name || null,
+  };
+
+  const updated = [];
+  for (const id of ids) {
+    const row = await Proposal.findByPk(id);
+    if (!row) continue;
+    const history = normalizeSentHistory(row.sentHistory);
+    history.push(entry);
+    const patch = { sentHistory: history };
+    const st = str(row.status) || 'draft';
+    if (st === 'draft' || st === 'sent') {
+      patch.status = 'sent';
+    }
+    await row.update(patch);
+    updated.push(await getProposal(id));
+  }
+  return updated;
+}
+
 module.exports = {
   listTemplates,
   createTemplate,
@@ -319,6 +370,7 @@ module.exports = {
   createProposal,
   updateProposal,
   removeProposal,
+  markProposalsSent,
   toProposalPublic,
   toTemplatePublic,
 };

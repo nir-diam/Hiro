@@ -26,6 +26,11 @@ const JobCandidateScreening = sequelize.define(
       defaultValue: [],
       comment: 'Array of { question: string, answer: string }',
     },
+    digitalAnswers: {
+      type: DataTypes.JSONB,
+      defaultValue: [],
+      comment: 'Array of { questionId, question, answer } from job digital questionnaire',
+    },
     telephoneImpression: {
       type: DataTypes.TEXT,
       allowNull: true,

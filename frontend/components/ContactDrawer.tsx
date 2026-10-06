@@ -8,9 +8,12 @@ import {
     ClockIcon, PlusIcon, WhatsappIcon, ArrowTopRightOnSquareIcon,
 } from './Icons';
 import { Contact } from './ClientsListView';
-import { MessageModalConfig } from '../hooks/useUIState';
+import type { MessageModalConfig, MessageRecipientOption } from '../hooks/useUIState';
 import { authHeaders } from '../utils/authHeaders';
-import { hydrateContactForDrawer } from '../utils/processEntityDrawers';
+import {
+    fetchClientContactRecipientOptions,
+    hydrateContactForDrawer,
+} from '../utils/processEntityDrawers';
 import { resolveProcessPlacements, resolveStageDisplay } from '../utils/processPlacements';
 import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
 import { eventBelongsToContact } from '../utils/contactEventHistory';
@@ -83,6 +86,7 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
     const [pipelines, setPipelines] = useState<PipelineDto[]>([]);
     const [contactDetail, setContactDetail] = useState<Contact | null>(null);
     const [processesLoading, setProcessesLoading] = useState(false);
+    const [clientRecipientOptions, setClientRecipientOptions] = useState<MessageRecipientOption[]>([]);
 
     const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
     const clientId = String(contact?.clientId || '').trim();
@@ -99,9 +103,68 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
         [displayContact?.email],
     );
 
+    const organizationScope = useMemo(
+        () => ({
+            organizationId: String(displayContact?.organizationId || '').trim() || null,
+            organizationTmpId: String(displayContact?.organizationTmpId || '').trim() || null,
+        }),
+        [displayContact?.organizationId, displayContact?.organizationTmpId],
+    );
+
+    const hasOrganizationScope = Boolean(
+        organizationScope.organizationId || organizationScope.organizationTmpId,
+    );
+
+    const buildCurrentRecipientOption = useCallback((): MessageRecipientOption => ({
+        id: contactId || displayContact?.id || '',
+        name: displayContact?.name || '',
+        email: displayEmail,
+        phone: displayPhone,
+        subtitle: displayContact?.clientName || null,
+        clientId: clientId || null,
+        organizationId: displayContact?.organizationId
+            ? String(displayContact.organizationId)
+            : null,
+    }), [clientId, contactId, displayContact, displayEmail, displayPhone]);
+
+    const mergeRecipientOptions = useCallback(
+        (loaded: MessageRecipientOption[]): MessageRecipientOption[] => {
+            const current = buildCurrentRecipientOption();
+            if (!current.id) return loaded.length ? loaded : [];
+            const byId = new Map<string, MessageRecipientOption>();
+            for (const opt of loaded) {
+                if (opt?.id) byId.set(opt.id, opt);
+            }
+            byId.set(current.id, { ...byId.get(current.id), ...current });
+            return Array.from(byId.values()).sort((a, b) =>
+                a.name.localeCompare(b.name, 'he'),
+            );
+        },
+        [buildCurrentRecipientOption],
+    );
+
     const handleContactAction = useCallback(
-        (mode: 'email' | 'sms' | 'whatsapp') => {
+        async (mode: 'email' | 'sms' | 'whatsapp') => {
             if (!displayContact) return;
+            let recipientOptions = mergeRecipientOptions(clientRecipientOptions);
+            if (
+                clientId
+                && hasOrganizationScope
+                && recipientOptions.length <= 1
+                && apiBase
+            ) {
+                const fetched = await fetchClientContactRecipientOptions(
+                    apiBase,
+                    clientId,
+                    displayContact.clientName || '',
+                    organizationScope,
+                );
+                recipientOptions = mergeRecipientOptions(fetched);
+                if (fetched.length) setClientRecipientOptions(fetched);
+            }
+            if (!recipientOptions.length) {
+                recipientOptions = [buildCurrentRecipientOption()];
+            }
             const config: MessageModalConfig = {
                 mode,
                 recipientType: 'client_contact',
@@ -114,30 +177,24 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
                     : null,
                 linkedOrganizationName: displayContact.clientName || null,
                 linkedContactId: contactId || null,
-                recipientOptions: [
-                    {
-                        id: contactId || displayContact.id,
-                        name: displayContact.name,
-                        email: displayEmail,
-                        phone: displayPhone,
-                        subtitle: displayContact.clientName || null,
-                        clientId: clientId || null,
-                        organizationId: displayContact.organizationId
-                            ? String(displayContact.organizationId)
-                            : null,
-                    },
-                ],
+                recipientOptions,
                 initialRecipientIds: contactId ? [contactId] : undefined,
             };
             openMessageModal(config);
         },
         [
+            apiBase,
+            buildCurrentRecipientOption,
             clientId,
+            clientRecipientOptions,
             contactId,
             displayContact,
             displayEmail,
             displayPhone,
+            hasOrganizationScope,
+            mergeRecipientOptions,
             openMessageModal,
+            organizationScope,
         ],
     );
 
@@ -147,8 +204,36 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
             setEvents([]);
             setEventsError(null);
             setContactDetail(null);
+            setClientRecipientOptions([]);
         }
     }, [isOpen, contact?.id]);
+
+    useEffect(() => {
+        if (!isOpen || !apiBase || !clientId || !hasOrganizationScope) {
+            setClientRecipientOptions([]);
+            return;
+        }
+        let active = true;
+        void fetchClientContactRecipientOptions(
+            apiBase,
+            clientId,
+            displayContact?.clientName || contact?.clientName || '',
+            organizationScope,
+        ).then((rows) => {
+            if (active) setClientRecipientOptions(rows);
+        });
+        return () => {
+            active = false;
+        };
+    }, [
+        isOpen,
+        apiBase,
+        clientId,
+        hasOrganizationScope,
+        organizationScope,
+        contact?.clientName,
+        displayContact?.clientName,
+    ]);
 
     useEffect(() => {
         if (!isOpen || !contact) {

@@ -24,6 +24,7 @@ export type EventsJournalFiltersSnapshot = {
 type StorageScope = {
   crossClientJournal?: boolean;
   scopeOrganizationId?: string | null;
+  scopeOrganizationTmpId?: string | null;
   scopeContactId?: string | null;
   scopeCandidateId?: string | null;
   scopeJobId?: string | null;
@@ -37,6 +38,9 @@ export function buildEventsJournalFilterStorageKey(scope: StorageScope): string 
   if (scope.scopeCandidateId) return `hiro.eventsJournal.filters.candidate:${scope.scopeCandidateId}`;
   if (scope.scopeJobId) return `hiro.eventsJournal.filters.job:${scope.scopeJobId}`;
   if (scope.scopeOrganizationId) return `hiro.eventsJournal.filters.org:${scope.scopeOrganizationId}`;
+  if (scope.scopeOrganizationTmpId) {
+    return `hiro.eventsJournal.filters.org-tmp:${scope.scopeOrganizationTmpId}`;
+  }
   if (scope.crossClientJournal) return 'hiro.eventsJournal.filters.admin-global';
   return 'hiro.eventsJournal.filters.default';
 }

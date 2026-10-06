@@ -30,6 +30,15 @@ const ClientPipeline = sequelize.define(
       allowNull: false,
       defaultValue: 0,
     },
+    defaultContactId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+    defaultAssigneeUserIds: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+    },
   },
   {
     tableName: 'client_pipelines',

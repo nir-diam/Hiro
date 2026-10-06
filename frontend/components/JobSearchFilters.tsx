@@ -1,69 +1,103 @@
 
-import React, { useState } from 'react';
-import { MagnifyingGlassIcon, XMarkIcon, ChevronDownIcon, CalendarDaysIcon, BriefcaseIcon, MapPinIcon } from './Icons';
-import LocationSelector, { LocationItem } from './LocationSelector';
-import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+    MagnifyingGlassIcon,
+    XMarkIcon,
+    ChevronDownIcon,
+    CalendarDaysIcon,
+    BriefcaseIcon,
+    CheckIcon,
+} from './Icons';
+import LocationSelector, { type LocationItem } from './LocationSelector';
+import JobFieldSelector, { type SelectedJobField } from './JobFieldSelector';
+import {
+    cycleDateSort,
+    dateSortLabel,
+    EMPTY_JOB_SEARCH_FILTERS,
+    jobFieldKey,
+    PORTAL_JOB_SCOPE_OPTIONS,
+    type JobSearchFilterState,
+} from '../utils/portalJobFilters';
+
+export type { JobSearchFilterState };
+export { EMPTY_JOB_SEARCH_FILTERS };
 
 interface JobSearchFiltersProps {
     searchTerm: string;
     setSearchTerm: (term: string) => void;
-    filters: {
-        location: string;
-        type: string;
-        date: string;
-    };
-    setFilters: (filters: any) => void;
+    filters: JobSearchFilterState;
+    setFilters: React.Dispatch<React.SetStateAction<JobSearchFilterState>>;
     onClear: () => void;
     resultsCount: number;
 }
 
-const JobSearchFilters: React.FC<JobSearchFiltersProps> = ({ searchTerm, setSearchTerm, filters, setFilters, onClear, resultsCount }) => {
-    // State for managing complex selectors
-    const [selectedLocations, setSelectedLocations] = useState<LocationItem[]>([]);
+const JobSearchFilters: React.FC<JobSearchFiltersProps> = ({
+    searchTerm,
+    setSearchTerm,
+    filters,
+    setFilters,
+    onClear,
+    resultsCount,
+}) => {
     const [isJobFieldOpen, setIsJobFieldOpen] = useState(false);
-    const [selectedRole, setSelectedRole] = useState('');
+    const [isScopeOpen, setIsScopeOpen] = useState(false);
+    const scopeRef = useRef<HTMLDivElement>(null);
 
-    const handleLocationChange = (locs: LocationItem[]) => {
-        setSelectedLocations(locs);
-        // Map back to string for the simple filter prop, or extend filter object in parent
-        // For now, we simulate filter string update to keep props compatible
-        const locString = locs.map(l => l.value).join(', ');
-        setFilters({ ...filters, location: locString });
+    useEffect(() => {
+        if (!isScopeOpen) return;
+        const onDocClick = (event: MouseEvent) => {
+            if (!scopeRef.current?.contains(event.target as Node)) {
+                setIsScopeOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDocClick);
+        return () => document.removeEventListener('mousedown', onDocClick);
+    }, [isScopeOpen]);
+
+    const handleLocationChange = (locations: LocationItem[]) => {
+        setFilters({ ...filters, locations });
     };
 
-    const handleJobFieldChange = (field: SelectedJobField | null) => {
-        if (field) {
-            setSelectedRole(field.role);
-            // In a real app, you might want to filter by both category and role
-            // Here we just put the role in the search term or a specific filter
-            setSearchTerm(field.role); 
-        }
-        setIsJobFieldOpen(false);
+    const toggleJobField = (field: SelectedJobField) => {
+        const key = jobFieldKey(field);
+        const exists = filters.jobFields.some((item) => jobFieldKey(item) === key);
+        const jobFields = exists
+            ? filters.jobFields.filter((item) => jobFieldKey(item) !== key)
+            : [...filters.jobFields, field];
+        setFilters({ ...filters, jobFields });
     };
 
-    const handleDateChange = () => {
-        const options = ['', 'היום', 'השבוע', 'החודש'];
-        const currentIndex = options.indexOf(filters.date);
-        const nextIndex = (currentIndex + 1) % options.length;
-        setFilters({ ...filters, date: options[nextIndex] });
+    const toggleJobScope = (scope: string) => {
+        const jobScopes = filters.jobScopes.includes(scope)
+            ? filters.jobScopes.filter((item) => item !== scope)
+            : [...filters.jobScopes, scope];
+        setFilters({ ...filters, jobScopes });
     };
 
-    const handleTypeChange = () => {
-        const options = ['', 'משרה מלאה', 'חלקית', 'משמרות', 'היברידי'];
-        const currentIndex = options.indexOf(filters.type);
-        const nextIndex = (currentIndex + 1) % options.length;
-        setFilters({ ...filters, type: options[nextIndex] });
+    const handleDateSortChange = () => {
+        setFilters((prev) => ({ ...prev, dateSort: cycleDateSort(prev.dateSort) }));
     };
-    
+
     const handleClearAll = () => {
         onClear();
-        setSelectedLocations([]);
-        setSelectedRole('');
     };
+
+    const jobFieldLabel =
+        filters.jobFields.length === 0
+            ? 'תחום משרה'
+            : filters.jobFields.length === 1
+              ? filters.jobFields[0].role
+              : `${filters.jobFields.length} תחומים`;
+
+    const scopeLabel =
+        filters.jobScopes.length === 0
+            ? 'היקף משרה'
+            : filters.jobScopes.length === 1
+              ? filters.jobScopes[0]
+              : `${filters.jobScopes.length} היקפים`;
 
     return (
         <div className="w-full bg-white rounded-2xl shadow-sm border border-border-default p-4 mb-6 space-y-4">
-            {/* Search — full width */}
             <div className="relative w-full">
                 <MagnifyingGlassIcon className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-text-subtle pointer-events-none" />
                 <input
@@ -73,7 +107,7 @@ const JobSearchFilters: React.FC<JobSearchFiltersProps> = ({ searchTerm, setSear
                     placeholder="חיפוש משרה, חברה או מילות מפתח..."
                     className="w-full bg-bg-subtle/50 border border-border-default rounded-xl py-3.5 pl-12 pr-12 text-base focus:ring-2 focus:ring-primary-500 focus:border-transparent transition-all outline-none"
                 />
-                {searchTerm && (
+                {searchTerm ? (
                     <button
                         type="button"
                         onClick={() => setSearchTerm('')}
@@ -81,74 +115,127 @@ const JobSearchFilters: React.FC<JobSearchFiltersProps> = ({ searchTerm, setSear
                     >
                         <XMarkIcon className="w-4 h-4" />
                     </button>
-                )}
+                ) : null}
             </div>
 
             <div className="flex flex-col lg:flex-row gap-3 items-stretch lg:items-center justify-between">
-                {/* Filters */}
                 <div className="flex items-center gap-2 w-full lg:flex-1 overflow-visible flex-wrap lg:flex-nowrap">
-                    
-                    {/* Role Selector */}
-                    <button 
+                    <button
+                        type="button"
                         onClick={() => setIsJobFieldOpen(true)}
                         className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-sm font-medium transition-all duration-200 min-w-[140px] justify-between ${
-                            selectedRole ? 'bg-primary-50 border-primary-300 text-primary-700' : 'bg-white border-border-default text-text-muted hover:border-primary-300'
+                            filters.jobFields.length
+                                ? 'bg-primary-50 border-primary-300 text-primary-700'
+                                : 'bg-white border-border-default text-text-muted hover:border-primary-300'
                         }`}
                     >
                         <div className="flex items-center gap-2 truncate">
-                            <BriefcaseIcon className="w-4 h-4 flex-shrink-0"/>
-                            <span className="truncate">{selectedRole || 'תחום משרה'}</span>
+                            <BriefcaseIcon className="w-4 h-4 flex-shrink-0" />
+                            <span className="truncate">{jobFieldLabel}</span>
                         </div>
                         <ChevronDownIcon className="w-4 h-4 opacity-50 flex-shrink-0" />
                     </button>
 
-                    {/* Location Selector (Smart Component) */}
                     <div className="w-full lg:w-64 z-20">
-                         <LocationSelector 
-                            selectedLocations={selectedLocations}
+                        <LocationSelector
+                            selectedLocations={filters.locations}
                             onChange={handleLocationChange}
                             placeholder="מיקום"
                         />
                     </div>
 
-                    {/* Simple Filters */}
-                    <button 
-                        onClick={handleTypeChange}
+                    <div className="relative" ref={scopeRef}>
+                        <button
+                            type="button"
+                            onClick={() => setIsScopeOpen((open) => !open)}
+                            className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-sm font-medium transition-all duration-200 whitespace-nowrap ${
+                                filters.jobScopes.length
+                                    ? 'bg-primary-50 border-primary-300 text-primary-700'
+                                    : 'bg-white border-border-default text-text-muted hover:border-primary-300'
+                            }`}
+                        >
+                            <span>{scopeLabel}</span>
+                            <ChevronDownIcon className="w-4 h-4 opacity-50" />
+                        </button>
+                        {isScopeOpen ? (
+                            <div className="absolute top-full mt-2 right-0 z-30 min-w-[240px] rounded-xl border border-border-default bg-white shadow-xl p-3">
+                                <p className="text-[11px] font-bold text-text-muted uppercase tracking-wide mb-2">
+                                    בחר היקפי משרה
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                    {PORTAL_JOB_SCOPE_OPTIONS.map((scope) => {
+                                        const selected = filters.jobScopes.includes(scope);
+                                        return (
+                                            <button
+                                                key={scope}
+                                                type="button"
+                                                onClick={() => toggleJobScope(scope)}
+                                                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${
+                                                    selected
+                                                        ? 'bg-primary-50 text-primary-700 border-primary-200'
+                                                        : 'bg-bg-subtle text-text-muted border-transparent hover:border-primary-200'
+                                                }`}
+                                            >
+                                                {selected ? <CheckIcon className="w-3.5 h-3.5" /> : null}
+                                                {scope}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        ) : null}
+                    </div>
+
+                    <button
+                        type="button"
+                        onClick={handleDateSortChange}
                         className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-sm font-medium transition-all duration-200 whitespace-nowrap ${
-                            filters.type ? 'bg-primary-50 border-primary-300 text-primary-700' : 'bg-white border-border-default text-text-muted hover:border-primary-300'
+                            filters.dateSort
+                                ? 'bg-primary-50 border-primary-300 text-primary-700'
+                                : 'bg-white border-border-default text-text-muted hover:border-primary-300'
                         }`}
+                        title="מיון לפי תאריך עדכון משרה"
                     >
-                        <span>{filters.type || 'היקף משרה'}</span>
-                        <ChevronDownIcon className="w-4 h-4 opacity-50" />
-                    </button>
-                    
-                    <button 
-                        onClick={handleDateChange}
-                        className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border text-sm font-medium transition-all duration-200 whitespace-nowrap ${
-                            filters.date ? 'bg-primary-50 border-primary-300 text-primary-700' : 'bg-white border-border-default text-text-muted hover:border-primary-300'
-                        }`}
-                    >
-                        <CalendarDaysIcon className="w-4 h-4"/>
-                        <span>{filters.date || 'תאריך'}</span>
+                        <CalendarDaysIcon className="w-4 h-4" />
+                        <span>{dateSortLabel(filters.dateSort)}</span>
                     </button>
                 </div>
 
-                {/* Actions */}
                 <div className="flex items-center gap-3 w-full lg:w-auto justify-end shrink-0">
-                     <button 
+                    <button
+                        type="button"
                         onClick={handleClearAll}
                         className="text-text-muted hover:text-red-500 text-sm font-medium whitespace-nowrap px-2"
                     >
                         נקה הכל
                     </button>
-                    <button className="bg-primary-600 hover:bg-primary-700 text-white text-sm font-bold px-6 py-2.5 rounded-xl shadow-sm transition-colors whitespace-nowrap">
-                        חפש ({resultsCount})
-                    </button>
+                    <div className="bg-primary-600 text-white text-sm font-bold px-6 py-2.5 rounded-xl shadow-sm whitespace-nowrap">
+                        {resultsCount} משרות
+                    </div>
                 </div>
             </div>
-            
-            <JobFieldSelector 
-                onChange={handleJobFieldChange}
+
+            {filters.jobFields.length > 0 ? (
+                <div className="flex flex-wrap gap-2 pt-1">
+                    {filters.jobFields.map((field) => (
+                        <button
+                            key={jobFieldKey(field)}
+                            type="button"
+                            onClick={() => toggleJobField(field)}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold bg-primary-50 text-primary-700 border border-primary-100 hover:bg-primary-100"
+                        >
+                            {field.role}
+                            <XMarkIcon className="w-3 h-3" />
+                        </button>
+                    ))}
+                </div>
+            ) : null}
+
+            <JobFieldSelector
+                multiSelect
+                selectedValues={filters.jobFields}
+                onToggleRole={toggleJobField}
+                onChange={() => undefined}
                 isModalOpen={isJobFieldOpen}
                 setIsModalOpen={setIsJobFieldOpen}
             />

@@ -20,6 +20,8 @@ export type SendNotificationEmailAttachment = {
     filename: string;
     content: string;
     contentType?: string;
+    /** Inline image for HTML `cid:` references (email signature logo, etc.). */
+    cid?: string;
 };
 
 export type SendNotificationEmailBody = {

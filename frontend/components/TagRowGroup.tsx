@@ -1,4 +1,5 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
     BriefcaseIcon,
     AcademicCapIcon,
@@ -10,6 +11,7 @@ import {
     ClockIcon,
 } from './Icons';
 import { SmartTagType, SmartTagData, SmartTagTooltipPanel, SmartTagMode } from './SmartTagTypes';
+import { isAcademicDegreeCatalogTag } from '../utils/academicDegreeCatalogTag';
 
 const TYPE_DEFAULT_BORDER: Record<SmartTagType, string> = {
     role: 'border-primary-600',
@@ -82,6 +84,7 @@ function panelFromLegacyTooltip(
 interface SmartTagBadgeProps extends SmartTagData {
     onRemove?: () => void;
     onToggleMode?: () => void;
+    onSearch?: () => void;
 }
 
 const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
@@ -94,9 +97,23 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
     tooltipPanel: panelProp,
     onRemove,
     onToggleMode,
+    onSearch,
 }) => {
     const [hovered, setHovered] = useState(false);
+    const [tooltipPos, setTooltipPos] = useState<{ top: number; left: number; placement: 'above' | 'below' } | null>(null);
     const wrapRef = useRef<HTMLDivElement>(null);
+
+    const updateTooltipPos = useCallback(() => {
+        const el = wrapRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const placement = rect.top > 220 ? 'above' : 'below';
+        setTooltipPos({
+            top: placement === 'above' ? rect.top - 10 : rect.bottom + 10,
+            left: Math.min(window.innerWidth - 16, Math.max(16, rect.left + rect.width / 2)),
+            placement,
+        });
+    }, []);
 
     const panel = useMemo(() => {
         if (panelProp) return panelProp;
@@ -107,6 +124,7 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
     const hasPopover = Boolean(panel);
     const sourceLabel = isAiSuggested ? 'AI (בינה מלאכותית)' : 'הוזן ידנית / מועמד';
     const canToggleMode = Boolean(onToggleMode);
+    const canSearch = Boolean(onSearch);
 
     const baseClasses =
         'inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all select-none border whitespace-nowrap relative';
@@ -130,8 +148,27 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
               ? 'bg-slate-400'
               : 'bg-emerald-500';
 
+    useEffect(() => {
+        if (!hovered) {
+            setTooltipPos(null);
+            return;
+        }
+        updateTooltipPos();
+        const reposition = () => updateTooltipPos();
+        window.addEventListener('scroll', reposition, true);
+        window.addEventListener('resize', reposition);
+        return () => {
+            window.removeEventListener('scroll', reposition, true);
+            window.removeEventListener('resize', reposition);
+        };
+    }, [hovered, updateTooltipPos]);
+
     const handleBadgeClick = (e: React.MouseEvent) => {
         e.stopPropagation();
+        if (canSearch) {
+            onSearch?.();
+            return;
+        }
         if (canToggleMode) {
             onToggleMode?.();
         }
@@ -139,26 +176,37 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
 
     const badgeClass = `${baseClasses} ${configs[type]} ${modeBorderClass(mode, type)} ${
         isAiSuggested ? 'border-dashed' : 'border-solid'
-    } ${canToggleMode || hasPopover ? 'cursor-pointer hover:shadow-md hover:-translate-y-0.5' : 'cursor-default'}`;
+    } ${canToggleMode || canSearch || hasPopover ? 'cursor-pointer hover:shadow-md hover:-translate-y-0.5' : 'cursor-default'}`;
 
     return (
         <div
             ref={wrapRef}
             className="relative inline-flex group/tag"
-            onMouseEnter={() => setHovered(true)}
+            onMouseEnter={() => {
+                setHovered(true);
+                updateTooltipPos();
+            }}
             onMouseLeave={() => setHovered(false)}
         >
             <button
                 type="button"
                 onClick={handleBadgeClick}
                 className={badgeClass}
-                title={canToggleMode ? modeToggleTitle(mode) : undefined}
+                title={
+                    canSearch
+                        ? 'חיפוש מועמדים עם תואר אקדמי'
+                        : canToggleMode
+                          ? modeToggleTitle(mode)
+                          : undefined
+                }
                 aria-label={
-                    mode === 'mandatory'
-                        ? `${label} — תגית חובה`
-                        : mode === 'negative'
-                          ? `${label} — תגית שלילית`
-                          : label
+                    canSearch
+                        ? `${label} — חיפוש מועמדים עם תואר אקדמי`
+                        : mode === 'mandatory'
+                          ? `${label} — תגית חובה`
+                          : mode === 'negative'
+                            ? `${label} — תגית שלילית`
+                            : label
                 }
             >
                 {isAiSuggested && <SparklesIcon className="w-3 h-3 opacity-70" />}
@@ -166,18 +214,23 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
                 {isVerified && <CheckCircleIcon className="w-3 h-3 text-current opacity-80" />}
             </button>
 
-            {hasPopover && panel && (
+            {hasPopover && panel && hovered && tooltipPos && createPortal(
                 <div
                     role="tooltip"
                     aria-label={`פרטי תגית: ${panel.title}`}
-                    className={`fixed sm:absolute bottom-4 sm:bottom-full left-4 right-4 sm:left-1/2 sm:right-auto sm:-translate-x-1/2 sm:mb-3 z-[9999] transform transition-all duration-200 origin-bottom max-sm:max-h-[min(60vh,calc(100vh-2rem))] pointer-events-none ${
-                        hovered
-                            ? 'opacity-100 visible translate-y-0'
-                            : 'opacity-0 invisible translate-y-2'
-                    }`}
+                    style={{
+                        position: 'fixed',
+                        top: tooltipPos.top,
+                        left: tooltipPos.left,
+                        transform: tooltipPos.placement === 'above' ? 'translate(-50%, -100%)' : 'translate(-50%, 0)',
+                        zIndex: 99999,
+                    }}
+                    className="relative pointer-events-auto animate-fade-in max-w-[min(400px,calc(100vw-2rem))]"
+                    onMouseEnter={() => setHovered(true)}
+                    onMouseLeave={() => setHovered(false)}
                 >
                     <div
-                        className="flex flex-col gap-4 p-5 w-full sm:w-max sm:min-w-[340px] sm:max-w-[400px] text-right bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl rounded-2xl shadow-2xl border border-slate-200/50 dark:border-slate-700/50 relative whitespace-normal break-words max-h-[60vh] sm:max-h-[400px] overflow-y-auto custom-scrollbar pointer-events-auto"
+                        className="flex flex-col gap-4 p-5 w-[min(400px,calc(100vw-2rem))] min-w-[280px] text-right bg-white dark:bg-slate-900 backdrop-blur-xl rounded-2xl shadow-2xl border-2 border-slate-300 dark:border-slate-600 ring-1 ring-black/10 dark:ring-white/10 relative whitespace-normal break-words max-h-[min(60vh,400px)] overflow-y-auto custom-scrollbar"
                         dir="rtl"
                     >
                         <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary-500 via-secondary-500 to-primary-500 opacity-80 rounded-t-2xl shrink-0" />
@@ -332,8 +385,15 @@ const SmartTagBadge: React.FC<SmartTagBadgeProps> = ({
                             </div>
                         </div>
                     </div>
-                    <div className="hidden sm:block absolute top-full left-1/2 -translate-x-1/2 border-[8px] border-transparent border-t-white/95 dark:border-t-slate-900/95 drop-shadow-sm pointer-events-none" />
-                </div>
+                    <div
+                        className={`absolute left-1/2 -translate-x-1/2 border-[8px] border-transparent pointer-events-none ${
+                            tooltipPos.placement === 'above'
+                                ? 'top-full border-t-white dark:border-t-slate-900 drop-shadow-sm'
+                                : 'bottom-full border-b-white dark:border-b-slate-900'
+                        }`}
+                    />
+                </div>,
+                document.body,
             )}
 
             {onRemove && (
@@ -452,6 +512,7 @@ interface TagRowGroupProps {
     onRowAdd?: (rowId: string) => void;
     onTagRemove?: (label: string) => void;
     onTagToggle?: (tagKey: string) => void;
+    onTagSearch?: (tag: SmartTagData) => void;
 }
 
 const renderTagBadge = (
@@ -459,18 +520,32 @@ const renderTagBadge = (
     key: string,
     onTagRemove?: (label: string) => void,
     onTagToggle?: (tagKey: string) => void,
-) => (
-    <SmartTagBadge
-        key={key}
-        {...tag}
-        onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
-        onToggleMode={
-            onTagToggle && tag.tagKey ? () => onTagToggle(tag.tagKey!) : undefined
-        }
-    />
-);
+    onTagSearch?: (tag: SmartTagData) => void,
+) => {
+    const opensDegreeSearch = Boolean(onTagSearch && isAcademicDegreeCatalogTag(tag.label, tag.tagKey));
+    return (
+        <SmartTagBadge
+            key={key}
+            {...tag}
+            onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
+            onToggleMode={
+                !opensDegreeSearch && onTagToggle && tag.tagKey
+                    ? () => onTagToggle(tag.tagKey!)
+                    : undefined
+            }
+            onSearch={opensDegreeSearch ? () => onTagSearch!(tag) : undefined}
+        />
+    );
+};
 
-const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualificationAdd, onRowAdd, onTagRemove, onTagToggle }) => {
+const TagRowGroup: React.FC<TagRowGroupProps> = ({
+    groupedSmartTags,
+    onQualificationAdd,
+    onRowAdd,
+    onTagRemove,
+    onTagToggle,
+    onTagSearch,
+}) => {
     const [expandedRows, setExpandedRows] = useState<Record<string, boolean>>({});
     const toggleHiddenTags = (rowId: string) => {
         setExpandedRows((prev) => ({ ...prev, [rowId]: !prev[rowId] }));
@@ -529,7 +604,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                         <span className="text-[11px] text-text-subtle italic">לא קיימות תגיות</span>
                                     )}
                                     {visibleSkills.map((tag) =>
-                                        renderTagBadge(tag, `${row.id}-skill-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                        renderTagBadge(tag, `${row.id}-skill-${tagIdentity(tag)}`, onTagRemove, onTagToggle, onTagSearch),
                                     )}
                                     {extraSkills > 0 && (
                                         <button
@@ -544,7 +619,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 {extraSkills > 0 && expandedRows[skillExpandKey] && (
                                     <div className="flex flex-wrap gap-2">
                                         {hiddenSkills.map((tag) =>
-                                            renderTagBadge(tag, `${row.id}-skill-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                            renderTagBadge(tag, `${row.id}-skill-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle, onTagSearch),
                                         )}
                                     </div>
                                 )}
@@ -553,7 +628,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                             <div className="space-y-1.5">
                                 <div className="flex flex-wrap items-center gap-2">
                                     {visibleTools.map((tag) =>
-                                        renderTagBadge(tag, `${row.id}-tool-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                        renderTagBadge(tag, `${row.id}-tool-${tagIdentity(tag)}`, onTagRemove, onTagToggle, onTagSearch),
                                     )}
                                     {extraTools > 0 && (
                                         <button
@@ -568,7 +643,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 {extraTools > 0 && expandedRows[toolExpandKey] && (
                                     <div className="flex flex-wrap gap-2">
                                         {hiddenTools.map((tag) =>
-                                            renderTagBadge(tag, `${row.id}-tool-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                            renderTagBadge(tag, `${row.id}-tool-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle, onTagSearch),
                                         )}
                                     </div>
                                 )}
@@ -595,7 +670,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 <span className="text-[11px] text-text-subtle italic">לא קיימות תגיות</span>
                             )}
                             {visibleTags.map((tag) =>
-                                renderTagBadge(tag, `${row.id}-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                renderTagBadge(tag, `${row.id}-${tagIdentity(tag)}`, onTagRemove, onTagToggle, onTagSearch),
                             )}
                             {extraCount > 0 && (
                                 <button
@@ -620,7 +695,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                         {extraCount > 0 && expandedRows[row.id] && (
                             <div className="flex flex-wrap gap-2 mt-1">
                                 {hiddenTags.map((tag) =>
-                                    renderTagBadge(tag, `${row.id}-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle),
+                                    renderTagBadge(tag, `${row.id}-hidden-${tagIdentity(tag)}`, onTagRemove, onTagToggle, onTagSearch),
                                 )}
                             </div>
                         )}

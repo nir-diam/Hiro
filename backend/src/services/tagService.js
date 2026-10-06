@@ -9,6 +9,12 @@ const { sendSingleTurnChat } = require('./geminiService');
 const promptService = require('./promptService');
 const picklistService = require('./picklistService');
 const { sequelize } = require('../config/db');
+const auditLogger = require('../utils/auditLogger');
+const {
+  assertTagNotProtectedForMutation,
+  assertProtectedTagUpdateAllowed,
+  isTagProtectedRow,
+} = require('../utils/tagProtection');
 
 const fireAndForget = (promise) => {
   if (!promise || typeof promise.catch !== 'function') return;
@@ -227,6 +233,7 @@ const list = async (options = {}) => {
     activityTo,
     sort = 'tagKey',
     direction = 'asc',
+    isProtected,
   } = options;
 
   const hasLimit = typeof limit !== 'undefined' && limit !== null;
@@ -236,6 +243,11 @@ const list = async (options = {}) => {
   const offset = hasLimit ? (normalizedPage - 1) * normalizedLimit : 0;
 
   const where = {};
+  if (isProtected === true || isProtected === 'true' || isProtected === '1') {
+    where.isProtected = true;
+  } else if (isProtected === false || isProtected === 'false' || isProtected === '0') {
+    where.isProtected = { [Op.not]: true };
+  }
   const searchConditions = [];
   /** Match "רוקח ת" against DB values like "רוקח/ת" by ignoring / and \. */
   const stripSlashChars = (s) => String(s || '').replace(/[/\\]/g, '');
@@ -618,6 +630,7 @@ const normalizeTagStatus = (status) => String(status || '').trim().toLowerCase()
 
 const update = async (id, payload, options = {}) => {
   const tag = await getById(id);
+  assertProtectedTagUpdateAllowed(tag, payload);
   const beforeState = clonePlain(tag);
   if (payload.tagKey === '' || (!payload.tagKey && (payload.displayNameEn || payload.displayNameHe))) {
     payload.tagKey = normalizeTagKey(payload.displayNameEn || payload.displayNameHe || tag.tagKey);
@@ -671,6 +684,7 @@ const update = async (id, payload, options = {}) => {
 
 const remove = async (id, options = {}) => {
   const tag = await getById(id);
+  assertTagNotProtectedForMutation(tag);
   const transaction = options.transaction;
   await tag.destroy({ transaction });
 };
@@ -736,6 +750,7 @@ const mergeCatalogTagIntoTarget = async (
     err.status = 404;
     throw err;
   }
+  assertTagNotProtectedForMutation(sourceTag);
 
   const primaryLabels = targetPrimaryLabelSet(targetTag);
   const mergeTerms = collectCatalogTagLabels(sourceTag).filter(
@@ -815,14 +830,27 @@ const mergeCatalogTags = async (merges = []) => {
     throw err;
   }
   const results = [];
+  const skipped = [];
   for (const entry of merges) {
-    results.push(
-      await mergeCatalogTagIntoTarget(entry.sourceTagId, entry.targetTagId, {
-        aliasPriority: Number(entry.aliasPriority) || 4,
-      }),
-    );
+    try {
+      results.push(
+        await mergeCatalogTagIntoTarget(entry.sourceTagId, entry.targetTagId, {
+          aliasPriority: Number(entry.aliasPriority) || 4,
+        }),
+      );
+    } catch (err) {
+      if (err?.code === 'TAG_PROTECTED') {
+        skipped.push({
+          sourceTagId: entry.sourceTagId,
+          targetTagId: entry.targetTagId,
+          reason: 'TAG_PROTECTED',
+        });
+        continue;
+      }
+      throw err;
+    }
   }
-  return { success: true, results };
+  return { success: true, results, skipped };
 };
 
 let tagPromptTemplate = null;
@@ -1093,6 +1121,117 @@ const removeSynonymsByIds = async (tagId, synonymIds, options = {}) => {
   );
 };
 
+const logTagProtectionAudit = async (req, { action, tag, note, actorUserId, actorName, actorEmail }) => {
+  const tagName = tag.displayNameHe || tag.displayNameEn || tag.tagKey || tag.id;
+  const description =
+    action === 'protect'
+      ? `הגנה על תגית "${tagName}"`
+      : `שחרור הגנה מתגית "${tagName}"`;
+  await auditLogger.log(req, {
+    action: 'update',
+    description,
+    entity: { type: 'Tag', id: tag.id, name: tagName },
+    metadata: {
+      tagProtection: action,
+      protectionNote: note || tag.protectionNote || null,
+      actorUserId: actorUserId || null,
+      actorName: actorName || null,
+      actorEmail: actorEmail || null,
+    },
+  });
+};
+
+const protectCatalogTags = async (tagIds = [], { note, actorUserId, actorName, actorEmail, req } = {}) => {
+  const trimmedNote = String(note || '').trim();
+  if (!trimmedNote) {
+    const err = new Error('Protection note is required');
+    err.status = 400;
+    throw err;
+  }
+  const ids = [...new Set((tagIds || []).map((id) => String(id).trim()).filter(Boolean))];
+  if (!ids.length) {
+    const err = new Error('No tag ids provided');
+    err.status = 400;
+    throw err;
+  }
+
+  const tags = await Tag.findAll({ where: { id: { [Op.in]: ids } } });
+  const tagById = new Map(tags.map((t) => [String(t.id), t]));
+  const protectedIds = [];
+  const skipped = [];
+
+  for (const id of ids) {
+    const tag = tagById.get(id);
+    if (!tag) {
+      skipped.push({ id, reason: 'not_found' });
+      continue;
+    }
+    if (isTagProtectedRow(tag)) {
+      skipped.push({ id, reason: 'already_protected' });
+      continue;
+    }
+    await tag.update({
+      isProtected: true,
+      protectedAt: new Date(),
+      protectedBy: actorUserId || null,
+      protectionNote: trimmedNote,
+    });
+    await logTagProtectionAudit(req, {
+      action: 'protect',
+      tag,
+      note: trimmedNote,
+      actorUserId,
+      actorName,
+      actorEmail,
+    });
+    protectedIds.push(id);
+  }
+
+  return { protected: protectedIds, skipped, count: protectedIds.length };
+};
+
+const unprotectCatalogTags = async (tagIds = [], { actorUserId, actorName, actorEmail, req } = {}) => {
+  const ids = [...new Set((tagIds || []).map((id) => String(id).trim()).filter(Boolean))];
+  if (!ids.length) {
+    const err = new Error('No tag ids provided');
+    err.status = 400;
+    throw err;
+  }
+
+  const tags = await Tag.findAll({ where: { id: { [Op.in]: ids } } });
+  const tagById = new Map(tags.map((t) => [String(t.id), t]));
+  const unprotected = [];
+  const skipped = [];
+
+  for (const id of ids) {
+    const tag = tagById.get(id);
+    if (!tag) {
+      skipped.push({ id, reason: 'not_found' });
+      continue;
+    }
+    if (!isTagProtectedRow(tag)) {
+      skipped.push({ id, reason: 'not_protected' });
+      continue;
+    }
+    await tag.update({
+      isProtected: false,
+      protectedAt: null,
+      protectedBy: null,
+      protectionNote: null,
+    });
+    await logTagProtectionAudit(req, {
+      action: 'unprotect',
+      tag,
+      actorUserId,
+      actorName,
+      actorEmail,
+    });
+    unprotected.push(id);
+  }
+
+  return { unprotected, skipped, count: unprotected.length };
+};
+
 module.exports = {
   list,
   getById,
@@ -1105,5 +1244,7 @@ module.exports = {
   mergeCatalogTagIntoTarget,
   enrichSuggestions,
   recordTagDeletionResolution,
+  protectCatalogTags,
+  unprotectCatalogTags,
 };
 

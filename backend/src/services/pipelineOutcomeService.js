@@ -45,6 +45,7 @@ const {
   appendClientEventActivity,
   EVENT_CLOSED_SUMMARY,
 } = require('../utils/clientEventHistory');
+const { resolvePipelineDefaultCoordinatorString } = require('../utils/pipelineDefaultAssignees');
 
 function matchStageByName(stages, name) {
   const normalized = String(name || '').trim().toLowerCase();
@@ -265,8 +266,10 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
   }
 
   const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+  const defaultCoordinator = await resolvePipelineDefaultCoordinatorString(targetPipeline);
+  const coordinator = defaultCoordinator || actor;
   const now = new Date().toISOString();
-  const client = ctx.client || (await clientService.getById(ctx.clientId));
+  const client = await clientService.getById(ctx.clientId);
   const prevEvents = Array.isArray(client?.events) ? client.events : [];
 
   let contactId = null;
@@ -309,8 +312,8 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
     stage: targetStage.name || '',
     stageId: targetStage.id,
     date: now,
-    coordinator: actor,
-    creator: actor,
+    coordinator,
+    creator: coordinator,
     status: 'עתידי',
     contactId,
     contactName,
@@ -612,6 +615,18 @@ async function buildClientEventContext(clientId, clientEventId) {
   };
 }
 
+/** Reload clients.events from DB — required before each automation (ctx.client is stale after prior writes). */
+async function reloadClientEventContext(ctx) {
+  if (!ctx || ctx.kind !== 'client' || !ctx.clientId) return ctx;
+  const client = await clientService.getById(ctx.clientId);
+  ctx.client = client;
+  if (ctx.clientEventId) {
+    const events = Array.isArray(client.events) ? client.events : [];
+    ctx.event = events.find((e) => String(e.id) === String(ctx.clientEventId)) || ctx.event;
+  }
+  return ctx;
+}
+
 async function dispatchSms({ to, message }) {
   const phones = Array.isArray(to) ? to : [to];
   if (inforuService.isConfigured()) {
@@ -791,6 +806,10 @@ async function buildPendingApprovalResult(automation, ctx) {
 async function runAutomation(req, automation, ctx, { skipManualApproval = false, pipelineKind = 'client' } = {}) {
   if (automation.requireManualApproval && !skipManualApproval) {
     return buildPendingApprovalResult(automation, ctx);
+  }
+
+  if (ctx.kind === 'client') {
+    await reloadClientEventContext(ctx);
   }
 
   const delayMs = scheduleDelayMs(automation.scheduleType, automation.scheduleValue);
@@ -1384,6 +1403,7 @@ async function executeOutcome(req, params) {
     }
   } else {
     actionResult = await applyClientOutcomeAction(req, ctx, outcome, pipeline, journalOptions);
+    await reloadClientEventContext(ctx);
   }
 
   const automations = Array.isArray(outcome.automations) ? outcome.automations : [];
@@ -1467,6 +1487,10 @@ async function approveAutomations(req, params) {
     ctx.pipelineId = pipelineId;
     if (context.candidateId) ctx.candidateId = context.candidateId;
     if (context.jobCandidateId) ctx.jobCandidateId = context.jobCandidateId;
+  }
+
+  if (pipelineKind !== 'candidate') {
+    await reloadClientEventContext(ctx);
   }
 
   const automations = (Array.isArray(outcome.automations) ? outcome.automations : []).filter((a) =>
@@ -1609,6 +1633,8 @@ async function ensureClientEventForCandidate(
 
   const now = new Date().toISOString();
   const label = String(candidateName || 'מועמד').trim() || 'מועמד';
+  const bootstrapCoordinator =
+    (await resolvePipelineDefaultCoordinatorString(pipeline)) || 'מערכת';
   const event = {
     id: uuidv4(),
     title: `קליטת קו"ח: ${label}`.slice(0, 240),
@@ -1618,8 +1644,8 @@ async function ensureClientEventForCandidate(
     stage: stage?.name || '',
     stageId: stage?.id || null,
     date: now,
-    coordinator: 'מערכת',
-    creator: 'מערכת',
+    coordinator: bootstrapCoordinator,
+    creator: bootstrapCoordinator,
     status: 'עתידי',
     contactId: cid,
     contactName: label,

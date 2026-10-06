@@ -1,6 +1,6 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { useLocation, useParams, useSearchParams } from 'react-router-dom';
 import {
     BuildingOffice2Icon,
     UserGroupIcon,
@@ -81,10 +81,15 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
         setEventsProcessStageId(processStageFromUrl);
     }, [tabFromUrl, pipelineFromUrl, processStageFromUrl]);
 
+    const location = useLocation();
     const [org, setOrg] = useState<Record<string, unknown> | null>(null);
     const [client, setClient] = useState<any | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [enrichmentPending, setEnrichmentPending] = useState(
+        () => Boolean((location.state as { backgroundEnrichment?: boolean } | null)?.backgroundEnrichment),
+    );
+    const [enrichmentJustFinished, setEnrichmentJustFinished] = useState(false);
 
     // Single load: org + linked client (deduped — avoids StrictMode double-fetch).
     useEffect(() => {
@@ -131,6 +136,9 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
 
                 setOrg(bundle.organization);
                 setClient(bundle.client);
+                if (bundle.enrichment?.pending) {
+                    setEnrichmentPending(true);
+                }
             } catch (e: unknown) {
                 if (!active) return;
                 setError((e as Error)?.message || 'Organization not found');
@@ -145,6 +153,41 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
             active = false;
         };
     }, [resolvedOrgKey, isPendingOrg, organizationIdParam, user?.clientId]);
+
+    useEffect(() => {
+        if (isPendingOrg || !organizationIdParam || !enrichmentPending) return undefined;
+
+        let cancelled = false;
+        const poll = async () => {
+            invalidateOrganizationProfileCaches({ organizationId: organizationIdParam });
+            try {
+                const bundle = await fetchOrganizationProfile(organizationIdParam, { bypassCache: true });
+                if (cancelled) return;
+                setOrg(bundle.organization);
+                if (bundle.client) setClient(bundle.client);
+                if (!bundle.enrichment?.pending) {
+                    setEnrichmentPending(false);
+                    setEnrichmentJustFinished(true);
+                }
+            } catch {
+                /* keep polling */
+            }
+        };
+
+        const timer = window.setInterval(() => { void poll(); }, 3000);
+        void poll();
+
+        return () => {
+            cancelled = true;
+            window.clearInterval(timer);
+        };
+    }, [isPendingOrg, organizationIdParam, enrichmentPending]);
+
+    useEffect(() => {
+        if (!enrichmentJustFinished) return undefined;
+        const timer = window.setTimeout(() => setEnrichmentJustFinished(false), 8000);
+        return () => window.clearTimeout(timer);
+    }, [enrichmentJustFinished]);
 
     // ClientDetailsTab reads company info from organizationLinks — inject current org as primary
     const clientForDetails = useMemo(() => {
@@ -234,7 +277,9 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                         <div className="lg:col-span-1 space-y-6">
                             {clientForDetails ? (
                                 <ClientDetailsTab
+                                    key={organizationIdParam || organizationTmpId || clientId || 'details'}
                                     client={clientForDetails}
+                                    organizationId={organizationIdParam || undefined}
                                     onClientUpdated={(updated) => {
                                         setClient(updated);
                                         invalidateOrganizationProfileCaches({
@@ -341,6 +386,26 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
 
     return (
         <div className="space-y-6">
+            {enrichmentPending ? (
+                <div
+                    className="rounded-2xl border border-primary-200 bg-primary-50/80 px-4 py-3 text-sm text-primary-950 flex items-start gap-3"
+                    role="status"
+                >
+                    <ArrowPathIcon className="w-5 h-5 shrink-0 animate-spin text-primary-600 mt-0.5" />
+                    <div>
+                        <p className="font-bold">{t('organization_profile.enrichment_in_progress_title')}</p>
+                        <p className="text-primary-900/90 mt-0.5 leading-relaxed">
+                            {t('organization_profile.enrichment_in_progress_body')}
+                        </p>
+                    </div>
+                </div>
+            ) : null}
+            {!enrichmentPending && enrichmentJustFinished ? (
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50/90 px-4 py-3 text-sm text-emerald-900 font-semibold">
+                    {t('organization_profile.enrichment_complete')}
+                </div>
+            ) : null}
+
             <header>
                 <div className="flex flex-wrap items-center gap-2">
                     <h1 className="text-2xl font-bold text-text-default">{displayName}</h1>

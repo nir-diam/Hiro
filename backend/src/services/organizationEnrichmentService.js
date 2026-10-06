@@ -1033,6 +1033,11 @@ const organizationNeedsEnrichment = (org) => {
   return !(hasWebsite && hasLinkedin && hasLocation && hasDescription);
 };
 
+const isOrganizationEnrichmentPending = (orgId) => {
+  const id = orgId != null ? String(orgId).trim() : '';
+  return id ? pendingEnrichmentIds.has(id) : false;
+};
+
 const scheduleOrganizationEnrichment = (org) => {
   if (!org?.id) return;
   const id = String(org.id);
@@ -1117,6 +1122,7 @@ const verifyOrganizationWebsite = async ({ companyNameCv, candidateContext = '',
 module.exports = {
   enrichOrganizationById,
   organizationNeedsEnrichment,
+  isOrganizationEnrichmentPending,
   scheduleOrganizationEnrichment,
   scheduleOrganizationEnrichmentIfNeeded,
   buildOrganizationUpdates,

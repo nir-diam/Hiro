@@ -39,9 +39,10 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
     const inputRef = useRef<HTMLInputElement>(null);
 
     // Get selected object for display
-    const selectedOption = useMemo(() => 
-        options.find(o => o.id === value), 
-    [value, options]);
+    const selectedOption = useMemo(
+        () => options.find((o) => String(o.id) === String(value)),
+        [value, options],
+    );
 
     // Internal filtering (if onSearchChange is not provided)
     const filteredOptions = useMemo(() => {
@@ -148,7 +149,7 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
                                 onClick={() => handleSelect(option)}
                                 className={`
                                     w-full text-right px-4 py-2.5 text-sm transition-colors flex items-center justify-between group
-                                    ${value === option.id ? 'bg-primary-50 text-primary-700 font-medium' : 'text-text-default hover:bg-bg-hover'}
+                                    ${String(value) === String(option.id) ? 'bg-primary-50 text-primary-700 font-medium' : 'text-text-default hover:bg-bg-hover'}
                                 `}
                             >
                                 <div className="flex items-center gap-2 truncate">

@@ -9,6 +9,7 @@ const {
   sendStaffPasswordResetEmail,
   inviteStaffUser,
 } = require('../services/staffUserProvisioningService');
+const userPreferencesService = require('../services/userPreferencesService');
 
 /** Non-null client UUID for tenant-scoped staff, or null if unassigned. */
 const tenantClientIdOf = (u) => {
@@ -299,6 +300,7 @@ const update = async (req, res) => {
       permissions,
       password,
       clientId: nextClientId,
+      emailSignature,
     } = req.body;
 
     if (email !== undefined && email !== user.email) {
@@ -323,6 +325,13 @@ const update = async (req, res) => {
     }
     if (nextClientId !== undefined && canManageStaffAcrossTenants(actor)) {
       updates.clientId = nextClientId || null;
+    }
+
+    if (emailSignature !== undefined) {
+      const currentPrefs = await userPreferencesService.getForUser(user.id);
+      updates.uiPreferences = userPreferencesService.deepMergePreferences(currentPrefs, {
+        emailSignature: emailSignature === null ? null : emailSignature,
+      });
     }
 
     await user.update(updates);

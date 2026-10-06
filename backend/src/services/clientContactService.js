@@ -239,6 +239,7 @@ const update = async (id, payload = {}) => {
     err.status = 404;
     throw err;
   }
+  const rowPlain = row.toJSON ? row.toJSON() : row.get({ plain: true });
   let data = { ...payload };
   if (
     Object.prototype.hasOwnProperty.call(data, 'name')
@@ -252,9 +253,10 @@ const update = async (id, payload = {}) => {
     || Object.prototype.hasOwnProperty.call(data, 'phone')
     || Object.prototype.hasOwnProperty.call(data, 'mobilePhone')
   ) {
-    data = assertContactName({ ...row.toJSON(), ...data });
+    data = assertContactName({ ...rowPlain, ...data });
   } else {
-    data = normalizeContactPayload(data);
+    // Partial PATCH (isActive, groupId, flags) must not wipe name/email/metadata.
+    data = normalizeContactPayload({ ...rowPlain, ...data });
   }
   if (Object.prototype.hasOwnProperty.call(data, 'organizationId')
       && data.organizationId != null

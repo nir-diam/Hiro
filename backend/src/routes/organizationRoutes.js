@@ -2,9 +2,14 @@ const express = require('express');
 const organizationController = require('../controllers/organizationController');
 const organizationTmpRoutes = require('./organizationTmpRoutes');
 const organizationAiDecisionController = require('../controllers/organizationAiDecisionController');
+const organizationProfileUpdateController = require('../controllers/organizationProfileUpdateController');
 const authMiddleware = require('../middleware/authMiddleware');
 const optionalAuth = authMiddleware.optionalAuth;
-const { optionalAttachDbUser } = require('../middleware/permissionMiddleware');
+const {
+  optionalAttachDbUser,
+  attachDbUser,
+  requirePagePermission,
+} = require('../middleware/permissionMiddleware');
 
 const router = express.Router();
 const orgWrite = [optionalAuth, optionalAttachDbUser];
@@ -24,6 +29,12 @@ router.put('/ai-decisions/:id/resolve', organizationAiDecisionController.resolve
 router.patch('/ai-decisions/:id/approve', organizationAiDecisionController.approve);
 router.patch('/ai-decisions/:id/comments', organizationAiDecisionController.updateComments);
 router.patch('/ai-decisions/:id/fields', organizationAiDecisionController.updateDecisionFields);
+
+const adminOrgReview = [authMiddleware, attachDbUser, requirePagePermission('page:admin')];
+router.get('/profile-updates/pending-count', ...adminOrgReview, organizationProfileUpdateController.countPending);
+router.get('/profile-updates', ...adminOrgReview, organizationProfileUpdateController.list);
+router.post('/profile-updates/:id/approve', ...adminOrgReview, organizationProfileUpdateController.approve);
+router.post('/profile-updates/:id/reject', ...adminOrgReview, organizationProfileUpdateController.reject);
 
 router.post('/merge', ...orgWrite, organizationController.mergeOrganizations);
 

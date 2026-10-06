@@ -48,7 +48,6 @@ const OrganizationEventsTab: React.FC<Props> = ({
       scopeOrganizationTmpId={organizationTmpId || null}
       scopeOrganizationName={scopedName}
       preferredOrganizationLabel={scopedName}
-      hideFilters
       alwaysShowDetails
       defaultActionPipelineId={defaultActionPipelineId}
       defaultProcessStageId={defaultProcessStageId}

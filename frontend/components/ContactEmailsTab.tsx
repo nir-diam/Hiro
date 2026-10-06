@@ -8,9 +8,12 @@ interface ContactEmailsTabProps {
   contactName: string;
   contactPhone?: string;
   contactEmail?: string;
+  contactEmails?: string[];
   clientId?: string | null;
   contactId?: string | null;
   organizationId?: string | null;
+  organizationTmpId?: string | null;
+  organizationName?: string | null;
   /** When true, show all company contact emails (not only this contact). */
   companyWide?: boolean;
   title?: string;
@@ -21,9 +24,12 @@ const ContactEmailsTab: React.FC<ContactEmailsTabProps> = ({
   contactName,
   contactPhone,
   contactEmail,
+  contactEmails,
   clientId,
   contactId,
   organizationId,
+  organizationTmpId,
+  organizationName,
   companyWide = false,
   title,
 }) => (
@@ -36,9 +42,12 @@ const ContactEmailsTab: React.FC<ContactEmailsTabProps> = ({
     contactName={contactName}
     contactPhone={contactPhone}
     contactEmail={contactEmail}
+    contactEmails={contactEmails}
     clientId={clientId}
     contactId={contactId}
     organizationId={organizationId}
+    organizationTmpId={organizationTmpId}
+    organizationName={organizationName}
     companyWide={companyWide}
   />
 );

@@ -2,11 +2,15 @@ const { Op, QueryTypes } = require('sequelize');
 const redis = require('./redisService');
 const { invalidateJobMatches, invalidateJobInAllCandidateOpportunities } = require('./matchingCacheService');
 const Job = require('../models/Job');
+const ClientOrganizationLink = require('../models/ClientOrganizationLink');
+const Organization = require('../models/Organization');
+const OrganizationTmp = require('../models/OrganizationTmp');
 const Prompt = require('../models/Prompt');
 const Client = require('../models/Client');
 const ClientContact = require('../models/ClientContact');
 const User = require('../models/User');
 const clientUsageSettingService = require('./clientUsageSettingService');
+const { prepareCvForwardSettingsForSave } = require('../utils/cvForwardSettings');
 const { sequelize } = require('../config/db');
 
 const REFERRAL_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -402,12 +406,101 @@ const searchForPicker = async ({ search, limit = 30 } = {}) => {
   });
 };
 
+/** Heavy job fields loaded on demand via GET /api/jobs/:id — omitted from list/grid APIs. */
+const JOB_LIST_API_EXCLUDE_ATTRIBUTES = [
+  'telephoneQuestions',
+  'digitalQuestions',
+  'recruitmentSources',
+  'cvForwardSettings',
+  'aiRawDescription',
+  'contacts',
+  'events',
+  'embedding',
+  'listNotesHistory',
+  'skills',
+  'languages',
+];
+
+const JOB_LIST_FIND_ATTRIBUTES = {
+  exclude: ['events', 'skills', 'embedding', ...JOB_LIST_API_EXCLUDE_ATTRIBUTES.filter(
+    (k) => k !== 'events' && k !== 'skills' && k !== 'embedding',
+  )],
+};
+
+const JOB_COMPOSE_FIND_ATTRIBUTES = ['id', 'title', 'client', 'postingCode'];
+
 /** API payloads must never include embedding vectors (large JSONB). */
 const toApiJob = (job) => {
   if (!job) return job;
   const plain = typeof job.get === 'function' ? job.get({ plain: true }) : { ...job };
   delete plain.embedding;
   return plain;
+};
+
+const toApiJobComposeRow = (job) => {
+  const plain = toApiJob(job);
+  return {
+    id: plain.id,
+    title: plain.title,
+    client: plain.client,
+    postingCode: plain.postingCode ?? null,
+  };
+};
+
+const toApiJobListRow = (job) => {
+  const plain = toApiJob(job);
+  for (const key of JOB_LIST_API_EXCLUDE_ATTRIBUTES) {
+    delete plain[key];
+  }
+  return plain;
+};
+
+/**
+ * Jobs for a tenant client, optionally narrowed to linked organizations.
+ */
+const findJobsScopedToClient = async (clientId, { attributes = JOB_LIST_FIND_ATTRIBUTES } = {}) => {
+  const effectiveClientId = clientId != null ? String(clientId).trim() : '';
+  if (!effectiveClientId) return [];
+
+  let queryAttributes = attributes;
+  if (Array.isArray(attributes) && !attributes.includes('organizationId')) {
+    queryAttributes = [...attributes, 'organizationId'];
+  }
+
+  const rows = await Job.findAll({
+    where: { clientId: effectiveClientId },
+    attributes: queryAttributes,
+    order: [['openDate', 'DESC']],
+  });
+
+  const linkedOrgs = await ClientOrganizationLink.findAll({
+    where: { clientId: effectiveClientId },
+    include: [
+      { model: Organization, as: 'organization', required: false, attributes: ['id', 'name'] },
+      { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
+    ],
+  });
+
+  if (linkedOrgs.length === 0) return rows;
+
+  const linkedOrgIds = new Set();
+  const linkedOrgNames = new Set();
+  for (const link of linkedOrgs) {
+    const org = link.organization || link.organizationTmp;
+    if (!org) continue;
+    linkedOrgIds.add(String(org.id));
+    const nm = (org.name || '').toLowerCase().trim();
+    if (nm) linkedOrgNames.add(nm);
+  }
+
+  const filtered = rows.filter((job) => {
+    const plain = job.toJSON ? job.toJSON() : job;
+    if (plain.organizationId && linkedOrgIds.has(String(plain.organizationId))) return true;
+    const clientName = String(plain.client || '').toLowerCase().trim();
+    return clientName && linkedOrgNames.has(clientName);
+  });
+
+  return filtered.length > 0 ? filtered : rows;
 };
 
 const list = async ({ tagId = null } = {}) => {
@@ -417,20 +510,44 @@ const list = async ({ tagId = null } = {}) => {
     if (!ids.length) return [];
     const rows = await Job.findAll({
       where: { id: { [Op.in]: ids } },
-      attributes: { exclude: ['events', 'skills', 'embedding'] },
+      attributes: JOB_LIST_FIND_ATTRIBUTES,
     });
-    await hydrateJobsSkills(rows);
-    const enriched = await enrichJobsWithCandidateCounts(rows);
-    await enrichJobsWithOrganizationIds(enriched);
-    return enriched.map(toApiJob);
+    await Promise.all([
+      enrichJobsWithCandidateCounts(rows),
+      enrichJobsWithOrganizationIds(rows),
+    ]);
+    return rows.map(toApiJobListRow);
   }
   const rows = await Job.findAll({
-    attributes: { exclude: ['events', 'skills', 'embedding'] },
+    attributes: JOB_LIST_FIND_ATTRIBUTES,
   });
-  await hydrateJobsSkills(rows);
-  const enriched = await enrichJobsWithCandidateCounts(rows);
-  await enrichJobsWithOrganizationIds(enriched);
-  return enriched.map(toApiJob);
+  await Promise.all([
+    enrichJobsWithCandidateCounts(rows),
+    enrichJobsWithOrganizationIds(rows),
+  ]);
+  return rows.map(toApiJobListRow);
+};
+
+const listForTenantGrid = async (clientId) => {
+  const rows = await findJobsScopedToClient(clientId, { attributes: JOB_LIST_FIND_ATTRIBUTES });
+  await Promise.all([
+    enrichJobsWithCandidateCounts(rows),
+    enrichJobsWithOrganizationIds(rows),
+  ]);
+  return rows.map(toApiJobListRow);
+};
+
+const listForComposePicker = async ({ clientId, platformAdmin }) => {
+  if (platformAdmin) {
+    const rows = await Job.findAll({
+      attributes: JOB_COMPOSE_FIND_ATTRIBUTES,
+      order: [['openDate', 'DESC']],
+    });
+    return rows.map(toApiJobComposeRow);
+  }
+  if (!clientId) return [];
+  const rows = await findJobsScopedToClient(clientId, { attributes: JOB_COMPOSE_FIND_ATTRIBUTES });
+  return rows.map(toApiJobComposeRow);
 };
 
 /**
@@ -543,7 +660,7 @@ const getById = async (id, { skipCache = false } = {}) => {
 };
 
 const create = async (payload) => {
-  const { data, skills } = stripSkillsFromPayload(payload);
+  const { data, skills } = stripSkillsFromPayload(prepareCvForwardSettingsForSave(payload));
   if (!data.organizationId) {
     const resolved = await resolveOrganizationIdForJob({
       organizationId: data.organizationId,
@@ -570,7 +687,7 @@ const update = async (id, payload) => {
     err.status = 404;
     throw err;
   }
-  const { data, skills, hasSkills } = stripSkillsFromPayload(payload);
+  const { data, skills, hasSkills } = stripSkillsFromPayload(prepareCvForwardSettingsForSave(payload));
   const nextClient = data.client !== undefined ? data.client : existing.client;
   const nextClientId = data.clientId !== undefined ? data.clientId : existing.clientId;
   if (data.organizationId === undefined || data.organizationId == null) {
@@ -730,6 +847,20 @@ const analyzeRawDescription = async (rawText) => {
     }
   }
 
+  if (parsed.client && String(parsed.client).trim()) {
+    try {
+      const Organization = require('../models/Organization');
+      const orgId = await resolveOrganizationIdForJob({ client: parsed.client, clientId: null });
+      if (orgId) {
+        parsed.suggestedOrganizationId = orgId;
+        const org = await Organization.findByPk(orgId, { attributes: ['name'] });
+        if (org?.name) parsed.clientResolvedName = String(org.name).trim();
+      }
+    } catch (orgErr) {
+      console.warn('[jobService.analyzeRawDescription] org resolve failed:', orgErr?.message || orgErr);
+    }
+  }
+
   return parsed;
 };
 
@@ -752,6 +883,8 @@ const toPlainJobForMatchScore = (job) => {
 
 module.exports = {
   list,
+  listForTenantGrid,
+  listForComposePicker,
   listForPicker,
   searchForPicker,
   getById,
@@ -764,6 +897,9 @@ module.exports = {
   hydrateJobsSkills,
   enrichJobsWithCandidateCounts,
   toApiJob,
+  toApiJobComposeRow,
+  toApiJobListRow,
+  findJobsScopedToClient,
   toPlainJobForMatchScore,
   mapSystemTagsToJobSkills,
   listJobTags,

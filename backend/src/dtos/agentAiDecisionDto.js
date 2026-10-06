@@ -23,6 +23,7 @@ const TAG_PUBLIC_FIELDS = Object.freeze([
 const ORG_PUBLIC_FIELDS = Object.freeze([
   'id',
   'originalTerm',
+  'organizationId',
   'aiDecision',
   'aiSuggestedTarget',
   'aiReasoning',

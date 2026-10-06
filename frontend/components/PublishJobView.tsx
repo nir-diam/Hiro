@@ -22,6 +22,7 @@ import {
   fetchJobImages,
   deleteJobImage,
   generateHeroImage,
+  type JobHeroBrandSource,
   type LandingLayout,
   type LayoutVariantContent,
   type LandingLayoutsMap,
@@ -31,6 +32,56 @@ import {
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+type PublicationBranding = {
+    clientName?: string;
+    logoUrl?: string | null;
+    primaryColor?: string | null;
+};
+
+const normalizeHexColor = (v: unknown): string | null => {
+    const s = String(v ?? '').trim();
+    return /^#[0-9a-fA-F]{6}$/.test(s) ? s : null;
+};
+
+const publicationBrandHasAssets = (b: PublicationBranding | null | undefined): boolean =>
+    Boolean(b && (String(b.logoUrl || '').trim() || normalizeHexColor(b.primaryColor)));
+
+const resolveHeroBrandPreview = (
+    requestedSource: JobHeroBrandSource,
+    tenant: PublicationBranding | null,
+    employer: PublicationBranding | null,
+) => {
+    const companyBrand = tenant;
+    const employerBrand = employer;
+    let effectiveSource: JobHeroBrandSource = requestedSource;
+    let picked: PublicationBranding | null =
+        requestedSource === 'job_client' ? employerBrand : companyBrand;
+    let usedCompanyFallback = false;
+
+    if (!publicationBrandHasAssets(picked)) {
+        if (requestedSource === 'job_client' && publicationBrandHasAssets(companyBrand)) {
+            picked = companyBrand;
+            effectiveSource = 'company';
+            usedCompanyFallback = true;
+        } else {
+            picked = companyBrand || employerBrand || null;
+        }
+    }
+
+    const baseColor = normalizeHexColor(picked?.primaryColor) || '#1e293b';
+    const brandName = String(picked?.clientName || tenant?.clientName || '—').trim() || '—';
+    const logoUrl = String(picked?.logoUrl || '').trim() || null;
+
+    let warning: 'neutral_no_brand' | 'fallback_company_brand' | null = null;
+    if (!logoUrl && !normalizeHexColor(picked?.primaryColor)) {
+        warning = 'neutral_no_brand';
+    } else if (usedCompanyFallback) {
+        warning = 'fallback_company_brand';
+    }
+
+    return { effectiveSource, brandName, logoUrl, baseColor, warning };
+};
 
 const resolvePublishJobId = (routeJobId?: string, jobRecord?: { id?: unknown } | null): string => {
   const route = String(routeJobId || '').trim();
@@ -355,9 +406,13 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     const [heroDesignInstructions, setHeroDesignInstructions] = useState('');
     const [heroGallery, setHeroGallery] = useState<CompanyCreatedImage[]>([]);
     const [heroGalleryLoading, setHeroGalleryLoading] = useState(false);
-    const [clientLogoUrl, setClientLogoUrl] = useState<string | null>(null);
-    const [clientDisplayName, setClientDisplayName] = useState('');
-    const [brandColor, setBrandColor] = useState('#1e293b');
+    const [heroBrandSource, setHeroBrandSource] = useState<JobHeroBrandSource>('company');
+    const [heroBrandColorOverride, setHeroBrandColorOverride] = useState<string | null>(null);
+    const [tenantBranding, setTenantBranding] = useState<PublicationBranding | null>(null);
+    const [employerBranding, setEmployerBranding] = useState<PublicationBranding | null>(null);
+    const [heroBrandPreviewWarning, setHeroBrandPreviewWarning] = useState<
+        'neutral_no_brand' | 'fallback_company_brand' | null
+    >(null);
     const [publicRouteKey, setPublicRouteKey] = useState('');
     const [isGeneratingHero, setIsGeneratingHero] = useState(false);
     const [heroFeedback, setHeroFeedback] = useState<string | null>(null);
@@ -387,6 +442,22 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     const [selectedSourceFilter, setSelectedSourceFilter] = useState<string | null>(null);
     const [sourceCandidates, setSourceCandidates] = useState<SourceCandidate[]>([]);
     const candidatesTableRef = useRef<HTMLDivElement>(null);
+
+    const heroBrandPreview = useMemo(
+        () => resolveHeroBrandPreview(heroBrandSource, tenantBranding, employerBranding),
+        [heroBrandSource, tenantBranding, employerBranding],
+    );
+
+    const effectiveHeroBrandColor =
+        normalizeHexColor(heroBrandColorOverride) || heroBrandPreview.baseColor;
+
+    const heroBrandColorIsOverridden =
+        heroBrandColorOverride != null
+        && normalizeHexColor(heroBrandColorOverride) !== heroBrandPreview.baseColor;
+
+    useEffect(() => {
+        setHeroBrandPreviewWarning(heroBrandPreview.warning);
+    }, [heroBrandPreview.warning]);
 
     const jobDisplayTitle = (job as any).title || (job as any).jobTitle || publicJobTitle || '—';
     const targetJobId = resolvePublishJobId(jobId, job as { id?: unknown });
@@ -499,12 +570,48 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                 if (pub.clientLandingContact) {
                     setLandingContact(pub.clientLandingContact);
                 }
+                const pubSource =
+                    pub.heroBrandSource === 'job_client' || pub.heroBrandSource === 'company'
+                        ? pub.heroBrandSource
+                        : pub.defaultHeroBrandSource === 'job_client'
+                          ? 'job_client'
+                          : 'company';
+                setHeroBrandSource(pubSource);
+                const override = normalizeHexColor((pub as { heroBrandColorOverride?: string }).heroBrandColorOverride);
+                setHeroBrandColorOverride(override);
+                if (pub.tenantBranding) {
+                    setTenantBranding({
+                        clientName: pub.tenantBranding.clientName,
+                        logoUrl: pub.tenantBranding.logoUrl ?? null,
+                        primaryColor: pub.tenantBranding.primaryColor ?? null,
+                    });
+                }
+                if (pub.employerBranding) {
+                    setEmployerBranding({
+                        clientName: pub.employerBranding.clientName,
+                        logoUrl: pub.employerBranding.logoUrl ?? null,
+                        primaryColor: pub.employerBranding.primaryColor ?? null,
+                    });
+                }
+                const preview = resolveHeroBrandPreview(
+                    pubSource,
+                    pub.tenantBranding
+                        ? {
+                              clientName: pub.tenantBranding.clientName,
+                              logoUrl: pub.tenantBranding.logoUrl ?? null,
+                              primaryColor: pub.tenantBranding.primaryColor ?? null,
+                          }
+                        : null,
+                    pub.employerBranding
+                        ? {
+                              clientName: pub.employerBranding.clientName,
+                              logoUrl: pub.employerBranding.logoUrl ?? null,
+                              primaryColor: pub.employerBranding.primaryColor ?? null,
+                          }
+                        : null,
+                );
+                setHeroBrandPreviewWarning(preview.warning);
                 if (pub.clientBranding) {
-                    setClientLogoUrl(pub.clientBranding.logoUrl || null);
-                    setBrandColor(pub.clientBranding.primaryColor || '#1e293b');
-                    if (pub.clientBranding.clientName) {
-                        setClientDisplayName(pub.clientBranding.clientName);
-                    }
                     const routeKey = resolvePublicClientRouteKey(pub.clientBranding?.domain);
                     if (routeKey) setPublicRouteKey(routeKey);
                 }
@@ -590,9 +697,9 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
             const result = await generateHeroImage(publishJobId, {
                 aspectRatio: '16:9',
                 landingLayout: layout,
-                companyLogo: clientLogoUrl,
-                clientName: clientDisplayName.trim() || undefined,
-                brandColor,
+                heroBrandSource,
+                brandColor: effectiveHeroBrandColor,
+                heroBrandColorOverride: heroBrandColorIsOverridden ? effectiveHeroBrandColor : undefined,
                 publicJobTitle: publicJobTitle.trim(),
                 publicJobDescription: publicJobDescription,
                 publicJobRequirements: publicJobRequirements,
@@ -602,7 +709,15 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                 heroDesignInstructions: heroDesignInstructions.trim() || undefined,
             });
             setHeroImageUrl(result.heroImageUrl || result.url);
-            setHeroFeedback('המודעה נוצרה ב-Nano Banana ונשמרה');
+            if (result.heroBrand?.warning === 'neutral_no_brand') {
+                setHeroBrandPreviewWarning('neutral_no_brand');
+                setHeroFeedback('המודעה נוצרה — השלימו לוגו וצבע מותג בהגדרות החברה לתוצאה ממותגת');
+            } else if (result.heroBrand?.warning === 'fallback_company_brand') {
+                setHeroBrandPreviewWarning('fallback_company_brand');
+                setHeroFeedback('המודעה נוצרה עם מותג החברה (ללקוח המשרה אין לוגו/צבע)');
+            } else {
+                setHeroFeedback('המודעה נוצרה ב-Nano Banana ונשמרה');
+            }
             const refreshed = await fetchJobImages(publishJobId).catch(() => []);
             setHeroGallery(refreshed || []);
         } catch (err: any) {
@@ -731,6 +846,8 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
             videoUrl: videoUrl.trim() || null,
             heroImageUrl: heroImageUrl.trim() || null,
             heroDesignInstructions: heroDesignInstructions.trim() || null,
+            heroBrandSource,
+            heroBrandColorOverride: heroBrandColorIsOverridden ? effectiveHeroBrandColor : null,
             landingPageFields,
             screeningQuestions,
             trackingLinks: trackingLinksToPayload(linksOverride ?? trackingLinks),
@@ -1113,6 +1230,73 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                             הנחיות אלה יישלחו ל-Nano Banana בכל יצירת תמונה, תחת &quot;הנחיות נוספות&quot; בפרומפט.
                         </p>
                     </div>
+                    <div className="rounded-xl border border-border-default p-4 space-y-4 bg-bg-card">
+                        <div>
+                            <p className="text-sm font-semibold text-text-default">מותג לתמונת Nano Banana</p>
+                            <p className="text-xs text-text-muted mt-0.5">
+                                ברירת מחדל מהגדרות החברה — ניתן לשנות למשרה זו בלבד.
+                            </p>
+                        </div>
+                        <div className="flex flex-wrap gap-4">
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="radio"
+                                    name="publishHeroBrandSource"
+                                    checked={heroBrandSource === 'company'}
+                                    onChange={() => {
+                                        setHeroBrandSource('company');
+                                        setHeroBrandColorOverride(null);
+                                    }}
+                                    className="text-primary-600"
+                                />
+                                <span className="text-sm">חברה</span>
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="radio"
+                                    name="publishHeroBrandSource"
+                                    checked={heroBrandSource === 'job_client'}
+                                    onChange={() => {
+                                        setHeroBrandSource('job_client');
+                                        setHeroBrandColorOverride(null);
+                                    }}
+                                    className="text-primary-600"
+                                />
+                                <span className="text-sm">לקוח המשרה</span>
+                            </label>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-3">
+                            <label className="text-sm font-semibold text-text-muted">צבע למשרה זו</label>
+                            <input
+                                type="color"
+                                value={/^#[0-9a-fA-F]{6}$/.test(effectiveHeroBrandColor) ? effectiveHeroBrandColor : '#1e293b'}
+                                onChange={(e) => setHeroBrandColorOverride(e.target.value)}
+                                className="w-12 h-10 rounded border border-border-default cursor-pointer"
+                            />
+                            <span className="text-sm font-mono dir-ltr" dir="ltr">
+                                {effectiveHeroBrandColor}
+                            </span>
+                            {heroBrandColorIsOverridden && (
+                                <button
+                                    type="button"
+                                    onClick={() => setHeroBrandColorOverride(null)}
+                                    className="text-xs font-semibold text-primary-700 hover:text-primary-800"
+                                >
+                                    החזר לצבע המותג
+                                </button>
+                            )}
+                        </div>
+                        {heroBrandPreviewWarning === 'fallback_company_brand' && (
+                            <p className="text-xs text-amber-700">
+                                ללקוח המשרה אין לוגו/צבע — ישמש מותג החברה.
+                            </p>
+                        )}
+                        {heroBrandPreviewWarning === 'neutral_no_brand' && (
+                            <p className="text-xs text-amber-700">
+                                חסרים לוגו וצבע מותג — התמונה תיווצר בעיצוב ניטרלי. השלימו בהגדרות החברה.
+                            </p>
+                        )}
+                    </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <button
                             type="button"
@@ -1130,7 +1314,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                             </span>
                             <span className="text-xs text-text-muted text-center leading-tight">
                                 {selectedLandingLayout
-                                    ? `סגנון: ${LANDING_LAYOUT_OPTIONS.find((o) => o.id === selectedLandingLayout)?.title || selectedLandingLayout} · ${brandColor}`
+                                    ? `סגנון: ${LANDING_LAYOUT_OPTIONS.find((o) => o.id === selectedLandingLayout)?.title || selectedLandingLayout} · ${effectiveHeroBrandColor}`
                                     : 'יש לבחור סגנון עיצוב מתפריט "צור עיצוב"'}
                             </span>
                         </button>
@@ -1186,7 +1370,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                             onClick={() => setIsDesignMenuOpen((v) => !v)}
                             disabled={isGeneratingHero}
                             className="w-full flex items-center justify-between text-white font-bold py-3 px-4 rounded-lg hover:opacity-90 transition disabled:opacity-60"
-                            style={{ backgroundColor: brandColor || '#9e1c22' }}
+                            style={{ backgroundColor: effectiveHeroBrandColor || '#9e1c22' }}
                         >
                             <span>צור עיצוב</span>
                             <div className="flex items-center gap-2">
@@ -1199,6 +1383,15 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                                 נבחר: {LANDING_LAYOUT_OPTIONS.find((o) => o.id === selectedLandingLayout)?.title}
                             </p>
                         )}
+                        <p className="text-xs text-text-muted mt-2">
+                            ייווצר עם המותג של:{' '}
+                            <span className="font-semibold text-text-default">{heroBrandPreview.brandName}</span>
+                            {' · '}
+                            צבע{' '}
+                            <span className="font-mono dir-ltr" dir="ltr">
+                                {effectiveHeroBrandColor}
+                            </span>
+                        </p>
                         {isDesignMenuOpen && (
                             <div className="mt-2 bg-white border border-border-default rounded-xl shadow-lg p-2 space-y-1 animate-fade-in z-20 relative">
                                 {LANDING_LAYOUT_OPTIONS.map((option) => (

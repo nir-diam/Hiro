@@ -1,14 +1,47 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { PlusIcon, PencilIcon, TrashIcon, DocumentTextIcon, MagnifyingGlassIcon } from './Icons';
+import {
+    PlusIcon,
+    PencilIcon,
+    TrashIcon,
+    DocumentTextIcon,
+    MagnifyingGlassIcon,
+    BellIcon,
+    ExclamationTriangleIcon,
+    VideoCameraIcon,
+    CheckCircleIcon,
+} from './Icons';
 import AddApplicationModal, { type ApplicationFormValues } from './AddApplicationModal';
+import CandidateScreeningWizard, { type ScreeningQuestion } from './CandidateScreeningWizard';
 import { authHeaders } from '../utils/authHeaders';
+import {
+    formatApplicationJobTitle,
+    isDigitalScreeningComplete,
+    mapJobQuestionsToWizard,
+    wizardAnswersToDigitalRows,
+    type DigitalAnswerRow,
+    type JobDigitalQuestion,
+    type ScreeningDataByJob,
+} from '../utils/digitalScreening';
 
 interface JobOption {
     id: string;
     title: string;
     client?: string;
+    digitalQuestions?: JobDigitalQuestion[];
 }
+
+export type PendingDigitalScreeningTask = {
+    id: string;
+    jobId: string;
+    jobTitle: string;
+    type: 'screening';
+    data: {
+        jobTitle: string;
+        questions: ScreeningQuestion[];
+        digitalQuestions: JobDigitalQuestion[];
+    };
+};
 
 type EmailUploadRow = {
     id: number | string;
@@ -32,17 +65,40 @@ interface ApplicationRecord {
     applicationDate?: string | null;
     link?: string | null;
     cvFile?: string | null;
+    fileKey?: string | null;
     notes?: string | null;
     job?: JobOption | null;
     date?: string;
-    source?: 'manual' | 'email';
+    source?: 'manual' | 'email' | 'portal';
     readOnly?: boolean;
 }
+
+type PortalLinkedJobRow = {
+    jobCandidateId?: string | number;
+    jobId?: string | null;
+    candidateId?: string;
+    status?: string | null;
+    source?: string | null;
+    createdAt?: string | null;
+    updatedAt?: string | null;
+    job?: JobOption | null;
+};
+
+const PORTAL_LINK_SOURCES = new Set(['candidate_portal', 'job_matching']);
 
 interface CandidateApplicationsViewProps {
     candidateId?: string | null;
     /** All profile version ids for the same portal user — aggregates email + manual submissions. */
     relatedProfileIds?: string[];
+    /** Reload list when the applications tab becomes visible. */
+    isActive?: boolean;
+    /** Bump after portal apply so the list refreshes without a full page reload. */
+    refreshToken?: number;
+    /** Notifies parent (sidebar badge / urgent tasks) when pending digital screenings change. */
+    onPendingDigitalScreeningsChange?: (tasks: PendingDigitalScreeningTask[]) => void;
+    /** When parent sidebar triggers a task, open that application's wizard. */
+    externalScreeningTaskId?: string | null;
+    onExternalScreeningTaskHandled?: () => void;
 }
 
 const apiBase = () => (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
@@ -91,6 +147,31 @@ function filenameFromContentDisposition(header: string | null, fallback: string)
     return plain?.[1] || fallback;
 }
 
+function mapPortalLinkedJobToApplication(row: PortalLinkedJobRow): ApplicationRecord | null {
+    const candidateId = row.candidateId ? String(row.candidateId) : '';
+    const jobId = row.jobId != null ? String(row.jobId).trim() : '';
+    const source = String(row.source || '').trim();
+    if (!candidateId || !jobId || !PORTAL_LINK_SOURCES.has(source)) return null;
+
+    const job = row.job || undefined;
+    return {
+        id: `portal-${row.jobCandidateId || `${candidateId}-${jobId}`}`,
+        candidateId,
+        jobId,
+        company: String(job?.client || '').trim() || '—',
+        role: String(job?.title || '').trim() || '—',
+        status: source === 'candidate_portal' ? 'הוגש מהפורטל' : String(row.status || 'נשלח').trim() || 'נשלח',
+        applicationDate: row.createdAt || row.updatedAt || null,
+        date: normalizeDate(row.createdAt || row.updatedAt),
+        link: null,
+        cvFile: null,
+        notes: '',
+        job: job || null,
+        source: 'portal',
+        readOnly: true,
+    };
+}
+
 function mapEmailUploadToApplication(upload: EmailUploadRow): ApplicationRecord | null {
     const candidateId = upload.candidateId ? String(upload.candidateId) : '';
     if (!candidateId) return null;
@@ -116,6 +197,7 @@ function mapEmailUploadToApplication(upload: EmailUploadRow): ApplicationRecord 
         date: normalizeDate(upload.createdAt),
         link: null,
         cvFile: cvLabel,
+        fileKey: String(upload.fileKey || '').trim() || null,
         notes: String(upload.userNotes || '').trim(),
         job: job || null,
         source: 'email',
@@ -123,24 +205,76 @@ function mapEmailUploadToApplication(upload: EmailUploadRow): ApplicationRecord 
     };
 }
 
+function looksLikeOpaqueFileToken(value: string): boolean {
+    const label = String(value || '').trim();
+    if (!label || label.length < 16) return false;
+    if (/[\s\u0590-\u05FF]/.test(label)) return false;
+    return /^[a-z0-9._-]+$/i.test(label);
+}
+
+function emailApplicationDisplayScore(app: ApplicationRecord): number {
+    const label = String(app.cvFile || '').trim();
+    let score = Math.min(label.length, 200);
+    if (looksLikeOpaqueFileToken(label)) score -= 500;
+    if (/קורות\s*חיים/i.test(label)) score += 40;
+    if ((app.notes || '').trim()) score += 10;
+    const uploadNum = Number(String(app.id).replace(/^email-/, '')) || 0;
+    return score * 1000 + uploadNum;
+}
+
+function pickPreferredEmailApplication(apps: ApplicationRecord[]): ApplicationRecord {
+    return [...apps].sort(
+        (a, b) => emailApplicationDisplayScore(b) - emailApplicationDisplayScore(a),
+    )[0];
+}
+
+/** Collapse mirror rows, double-ingest, and subject vs fileKey label pairs for the same submission. */
 function dedupeEmailApplications(apps: ApplicationRecord[]): ApplicationRecord[] {
-    const seen = new Set<string>();
-    return apps.filter((app) => {
-        const dedupeKey =
-            app.source === 'email' && app.cvFile
-                ? `email-file::${app.cvFile}::${app.date || ''}`
-                : app.id;
-        if (seen.has(dedupeKey)) return false;
-        seen.add(dedupeKey);
-        return true;
-    });
+    if (!apps.length) return [];
+
+    const afterFileKey = new Map<string, ApplicationRecord[]>();
+    const withoutFileKey: ApplicationRecord[] = [];
+    for (const app of apps) {
+        const fileKey = String(app.fileKey || '').trim();
+        if (fileKey) {
+            const bucket = afterFileKey.get(fileKey) || [];
+            bucket.push(app);
+            afterFileKey.set(fileKey, bucket);
+        } else {
+            withoutFileKey.push(app);
+        }
+    }
+    const fileKeyDeduped = [
+        ...[...afterFileKey.values()].map(pickPreferredEmailApplication),
+        ...withoutFileKey,
+    ];
+
+    const byJobDay = new Map<string, ApplicationRecord[]>();
+    for (const app of fileKeyDeduped) {
+        const jobId = String(app.jobId || '').trim();
+        const day = String(app.date || '').slice(0, 10);
+        const groupKey = jobId ? `job::${jobId}::${day}` : `id::${app.id}`;
+        const bucket = byJobDay.get(groupKey) || [];
+        bucket.push(app);
+        byJobDay.set(groupKey, bucket);
+    }
+
+    return [...byJobDay.values()].map((group) =>
+        group.length === 1 ? group[0] : pickPreferredEmailApplication(group),
+    );
 }
 
 const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
     candidateId,
     relatedProfileIds = [],
+    isActive = true,
+    refreshToken = 0,
+    onPendingDigitalScreeningsChange,
+    externalScreeningTaskId,
+    onExternalScreeningTaskHandled,
 }) => {
     const [applications, setApplications] = useState<ApplicationRecord[]>([]);
+    const [screeningDataByJob, setScreeningDataByJob] = useState<ScreeningDataByJob>({});
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingApp, setEditingApp] = useState<ApplicationFormValues | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
@@ -150,6 +284,8 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
     const [downloadingCvId, setDownloadingCvId] = useState<string | null>(null);
     const [notesBaseline, setNotesBaseline] = useState<Record<string, string>>({});
     const [loadError, setLoadError] = useState<string | null>(null);
+    const [activeScreeningApp, setActiveScreeningApp] = useState<ApplicationRecord | null>(null);
+    const [isSubmittingScreening, setIsSubmittingScreening] = useState(false);
 
     const profileIdsKey = useMemo(() => {
         const ids = new Set<string>();
@@ -173,7 +309,8 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
             const base = apiBase();
             const qs = encodeURIComponent(profileIdsKey);
             const headers = authHeaders();
-            const [manualRes, emailRes] = await Promise.all([
+            const primaryCandidateId = profileIdsKey.split(',')[0] || candidateId || '';
+            const [manualRes, emailRes, screeningRes] = await Promise.all([
                 fetch(`${base}/api/applications?candidateIds=${qs}`, {
                     headers,
                     credentials: 'include',
@@ -182,6 +319,13 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                     headers,
                     credentials: 'include',
                 }),
+                primaryCandidateId
+                    ? fetch(`${base}/api/candidates/${encodeURIComponent(primaryCandidateId)}/screening-data`, {
+                          headers,
+                          credentials: 'include',
+                          cache: 'no-store',
+                      })
+                    : Promise.resolve(null),
             ]);
             if (!manualRes.ok) throw new Error('Failed to load applications');
             const manualPayload = await manualRes.json();
@@ -206,17 +350,56 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
             const manualJobKeys = new Set(
                 manualApps.map((a) => `${a.candidateId}::${a.jobId || ''}::${a.date || ''}`),
             );
+            const manualJobIds = new Set(
+                manualApps.filter((a) => a.jobId).map((a) => `${a.candidateId}::${a.jobId}`),
+            );
             const emailOnly = emailApps.filter((app) => {
                 const key = `${app.candidateId}::${app.jobId || ''}::${app.date || ''}`;
                 if (app.jobId && manualJobKeys.has(key)) return false;
                 return true;
             });
-            const combined = [...manualApps, ...emailOnly].sort((a, b) => {
+
+            const portalApps: ApplicationRecord[] = [];
+            const candidateIds = profileIdsKey.split(',').filter(Boolean);
+            await Promise.all(
+                candidateIds.map(async (cid) => {
+                    try {
+                        const linkedRes = await fetch(
+                            `${base}/api/candidates/${encodeURIComponent(cid)}/linked-jobs`,
+                            { headers, credentials: 'include', cache: 'no-store' },
+                        );
+                        if (!linkedRes.ok) return;
+                        const linkedPayload = await linkedRes.json();
+                        if (!Array.isArray(linkedPayload)) return;
+                        for (const row of linkedPayload) {
+                            const mapped = mapPortalLinkedJobToApplication(row as PortalLinkedJobRow);
+                            if (!mapped) continue;
+                            const dedupeKey = `${mapped.candidateId}::${mapped.jobId}`;
+                            if (manualJobIds.has(dedupeKey)) continue;
+                            portalApps.push(mapped);
+                        }
+                    } catch (linkedErr) {
+                        console.warn('[CandidateApplicationsView] linked-jobs fetch failed', cid, linkedErr);
+                    }
+                }),
+            );
+            const portalDeduped = portalApps.filter((app, index, arr) => {
+                const key = `${app.candidateId}::${app.jobId}`;
+                return arr.findIndex((other) => `${other.candidateId}::${other.jobId}` === key) === index;
+            });
+
+            const combined = [...manualApps, ...emailOnly, ...portalDeduped].sort((a, b) => {
                 const aTime = Date.parse(String(a.date || '')) || 0;
                 const bTime = Date.parse(String(b.date || '')) || 0;
                 return bTime - aTime;
             });
             setApplications(combined);
+            if (screeningRes?.ok) {
+                const screeningPayload = (await screeningRes.json()) as ScreeningDataByJob;
+                setScreeningDataByJob(screeningPayload && typeof screeningPayload === 'object' ? screeningPayload : {});
+            } else {
+                setScreeningDataByJob({});
+            }
             const baseline: Record<string, string> = {};
             for (const app of combined) {
                 baseline[app.id] = app.notes || '';
@@ -228,11 +411,117 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
         } finally {
             setIsLoading(false);
         }
-    }, [profileIdsKey]);
+    }, [profileIdsKey, candidateId]);
 
     useEffect(() => {
         void loadApplications();
-    }, [loadApplications]);
+    }, [loadApplications, refreshToken]);
+
+    useEffect(() => {
+        if (isActive) void loadApplications();
+    }, [isActive, loadApplications]);
+
+    const getDigitalQuestionsForApp = useCallback((app: ApplicationRecord): JobDigitalQuestion[] => {
+        const fromJob = Array.isArray(app.job?.digitalQuestions) ? app.job!.digitalQuestions! : [];
+        return fromJob.filter((q) => String(q?.text || '').trim());
+    }, []);
+
+    const getDigitalAnswersForApp = useCallback(
+        (app: ApplicationRecord): DigitalAnswerRow[] => {
+            const jobId = app.jobId ? String(app.jobId) : '';
+            if (!jobId) return [];
+            return screeningDataByJob[jobId]?.digitalAnswers || [];
+        },
+        [screeningDataByJob],
+    );
+
+    const isAppDigitalScreeningPending = useCallback(
+        (app: ApplicationRecord): boolean => {
+            const questions = getDigitalQuestionsForApp(app);
+            if (!questions.length) return false;
+            return !isDigitalScreeningComplete(questions, getDigitalAnswersForApp(app));
+        },
+        [getDigitalAnswersForApp, getDigitalQuestionsForApp],
+    );
+
+    const pendingDigitalTasks = useMemo((): PendingDigitalScreeningTask[] => {
+        return applications
+            .filter((app) => app.jobId && isAppDigitalScreeningPending(app))
+            .map((app) => {
+                const digitalQuestions = getDigitalQuestionsForApp(app);
+                const jobTitle = formatApplicationJobTitle(app);
+                return {
+                    id: app.id,
+                    jobId: String(app.jobId),
+                    jobTitle,
+                    type: 'screening' as const,
+                    data: {
+                        jobTitle,
+                        questions: mapJobQuestionsToWizard(digitalQuestions),
+                        digitalQuestions,
+                    },
+                };
+            });
+    }, [applications, getDigitalQuestionsForApp, isAppDigitalScreeningPending]);
+
+    useEffect(() => {
+        onPendingDigitalScreeningsChange?.(pendingDigitalTasks);
+    }, [pendingDigitalTasks, onPendingDigitalScreeningsChange]);
+
+    useEffect(() => {
+        if (!externalScreeningTaskId) return;
+        const app = applications.find((row) => row.id === externalScreeningTaskId);
+        if (app && isAppDigitalScreeningPending(app)) {
+            setActiveScreeningApp(app);
+            onExternalScreeningTaskHandled?.();
+        }
+    }, [externalScreeningTaskId, applications, isAppDigitalScreeningPending, onExternalScreeningTaskHandled]);
+
+    const openScreeningWizard = (app: ApplicationRecord) => {
+        if (!isAppDigitalScreeningPending(app)) return;
+        setActiveScreeningApp(app);
+    };
+
+    const handleScreeningSubmit = async (answers: Record<number, unknown>) => {
+        if (!activeScreeningApp?.jobId || !candidateId) return;
+        const digitalQuestions = getDigitalQuestionsForApp(activeScreeningApp);
+        const digitalAnswers = wizardAnswersToDigitalRows(digitalQuestions, answers);
+        setIsSubmittingScreening(true);
+        setLoadError(null);
+        try {
+            const base = apiBase();
+            const res = await fetch(
+                `${base}/api/candidates/${encodeURIComponent(String(candidateId))}/screening-data`,
+                {
+                    method: 'PUT',
+                    headers: authHeaders(true),
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        jobId: activeScreeningApp.jobId,
+                        digitalAnswers,
+                    }),
+                },
+            );
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.message || 'שמירת שאלון נכשלה');
+            }
+            const payload = await res.json();
+            setScreeningDataByJob((prev) => ({
+                ...prev,
+                [String(activeScreeningApp.jobId)]: {
+                    ...prev[String(activeScreeningApp.jobId)],
+                    digitalAnswers: payload.digitalAnswers || digitalAnswers,
+                },
+            }));
+            setActiveScreeningApp(null);
+        } catch (err) {
+            console.error('[CandidateApplicationsView] handleScreeningSubmit', err);
+            setLoadError(err instanceof Error ? err.message : 'שמירת שאלון נכשלה');
+        } finally {
+            setIsSubmittingScreening(false);
+        }
+    };
 
     const saveApplication = async (formData: ApplicationFormValues) => {
         if (!candidateId) return;
@@ -462,6 +751,41 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                 </div>
             ) : null}
 
+            {pendingDigitalTasks.length > 0 ? (
+                <div className="p-4 bg-red-50 rounded-2xl border border-red-100 animate-fade-in">
+                    <h4 className="text-xs font-bold text-red-800 uppercase tracking-wider mb-3 flex items-center gap-2">
+                        <BellIcon className="w-4 h-4" />
+                        משימות דחופות
+                    </h4>
+                    <div className="space-y-3">
+                        {pendingDigitalTasks.map((task) => (
+                            <div key={task.id} className="bg-white p-3 rounded-xl shadow-sm border border-red-100/50">
+                                <div className="flex items-start gap-2 mb-2">
+                                    <div className="mt-0.5 min-w-[16px]">
+                                        <ExclamationTriangleIcon className="w-4 h-4 text-red-500" />
+                                    </div>
+                                    <div>
+                                        <p className="text-xs font-bold text-gray-800 leading-tight">שאלון סינון</p>
+                                        <p className="text-[10px] text-gray-500 mt-0.5 line-clamp-1">{task.jobTitle}</p>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        const app = applications.find((row) => row.id === task.id);
+                                        if (app) openScreeningWizard(app);
+                                    }}
+                                    className="w-full bg-red-600 text-white text-xs font-bold py-2 rounded-lg hover:bg-red-700 transition flex items-center justify-center gap-1.5"
+                                >
+                                    <VideoCameraIcon className="w-3 h-3" />
+                                    בצע כעת
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
+
             <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
                 <div className="relative w-full sm:w-auto sm:min-w-[300px]">
                     <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
@@ -491,6 +815,7 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                                 <th className="px-6 py-4">חברה</th>
                                 <th className="px-6 py-4">משרה</th>
                                 <th className="px-6 py-4">סטטוס</th>
+                                <th className="px-6 py-4">שאלון דיגיטלי</th>
                                 <th className="px-6 py-4">לינק</th>
                                 <th className="px-6 py-4">קובץ קו"ח</th>
                                 <th className="px-6 py-4">הערות</th>
@@ -500,7 +825,7 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                         <tbody className="divide-y divide-border-subtle">
                             {isLoading ? (
                                 <tr>
-                                    <td colSpan={8} className="px-6 py-12 text-center text-text-muted">
+                                    <td colSpan={9} className="px-6 py-12 text-center text-text-muted">
                                         טוען הגשות...
                                     </td>
                                 </tr>
@@ -522,11 +847,43 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                                                 className={`px-2 py-1 rounded-md text-xs font-bold ${
                                                     app.source === 'email'
                                                         ? 'bg-blue-50 text-blue-700'
-                                                        : 'bg-primary-50 text-primary-700'
+                                                        : app.source === 'portal'
+                                                          ? 'bg-emerald-50 text-emerald-700'
+                                                          : 'bg-primary-50 text-primary-700'
                                                 }`}
                                             >
                                                 {app.status}
                                             </span>
+                                        </td>
+                                        <td className="px-6 py-4">
+                                            {(() => {
+                                                const digitalQuestions = getDigitalQuestionsForApp(app);
+                                                if (!digitalQuestions.length) {
+                                                    return <span className="text-text-subtle">—</span>;
+                                                }
+                                                const complete = isDigitalScreeningComplete(
+                                                    digitalQuestions,
+                                                    getDigitalAnswersForApp(app),
+                                                );
+                                                if (complete) {
+                                                    return (
+                                                        <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-bold bg-green-50 text-green-700">
+                                                            <CheckCircleIcon className="w-3.5 h-3.5" />
+                                                            הושלם
+                                                        </span>
+                                                    );
+                                                }
+                                                return (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openScreeningWizard(app)}
+                                                        className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-red-50 text-red-700 border border-red-100 hover:bg-red-100 transition"
+                                                    >
+                                                        <ExclamationTriangleIcon className="w-3.5 h-3.5" />
+                                                        ממתין — בצע כעת
+                                                    </button>
+                                                );
+                                            })()}
                                         </td>
                                         <td className="px-6 py-4">
                                             {app.link ? (
@@ -573,13 +930,15 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                                                 value={app.notes || ''}
                                                 onChange={(e) => handleNotesChange(app.id, e.target.value)}
                                                 onBlur={(e) => void saveNotes(app, e.target.value)}
-                                                disabled={savingNotesId === app.id}
+                                                disabled={savingNotesId === app.id || app.source === 'portal'}
                                                 className="w-full min-w-[180px] max-w-xs bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm text-text-default focus:ring-2 focus:ring-primary-500 outline-none resize-y disabled:opacity-60"
                                             />
                                         </td>
                                         <td className="px-6 py-4">
                                             {app.readOnly ? (
-                                                <span className="text-xs text-text-muted">מקור: מייל</span>
+                                                <span className="text-xs text-text-muted">
+                                                    {app.source === 'portal' ? 'מקור: פורטל' : 'מקור: מייל'}
+                                                </span>
                                             ) : (
                                                 <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
                                                     <button
@@ -603,7 +962,7 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                                 ))
                             ) : (
                                 <tr>
-                                    <td colSpan={8} className="px-6 py-12 text-center text-text-muted">
+                                    <td colSpan={9} className="px-6 py-12 text-center text-text-muted">
                                         לא נמצאו הגשות. לחץ על "הוסף הגשה חדשה" כדי להתחיל.
                                     </td>
                                 </tr>
@@ -624,6 +983,18 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                 initialData={editingApp}
                 isSaving={isSaving}
             />
+
+            {activeScreeningApp ? (
+                <CandidateScreeningWizard
+                    jobTitle={formatApplicationJobTitle(activeScreeningApp)}
+                    questions={mapJobQuestionsToWizard(getDigitalQuestionsForApp(activeScreeningApp))}
+                    onClose={() => {
+                        if (isSubmittingScreening) return;
+                        setActiveScreeningApp(null);
+                    }}
+                    onSubmit={(answers) => void handleScreeningSubmit(answers)}
+                />
+            ) : null}
         </div>
     );
 };

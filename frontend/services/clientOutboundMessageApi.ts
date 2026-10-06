@@ -1,5 +1,6 @@
 import { authHeaders } from '../utils/authHeaders';
 import { downloadBlobAsFile } from '../utils/downloadBlobAsFile';
+import { recipientMatchesContactEmails } from '../utils/contactEmailMatch';
 
 const apiBase = () => import.meta.env.VITE_API_BASE || '';
 
@@ -217,6 +218,9 @@ export type OutboundMessageHistoryItem = {
     organizationId: string | null;
     notificationMessageId: string | null;
     attachments: OutboundMessageAttachmentRef[];
+    /** Sent email that included a proposal (template or saved proposal). */
+    isProposal?: boolean;
+    proposalLabels?: string[];
 };
 
 type ClientEventLike = {
@@ -225,6 +229,7 @@ type ClientEventLike = {
     description?: string;
     date?: string;
     type?: string[] | string;
+    contactId?: string | null;
     linkedTo?: { type?: string; id?: string; name?: string } | string | null;
     organizationId?: string | null;
     coordinator?: string;
@@ -238,7 +243,49 @@ type ClientEventLike = {
         deliveryStatus?: string | null;
         notificationMessageId?: string | null;
         attachments?: OutboundMessageAttachmentRef[] | null;
+        outboundProposal?: boolean;
+        proposalTemplateNames?: string[] | null;
     } | null;
+};
+
+const eventTypesList = (event: ClientEventLike): string[] =>
+    Array.isArray(event.type)
+        ? event.type.map((t) => String(t || '').trim()).filter(Boolean)
+        : event.type
+          ? [String(event.type).trim()]
+          : [];
+
+const isProposalOutboundEvent = (event: ClientEventLike, meta: ClientEventLike['metadata']): boolean => {
+    if (meta?.outboundProposal === true) return true;
+    const types = eventTypesList(event);
+    if (types.some((t) => t === 'proposal' || t === 'הצעת מחיר')) return true;
+    const title = String(event.title || '');
+    return title.includes('הצעת מחיר');
+};
+
+const contactMatchesOutboundEvent = (args: {
+    channel: OutboundMessageChannel;
+    contactId: string;
+    contactEmails: string[];
+    linked: { id?: string } | null;
+    eventContactId: string;
+    toField: string;
+    isProposal: boolean;
+}): boolean => {
+    const { channel, contactId, contactEmails, linked, eventContactId, toField, isProposal } = args;
+    const linkedId = linked?.id ? String(linked.id).trim() : '';
+    const idMatch =
+        Boolean(contactId)
+        && (linkedId === contactId || eventContactId === contactId);
+
+    if (isProposal && idMatch) return true;
+    if (idMatch) return true;
+
+    if (channel === 'email' && contactEmails.length > 0) {
+        return recipientMatchesContactEmails(toField, contactEmails);
+    }
+
+    return false;
 };
 
 const parseAttachmentRefs = (
@@ -308,6 +355,30 @@ export async function downloadNotificationMessageAttachment(
     await downloadBlobAsFile(blob, attachment.filename);
 }
 
+export async function fetchNotificationMessageAttachmentBlob(
+    messageId: string,
+    index: number,
+): Promise<Blob> {
+    const id = String(messageId || '').trim();
+    if (!id || !apiBase()) {
+        throw new Error('לא ניתן לטעון את הקובץ');
+    }
+    const res = await fetch(notificationAttachmentDownloadUrl(id, index), {
+        method: 'GET',
+        headers: authHeaders(),
+        credentials: 'include',
+    });
+    if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(
+            typeof (err as { message?: string }).message === 'string'
+                ? (err as { message: string }).message
+                : 'טעינת הקובץ נכשלה',
+        );
+    }
+    return res.blob();
+}
+
 const extractBodyFromDescription = (description: string): string => {
     const marker = '── תוכן ההודעה ──';
     const idx = description.indexOf(marker);
@@ -371,6 +442,17 @@ const toHistoryItem = (event: ClientEventLike, channel: OutboundMessageChannel):
         meta?.notificationMessageId != null
             ? String(meta.notificationMessageId).trim() || null
             : extractFieldFromDescription(description, 'מזהה הודעה במערכת');
+    const isProposal = isProposalOutboundEvent(event, meta);
+    const proposalFromMeta = Array.isArray(meta?.proposalTemplateNames)
+        ? meta.proposalTemplateNames.map((n) => String(n || '').trim()).filter(Boolean)
+        : [];
+    const proposalFromDesc = extractFieldFromDescription(description, 'תבניות הצעת מחיר');
+    const proposalLabels =
+        proposalFromMeta.length > 0
+            ? proposalFromMeta
+            : proposalFromDesc
+              ? proposalFromDesc.split(',').map((s) => s.trim()).filter(Boolean)
+              : [];
     return {
         id: String(event.id || ''),
         channel,
@@ -392,6 +474,8 @@ const toHistoryItem = (event: ClientEventLike, channel: OutboundMessageChannel):
         organizationId: event.organizationId != null ? String(event.organizationId) : null,
         notificationMessageId,
         attachments: parseAttachmentRefs(meta, notificationMessageId),
+        isProposal,
+        proposalLabels: proposalLabels.length ? proposalLabels : undefined,
     };
 };
 
@@ -404,6 +488,8 @@ export async function listOutboundMessageEvents(params: {
     channel: OutboundMessageChannel;
     contactId?: string | null;
     contactName?: string | null;
+    /** All known emails for the contact — used to match `אל:` / metadata.to (not body text). */
+    contactEmails?: string[] | null;
     organizationId?: string | null;
     companyWide?: boolean;
 }): Promise<OutboundMessageHistoryItem[]> {
@@ -423,16 +509,21 @@ export async function listOutboundMessageEvents(params: {
     const rows = await res.json();
     const list: ClientEventLike[] = Array.isArray(rows) ? rows : [];
     const contactId = params.contactId ? String(params.contactId).trim() : '';
-    const contactName = params.contactName ? String(params.contactName).trim() : '';
     const organizationId = params.organizationId ? String(params.organizationId).trim() : '';
     const companyWide = Boolean(params.companyWide);
+    const contactEmails = Array.isArray(params.contactEmails)
+        ? params.contactEmails.map((e) => String(e || '').trim()).filter(Boolean)
+        : [];
 
     return list
         .map((event) => {
             const channel = parseChannelFromEvent(event);
             if (channel !== params.channel) return null;
+            const meta = event.metadata && typeof event.metadata === 'object' ? event.metadata : null;
+            const isProposal = isProposalOutboundEvent(event, meta);
             const isOutbound =
                 event.metadata?.outboundMessage === true ||
+                isProposal ||
                 String(event.title || '').startsWith('נשלח') ||
                 String(event.title || '').startsWith('נשלחה');
             if (!isOutbound) return null;
@@ -440,19 +531,30 @@ export async function listOutboundMessageEvents(params: {
             const linked =
                 event.linkedTo && typeof event.linkedTo === 'object' ? event.linkedTo : null;
             const eventOrgId = event.organizationId != null ? String(event.organizationId) : '';
+            const description = String(event.description || '');
+            const toField =
+                meta?.to != null
+                    ? String(meta.to)
+                    : extractFieldFromDescription(description, 'אל') || '';
+            const eventContactId =
+                event.contactId != null ? String(event.contactId).trim() : '';
 
             if (companyWide) {
                 if (organizationId && eventOrgId && eventOrgId !== organizationId) return null;
-            } else if (contactId || contactName) {
-                const idMatch = contactId && linked?.id && String(linked.id) === contactId;
-                const nameMatch =
-                    contactName &&
-                    linked?.name &&
-                    String(linked.name).includes(contactName);
-                const blobMatch =
-                    contactName &&
-                    `${event.title || ''} ${event.description || ''}`.includes(contactName);
-                if (!idMatch && !nameMatch && !blobMatch) return null;
+            } else if (contactId || contactEmails.length) {
+                if (
+                    !contactMatchesOutboundEvent({
+                        channel,
+                        contactId,
+                        contactEmails,
+                        linked,
+                        eventContactId,
+                        toField,
+                        isProposal,
+                    })
+                ) {
+                    return null;
+                }
             }
 
             return toHistoryItem(event, channel);

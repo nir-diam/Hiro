@@ -4,6 +4,14 @@ const apiBase = () => import.meta.env.VITE_API_BASE || '';
 
 export type ProposalStatus = 'draft' | 'sent' | 'accepted' | 'rejected' | 'converted';
 
+export type ProposalSentHistoryEntry = {
+  sentAt: string;
+  sentByUserId?: string | null;
+  sentByName?: string | null;
+};
+
+export const PROPOSALS_UPDATED_EVENT = 'hiro-proposals-updated';
+
 export type ProposalDto = {
   id: string;
   clientId: string;
@@ -24,6 +32,8 @@ export type ProposalDto = {
   contactName?: string;
   totalAmount?: string;
   createdByName?: string;
+  sentHistory?: ProposalSentHistoryEntry[];
+  lastSentAt?: string | null;
 };
 
 export type ProposalTemplateDto = {
@@ -143,6 +153,30 @@ export async function deleteProposal(id: string): Promise<void> {
     headers: authHeaders(),
   });
   await parseJson(res);
+}
+
+export async function markProposalsSent(proposalIds: string[]): Promise<ProposalDto[]> {
+  const ids = [...new Set(proposalIds.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!ids.length) return [];
+  const res = await fetch(`${apiBase()}/api/proposals/mark-sent`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: authHeaders(true),
+    body: JSON.stringify({ proposalIds: ids }),
+  });
+  const data = await parseJson(res);
+  const rows = Array.isArray((data as { data?: unknown })?.data)
+    ? (data as { data: ProposalDto[] }).data
+    : [];
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(PROPOSALS_UPDATED_EVENT));
+  }
+  return rows;
+}
+
+export function dispatchProposalsUpdated(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(PROPOSALS_UPDATED_EVENT));
 }
 
 export const PROPOSAL_STATUS_LABELS: Record<ProposalStatus, string> = {

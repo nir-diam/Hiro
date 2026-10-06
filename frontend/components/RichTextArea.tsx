@@ -326,6 +326,8 @@ export const RichTextArea = React.forwardRef<RichTextAreaHandle, RichTextAreaPro
                 .rich-text-editor-content li { margin-bottom: 0.35em; line-height: 1.6; }
                 .rich-text-editor-content div { margin-bottom: 0.5em; line-height: 1.65; }
                 .rich-text-editor-content br + br { display: block; content: ''; margin-top: 0.5em; }
+                .rich-text-editor-content img { max-width: 100%; height: auto; display: block; margin: 0.5em 0 0.5em auto; }
+                .rich-text-editor-content table { max-width: 100%; margin-top: 0.75em; }
             `}</style>
         </div>
     );

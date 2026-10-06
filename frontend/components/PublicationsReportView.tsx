@@ -41,6 +41,57 @@ const allColumns = [
 
 const defaultVisibleColumns = allColumns.map(c => c.id);
 
+const csvEscape = (value: string | number): string => {
+    const s = String(value ?? '');
+    if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+};
+
+const exportPublicationsCsv = (rows: JobPublication[]) => {
+    const headers = [
+        'שם משרה',
+        'חברה',
+        'תחום',
+        'לוח פרסום',
+        'עיר',
+        'מועמדים',
+        'חשיפות',
+        'יחס המרה %',
+        'תחילת פרסום',
+        'סיום פרסום',
+        'תאריך יצירה',
+    ];
+    const lines = rows.map((job) => {
+        const rate =
+            job.views > 0 ? ((job.candidatesCount / job.views) * 100).toFixed(1) : '0';
+        return [
+            job.jobTitle,
+            job.company,
+            job.domain,
+            job.board,
+            job.city,
+            job.candidatesCount,
+            job.views,
+            rate,
+            job.publishedAt ? new Date(job.publishedAt).toLocaleDateString('he-IL') : '',
+            job.unpublishedAt ? new Date(job.unpublishedAt).toLocaleDateString('he-IL') : '',
+            job.publicationDate ? new Date(job.publicationDate).toLocaleDateString('he-IL') : '',
+        ]
+            .map(csvEscape)
+            .join(',');
+    });
+    const bom = '\uFEFF';
+    const blob = new Blob([bom + [headers.join(','), ...lines].join('\n')], {
+        type: 'text/csv;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `publications-report-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+};
+
 // --- COMPONENTS ---
 
 const StatCard: React.FC<{ title: string; value: string | number; subValue?: string; icon: React.ReactNode; color: string }> = ({ title, value, subValue, icon, color }) => (
@@ -309,7 +360,7 @@ const PublicationsReportView: React.FC = () => {
                 city: r.city || '',
                 region: r.region || '',
                 candidatesCount: Number(r.candidatesCount) || 0,
-                views: 0,
+                views: Number(r.views) || 0,
                 board: r.sourceName || '',
                 publishedAt: r.publishedAt || null,
                 unpublishedAt: r.unpublishedAt || null,
@@ -673,7 +724,12 @@ const PublicationsReportView: React.FC = () => {
                             <button title="רענן" className="p-2 text-text-muted rounded-full hover:bg-bg-hover transition-colors" onClick={() => void loadData()}>
                                 <ArrowPathIcon className="w-5 h-5"/>
                             </button>
-                            <button title="ייצוא ל-CSV" className="p-2 text-text-muted rounded-full hover:bg-bg-hover transition-colors" onClick={() => alert('Exporting to Excel...')}>
+                            <button
+                                title="ייצוא ל-CSV"
+                                className="p-2 text-text-muted rounded-full hover:bg-bg-hover transition-colors disabled:opacity-40"
+                                disabled={processedData.length === 0}
+                                onClick={() => exportPublicationsCsv(processedData)}
+                            >
                                 <DocumentArrowDownIcon className="w-5 h-5"/>
                             </button>
                             <div className="relative" ref={settingsRef}>

@@ -1,12 +1,20 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     UserIcon, BriefcaseIcon, LinkIcon, UserGroupIcon, ArrowLeftIcon,
     LockClosedIcon, ShieldCheckIcon, PencilIcon, CheckCircleIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
-import { fetchStaffUser, resetStaffUserPassword, updateStaffUser, type StaffUserDto } from '../services/usersApi';
+import {
+    fetchStaffUser,
+    resetStaffUserPassword,
+    updateStaffUser,
+    type EmailSignatureDto,
+    type StaffUserDto,
+} from '../services/usersApi';
+import { RichTextArea, type RichTextAreaHandle } from './RichTextArea';
+import { parseEmailSignature, buildEmailSignatureHtml } from '../utils/emailSignature';
 
 // --- SHARED FORM COMPONENTS ---
 
@@ -206,50 +214,138 @@ const UsageTab: React.FC = () => {
     );
 };
 
-const SignatureTab: React.FC = () => {
+const SignatureTab: React.FC<{
+    userId: string;
+    uiPreferences?: StaffUserDto['uiPreferences'];
+    onSaved: (user: StaffUserDto) => void;
+}> = ({ userId, uiPreferences, onSaved }) => {
     const { t } = useLanguage();
-    const [signature, setSignature] = useState(`בברכה,
-ישראל ישראלי | רכז גיוס
-מימד אנושי - פתרונות כוח אדם
-טלפון: 054-1234567 | אתר: www.humand.co.il`);
+    const editorRef = useRef<RichTextAreaHandle>(null);
+    const initial = parseEmailSignature(uiPreferences ?? null);
+    const [logoUrl, setLogoUrl] = useState(initial.logoUrl ?? '');
+    const [htmlSeed, setHtmlSeed] = useState(initial.html ?? '');
+    const [saving, setSaving] = useState(false);
+    const [msg, setMsg] = useState<string | null>(null);
+
+    useEffect(() => {
+        const sig = parseEmailSignature(uiPreferences ?? null);
+        setLogoUrl(sig.logoUrl ?? '');
+        setHtmlSeed(sig.html ?? '');
+    }, [uiPreferences, userId]);
+
+    const previewHtml = buildEmailSignatureHtml({ html: htmlSeed, logoUrl: logoUrl || undefined });
+
+    const handleLogoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        if (!file.type.startsWith('image/')) {
+            window.alert('יש לבחור קובץ תמונה (PNG, JPG וכו\')');
+            e.target.value = '';
+            return;
+        }
+        if (file.size > 200 * 1024) {
+            window.alert('גודל הלוגו המקסימלי הוא 200KB');
+            e.target.value = '';
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+            const data = typeof reader.result === 'string' ? reader.result : '';
+            if (data) setLogoUrl(data);
+        };
+        reader.readAsDataURL(file);
+    };
+
+    const save = async () => {
+        setMsg(null);
+        setSaving(true);
+        try {
+            const html = editorRef.current?.getHtml()?.trim() || htmlSeed.trim();
+            const payload: EmailSignatureDto | null =
+                html || logoUrl
+                    ? {
+                          ...(html ? { html } : {}),
+                          ...(logoUrl ? { logoUrl } : {}),
+                      }
+                    : null;
+            const updated = await updateStaffUser(userId, { emailSignature: payload });
+            onSaved(updated);
+            setHtmlSeed(html);
+            setMsg('נשמר בהצלחה');
+        } catch (e: unknown) {
+            setMsg(e instanceof Error ? e.message : 'שמירה נכשלה');
+        } finally {
+            setSaving(false);
+        }
+    };
 
     return (
         <div className="space-y-6 animate-fade-in">
-             <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
-                 <div className="flex items-center gap-2 mb-4">
-                     <PencilIcon className="w-5 h-5 text-primary-500"/>
-                     <h3 className="text-lg font-bold text-text-default">{t('coordinator_profile.tab_signature')}</h3>
-                 </div>
-                 <p className="text-sm text-text-muted mb-4">{t('coordinator_profile.signature_desc')}</p>
-                 
-                 {/* Rich Text Toolbar Simulation */}
-                 <div className="border border-border-default rounded-lg overflow-hidden">
-                     <div className="bg-bg-subtle p-2 border-b border-border-default flex gap-2">
-                         <button className="p-1.5 hover:bg-bg-hover rounded font-bold text-text-default">B</button>
-                         <button className="p-1.5 hover:bg-bg-hover rounded italic text-text-default">I</button>
-                         <button className="p-1.5 hover:bg-bg-hover rounded underline text-text-default">U</button>
-                         <div className="w-px h-6 bg-border-default mx-1"></div>
-                         <button className="p-1.5 hover:bg-bg-hover rounded text-text-default flex items-center gap-1 text-xs">
-                             <LinkIcon className="w-3.5 h-3.5"/> הוסף קישור
-                         </button>
-                     </div>
-                     <textarea 
-                        className="w-full h-48 p-4 bg-white text-text-default text-sm outline-none resize-none"
-                        value={signature}
-                        onChange={(e) => setSignature(e.target.value)}
-                     ></textarea>
-                 </div>
-            </div>
-            
-            <div className="bg-bg-subtle/50 p-4 rounded-xl border border-border-default">
-                <h4 className="font-bold text-sm text-text-default mb-2">תצוגה מקדימה:</h4>
-                <div className="bg-white p-4 rounded-lg border border-border-default text-sm whitespace-pre-line">
-                    {signature}
+            <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
+                <div className="flex items-center gap-2 mb-4">
+                    <PencilIcon className="w-5 h-5 text-primary-500" />
+                    <h3 className="text-lg font-bold text-text-default">{t('coordinator_profile.tab_signature')}</h3>
                 </div>
+                <p className="text-sm text-text-muted mb-4">{t('coordinator_profile.signature_desc')}</p>
+
+                <div className="mb-4">
+                    <label className="block text-sm font-semibold text-text-muted mb-2">לוגו (אופציונלי)</label>
+                    <div className="flex flex-wrap items-center gap-4">
+                        {logoUrl ? (
+                            <img src={logoUrl} alt="" className="h-12 max-w-[160px] object-contain border border-border-subtle rounded-lg p-1 bg-white" />
+                        ) : null}
+                        <input
+                            type="file"
+                            accept="image/png,image/jpeg,image/gif,image/webp"
+                            onChange={handleLogoFile}
+                            className="text-sm text-text-muted file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary-50 file:text-primary-700 file:font-semibold"
+                        />
+                        {logoUrl ? (
+                            <button
+                                type="button"
+                                onClick={() => setLogoUrl('')}
+                                className="text-xs font-semibold text-red-600 hover:underline"
+                            >
+                                הסר לוגו
+                            </button>
+                        ) : null}
+                    </div>
+                </div>
+
+                <label className="block text-sm font-semibold text-text-muted mb-2">תוכן החתימה</label>
+                <RichTextArea
+                    ref={editorRef}
+                    value={htmlSeed}
+                    onChange={setHtmlSeed}
+                    minHeight="180px"
+                    placeholder="שם, תפקיד, טלפון, קישורים…"
+                />
+                <p className="text-xs text-text-subtle mt-2">
+                    בתבניות מייל הוסיפו את הפרמטר {'{recruiter_signature}'} בסוף ההודעה — החתימה תוצג עם עיצוב HTML (כמו ב-Gmail).
+                </p>
             </div>
 
+            <div className="bg-bg-subtle/50 p-4 rounded-xl border border-border-default">
+                <h4 className="font-bold text-sm text-text-default mb-2">תצוגה מקדימה:</h4>
+                <div
+                    className="bg-white p-4 rounded-lg border border-border-default text-sm"
+                    dir="rtl"
+                    dangerouslySetInnerHTML={{
+                        __html: previewHtml || '<span class="text-text-muted">אין חתימה</span>',
+                    }}
+                />
+            </div>
+
+            {msg && <p className={`text-sm ${msg.includes('נכשל') ? 'text-red-600' : 'text-green-600'}`}>{msg}</p>}
             <div className="flex justify-end">
-                  <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 shadow-sm transition-all">{t('client_form.save')}</button>
+                <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void save()}
+                    className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 shadow-sm transition-all disabled:opacity-60"
+                >
+                    {saving ? 'שומר...' : t('client_form.save')}
+                </button>
             </div>
         </div>
     );
@@ -602,7 +698,13 @@ const CoordinatorProfileView: React.FC = () => {
                     />
                 )}
                 {activeTab === 'usage' && <UsageTab />}
-                {activeTab === 'signature' && <SignatureTab />}
+                {activeTab === 'signature' && (
+                    <SignatureTab
+                        userId={staffUser.id}
+                        uiPreferences={staffUser.uiPreferences}
+                        onSaved={(updated) => setStaffUser(updated)}
+                    />
+                )}
                 {activeTab === 'permissions' && (
                     <PermissionsTab userId={staffUser.id} user={staffUser} onUserUpdated={setStaffUser} />
                 )}

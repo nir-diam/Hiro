@@ -81,6 +81,11 @@ router.post(
   requireAgentScope(AGENT_SCOPES.TAGS_WRITE),
   agentController.mergeTags,
 );
+router.post(
+  '/tags/:id/enrich',
+  requireAgentScope(AGENT_SCOPES.TAGS_WRITE),
+  agentController.enrichTag,
+);
 router.patch(
   '/tags/:id/execute',
   requireAgentScope(AGENT_SCOPES.TAGS_WRITE),
@@ -91,6 +96,16 @@ router.get(
   '/organizations',
   requireAgentScope(AGENT_SCOPES.ORGANIZATIONS_READ),
   agentController.listOrganizations,
+);
+router.get(
+  '/organizations/duplicates',
+  requireAgentScope(AGENT_SCOPES.ORGANIZATIONS_READ),
+  agentController.listOrganizationDuplicates,
+);
+router.post(
+  '/organizations',
+  requireAgentScope(AGENT_SCOPES.ORGANIZATIONS_WRITE),
+  agentController.createOrganization,
 );
 router.post(
   '/organizations/merge',

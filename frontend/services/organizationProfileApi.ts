@@ -50,11 +50,26 @@ export type OrganizationPrimaryClient = {
     clientName: string | null;
 };
 
+export type OrganizationEnrichmentStatus = {
+    pending: boolean;
+    needsEnrichment: boolean;
+};
+
 export type OrganizationProfileBundle = {
     organization: Record<string, unknown>;
     primaryClient: OrganizationPrimaryClient;
     client: Record<string, unknown> | null;
+    enrichment?: OrganizationEnrichmentStatus;
 };
+
+function parseEnrichmentStatus(data: Record<string, unknown>): OrganizationEnrichmentStatus | undefined {
+    const raw = data.enrichment;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+    return {
+        pending: Boolean((raw as OrganizationEnrichmentStatus).pending),
+        needsEnrichment: Boolean((raw as OrganizationEnrichmentStatus).needsEnrichment),
+    };
+}
 
 /** Pending (staging) organization profile — linked tenant client included. */
 export function fetchPendingOrganizationProfile(
@@ -135,7 +150,12 @@ export function fetchOrganizationProfile(
                     clientRaw && typeof clientRaw === 'object' && !Array.isArray(clientRaw)
                         ? (clientRaw as Record<string, unknown>)
                         : null;
-                return { organization, primaryClient, client };
+                return {
+                    organization,
+                    primaryClient,
+                    client,
+                    enrichment: parseEnrichmentStatus(data),
+                };
             }),
         opts?.bypassCache,
     );

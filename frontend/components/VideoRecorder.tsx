@@ -13,6 +13,7 @@ const VideoRecorder: React.FC<VideoRecorderProps> = ({ onRecordingComplete, time
     const [timeLeft, setTimeLeft] = useState(timeLimit);
     const [videoSrc, setVideoSrc] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
+    const [cameraReady, setCameraReady] = useState(false);
     
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -53,9 +54,11 @@ const VideoRecorder: React.FC<VideoRecorderProps> = ({ onRecordingComplete, time
                 videoRef.current.muted = true; // Mute preview to avoid feedback
                 videoRef.current.play();
             }
+            setCameraReady(true);
             setError(null);
         } catch (err) {
             console.error("Error accessing camera:", err);
+            setCameraReady(false);
             setError("לא ניתן לגשת למצלמה. אנא וודא שנתת הרשאות מתאימות.");
         }
     };
@@ -105,8 +108,9 @@ const VideoRecorder: React.FC<VideoRecorderProps> = ({ onRecordingComplete, time
         setVideoSrc(null);
         setTimeLeft(timeLimit);
         setStatus('idle');
+        setCameraReady(false);
         onRecordingComplete(null); // Clear the answer in parent
-        startCamera();
+        void startCamera();
     };
 
     // Format time MM:SS
@@ -135,14 +139,14 @@ const VideoRecorder: React.FC<VideoRecorderProps> = ({ onRecordingComplete, time
                     <video src={videoSrc} controls className="w-full h-full object-cover" />
                 ) : (
                     <>
-                        <video ref={videoRef} className={`w-full h-full object-cover ${status === 'idle' && !streamRef.current ? 'hidden' : ''}`} playsInline muted />
-                        {status === 'idle' && !streamRef.current && (
+                        <video ref={videoRef} className={`w-full h-full object-cover ${status === 'idle' && !cameraReady ? 'hidden' : ''}`} playsInline muted />
+                        {status === 'idle' && !cameraReady && (
                             <div className="absolute inset-0 flex flex-col items-center justify-center text-white bg-gray-900">
                                 <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mb-4 animate-pulse">
                                     <VideoCameraIcon className="w-8 h-8 text-gray-400" />
                                 </div>
                                 <p className="text-sm font-medium">המצלמה כבויה</p>
-                                <button onClick={startCamera} className="mt-4 px-6 py-2 bg-white text-black text-sm font-bold rounded-full hover:bg-gray-200 transition">
+                                <button type="button" onClick={() => void startCamera()} className="mt-4 px-6 py-2 bg-white text-black text-sm font-bold rounded-full hover:bg-gray-200 transition">
                                     הפעל מצלמה
                                 </button>
                             </div>
@@ -187,14 +191,15 @@ const VideoRecorder: React.FC<VideoRecorderProps> = ({ onRecordingComplete, time
                 )}
 
                 {status === 'review' && retriesAllowed && (
-                    <button 
+                    <button
+                        type="button"
                         onClick={handleRetake}
-                        className="flex items-center gap-2 text-text-muted hover:text-text-default transition-colors p-2 bg-bg-subtle/50 hover:bg-bg-subtle rounded-xl"
+                        className="flex items-center gap-2 text-primary-700 hover:text-primary-900 transition-colors px-4 py-2.5 bg-primary-50 hover:bg-primary-100 border border-primary-200 rounded-xl shadow-sm"
                     >
-                        <div className="w-8 h-8 bg-bg-card rounded-full flex items-center justify-center shadow-sm">
+                        <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center shadow-sm">
                             <ArrowPathIcon className="w-4 h-4" />
                         </div>
-                        <span className="text-sm font-bold">לא מרוצה? הקלט שוב</span>
+                        <span className="text-sm font-bold">הקלט שוב</span>
                     </button>
                 )}
             </div>

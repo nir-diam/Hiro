@@ -209,6 +209,9 @@ const list = async ({
   activityDate,
   activityFrom,
   activityTo,
+  registrationNumber = '',
+  dataConfidence = '',
+  activityStatus = '',
 } = {}) => {
   const activityWhere = includeMerged ? {} : {
     [Op.or]: [
@@ -244,6 +247,21 @@ const list = async ({
     } else {
       where[Op.and].push({ [Op.or]: primaryMatches });
     }
+  }
+
+  const regNum = String(registrationNumber || '').replace(/\D/g, '');
+  if (regNum) {
+    where[Op.and].push({ registrationNumber: regNum });
+  }
+
+  const dcFilter = String(dataConfidence || '').trim();
+  if (dcFilter) {
+    where[Op.and].push({ dataConfidence: dcFilter });
+  }
+
+  const actFilter = String(activityStatus || '').trim();
+  if (actFilter) {
+    where[Op.and].push({ activityStatus: actFilter });
   }
 
   if (mainField) {
@@ -554,7 +572,7 @@ const loadProfileBundleJoined = async (orgId, preferredClientId = '') => {
 
   const orgRow = await Organization.findByPk(orgId, {
     attributes: API_ATTRIBUTES,
-    include: [linkInclude],
+    include: [linkInclude, ADDITIONAL_LOCATIONS_INCLUDE],
   });
 
   if (!orgRow) {
@@ -564,7 +582,14 @@ const loadProfileBundleJoined = async (orgId, preferredClientId = '') => {
   }
 
   const plainOrg = orgToApiPlain(orgRow);
-  const organization = { ...plainOrg, additionalLocations: [] };
+  const additionalLocations = Array.isArray(plainOrg.additionalLocations)
+    ? plainOrg.additionalLocations.map((loc) => ({
+      description: String(loc.description || '').trim(),
+      location: String(loc.location || '').trim(),
+      address: String(loc.address || '').trim(),
+    }))
+    : [];
+  const organization = { ...plainOrg, additionalLocations };
   delete organization.clientLinks;
 
   const links = plainOrg.clientLinks || [];
@@ -613,9 +638,20 @@ const getOrganizationProfileBundle = async (
   }
 
   const bundle = await loadProfileBundleJoined(orgId, hintedClientId);
-  orgProfileBundleCache.set(bundleCacheKey, { at: Date.now(), data: bundle });
+  const {
+    organizationNeedsEnrichment,
+    isOrganizationEnrichmentPending,
+  } = require('./organizationEnrichmentService');
+  const withEnrichment = {
+    ...bundle,
+    enrichment: {
+      pending: isOrganizationEnrichmentPending(orgId),
+      needsEnrichment: organizationNeedsEnrichment(bundle.organization),
+    },
+  };
+  orgProfileBundleCache.set(bundleCacheKey, { at: Date.now(), data: withEnrichment });
   orgByIdApiCache.set(`light:${orgId}`, { at: Date.now(), data: bundle.organization });
-  return bundle;
+  return withEnrichment;
 };
 
 const findByAnyName = async ({ name, nameEn, legalName }) => {
@@ -690,6 +726,33 @@ const sanitizePayload = (payload) => {
   }
   delete out.embedding;
   delete out.additionalLocations;
+  delete out.candidateCount;
+  return out;
+};
+
+/** OrganizationTmp uses STRING for subField/businessModel/productType (not TEXT[] like Organization). */
+const sanitizePayloadForOrganizationTmp = (payload) => {
+  if (!payload || typeof payload !== 'object') return {};
+  const out = { ...payload };
+  const arrayToJoinedString = (val) => {
+    if (Array.isArray(val)) {
+      const parts = val.map((s) => String(s || '').trim()).filter(Boolean);
+      return parts.length ? parts.join(', ') : null;
+    }
+    if (val == null) return null;
+    const s = String(val).trim();
+    return s || null;
+  };
+  if ('subField' in out) out.subField = arrayToJoinedString(out.subField);
+  if ('businessModel' in out) out.businessModel = arrayToJoinedString(out.businessModel);
+  if ('productType' in out) out.productType = arrayToJoinedString(out.productType);
+  delete out.mainField2;
+  delete out.snippet;
+  delete out.logo;
+  delete out.phone;
+  delete out.embedding;
+  delete out.clientId;
+  delete out.context;
   delete out.candidateCount;
   return out;
 };
@@ -1305,7 +1368,7 @@ const findOrCreateByName = async (name, defaults = {}) => {
       if (added) {
         console.log(`[orgService] merge_company: added alias "${trimmed}" → "${targetOrg.name}"`);
       }
-      saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_merge' });
+      saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_merge', organizationId: targetOrg.id });
       scheduleOrganizationEnrichmentIfNeeded(targetOrg);
       return targetOrg;
     }
@@ -1319,7 +1382,7 @@ const findOrCreateByName = async (name, defaults = {}) => {
       if (added) {
         console.log(`[orgService] map_generic: added alias "${trimmed}" → "${targetOrg.name}"`);
       }
-      saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_map_generic' });
+      saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_map_generic', organizationId: targetOrg.id });
       scheduleOrganizationEnrichmentIfNeeded(targetOrg);
       return targetOrg;
     }
@@ -1332,12 +1395,12 @@ const findOrCreateByName = async (name, defaults = {}) => {
 
   // ── 6b. manual_review → LLM explicitly uncertain; always stage as manual ──
   if (aiResult?.decision === 'manual_review') {
-    const tmpPayload = {
+    const tmpPayload = sanitizePayloadForOrganizationTmp({
       name: trimmed,
       isCompany: true,
       candidateId: candidateId || null,
       ...restDefaults,
-    };
+    });
     const tmpOrg = await OrganizationTmp.create(tmpPayload);
     // reviewStatus is already 'manual' (set above); pass organizationTmpId so
     // the AI Decisions tab can link directly to the staging record.
@@ -1351,27 +1414,51 @@ const findOrCreateByName = async (name, defaults = {}) => {
   //    so human reviewers can still audit low-confidence decisions in the UI,
   //    but the org is always created and enriched immediately.
   if (aiResult?.decision === 'create_company') {
-    const orgPayload = sanitizePayload({ name: trimmed, ...restDefaults });
-    const org = await Organization.create(orgPayload);
-    scheduleOrganizationEmbedding(org);
-    scheduleOrganizationEnrichment(org);   // company_enrichment prompt via Gemini
-    try {
-      await promoteClientsForNewOrganization(org);
-    } catch (err) {
-      console.error('[organizationService] promoteClientsForNewOrganization failed', err?.message || err);
+    const { sequelize } = require('../config/db');
+    const crypto = require('crypto');
+    const lockKey = crypto.createHash('md5').update(trimmed.toLowerCase()).digest().readInt32BE(0);
+
+    let createdNew = false;
+    const org = await sequelize.transaction(async (transaction) => {
+      await sequelize.query('SELECT pg_advisory_xact_lock($1)', { bind: [lockKey], transaction });
+
+      const raceExisting = await Organization.findOne({
+        where: { name: { [Op.iLike]: trimmed } },
+        transaction,
+      });
+      if (raceExisting) {
+        console.log(`[orgService] create_company race: "${trimmed}" already exists (${raceExisting.id})`);
+        return raceExisting;
+      }
+
+      const orgPayload = sanitizePayload({ name: trimmed, ...restDefaults });
+      createdNew = true;
+      return Organization.create(orgPayload, { transaction });
+    });
+
+    if (createdNew) {
+      scheduleOrganizationEmbedding(org);
+      scheduleOrganizationEnrichment(org);
+      try {
+        await promoteClientsForNewOrganization(org);
+      } catch (err) {
+        console.error('[organizationService] promoteClientsForNewOrganization failed', err?.message || err);
+      }
+    } else {
+      scheduleOrganizationEnrichmentIfNeeded(org);
     }
-    saveDecision();                        // uses reviewStatus from band (or 'manual')
+    saveDecision({ organizationId: org.id });
     return org;
   }
 
   // ── 8. Everything else → stage in OrganizationTmp ────────────────────────
   //    merge/map_generic with בינוני/נמוך, or AI unavailable
-  const tmpPayload = {
+  const tmpPayload = sanitizePayloadForOrganizationTmp({
     name: trimmed,
     isCompany: aiResult ? aiResult.decision !== 'map_generic' : true,
     candidateId: candidateId || null,
     ...restDefaults,
-  };
+  });
   const tmpOrg = await OrganizationTmp.create(tmpPayload);
   saveDecision({ organizationTmpId: tmpOrg.id });
 
@@ -1697,6 +1784,100 @@ const removeAliases = async (orgId, aliasesToRemove, options = {}) => {
   return org;
 };
 
+const findByRegistrationNumber = async (registrationNumber) => {
+  const digits = String(registrationNumber || '').replace(/\D/g, '');
+  if (!digits) return null;
+  return Organization.findOne({ where: { registrationNumber: digits } });
+};
+
+const findByNormalizedName = async (name) => {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return null;
+  const { normalizedNameKey } = require('../utils/agentOrganizationFields');
+  const targetKey = normalizedNameKey(trimmed);
+  if (!targetKey) return null;
+
+  const rows = await Organization.findAll({
+    attributes: ['id', 'name', 'nameEn', 'legalName', 'registrationNumber', 'activityStatus'],
+    where: {
+      [Op.or]: [
+        { activityStatus: { [Op.ne]: 'merged' } },
+        { activityStatus: null },
+      ],
+    },
+    limit: 5000,
+  });
+
+  return rows.find((row) => {
+    const plain = row.get ? row.get({ plain: true }) : row;
+    const keys = [plain.name, plain.nameEn, plain.legalName]
+      .filter(Boolean)
+      .map((n) => normalizedNameKey(n));
+    return keys.includes(targetKey);
+  }) || null;
+};
+
+const findDuplicateGroups = async ({ limit = 50 } = {}) => {
+  const { normalizedNameKey } = require('../utils/agentOrganizationFields');
+  const safeLimit = Math.min(200, Math.max(1, Number(limit) || 50));
+
+  const rows = await Organization.findAll({
+    attributes: ['id', 'name', 'nameEn', 'legalName', 'registrationNumber', 'activityStatus', 'createdAt'],
+    where: {
+      [Op.or]: [
+        { activityStatus: { [Op.ne]: 'merged' } },
+        { activityStatus: null },
+      ],
+    },
+    order: [['name', 'ASC']],
+    limit: 10000,
+  });
+
+  const byReg = new Map();
+  const byName = new Map();
+
+  for (const row of rows) {
+    const plain = row.get ? row.get({ plain: true }) : row;
+    const reg = String(plain.registrationNumber || '').replace(/\D/g, '');
+    if (reg) {
+      if (!byReg.has(reg)) byReg.set(reg, []);
+      byReg.get(reg).push(plain);
+    }
+    for (const label of [plain.name, plain.nameEn, plain.legalName]) {
+      const key = normalizedNameKey(label);
+      if (!key) continue;
+      if (!byName.has(key)) byName.set(key, []);
+      byName.get(key).push(plain);
+    }
+  }
+
+  const groups = [];
+  const seenGroupKeys = new Set();
+
+  const pushGroup = (reason, key, orgs) => {
+    if (orgs.length < 2) return;
+    const groupKey = `${reason}:${key}:${orgs.map((o) => o.id).sort().join(',')}`;
+    if (seenGroupKeys.has(groupKey)) return;
+    seenGroupKeys.add(groupKey);
+    groups.push({ reason, matchKey: key, organizations: orgs });
+  };
+
+  for (const [reg, orgs] of byReg.entries()) {
+    pushGroup('registrationNumber', reg, orgs);
+  }
+  for (const [key, orgs] of byName.entries()) {
+    const unique = [...new Map(orgs.map((o) => [o.id, o])).values()];
+    pushGroup('normalizedName', key, unique);
+  }
+
+  return groups.slice(0, safeLimit);
+};
+
+const resolveOrganizationIdForTerm = async (term) => {
+  const org = await findByName(String(term || '').trim());
+  return org?.id || null;
+};
+
 module.exports = {
   list,
   globalLookup,
@@ -1712,6 +1893,10 @@ module.exports = {
   removeAliases,
   getByIds,
   findByName,
+  findByRegistrationNumber,
+  findByNormalizedName,
+  findDuplicateGroups,
+  resolveOrganizationIdForTerm,
   findOrCreateByName,
   findGenericBucketOrganizations,
   stageOrganizationFromClientCreate,

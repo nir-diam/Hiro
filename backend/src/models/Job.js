@@ -30,6 +30,11 @@ const Job = sequelize.define(
     },
     field: DataTypes.STRING,
     role: DataTypes.STRING,
+    jobFields: {
+      type: DataTypes.JSONB,
+      defaultValue: [],
+      comment: 'Selected taxonomy paths (category, fieldType, role); field/role mirror the first entry',
+    },
     priority: {
       type: DataTypes.ENUM('רגילה', 'דחופה', 'קריטית'),
       defaultValue: 'רגילה',
@@ -81,8 +86,22 @@ const Job = sequelize.define(
       defaultValue: 'standard',
     },
     internalNotes: DataTypes.TEXT,
+    /** Short editable notes in jobs list grid (not internal job form notes). */
+    listNotes: DataTypes.TEXT,
+    /** Edit history for listNotes: [{ id, at, userId, userName, previousText, newText, action }]. */
+    listNotesHistory: { type: DataTypes.JSONB, defaultValue: [] },
     uniqueEmail: DataTypes.STRING,
     contacts: { type: DataTypes.JSONB, defaultValue: [] },
+    cvForwardSettings: {
+      type: DataTypes.JSONB,
+      defaultValue: {
+        enabled: false,
+        recipients: [],
+        subjectPrefixTemplate: '{{מקור_גיוס}}',
+      },
+      comment:
+        'Automatic CV forwarding: enabled flag, recipients (users + external emails), subject prefix with {{variables}}.',
+    },
     recruitmentSources: { type: DataTypes.JSONB, defaultValue: [] },
     telephoneQuestions: { type: DataTypes.JSONB, defaultValue: [] },
     digitalQuestions: { type: DataTypes.JSONB, defaultValue: [] },

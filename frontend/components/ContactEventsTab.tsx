@@ -10,6 +10,7 @@ type Props = {
   organizationName?: string | null;
   contactId?: string;
   contactName?: string;
+  scopeContactEmails?: string[];
   contactProcessPipelineId?: string | null;
   contactProcessStageId?: string | null;
   defaultActionPipelineId?: string | null;
@@ -25,6 +26,7 @@ const ContactEventsTab: React.FC<Props> = ({
   organizationName = null,
   contactId,
   contactName,
+  scopeContactEmails,
   contactProcessPipelineId = null,
   contactProcessStageId = null,
   defaultActionPipelineId = null,
@@ -63,7 +65,7 @@ const ContactEventsTab: React.FC<Props> = ({
       preferredOrganizationLabel={organizationName || scopedOrganizationName}
       scopeContactId={contactId}
       scopeContactName={contactName}
-      hideFilters
+      scopeContactEmails={scopeContactEmails}
       alwaysShowDetails
       contactProcessPipelineId={contactProcessPipelineId}
       contactProcessStageId={contactProcessStageId}

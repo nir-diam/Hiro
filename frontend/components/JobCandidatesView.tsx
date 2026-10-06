@@ -1,11 +1,12 @@
 
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, TableCellsIcon, Squares2X2Icon,
     PlusIcon, ChevronUpIcon, FolderIcon, ArchiveBoxIcon, ArrowPathIcon,
     ChatBubbleBottomCenterTextIcon, EnvelopeIcon, WhatsappIcon, XMarkIcon, SparklesIcon,
-    MapPinIcon, CheckCircleIcon, FlagIcon, ChevronLeftIcon
+    MapPinIcon, CheckCircleIcon, FlagIcon, ChevronLeftIcon, ComputerDesktopIcon, VideoCameraIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDismiss } from './MatchScorePopup';
@@ -15,6 +16,12 @@ import {
     buildJobTagMatchCategories,
     type JobTagMatchInput,
 } from '../utils/jobTagMatchCategories';
+import {
+    digitalScreeningBadgeClass,
+    summarizeDigitalScreening,
+    type DigitalAnswerRow,
+    type JobDigitalQuestion,
+} from '../utils/digitalScreening';
 
 type CandidateStatus = 'חדש' | 'סינון טלפוני' | 'ראיון' | 'הצעה' | 'נדחה';
 
@@ -335,6 +342,159 @@ const JobCandidateTagGapsBanner: React.FC<{
     );
 };
 
+type CandidateDigitalScreening = {
+    digitalAnswers?: DigitalAnswerRow[];
+    screeningStatus?: string;
+    rejectionReason?: string;
+    rejectionNotes?: string;
+};
+
+type ScreeningModalState = {
+    candidateId: string;
+    candidateName: string;
+    digitalAnswers: DigitalAnswerRow[];
+    screeningStatus?: string;
+    rejectionReason?: string;
+};
+
+const DigitalScreeningAnswersModal: React.FC<{
+    isOpen: boolean;
+    candidateName: string;
+    questions: JobDigitalQuestion[];
+    digitalAnswers: DigitalAnswerRow[];
+    screeningStatus?: string;
+    rejectionReason?: string;
+    onClose: () => void;
+}> = ({ isOpen, candidateName, questions, digitalAnswers, screeningStatus, rejectionReason, onClose }) => {
+    useEffect(() => {
+        if (!isOpen) return;
+        const prev = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        return () => {
+            document.body.style.overflow = prev;
+        };
+    }, [isOpen]);
+
+    if (!isOpen) return null;
+
+    const summary = summarizeDigitalScreening(questions, digitalAnswers, screeningStatus, rejectionReason);
+    const byId = new Map<number, DigitalAnswerRow>(digitalAnswers.map((a) => [Number(a.questionId), a]));
+    const ordered = [...questions]
+        .filter((q) => String(q?.text || '').trim())
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+    const questionTypeLabel = (type?: string) => {
+        switch (type) {
+            case 'yes_no':
+                return 'כן / לא';
+            case 'multiple_choice':
+                return 'רב-ברירה';
+            case 'video':
+                return 'וידאו';
+            default:
+                return 'טקסט חופשי';
+        }
+    };
+
+    const modal = (
+        <div
+            className="fixed inset-0 z-[10090] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
+            dir="rtl"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="digital-screening-modal-title"
+            onClick={onClose}
+        >
+            <div
+                className="bg-bg-card w-full max-w-2xl rounded-2xl shadow-2xl border border-border-default flex flex-col max-h-[min(85vh,calc(100vh-2rem))]"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="p-5 border-b border-border-default flex items-start justify-between gap-4">
+                    <div>
+                        <p className="text-xs font-bold text-primary-600 uppercase tracking-wider mb-1">שאלון דיגיטלי</p>
+                        <h3 id="digital-screening-modal-title" className="text-lg font-black text-text-default">{candidateName}</h3>
+                        <span
+                            className={`inline-flex mt-2 text-[11px] font-bold px-2.5 py-1 rounded-full border ${digitalScreeningBadgeClass(summary.status)}`}
+                        >
+                            {summary.label}
+                        </span>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="p-2 rounded-full hover:bg-bg-subtle text-text-muted"
+                    >
+                        <XMarkIcon className="w-5 h-5" />
+                    </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-5 space-y-4">
+                    {ordered.length === 0 ? (
+                        <p className="text-sm text-text-muted text-center py-8">אין שאלות במשרה זו.</p>
+                    ) : (
+                        ordered.map((q, index) => {
+                            const row = byId.get(Number(q.id));
+                            const answer = String(row?.answer || '').trim();
+                            const isVideo = q.type === 'video' || answer === '[video]';
+                            return (
+                                <div
+                                    key={q.id}
+                                    className="rounded-xl border border-border-default bg-white p-4 shadow-sm"
+                                >
+                                    <div className="flex items-center gap-2 mb-2 flex-wrap">
+                                        <span className="text-xs font-bold text-text-muted">#{index + 1}</span>
+                                        <span className="text-[10px] font-bold uppercase tracking-wide text-text-muted bg-bg-subtle px-2 py-0.5 rounded">
+                                            {questionTypeLabel(q.type)}
+                                        </span>
+                                        {q.disqualifyIfWrong ? (
+                                            <span className="text-[10px] bg-gray-800 text-white px-1.5 rounded font-bold">
+                                                שאלה פוסלת
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                    <p className="text-sm font-semibold text-text-default mb-3">{q.text}</p>
+                                    {!answer ? (
+                                        <p className="text-sm text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                                            לא נענה
+                                        </p>
+                                    ) : isVideo ? (
+                                        <div className="flex items-center gap-3 bg-bg-subtle border border-border-default rounded-xl p-4">
+                                            <div className="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                                                <VideoCameraIcon className="w-5 h-5" />
+                                            </div>
+                                            <div>
+                                                <p className="text-sm font-bold text-text-default">וידאו הוקלט</p>
+                                                <p className="text-xs text-text-muted mt-0.5">
+                                                    הקלטת הווידאו נשמרה במערכת. צפייה בווידאו תהיה זמינה בקרוב.
+                                                </p>
+                                            </div>
+                                        </div>
+                                    ) : (
+                                        <p className="text-sm text-text-default bg-bg-subtle border border-border-default rounded-xl px-3 py-2.5 whitespace-pre-wrap">
+                                            {answer}
+                                        </p>
+                                    )}
+                                </div>
+                            );
+                        })
+                    )}
+                    {summary.failedReasons.length > 0 ? (
+                        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                            <p className="font-bold mb-1">סיבות פסילה</p>
+                            <ul className="list-disc list-inside space-y-1">
+                                {summary.failedReasons.map((reason) => (
+                                    <li key={reason}>{reason}</li>
+                                ))}
+                            </ul>
+                        </div>
+                    ) : null}
+                </div>
+            </div>
+        </div>
+    );
+
+    return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
+};
+
 interface JobCandidatesViewProps {
     openSummaryDrawer: (candidate: any | number) => void;
     jobId: string | number;
@@ -358,9 +518,12 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
     const [tagPanelCategories, setTagPanelCategories] = useState<TagMatchCategory[] | null>(null);
     const [tagPanelTitle, setTagPanelTitle] = useState('');
     const [tagLoadingId, setTagLoadingId] = useState<string | null>(null);
+    const [digitalQuestions, setDigitalQuestions] = useState<JobDigitalQuestion[]>([]);
+    const [screeningModal, setScreeningModal] = useState<ScreeningModalState | null>(null);
     const clientGeoRunRef = useRef(0);
 
     const tagJobModel = useMemo(() => jobRecordToTagMatchJob(job), [job]);
+    const showDigitalScreeningColumn = digitalQuestions.length > 0;
 
     const authHeaders = useCallback((): HeadersInit => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
@@ -442,6 +605,10 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                     skills: payload.job?.skills,
                     languages: payload.job?.languages,
                 });
+                const jobDig = Array.isArray(payload.job?.digitalQuestions)
+                    ? (payload.job.digitalQuestions as JobDigitalQuestion[])
+                    : [];
+                setDigitalQuestions(jobDig.filter((q) => String(q?.text || '').trim()));
                 setCandidates(Array.isArray(payload.candidates) ? payload.candidates : []);
                 const rm = Number(payload.returnMonths);
                 setReturnMonths(Number.isFinite(rm) && rm >= 0 ? rm : 3);
@@ -572,6 +739,36 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
         window.open(url, '_blank');
     };
 
+    const getCandidateScreeningSummary = useCallback(
+        (c: { digitalScreening?: CandidateDigitalScreening }) => {
+            const ds = c.digitalScreening;
+            return summarizeDigitalScreening(
+                digitalQuestions,
+                ds?.digitalAnswers,
+                ds?.screeningStatus,
+                ds?.rejectionReason,
+            );
+        },
+        [digitalQuestions],
+    );
+
+    const openScreeningModal = (
+        e: React.MouseEvent,
+        c: { id: string | number; name?: string; digitalScreening?: CandidateDigitalScreening },
+    ) => {
+        e.stopPropagation();
+        const ds = c.digitalScreening;
+        const summary = getCandidateScreeningSummary(c);
+        if (summary.status === 'none' || summary.status === 'pending') return;
+        setScreeningModal({
+            candidateId: String(c.id),
+            candidateName: String(c.name || c.id),
+            digitalAnswers: ds?.digitalAnswers || [],
+            screeningStatus: ds?.screeningStatus,
+            rejectionReason: ds?.rejectionReason,
+        });
+    };
+
     return (
         <div className="flex flex-col h-full bg-white relative">
             <header className="p-4 border-b border-border-subtle flex flex-wrap items-center justify-between gap-4 bg-bg-subtle/20">
@@ -629,6 +826,9 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                     <th className="p-4">{t('job_candidates.col_status')}</th>
                                     <th className="p-4">{t('job_candidates.col_distance')}</th>
                                     <th className="p-4">{t('job_candidates.col_match')}</th>
+                                    {showDigitalScreeningColumn ? (
+                                        <th className="p-4">שאלון דיגיטלי</th>
+                                    ) : null}
                                     <th className="p-4">{t('job_candidates.col_source')}</th>
                                     <th className="p-4">{t('job_candidates.col_activity')}</th>
                                 </tr>
@@ -636,14 +836,14 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                             <tbody className="divide-y divide-border-subtle overflow-visible">
                                 {loadingCandidates && (
                                     <tr>
-                                        <td colSpan={6} className="p-4 text-center text-text-muted text-xs">
+                                        <td colSpan={showDigitalScreeningColumn ? 7 : 6} className="p-4 text-center text-text-muted text-xs">
                                             טוען מועמדים...
                                         </td>
                                     </tr>
                                 )}
                                 {!loadingCandidates && filteredCandidates.length === 0 && (
                                     <tr>
-                                        <td colSpan={6} className="p-4 text-center text-text-muted text-xs">
+                                        <td colSpan={showDigitalScreeningColumn ? 7 : 6} className="p-4 text-center text-text-muted text-xs">
                                             אין מועמדים זמינים במשרה זו כרגע.
                                         </td>
                                     </tr>
@@ -657,6 +857,11 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                         clientGeoPending,
                                         t,
                                     );
+                                    const screeningSummary = getCandidateScreeningSummary(c);
+                                    const screeningClickable =
+                                        screeningSummary.status === 'passed' ||
+                                        screeningSummary.status === 'failed' ||
+                                        screeningSummary.status === 'partial';
                                     return (
                                     <tr
                                         key={c.id}
@@ -755,6 +960,36 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                                 />
                                             </div>
                                         </td>
+                                        {showDigitalScreeningColumn ? (
+                                            <td className={`p-4 ${dupGrey ? 'text-neutral-400' : ''}`}>
+                                                {screeningSummary.status === 'none' ? (
+                                                    <span className="text-xs text-text-subtle">—</span>
+                                                ) : (
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => openScreeningModal(e, c)}
+                                                        disabled={!screeningClickable}
+                                                        className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1 rounded-full border transition-colors ${
+                                                            dupGrey
+                                                                ? 'bg-neutral-200/90 text-neutral-400 border-neutral-300 cursor-default'
+                                                                : `${digitalScreeningBadgeClass(screeningSummary.status)} ${
+                                                                      screeningClickable
+                                                                          ? 'hover:opacity-90 cursor-pointer'
+                                                                          : 'cursor-default opacity-90'
+                                                                  }`
+                                                        }`}
+                                                        title={
+                                                            screeningClickable
+                                                                ? 'לחץ לצפייה בכל התשובות'
+                                                                : screeningSummary.label
+                                                        }
+                                                    >
+                                                        <ComputerDesktopIcon className="w-3.5 h-3.5 shrink-0" />
+                                                        <span className="max-w-[140px] truncate">{screeningSummary.label}</span>
+                                                    </button>
+                                                )}
+                                            </td>
+                                        ) : null}
                                         <td className={`p-4 text-xs ${dupGrey ? 'text-neutral-400' : 'text-text-muted'}`}>{c.source}</td>
                                         <td className={`p-4 text-xs ${dupGrey ? 'text-neutral-400/80' : 'text-text-subtle'}`}>{c.lastActivity}</td>
                                     </tr>
@@ -856,6 +1091,28 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
 
                                     <CandidateMatchSummaryLine candidate={c} />
 
+                                    {showDigitalScreeningColumn ? (() => {
+                                        const screeningSummary = getCandidateScreeningSummary(c);
+                                        const screeningClickable =
+                                            screeningSummary.status === 'passed' ||
+                                            screeningSummary.status === 'failed' ||
+                                            screeningSummary.status === 'partial';
+                                        if (screeningSummary.status === 'none') return null;
+                                        return (
+                                            <button
+                                                type="button"
+                                                onClick={(e) => openScreeningModal(e, c)}
+                                                disabled={!screeningClickable}
+                                                className={`mt-3 inline-flex items-center gap-1.5 text-[11px] font-bold px-2.5 py-1 rounded-full border ${
+                                                    digitalScreeningBadgeClass(screeningSummary.status)
+                                                } ${screeningClickable ? 'hover:opacity-90' : ''}`}
+                                            >
+                                                <ComputerDesktopIcon className="w-3.5 h-3.5" />
+                                                {screeningSummary.label}
+                                            </button>
+                                        );
+                                    })() : null}
+
                                     <JobCandidateTagGapsBanner
                                         candidate={c}
                                         tagJobModel={tagJobModel}
@@ -922,6 +1179,18 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                     title={tagPanelTitle}
                     subtitle={job?.client || undefined}
                     categories={tagPanelCategories}
+                />
+            ) : null}
+
+            {screeningModal ? (
+                <DigitalScreeningAnswersModal
+                    isOpen
+                    candidateName={screeningModal.candidateName}
+                    questions={digitalQuestions}
+                    digitalAnswers={screeningModal.digitalAnswers}
+                    screeningStatus={screeningModal.screeningStatus}
+                    rejectionReason={screeningModal.rejectionReason}
+                    onClose={() => setScreeningModal(null)}
                 />
             ) : null}
         </div>

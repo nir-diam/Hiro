@@ -15,10 +15,15 @@ type Options = {
     allColumnIds?: string[];
 };
 
+function columnsEqual(a: string[], b: string[]): boolean {
+    return a.length === b.length && a.every((id, i) => id === b[i]);
+}
+
 export function useScreenTablePreferences(screenKey: ScreenPreferenceKey, options: Options) {
-    const { ready, getScreen, setScreenPrefs, flushScreen } = useUserPreferences();
+    const { ready, preferences, getScreen, setScreenPrefs, flushScreen } = useUserPreferences();
     const defaultLayout = options.defaultLayoutMode ?? 'list';
     const defaultCols = options.defaultVisibleColumns;
+    const screenPrefs = preferences.screens[screenKey];
 
     const saved = getScreen(screenKey);
     const initialView = layoutModeToViewMode(saved?.layoutMode ?? defaultLayout);
@@ -30,17 +35,18 @@ export function useScreenTablePreferences(screenKey: ScreenPreferenceKey, option
 
     const [viewMode, setViewModeState] = useState<TableViewMode>(initialView);
     const [visibleColumns, setVisibleColumnsState] = useState<string[]>(initialCols);
-    const [hydrated, setHydrated] = useState(false);
 
     useEffect(() => {
-        if (!ready || hydrated) return;
-        const s = getScreen(screenKey);
-        setViewModeState(layoutModeToViewMode(s?.layoutMode ?? defaultLayout));
-        setVisibleColumnsState(
-            normalizeVisibleColumns(s?.visibleColumns, defaultCols, options.allColumnIds),
+        if (!ready) return;
+        const nextView = layoutModeToViewMode(screenPrefs?.layoutMode ?? defaultLayout);
+        setViewModeState((prev) => (prev === nextView ? prev : nextView));
+        const nextCols = normalizeVisibleColumns(
+            screenPrefs?.visibleColumns,
+            defaultCols,
+            options.allColumnIds,
         );
-        setHydrated(true);
-    }, [ready, hydrated, screenKey, getScreen, defaultLayout, defaultCols, options.allColumnIds]);
+        setVisibleColumnsState((prev) => (columnsEqual(prev, nextCols) ? prev : nextCols));
+    }, [ready, screenKey, screenPrefs, defaultLayout, defaultCols, options.allColumnIds]);
 
     const setViewMode = useCallback(
         (mode: TableViewMode) => {
@@ -62,11 +68,11 @@ export function useScreenTablePreferences(screenKey: ScreenPreferenceKey, option
     const handleColumnToggle = useCallback(
         (columnId: string) => {
             setVisibleColumnsState((prev) => {
-                const next = prev.includes(columnId)
+                const nextRaw = prev.includes(columnId)
                     ? prev.filter((id) => id !== columnId)
                     : [...prev, columnId];
                 const normalized = normalizeVisibleColumns(
-                    next,
+                    nextRaw,
                     defaultCols,
                     options.allColumnIds,
                 );
@@ -87,7 +93,7 @@ export function useScreenTablePreferences(screenKey: ScreenPreferenceKey, option
     );
 
     return {
-        ready: ready && hydrated,
+        ready,
         viewMode,
         setViewMode,
         visibleColumns,

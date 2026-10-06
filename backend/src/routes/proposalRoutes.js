@@ -13,6 +13,7 @@ router.put('/templates/:id', proposalController.updateTemplate);
 router.delete('/templates/:id', proposalController.removeTemplate);
 
 router.get('/', proposalController.listProposals);
+router.post('/mark-sent', proposalController.markSent);
 router.get('/:id', proposalController.getProposal);
 router.post('/', proposalController.createProposal);
 router.put('/:id', proposalController.updateProposal);

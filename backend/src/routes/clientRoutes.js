@@ -16,6 +16,7 @@ const clientHealthRuleController = require('../controllers/clientHealthRuleContr
 const jobHealthRuleController = require('../controllers/jobHealthRuleController');
 const recruitmentStatusController = require('../controllers/recruitmentStatusController');
 const recruitmentSourceController = require('../controllers/recruitmentSourceController');
+const organizationProfileUpdateController = require('../controllers/organizationProfileUpdateController');
 
 const router = express.Router();
 
@@ -229,6 +230,26 @@ router.get('/me/export-logo', authMiddleware, attachDbUser, clientController.get
 router.get('/:id/export-logo', authMiddleware, attachDbUser, clientController.getExportLogo);
 
 router.get('/:id/insights', authMiddleware, attachDbUser, clientController.getInsights);
+
+router.get(
+  '/:id/organization-profile-updates/pending',
+  authMiddleware,
+  attachDbUser,
+  organizationProfileUpdateController.getPendingForClient,
+);
+router.get(
+  '/:id/organization-profile-updates',
+  authMiddleware,
+  attachDbUser,
+  organizationProfileUpdateController.listForClient,
+);
+router.post(
+  '/:id/organization-profile-updates',
+  authMiddleware,
+  attachDbUser,
+  organizationProfileUpdateController.submitForClient,
+);
+
 router.get('/:id', clientController.get);
 router.post('/', optionalAuth, optionalAttachDbUser, clientController.create);
 router.put('/:id', optionalAuth, optionalAttachDbUser, clientController.update);

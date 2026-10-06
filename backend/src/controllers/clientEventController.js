@@ -109,17 +109,36 @@ const parsePositiveInt = (raw, fallback, max) => {
   return Math.min(n, max);
 };
 
+const filterEventsByOrganizationScope = (rows, { organizationId, organizationTmpId } = {}) => {
+  const orgId = organizationId ? String(organizationId).trim() : '';
+  const tmpId = organizationTmpId ? String(organizationTmpId).trim() : '';
+  if (!orgId && !tmpId) return rows;
+
+  return rows.filter((e) => {
+    const eventOrgId = String(e?.organizationId || '').trim();
+    const eventTmpId = String(e?.organizationTmpId || '').trim();
+    if (tmpId) {
+      if (eventTmpId) return eventTmpId === tmpId;
+      if (eventOrgId) return false;
+      return false;
+    }
+    if (orgId) return eventOrgId === orgId;
+    return true;
+  });
+};
+
 const list = async (req, res) => {
   const client = await clientService.getById(req.params.id);
   const organizationId = req.query?.organizationId
     ? String(req.query.organizationId).trim()
     : null;
+  const organizationTmpId = req.query?.organizationTmpId
+    ? String(req.query.organizationTmpId).trim()
+    : null;
   const summary = req.query?.summary === '1' || req.query?.summary === 'true';
   const limit = parsePositiveInt(req.query?.limit, 0, 5000);
   let rows = Array.isArray(client.events) ? client.events : [];
-  if (organizationId) {
-    rows = rows.filter((e) => String(e?.organizationId || '') === organizationId);
-  }
+  rows = filterEventsByOrganizationScope(rows, { organizationId, organizationTmpId });
   const clientId = String(client.id);
   const clientName = String(client.displayName || client.name || '').trim() || 'לקוח';
   const mapped = rows
@@ -137,6 +156,9 @@ const listAll = async (req, res) => {
     const clientIdFilter = req.query?.clientId ? String(req.query.clientId).trim() : null;
     const organizationId = req.query?.organizationId
       ? String(req.query.organizationId).trim()
+      : null;
+    const organizationTmpId = req.query?.organizationTmpId
+      ? String(req.query.organizationTmpId).trim()
       : null;
     const summary = req.query?.summary !== '0' && req.query?.summary !== 'false';
     const limit = parsePositiveInt(req.query?.limit, 600, 2000);
@@ -163,9 +185,7 @@ const listAll = async (req, res) => {
       const clientId = String(plain.id);
       const clientName = String(plain.displayName || plain.name || '').trim() || 'לקוח';
       let rows = Array.isArray(plain.events) ? plain.events : [];
-      if (organizationId) {
-        rows = rows.filter((e) => String(e?.organizationId || '') === organizationId);
-      }
+      rows = filterEventsByOrganizationScope(rows, { organizationId, organizationTmpId });
       if (rows.length > perClientCap) {
         rows = [...rows]
           .sort((a, b) => new Date(b?.date || 0).getTime() - new Date(a?.date || 0).getTime())
@@ -192,6 +212,9 @@ const create = async (req, res) => {
     const organizationId = payload.organizationId != null
       ? (String(payload.organizationId).trim() || null)
       : null;
+    const organizationTmpId = payload.organizationTmpId != null
+      ? (String(payload.organizationTmpId).trim() || null)
+      : null;
     const event = {
       id: payload.id || uuidv4(),
       type: normalizeTypes(payload.type),
@@ -204,6 +227,7 @@ const create = async (req, res) => {
       history: Array.isArray(payload.history) ? payload.history : [],
       updates: Array.isArray(payload.updates) ? payload.updates : [],
       organizationId,
+      organizationTmpId,
                     // Persist process/stage ids for pipeline outcome resolution
       process: payload.process != null ? String(payload.process) : undefined,
       processId: payload.processId != null ? String(payload.processId) : undefined,
