@@ -817,19 +817,35 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                             )}
                                         </button>
                                     )}
-                                    <button
-                                        type="button"
-                                        onClick={() => {
-                                            setIsSidebarUserMenuOpen(false);
-                                            handleLogout();
-                                        }}
-                                        className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm text-text-subtle hover:bg-bg-hover hover:text-red-600 transition-colors border-t border-border-default"
-                                    >
-                                        <ArrowTopRightOnSquareIcon className="w-4 h-4 shrink-0" />
-                                        <span>התנתק</span>
-                                    </button>
+                                    {!isOpen && (
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setIsSidebarUserMenuOpen(false);
+                                                handleLogout();
+                                            }}
+                                            className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm text-text-subtle hover:bg-bg-hover hover:text-red-600 transition-colors border-t border-border-default"
+                                        >
+                                            <ArrowTopRightOnSquareIcon className="w-4 h-4 shrink-0" />
+                                            <span>התנתק</span>
+                                        </button>
+                                    )}
                                 </div>
                             )}
+                        </div>
+                        <div
+                            className={`mt-2 flex justify-center transition-all duration-300 ${
+                                isOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden pointer-events-none'
+                            }`}
+                        >
+                            <button
+                                type="button"
+                                onClick={handleLogout}
+                                className="text-xs text-text-subtle hover:text-red-500 flex items-center gap-1 p-1"
+                            >
+                                <ArrowTopRightOnSquareIcon className="w-3 h-3" />
+                                <span>התנתק</span>
+                            </button>
                         </div>
                         {tenantClientId && (
                             <ClientProfileUpdatesHistoryModal

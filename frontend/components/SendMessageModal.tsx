@@ -12,6 +12,7 @@ import {
     PencilIcon,
     PlusIcon,
     TrashIcon,
+    EyeIcon,
     ArrowUpTrayIcon,
     ChevronDownIcon,
     MagnifyingGlassIcon,
@@ -42,14 +43,18 @@ import {
     prepareEmailHtmlWithInlineImages,
 } from '../utils/emailSignature';
 import { htmlToPlainText } from '../utils/parsedSearchTextHtml';
-import { RichTextArea } from './RichTextArea';
+import ProposalTemplateTinyMceEditor, {
+    type ProposalTemplateEditorHandle,
+} from './ProposalTemplateTinyMceEditor';
+import CompanyMediaPickerModal, { type CompanyMediaPickResult } from './CompanyMediaPickerModal';
+import { isImageAttachment } from '../services/clientAttachmentsApi';
 import {
     applyProposalTemplatePlaceholders,
     fetchProposalTemplates,
     fetchProposals,
+    markProposalsSent,
     type ProposalDto,
     type ProposalTemplateDto,
-  dispatchProposalsUpdated,
 } from '../services/proposalsApi';
 import {
     fetchClientLogoForProposalExport,
@@ -224,8 +229,31 @@ function showComposeToast(message: string, variant: 'success' | 'error' = 'error
 
 type ProposalRowCustomization = {
     contentOverride?: string;
+    /** When undefined, proposal is sent as PDF attachment (default). Set false for inline HTML in body. */
     sendAsPdf?: boolean;
 };
+
+function proposalSendAsPdfAttachment(custom?: ProposalRowCustomization): boolean {
+    return custom?.sendAsPdf !== false;
+}
+
+function buildProposalPdfAttachmentFilename(
+    kind: 'template' | 'saved',
+    tpl: ProposalTemplateDto | null,
+    proposal: ProposalDto | null,
+    rowIndex: number,
+    duplicateTemplateCount: number,
+): string {
+    if (kind === 'saved' && proposal) {
+        const baseName = sanitizeProposalPdfFilename(proposal.number || 'proposal');
+        return `${baseName}.pdf`;
+    }
+    if (tpl) {
+        const baseName = sanitizeProposalPdfFilename(tpl.name);
+        return duplicateTemplateCount > 1 ? `${baseName}-${rowIndex + 1}.pdf` : `${baseName}.pdf`;
+    }
+    return 'proposal.pdf';
+}
 
 async function buildComposeEmailAttachments(
     rows: string[],
@@ -357,6 +385,12 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [clientAttachmentsError, setClientAttachmentsError] = useState<string | null>(null);
     const attachmentFileInputRef = useRef<HTMLInputElement>(null);
     const pendingAttachmentUploadRowRef = useRef<number | null>(null);
+    const composeEditorRef = useRef<ProposalTemplateEditorHandle>(null);
+    const proposalEditEditorRef = useRef<ProposalTemplateEditorHandle>(null);
+    const [composeMediaPickerOpen, setComposeMediaPickerOpen] = useState(false);
+    const [composeMediaPickerTab, setComposeMediaPickerTab] = useState<'images' | 'attachments'>('images');
+    const [proposalEditMediaPickerOpen, setProposalEditMediaPickerOpen] = useState(false);
+    const [proposalEditMediaPickerTab, setProposalEditMediaPickerTab] = useState<'images' | 'attachments'>('images');
     const [proposalAttachmentIds, setProposalAttachmentIds] = useState<string[]>(['']);
     const [proposalTemplates, setProposalTemplates] = useState<ProposalTemplateDto[]>([]);
     const [proposalTemplatesLoading, setProposalTemplatesLoading] = useState(false);
@@ -375,6 +409,14 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     >({});
     const [proposalEditDraft, setProposalEditDraft] = useState('');
     const [proposalLogoPayload, setProposalLogoPayload] = useState<ExportImagePayload | null>(null);
+    const [proposalPreview, setProposalPreview] = useState<
+        | { kind: 'pdf'; title: string; objectUrl: string }
+        | { kind: 'html'; title: string; html: string }
+        | null
+    >(null);
+    const [proposalPreviewLoading, setProposalPreviewLoading] = useState(false);
+    const [proposalPreviewError, setProposalPreviewError] = useState<string | null>(null);
+    const proposalPreviewUrlRef = useRef<string | null>(null);
     const [resolvedLinkedOrgName, setResolvedLinkedOrgName] = useState('');
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState<string | null>(null);
@@ -398,6 +440,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [customEmailDraft, setCustomEmailDraft] = useState('');
     const [customEmailError, setCustomEmailError] = useState<string | null>(null);
     const customEmailInputRef = useRef<HTMLInputElement>(null);
+    /** false = שליחה בנפרד (ברירת מחדל), true = מייל אחד לכל הנמענים ב-To */
+    const [emailSendCombined, setEmailSendCombined] = useState(false);
+    const [bccEmails, setBccEmails] = useState<string[]>([]);
+    const [bccInputOpen, setBccInputOpen] = useState(false);
+    const [bccEmailDraft, setBccEmailDraft] = useState('');
+    const [bccEmailError, setBccEmailError] = useState<string | null>(null);
+    const bccEmailInputRef = useRef<HTMLInputElement>(null);
     const recipientPickerRef = useRef<HTMLDivElement>(null);
     const baseTemplateRef = useRef<{ subject: string; content: string } | null>(null);
     const [placeholderValues, setPlaceholderValues] = useState<Record<string, string>>({});
@@ -606,6 +655,17 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         return merged.join(', ');
     }, [hasRecipientPicker, selectedRecipients, candidateEmail, customRecipientEmails]);
 
+    const recipientEmailCount = useMemo(
+        () => collectRecipientEmailsFromBulkField(effectiveEmail, effectivePhone).length,
+        [effectiveEmail, effectivePhone],
+    );
+
+    useEffect(() => {
+        if (recipientEmailCount <= 1) {
+            setEmailSendCombined(false);
+        }
+    }, [recipientEmailCount]);
+
     const effectiveClientId = useMemo(() => {
         const linked = String(linkedClientId || '').trim();
         if (linked) return linked;
@@ -618,6 +678,90 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         const own = String(user?.clientId || '').trim();
         return own || '';
     }, [linkedClientId, hasRecipientPicker, selectedRecipients, user?.clientId]);
+
+    const insertHtmlIntoComposeEditor = useCallback((html: string) => {
+        composeEditorRef.current?.insertContent(html);
+    }, []);
+
+    const insertHtmlIntoProposalEditEditor = useCallback((html: string) => {
+        proposalEditEditorRef.current?.insertContent(html);
+    }, []);
+
+    const insertAttachmentHtmlIntoEditor = useCallback(
+        (editor: 'compose' | 'proposalEdit', attachment: ClientAttachment) => {
+            const url = attachment.url?.trim();
+            if (!url) return;
+            const safeUrl = url.replace(/"/g, '&quot;');
+            const safeName = (attachment.name || 'צרופה')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+            const html = isImageAttachment(attachment)
+                ? `<img src="${safeUrl}" alt="${safeName}" style="max-width:100%;height:auto;" />`
+                : `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer">${safeName}</a>`;
+            if (editor === 'proposalEdit') insertHtmlIntoProposalEditEditor(html);
+            else insertHtmlIntoComposeEditor(html);
+        },
+        [insertHtmlIntoComposeEditor, insertHtmlIntoProposalEditEditor],
+    );
+
+    const insertImageUrlIntoEditor = useCallback(
+        (editor: 'compose' | 'proposalEdit', url: string, alt = '') => {
+            const trimmed = url.trim();
+            if (!trimmed) return;
+            const safeAlt = alt.replace(/"/g, '&quot;');
+            const html = `<img src="${trimmed.replace(/"/g, '&quot;')}" alt="${safeAlt}" style="max-width:100%;height:auto;" />`;
+            if (editor === 'proposalEdit') insertHtmlIntoProposalEditEditor(html);
+            else insertHtmlIntoComposeEditor(html);
+        },
+        [insertHtmlIntoComposeEditor, insertHtmlIntoProposalEditEditor],
+    );
+
+    const openComposeMediaPicker = useCallback(
+        (tab: 'images' | 'attachments') => {
+            if (!effectiveClientId) {
+                alert('יש לבחור לקוח לפני הוספת תמונה או צרופה מהמאגר');
+                return;
+            }
+            setComposeMediaPickerTab(tab);
+            setComposeMediaPickerOpen(true);
+        },
+        [effectiveClientId],
+    );
+
+    const openProposalEditMediaPicker = useCallback(
+        (tab: 'images' | 'attachments') => {
+            if (!effectiveClientId) {
+                alert('יש לבחור לקוח לפני הוספת תמונה או צרופה מהמאגר');
+                return;
+            }
+            setProposalEditMediaPickerTab(tab);
+            setProposalEditMediaPickerOpen(true);
+        },
+        [effectiveClientId],
+    );
+
+    const handleComposeMediaPick = useCallback(
+        (result: CompanyMediaPickResult) => {
+            if (result.kind === 'image') {
+                insertImageUrlIntoEditor('compose', result.url, result.label || '');
+            } else {
+                insertAttachmentHtmlIntoEditor('compose', result.attachment);
+            }
+        },
+        [insertAttachmentHtmlIntoEditor, insertImageUrlIntoEditor],
+    );
+
+    const handleProposalEditMediaPick = useCallback(
+        (result: CompanyMediaPickResult) => {
+            if (result.kind === 'image') {
+                insertImageUrlIntoEditor('proposalEdit', result.url, result.label || '');
+            } else {
+                insertAttachmentHtmlIntoEditor('proposalEdit', result.attachment);
+            }
+        },
+        [insertAttachmentHtmlIntoEditor, insertImageUrlIntoEditor],
+    );
 
     const primaryCrmRecipient = useMemo(() => {
         if (hasRecipientPicker && selectedRecipients.length) return selectedRecipients[0];
@@ -829,6 +973,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setCustomRecipientEmails([]);
         setCustomEmailInputOpen(false);
         setCustomEmailDraft('');
+        setEmailSendCombined(false);
+        setBccEmails([]);
+        setBccInputOpen(false);
+        setBccEmailDraft('');
+        setBccEmailError(null);
         setSelectedRecipientIds(
             hasRecipientPicker && recipientOptions
                 ? defaultSelectedRecipientIds(recipientOptions, mode, initialRecipientIds)
@@ -1059,6 +1208,39 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             .filter(Boolean) as ProposalDto[];
     }, [savedProposalAttachmentIds, contactSavedProposals]);
 
+    const pendingProposalPdfAttachments = useMemo(() => {
+        const items: { label: string; filename: string }[] = [];
+        proposalAttachmentIds.forEach((id, rowIndex) => {
+            const tid = String(id || '').trim();
+            if (!tid) return;
+            const tpl = proposalTemplates.find((t) => t.id === tid);
+            if (!tpl || !proposalSendAsPdfAttachment(proposalRowCustomizations[rowIndex])) return;
+            const dupCount = proposalAttachmentIds.filter((x) => x === tid).length;
+            items.push({
+                label: tpl.name,
+                filename: buildProposalPdfAttachmentFilename('template', tpl, null, rowIndex, dupCount),
+            });
+        });
+        savedProposalAttachmentIds.forEach((id, rowIndex) => {
+            const pid = String(id || '').trim();
+            if (!pid) return;
+            const proposal = contactSavedProposals.find((p) => p.id === pid);
+            if (!proposal || !proposalSendAsPdfAttachment(savedProposalRowCustomizations[rowIndex])) return;
+            items.push({
+                label: `הצעה ${proposal.number}`,
+                filename: buildProposalPdfAttachmentFilename('saved', null, proposal, rowIndex, 1),
+            });
+        });
+        return items;
+    }, [
+        proposalAttachmentIds,
+        proposalTemplates,
+        proposalRowCustomizations,
+        savedProposalAttachmentIds,
+        contactSavedProposals,
+        savedProposalRowCustomizations,
+    ]);
+
     const resolveSavedProposalRawHtml = useCallback(
         (proposal: ProposalDto, rowIndex: number): string => {
             const override = savedProposalRowCustomizations[rowIndex]?.contentOverride;
@@ -1073,6 +1255,103 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             });
         },
         [savedProposalRowCustomizations, proposalPlaceholderContext],
+    );
+
+    const closeProposalPreview = useCallback(() => {
+        if (proposalPreviewUrlRef.current) {
+            URL.revokeObjectURL(proposalPreviewUrlRef.current);
+            proposalPreviewUrlRef.current = null;
+        }
+        setProposalPreview(null);
+        setProposalPreviewError(null);
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen) closeProposalPreview();
+    }, [isOpen, closeProposalPreview]);
+
+    const openProposalPreview = useCallback(
+        async (source: 'template' | 'saved', rowIndex: number) => {
+            setProposalPreviewError(null);
+            setProposalPreviewLoading(true);
+            closeProposalPreview();
+            try {
+                let deliveryLogoPayload = proposalLogoPayload;
+                if (!deliveryLogoPayload) {
+                    const raw = await fetchClientLogoForProposalExport(effectiveClientId);
+                    deliveryLogoPayload = raw ? await trimLogoForProposalPdf(raw) : null;
+                }
+                const sendAsPdf =
+                    source === 'template'
+                        ? proposalSendAsPdfAttachment(proposalRowCustomizations[rowIndex])
+                        : proposalSendAsPdfAttachment(savedProposalRowCustomizations[rowIndex]);
+
+                if (source === 'template') {
+                    const tplId = String(proposalAttachmentIds[rowIndex] || '').trim();
+                    const tpl = proposalTemplates.find((t) => t.id === tplId);
+                    if (!tpl) throw new Error('לא נמצאה תבנית הצעת מחיר');
+                    const rawHtml = resolveProposalRawHtml(tpl, rowIndex);
+                    const title = tpl.name;
+                    if (sendAsPdf) {
+                        const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
+                        const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
+                        const binary = atob(pdfBase64);
+                        const bytes = new Uint8Array(binary.length);
+                        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+                        const blob = new Blob([bytes], { type: 'application/pdf' });
+                        const objectUrl = URL.createObjectURL(blob);
+                        proposalPreviewUrlRef.current = objectUrl;
+                        setProposalPreview({ kind: 'pdf', title, objectUrl });
+                    } else {
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        const html = wrapProposalEmailBlock(bodyHtml, escapeHtml(title));
+                        setProposalPreview({ kind: 'html', title, html });
+                    }
+                } else {
+                    const pid = String(savedProposalAttachmentIds[rowIndex] || '').trim();
+                    const proposal = contactSavedProposals.find((p) => p.id === pid);
+                    if (!proposal) throw new Error('לא נמצאה הצעת מחיר שמורה');
+                    const rawHtml = resolveSavedProposalRawHtml(proposal, rowIndex);
+                    const title = `הצעה ${proposal.number}`;
+                    if (sendAsPdf) {
+                        const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
+                        const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
+                        const binary = atob(pdfBase64);
+                        const bytes = new Uint8Array(binary.length);
+                        for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+                        const blob = new Blob([bytes], { type: 'application/pdf' });
+                        const objectUrl = URL.createObjectURL(blob);
+                        proposalPreviewUrlRef.current = objectUrl;
+                        setProposalPreview({ kind: 'pdf', title, objectUrl });
+                    } else {
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        const html = wrapProposalEmailBlock(bodyHtml, escapeHtml(title));
+                        setProposalPreview({ kind: 'html', title, html });
+                    }
+                }
+            } catch (err: unknown) {
+                setProposalPreviewError(err instanceof Error ? err.message : 'טעינת תצוגה מקדימה נכשלה');
+            } finally {
+                setProposalPreviewLoading(false);
+            }
+        },
+        [
+            closeProposalPreview,
+            contactSavedProposals,
+            effectiveClientId,
+            proposalAttachmentIds,
+            proposalLogoPayload,
+            proposalRowCustomizations,
+            proposalTemplates,
+            resolveProposalRawHtml,
+            resolveSavedProposalRawHtml,
+            savedProposalAttachmentIds,
+            savedProposalRowCustomizations,
+        ],
     );
 
     const selectedJobRow = useMemo(
@@ -1154,12 +1433,19 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         e.preventDefault();
         setSubmitError(null);
 
-        if (!contentPlainText.trim()) {
+        const bodyHtml = (composeEditorRef.current?.getContent() || content).trim();
+        const submitPlain = htmlToPlainText(bodyHtml) || bodyHtml.replace(/\s+/g, ' ').trim();
+
+        if (!submitPlain.trim()) {
             setSubmitError('תוכן ההודעה חובה');
             return;
         }
 
-        const navPlaceholderError = missingNavigationPlaceholderMessage(subject, content, placeholderValues);
+        const navPlaceholderError = missingNavigationPlaceholderMessage(
+            subject,
+            bodyHtml,
+            placeholderValues,
+        );
         if (navPlaceholderError) {
             setSubmitError(navPlaceholderError);
             return;
@@ -1174,7 +1460,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             return;
         }
 
-        const trimmedContent = content.trim();
+        const trimmedContent = bodyHtml;
         const selectedTpl = selectedTemplateId
             ? templates.find((t) => t.id === selectedTemplateId)
             : undefined;
@@ -1187,10 +1473,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
         // Prefer config.channel (tied to modal UI) over mode prop to avoid channel mix-ups.
         const outboundChannel = config.channel;
-        const textOut =
-            outboundChannel === 'email'
-                ? htmlToPlainText(trimmedContent) || trimmedContent
-                : trimmedContent;
+        const textOut = submitPlain || trimmedContent;
 
         if (outboundChannel === 'whatsapp') {
             const waPhone = toWhatsAppPhoneDigits(effectivePhone);
@@ -1310,16 +1593,19 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                 const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
                 for (const { tpl, rowIndex } of proposalEntries) {
                     const rawHtml = resolveProposalRawHtml(tpl, rowIndex);
-                    const sendAsPdf = Boolean(proposalRowCustomizations[rowIndex]?.sendAsPdf);
+                    const sendAsPdf = proposalSendAsPdfAttachment(proposalRowCustomizations[rowIndex]);
                     if (sendAsPdf) {
                         const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
                         const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
                         const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
-                        const baseName = sanitizeProposalPdfFilename(tpl.name);
-                        const filename =
-                            proposalEntries.filter((e) => e.tpl.id === tpl.id).length > 1
-                                ? `${baseName}-${rowIndex + 1}.pdf`
-                                : `${baseName}.pdf`;
+                        const dupCount = proposalEntries.filter((e) => e.tpl.id === tpl.id).length;
+                        const filename = buildProposalPdfAttachmentFilename(
+                            'template',
+                            tpl,
+                            null,
+                            rowIndex,
+                            dupCount,
+                        );
                         proposalPdfAttachments.push({
                             filename,
                             content: pdfBase64,
@@ -1332,15 +1618,21 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                 }
                 for (const { proposal, rowIndex } of savedProposalEntries) {
                     const rawHtml = resolveSavedProposalRawHtml(proposal, rowIndex);
-                    const sendAsPdf = Boolean(savedProposalRowCustomizations[rowIndex]?.sendAsPdf);
+                    const sendAsPdf = proposalSendAsPdfAttachment(savedProposalRowCustomizations[rowIndex]);
                     const blockTitle = escapeHtml(`הצעה ${proposal.number}`);
                     if (sendAsPdf) {
                         const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
                         const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
                         const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
-                        const baseName = sanitizeProposalPdfFilename(proposal.number || 'proposal');
+                        const filename = buildProposalPdfAttachmentFilename(
+                            'saved',
+                            null,
+                            proposal,
+                            rowIndex,
+                            1,
+                        );
                         proposalPdfAttachments.push({
-                            filename: `${baseName}.pdf`,
+                            filename,
                             content: pdfBase64,
                             contentType: 'application/pdf',
                         });
@@ -1355,7 +1647,19 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         ? `<div dir="rtl" style="margin-top:1.25em;font-family:sans-serif;line-height:1.55;color:#222;">${proposalHtmlBlocks.join('')}</div>`
                         : '';
 
-                const prepared = prepareEmailHtmlWithInlineImages(`${mainHtml}${proposalsHtml}`);
+                const pdfAttachmentNoticeHtml =
+                    proposalPdfAttachments.length > 0
+                        ? `<div dir="rtl" style="margin-top:1.25em;padding:14px 16px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;font-family:sans-serif;font-size:14px;line-height:1.5;color:#1e3a5f;"><strong style="display:block;margin-bottom:6px;">קבצים מצורפים למייל (PDF)</strong><ul style="margin:0;padding-right:1.25em;">${proposalPdfAttachments
+                              .map(
+                                  (a) =>
+                                      `<li><span style="font-weight:600;">${escapeHtml(a.filename)}</span></li>`,
+                              )
+                              .join('')}</ul><p style="margin:8px 0 0;font-size:13px;color:#475569;">הצעות המחיר מצורפות כקובצי PDF — ניתן לפתוח אותן מהמייל.</p></div>`
+                        : '';
+
+                const prepared = prepareEmailHtmlWithInlineImages(
+                    `${mainHtml}${pdfAttachmentNoticeHtml}${proposalsHtml}`,
+                );
                 const html = prepared.html;
                 const inlineImageAttachments: SendNotificationEmailAttachment[] =
                     prepared.inlineAttachments.map((a) => ({
@@ -1386,53 +1690,101 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     ...proposalPdfAttachments,
                 ];
 
+                const pdfAttachmentPlainNotice =
+                    proposalPdfAttachments.length > 0
+                        ? `\n\nקבצים מצורפים (PDF): ${proposalPdfAttachments.map((a) => a.filename).join(', ')}`
+                        : '';
+                const textForEmail = `${textOut}${pdfAttachmentPlainNotice}`;
+
                 const emailResults: {
                     to: string;
                     notificationMessageId?: string | null;
                     providerMessageId?: string | null;
                 }[] = [];
-                for (const toEmail of toEmails) {
-                    const matchRecipient =
-                        crmRecipientsForLog.find(
-                            (r) => String(r.email || '').trim().toLowerCase() === toEmail.toLowerCase(),
-                        ) || crmRecipientsForLog[0];
+
+                const sharedTaskPayload = {
+                    source: 'SendMessageModal',
+                    candidateId: resolvedCandidateId,
+                    candidateName: effectiveName,
+                    bulkRecipientCount: toEmails.length,
+                    templateId: selectedTemplateId || null,
+                    jobId: selectedJobId || null,
+                    composeScope: composeScope,
+                    templateLabel: templateFooterLine || null,
+                    jobLabel: jobFooterLine || null,
+                    linkedClientId: linkedClientId || null,
+                    linkedOrganizationId: linkedOrganizationId || null,
+                    proposalTemplateIds: selectedProposalTemplates.map((t) => t.id),
+                    savedProposalIds: selectedSavedProposals.map((p) => p.id),
+                    proposalTemplateNames: [
+                        ...selectedProposalTemplates.map((t) => t.name),
+                        ...selectedSavedProposals.map((p) => p.number),
+                    ],
+                    attachmentCount: emailAttachments.filter((a) => !a.cid).length,
+                    attachmentNames: emailAttachments.filter((a) => !a.cid).map((a) => a.filename),
+                };
+
+                const bccLine = bccEmails.length ? bccEmails.join(', ') : undefined;
+                const sendCombined =
+                    (emailSendCombined && toEmails.length > 1)
+                    || (toEmails.length === 1 && Boolean(bccLine));
+
+                if (sendCombined) {
+                    const primaryMatch = crmRecipientsForLog[0];
                     const sendResult = await sendNotificationEmail({
-                        toEmail,
+                        toEmail: toEmails.join(', '),
                         subject: subject.trim(),
-                        text: textOut,
+                        text: textForEmail,
                         html,
                         isTask: false,
                         messageType: 'message',
+                        emailDeliveryMode: 'combined',
+                        bccEmail: bccLine,
                         attachments: emailAttachments.length ? emailAttachments : undefined,
                         taskPayload: {
-                            source: 'SendMessageModal',
-                            candidateId: resolvedCandidateId,
-                            candidateName: effectiveName,
-                            bulkRecipientCount: toEmails.length,
-                            templateId: selectedTemplateId || null,
-                            jobId: selectedJobId || null,
-                            composeScope: composeScope,
-                            templateLabel: templateFooterLine || null,
-                            jobLabel: jobFooterLine || null,
-                            linkedClientId: matchRecipient?.clientId || linkedClientId || null,
-                            linkedOrganizationId: matchRecipient?.organizationId || linkedOrganizationId || null,
-                            linkedContactId: resolveContactIdForLog(matchRecipient),
-                            linkedContactName: matchRecipient?.name || effectiveName,
-                            proposalTemplateIds: selectedProposalTemplates.map((t) => t.id),
-                            savedProposalIds: selectedSavedProposals.map((p) => p.id),
-                            proposalTemplateNames: [
-                                ...selectedProposalTemplates.map((t) => t.name),
-                                ...selectedSavedProposals.map((p) => p.number),
-                            ],
-                            attachmentCount: emailAttachments.filter((a) => !a.cid).length,
-                            attachmentNames: emailAttachments.filter((a) => !a.cid).map((a) => a.filename),
+                            ...sharedTaskPayload,
+                            linkedClientId: primaryMatch?.clientId || linkedClientId || null,
+                            linkedOrganizationId: primaryMatch?.organizationId || linkedOrganizationId || null,
+                            linkedContactId: resolveContactIdForLog(primaryMatch),
+                            linkedContactName: primaryMatch?.name || effectiveName,
+                            emailSendCombined: true,
+                            bccCount: bccEmails.length,
                         },
                     });
                     emailResults.push({
-                        to: toEmail,
+                        to: toEmails.join(', '),
                         notificationMessageId: sendResult.notificationMessageId ?? null,
                         providerMessageId: sendResult.messageId ?? null,
                     });
+                } else {
+                    for (const toEmail of toEmails) {
+                        const matchRecipient =
+                            crmRecipientsForLog.find(
+                                (r) => String(r.email || '').trim().toLowerCase() === toEmail.toLowerCase(),
+                            ) || crmRecipientsForLog[0];
+                        const sendResult = await sendNotificationEmail({
+                            toEmail,
+                            subject: subject.trim(),
+                            text: textForEmail,
+                            html,
+                            isTask: false,
+                            messageType: 'message',
+                            emailDeliveryMode: 'separate',
+                            attachments: emailAttachments.length ? emailAttachments : undefined,
+                            taskPayload: {
+                                ...sharedTaskPayload,
+                                linkedClientId: matchRecipient?.clientId || linkedClientId || null,
+                                linkedOrganizationId: matchRecipient?.organizationId || linkedOrganizationId || null,
+                                linkedContactId: resolveContactIdForLog(matchRecipient),
+                                linkedContactName: matchRecipient?.name || effectiveName,
+                            },
+                        });
+                        emailResults.push({
+                            to: toEmail,
+                            notificationMessageId: sendResult.notificationMessageId ?? null,
+                            providerMessageId: sendResult.messageId ?? null,
+                        });
+                    }
                 }
                 await logCrmOutboundEvents({
                     channel: 'email',
@@ -1450,7 +1802,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     isProposal: selectedProposalTemplates.length > 0 || selectedSavedProposals.length > 0,
                 });
                 if (selectedSavedProposals.length > 0) {
-                    dispatchProposalsUpdated();
+                    await markProposalsSent(selectedSavedProposals.map((p) => p.id));
                 }
                 showComposeToast('המייל נשלח בהצלחה', 'success');
             } catch (err: unknown) {
@@ -1504,6 +1856,38 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const removeCustomEmail = (email: string) => {
         setCustomRecipientEmails((prev) => prev.filter((e) => e !== email));
+    };
+
+    const openBccEmailInput = () => {
+        setBccInputOpen(true);
+        setBccEmailError(null);
+        window.setTimeout(() => bccEmailInputRef.current?.focus(), 0);
+    };
+
+    const commitBccEmail = () => {
+        const raw = bccEmailDraft.trim();
+        if (!raw) {
+            setBccEmailError('הזינו כתובת מייל');
+            return;
+        }
+        const email = raw.toLowerCase();
+        if (!EMAIL_RE.test(email)) {
+            setBccEmailError('כתובת המייל אינה תקינה');
+            return;
+        }
+        const allTo = collectRecipientEmailsFromBulkField(effectiveEmail, null);
+        if (allTo.includes(email) || bccEmails.includes(email)) {
+            setBccEmailError('כתובת זו כבר ברשימה');
+            return;
+        }
+        setBccEmails((prev) => [...prev, email]);
+        setBccEmailDraft('');
+        setBccInputOpen(false);
+        setBccEmailError(null);
+    };
+
+    const removeBccEmail = (email: string) => {
+        setBccEmails((prev) => prev.filter((e) => e !== email));
     };
 
     const renderRecipientPickerRow = (opt: MessageRecipientOption) => {
@@ -1628,13 +2012,34 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         const next = [...proposalAttachmentIds];
         next[index] = value;
         setProposalAttachmentIds(next);
-        setProposalRowCustomizations((prev) => {
-            if (!prev[index]) return prev;
-            const copy = { ...prev };
-            delete copy[index];
-            return copy;
-        });
-        if (proposalEditModal?.rowIndex === index) closeProposalEditModal();
+        const tid = String(value || '').trim();
+        if (tid) {
+            const tpl = proposalTemplates.find((t) => t.id === tid);
+            setProposalRowCustomizations((prev) => ({
+                ...prev,
+                [index]: {
+                    ...prev[index],
+                    sendAsPdf: true,
+                },
+            }));
+            if (tpl) {
+                setSubject((sub) => {
+                    const trimmed = sub.trim();
+                    const suggested = `הצעת מחיר — ${tpl.name}`;
+                    if (!trimmed) return suggested;
+                    if (!trimmed.includes('הצעת מחיר')) return `${suggested} · ${trimmed}`;
+                    return trimmed;
+                });
+            }
+        } else {
+            setProposalRowCustomizations((prev) => {
+                if (!prev[index]) return prev;
+                const copy = { ...prev };
+                delete copy[index];
+                return copy;
+            });
+        }
+        if (proposalEditModal?.rowIndex === index && !tid) closeProposalEditModal();
     };
 
     const addProposalAttachmentRow = () => {
@@ -1667,12 +2072,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const saveProposalEdit = () => {
         if (!proposalEditModal) return;
+        const finalHtml = proposalEditEditorRef.current?.getContent() || proposalEditDraft;
         if (proposalEditModal.source === 'saved') {
             setSavedProposalRowCustomizations((prev) => ({
                 ...prev,
                 [proposalEditModal.rowIndex]: {
                     ...prev[proposalEditModal.rowIndex],
-                    contentOverride: proposalEditDraft,
+                    contentOverride: finalHtml,
                 },
             }));
         } else {
@@ -1680,7 +2086,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                 ...prev,
                 [proposalEditModal.rowIndex]: {
                     ...prev[proposalEditModal.rowIndex],
-                    contentOverride: proposalEditDraft,
+                    contentOverride: finalHtml,
                 },
             }));
         }
@@ -1692,7 +2098,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             ...prev,
             [index]: {
                 ...prev[index],
-                sendAsPdf: !prev[index]?.sendAsPdf,
+                sendAsPdf: !proposalSendAsPdfAttachment(prev[index]),
             },
         }));
     };
@@ -1701,14 +2107,35 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         const next = [...savedProposalAttachmentIds];
         next[index] = value;
         setSavedProposalAttachmentIds(next);
-        setSavedProposalRowCustomizations((prev) => {
-            if (!prev[index]) return prev;
-            const copy = { ...prev };
-            delete copy[index];
-            return copy;
-        });
-        if (proposalEditModal?.source === 'saved' && proposalEditModal.rowIndex === index) {
-            closeProposalEditModal();
+        const pid = String(value || '').trim();
+        if (pid) {
+            const proposal = contactSavedProposals.find((p) => p.id === pid);
+            setSavedProposalRowCustomizations((prev) => ({
+                ...prev,
+                [index]: {
+                    ...prev[index],
+                    sendAsPdf: true,
+                },
+            }));
+            if (proposal) {
+                setSubject((sub) => {
+                    const trimmed = sub.trim();
+                    const suggested = `הצעת מחיר ${proposal.number}`;
+                    if (!trimmed) return suggested;
+                    if (!trimmed.includes('הצעת מחיר')) return `${suggested} · ${trimmed}`;
+                    return trimmed;
+                });
+            }
+        } else {
+            setSavedProposalRowCustomizations((prev) => {
+                if (!prev[index]) return prev;
+                const copy = { ...prev };
+                delete copy[index];
+                return copy;
+            });
+            if (proposalEditModal?.source === 'saved' && proposalEditModal.rowIndex === index) {
+                closeProposalEditModal();
+            }
         }
     };
 
@@ -1752,7 +2179,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             ...prev,
             [index]: {
                 ...prev[index],
-                sendAsPdf: !prev[index]?.sendAsPdf,
+                sendAsPdf: !proposalSendAsPdfAttachment(prev[index]),
             },
         }));
     };
@@ -1767,8 +2194,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-40 z-[70] flex items-center justify-center p-4" onClick={onClose}>
-            <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden text-text-default" onClick={e => e.stopPropagation()} style={{ animation: 'modalFadeIn 0.2s ease-out' }}>
-                <form onSubmit={handleSubmit} className="flex flex-col h-full max-h-[80vh]">
+            <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden text-text-default" onClick={e => e.stopPropagation()} style={{ animation: 'modalFadeIn 0.2s ease-out' }}>
+                <form onSubmit={handleSubmit} className="flex flex-col h-full max-h-[92vh]">
                     <header className="flex items-center justify-between p-4 border-b border-border-default flex-shrink-0">
                         <h2 id={titleId} className="text-xl font-bold text-text-default">{config.title}</h2>
                         <button type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover" aria-label="סגור">
@@ -1776,8 +2203,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         </button>
                     </header>
 
-                    <main className="p-6 space-y-4 overflow-y-auto">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <main className="p-6 flex-1 min-h-0 overflow-y-auto flex flex-col gap-4">
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 shrink-0">
                             <div>
                                 <div className="flex items-center justify-between gap-2 mb-1.5">
                                     <label className="block text-sm font-semibold text-text-muted">נמען:</label>
@@ -1794,6 +2221,32 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                         </button>
                                     ) : null}
                                 </div>
+
+                                {mode === 'email' && recipientEmailCount > 1 ? (
+                                    <label className="flex items-start gap-2 mb-2 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={emailSendCombined}
+                                            onChange={(e) => {
+                                                setEmailSendCombined(e.target.checked);
+                                                if (!e.target.checked) {
+                                                    setBccEmails([]);
+                                                    setBccInputOpen(false);
+                                                    setBccEmailDraft('');
+                                                    setBccEmailError(null);
+                                                }
+                                            }}
+                                            className="mt-0.5 w-4 h-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                                        />
+                                        <span className="text-xs text-text-default leading-snug">
+                                            <span className="font-bold">שלח לכולם ביחד</span>
+                                            <span className="text-text-muted">
+                                                {' '}
+                                                (מייל אחד עם כל הנמענים ב־«אל»; אחרת — מייל נפרד לכל כתובת)
+                                            </span>
+                                        </span>
+                                    </label>
+                                ) : null}
 
                                 {(selectedRecipients.length > 0 || customRecipientEmails.length > 0) && (
                                     <div className="flex flex-wrap gap-1.5 mb-2">
@@ -1901,6 +2354,96 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                             >
                                                 {customEmailError}
                                             </p>
+                                        ) : null}
+                                    </div>
+                                ) : null}
+
+                                {mode === 'email'
+                                && recipientEmailCount >= 1
+                                && (recipientEmailCount === 1 || emailSendCombined) ? (
+                                    <div className="mb-2 rounded-lg border border-border-subtle bg-bg-subtle/30 p-2.5 space-y-2">
+                                        <div className="flex items-center justify-between gap-2">
+                                            <span className="text-xs font-bold text-text-muted">עותק מוסתר (BCC)</span>
+                                            <button
+                                                type="button"
+                                                onClick={openBccEmailInput}
+                                                className="inline-flex items-center gap-1 text-xs font-bold text-primary-600 hover:text-primary-700 hover:bg-primary-50 rounded-md px-2 py-1 transition-colors"
+                                            >
+                                                <PlusIcon className="w-3.5 h-3.5" />
+                                                הוסף BCC
+                                            </button>
+                                        </div>
+                                        {bccEmails.length > 0 ? (
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {bccEmails.map((email) => (
+                                                    <span
+                                                        key={email}
+                                                        className="inline-flex items-center gap-1 text-xs font-semibold bg-bg-card text-text-default border border-border-default rounded-full pl-1 pr-2.5 py-1"
+                                                    >
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => removeBccEmail(email)}
+                                                            className="w-5 h-5 rounded-full hover:bg-bg-hover flex items-center justify-center shrink-0"
+                                                            aria-label={`הסר BCC ${email}`}
+                                                        >
+                                                            <XMarkIcon className="w-3 h-3" />
+                                                        </button>
+                                                        <span className="truncate" dir="ltr">
+                                                            {email}
+                                                        </span>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <p className="text-[11px] text-text-muted">אופציונלי — נמענים שלא ייראו לשאר הנמענים</p>
+                                        )}
+                                        {bccInputOpen ? (
+                                            <div className="space-y-1.5">
+                                                <div className="flex items-center gap-2">
+                                                    <input
+                                                        ref={bccEmailInputRef}
+                                                        type="text"
+                                                        inputMode="email"
+                                                        dir="ltr"
+                                                        value={bccEmailDraft}
+                                                        onChange={(e) => {
+                                                            setBccEmailDraft(e.target.value);
+                                                            if (bccEmailError) setBccEmailError(null);
+                                                        }}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter') {
+                                                                e.preventDefault();
+                                                                commitBccEmail();
+                                                            }
+                                                            if (e.key === 'Escape') {
+                                                                setBccInputOpen(false);
+                                                                setBccEmailDraft('');
+                                                                setBccEmailError(null);
+                                                            }
+                                                        }}
+                                                        placeholder="bcc@example.com"
+                                                        className={`flex-1 min-w-0 bg-bg-input border text-text-default text-sm rounded-lg px-2.5 py-2 ${
+                                                            bccEmailError
+                                                                ? 'border-red-400 ring-1 ring-red-200'
+                                                                : 'border-border-default'
+                                                        }`}
+                                                        autoComplete="off"
+                                                        aria-label="כתובת BCC"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={commitBccEmail}
+                                                        className="shrink-0 px-3 py-2 rounded-lg bg-primary-600 text-white text-xs font-bold hover:bg-primary-700"
+                                                    >
+                                                        הוסף
+                                                    </button>
+                                                </div>
+                                                {bccEmailError ? (
+                                                    <p className="text-xs font-semibold text-red-600" role="alert">
+                                                        {bccEmailError}
+                                                    </p>
+                                                ) : null}
+                                            </div>
                                         ) : null}
                                     </div>
                                 ) : null}
@@ -2028,9 +2571,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                     <p className="text-xs text-text-subtle mt-1">אין תבנית לערוץ זה</p>
                                 )}
                             </div>
-                        </div>
-
-                        <div>
+                            <div>
                              <label className="block text-sm font-semibold text-text-muted mb-1.5">משרה מקושרת:</label>
                             <div className="relative" ref={jobPickerRef}>
                                 <button
@@ -2120,33 +2661,58 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                             {!jobsLoading && !jobsErrBlocksHints && jobs.length === 0 && (
                                 <p className="text-xs text-text-subtle mt-1">אין משרות להצגה — ניתן לשלוח מייל בלי קישור משרה</p>
                             )}
+                            </div>
                         </div>
 
                          {config.showSubject && (
-                            <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">נושא:</label>
-                                <input type="text" value={subject} onChange={e => setSubject(e.target.value)} className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5" />
+                            <div className="shrink-0 space-y-2">
+                                <label className="block text-sm font-semibold text-text-muted mb-1.5">נושא המייל:</label>
+                                <input
+                                    type="text"
+                                    value={subject}
+                                    onChange={(e) => setSubject(e.target.value)}
+                                    placeholder="לדוגמה: הצעת מחיר — שם הלקוח"
+                                    className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5"
+                                />
+                                {pendingProposalPdfAttachments.length > 0 && (
+                                    <div
+                                        className="rounded-lg border border-primary-200 bg-primary-50/60 px-3 py-2.5 text-xs text-primary-900"
+                                        role="status"
+                                    >
+                                        <p className="font-bold mb-1.5">יישלח עם קבצי PDF מצורפים:</p>
+                                        <ul className="space-y-1 pr-1">
+                                            {pendingProposalPdfAttachments.map((item) => (
+                                                <li key={`${item.filename}-${item.label}`} className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                                                    <span className="font-semibold">{item.label}</span>
+                                                    <span className="text-primary-700/90 font-mono text-[11px]">{item.filename}</span>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
                             </div>
                         )}
 
-                        <div>
+                        <div className="flex-1 min-h-[700px] flex flex-col">
                              <label className="block text-sm font-semibold text-text-muted mb-1.5">תוכן ההודעה:</label>
-                            {config.channel === 'email' ? (
-                                <RichTextArea
-                                    value={content}
-                                    onChange={setContent}
-                                    minHeight="220px"
-                                    placeholder="כתבו את תוכן המייל…"
-                                    className="bg-bg-input border border-border-default rounded-lg overflow-hidden"
-                                />
-                            ) : (
-                                <textarea
-                                    value={content}
-                                    onChange={(e) => setContent(e.target.value)}
-                                    rows={8}
-                                    className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"
-                                />
-                            )}
+                            <ProposalTemplateTinyMceEditor
+                                ref={composeEditorRef}
+                                editorKey={`compose-${config.channel}-${selectedTemplateId || 'none'}-${isOpen ? 'open' : 'closed'}`}
+                                value={content}
+                                onChange={setContent}
+                                minHeight={700}
+                                showMenubar={false}
+                                onRequestImageInsert={
+                                    config.channel === 'email'
+                                        ? () => openComposeMediaPicker('images')
+                                        : undefined
+                                }
+                                onRequestAttachmentInsert={
+                                    config.channel === 'email'
+                                        ? () => openComposeMediaPicker('attachments')
+                                        : undefined
+                                }
+                            />
                             <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-text-subtle mt-1">
                                 <span>{contentPlainText.length} / 5000</span>
                                 {config.channel === 'sms' && contentPlainText.length > 0 ? (
@@ -2282,14 +2848,17 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                             אין תבניות הצעת מחיר ללקוח זה — ניתן להגדיר בהגדרות → תבניות הצעת מחיר.
                                         </p>
                                     )}
-                                    {proposalAttachmentIds.map((proposalId, index) => (
-                                        <div key={`proposal-${index}`} className="flex items-center gap-2">
+                                    {proposalAttachmentIds.map((proposalId, index) => {
+                                        const sendAsPdf = proposalSendAsPdfAttachment(proposalRowCustomizations[index]);
+                                        return (
+                                        <div key={`proposal-${index}`} className="flex flex-col gap-1.5">
+                                            <div className="flex flex-wrap items-center gap-2">
                                             <DocumentTextIcon className="w-5 h-5 text-text-muted flex-shrink-0" />
                                             <select
                                                 value={proposalId}
                                                 onChange={(e) => handleProposalAttachmentChange(index, e.target.value)}
                                                 disabled={!effectiveClientId || proposalTemplatesLoading || proposalTemplates.length === 0}
-                                                className="flex-grow bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 disabled:opacity-60"
+                                                className="flex-grow min-w-[12rem] bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 disabled:opacity-60"
                                             >
                                                 <option value="">בחר תבנית הצעת מחיר…</option>
                                                 {proposalTemplates.map((tpl) => (
@@ -2300,6 +2869,16 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                             </select>
                                             {proposalId && (
                                                 <>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void openProposalPreview('template', index)}
+                                                        disabled={proposalPreviewLoading}
+                                                        title="תצוגה מקדימה של ההצעה"
+                                                        aria-label="תצוגה מקדימה"
+                                                        className="p-2 rounded-lg transition-colors flex-shrink-0 text-text-subtle hover:text-primary-600 hover:bg-primary-50 disabled:opacity-50"
+                                                    >
+                                                        <EyeIcon className="w-4 h-4" />
+                                                    </button>
                                                     <button
                                                         type="button"
                                                         onClick={() => openProposalEdit(index)}
@@ -2316,16 +2895,17 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                                     <button
                                                         type="button"
                                                         onClick={() => toggleProposalSendAsPdf(index)}
-                                                        title="שליחה כקובץ PDF מצורף"
-                                                        aria-label="שליחה כ-PDF"
-                                                        aria-pressed={Boolean(proposalRowCustomizations[index]?.sendAsPdf)}
-                                                        className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
-                                                            proposalRowCustomizations[index]?.sendAsPdf
-                                                                ? 'text-primary-600 bg-primary-50 hover:bg-primary-100'
-                                                                : 'text-text-subtle hover:text-primary-600 hover:bg-primary-50'
+                                                        title={sendAsPdf ? 'נשלח כקובץ PDF מצורף (לחץ לשליחה בתוך גוף המייל)' : 'נשלח בתוך גוף המייל (לחץ לשליחה כ-PDF מצורף)'}
+                                                        aria-label={sendAsPdf ? 'PDF מצורף — פעיל' : 'PDF מצורף — כבוי'}
+                                                        aria-pressed={sendAsPdf}
+                                                        className={`inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg transition-colors flex-shrink-0 border ${
+                                                            sendAsPdf
+                                                                ? 'text-primary-700 bg-primary-50 border-primary-200 hover:bg-primary-100'
+                                                                : 'text-text-subtle border-transparent hover:text-primary-600 hover:bg-primary-50'
                                                         }`}
                                                     >
                                                         <DocumentIcon className="w-4 h-4" />
+                                                        <span className="text-[11px] font-bold whitespace-nowrap">PDF מצורף</span>
                                                     </button>
                                                 </>
                                             )}
@@ -2338,8 +2918,14 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                                     <TrashIcon className="w-4 h-4" />
                                                 </button>
                                             )}
+                                            </div>
+                                            {proposalId && sendAsPdf && (
+                                                <p className="text-[11px] text-text-muted pr-7">
+                                                    ההצעה תצורף למייל כקובץ PDF (לא בתוך גוף ההודעה).
+                                                </p>
+                                            )}
                                         </div>
-                                    ))}
+                                    );})}
                                     <button
                                         type="button"
                                         onClick={addProposalAttachmentRow}
@@ -2368,8 +2954,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                             אין הצעות שמורות לאיש קשר זה — ניתן ליצור בטאב «הצעות מחיר» בפרופיל איש הקשר.
                                         </p>
                                     )}
-                                    {savedProposalAttachmentIds.map((proposalId, index) => (
-                                        <div key={`saved-proposal-${index}`} className="flex items-center gap-2">
+                                    {savedProposalAttachmentIds.map((proposalId, index) => {
+                                        const sendAsPdf = proposalSendAsPdfAttachment(savedProposalRowCustomizations[index]);
+                                        return (
+                                        <div key={`saved-proposal-${index}`} className="flex flex-col gap-1.5">
+                                            <div className="flex flex-wrap items-center gap-2">
                                             <DocumentTextIcon className="w-5 h-5 text-amber-600 flex-shrink-0" />
                                             <select
                                                 value={proposalId}
@@ -2379,7 +2968,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                                     || contactSavedProposalsLoading
                                                     || contactSavedProposals.length === 0
                                                 }
-                                                className="flex-grow bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 disabled:opacity-60"
+                                                className="flex-grow min-w-[12rem] bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 disabled:opacity-60"
                                             >
                                                 <option value="">בחר הצעת מחיר שמורה…</option>
                                                 {contactSavedProposals.map((p) => (
@@ -2391,6 +2980,16 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                             </select>
                                             {proposalId && (
                                                 <>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void openProposalPreview('saved', index)}
+                                                        disabled={proposalPreviewLoading}
+                                                        title="תצוגה מקדימה של ההצעה"
+                                                        aria-label="תצוגה מקדימה"
+                                                        className="p-2 rounded-lg transition-colors flex-shrink-0 text-text-subtle hover:text-primary-600 hover:bg-primary-50 disabled:opacity-50"
+                                                    >
+                                                        <EyeIcon className="w-4 h-4" />
+                                                    </button>
                                                     <button
                                                         type="button"
                                                         onClick={() => openSavedProposalEdit(index)}
@@ -2407,16 +3006,17 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                                     <button
                                                         type="button"
                                                         onClick={() => toggleSavedProposalSendAsPdf(index)}
-                                                        title="שליחה כקובץ PDF מצורף"
-                                                        aria-label="שליחה כ-PDF"
-                                                        aria-pressed={Boolean(savedProposalRowCustomizations[index]?.sendAsPdf)}
-                                                        className={`p-2 rounded-lg transition-colors flex-shrink-0 ${
-                                                            savedProposalRowCustomizations[index]?.sendAsPdf
-                                                                ? 'text-primary-600 bg-primary-50 hover:bg-primary-100'
-                                                                : 'text-text-subtle hover:text-primary-600 hover:bg-primary-50'
+                                                        title={sendAsPdf ? 'נשלח כקובץ PDF מצורף (לחץ לשליחה בתוך גוף המייל)' : 'נשלח בתוך גוף המייל (לחץ לשליחה כ-PDF מצורף)'}
+                                                        aria-label={sendAsPdf ? 'PDF מצורף — פעיל' : 'PDF מצורף — כבוי'}
+                                                        aria-pressed={sendAsPdf}
+                                                        className={`inline-flex items-center gap-1.5 px-2.5 py-2 rounded-lg transition-colors flex-shrink-0 border ${
+                                                            sendAsPdf
+                                                                ? 'text-primary-700 bg-primary-50 border-primary-200 hover:bg-primary-100'
+                                                                : 'text-text-subtle border-transparent hover:text-primary-600 hover:bg-primary-50'
                                                         }`}
                                                     >
                                                         <DocumentIcon className="w-4 h-4" />
+                                                        <span className="text-[11px] font-bold whitespace-nowrap">PDF מצורף</span>
                                                     </button>
                                                 </>
                                             )}
@@ -2429,8 +3029,14 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                                     <TrashIcon className="w-4 h-4" />
                                                 </button>
                                             )}
+                                            </div>
+                                            {proposalId && sendAsPdf && (
+                                                <p className="text-[11px] text-text-muted pr-7">
+                                                    ההצעה תצורף למייל כקובץ PDF (לא בתוך גוף ההודעה).
+                                                </p>
+                                            )}
                                         </div>
-                                    ))}
+                                    );})}
                                     <button
                                         type="button"
                                         onClick={addSavedProposalAttachmentRow}
@@ -2482,6 +3088,78 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                 </form>
                 <style>{`@keyframes modalFadeIn { from { opacity: 0; transform: scale(0.98); } to { opacity: 1; transform: scale(1); } }`}</style>
             </div>
+            <CompanyMediaPickerModal
+                isOpen={composeMediaPickerOpen}
+                onClose={() => setComposeMediaPickerOpen(false)}
+                clientId={effectiveClientId || null}
+                initialTab={composeMediaPickerTab}
+                onPick={handleComposeMediaPick}
+            />
+            <CompanyMediaPickerModal
+                isOpen={proposalEditMediaPickerOpen}
+                onClose={() => setProposalEditMediaPickerOpen(false)}
+                clientId={effectiveClientId || null}
+                initialTab={proposalEditMediaPickerTab}
+                onPick={handleProposalEditMediaPick}
+            />
+
+            {(proposalPreviewLoading || proposalPreview || proposalPreviewError) && (
+                <div
+                    className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/50"
+                    onClick={closeProposalPreview}
+                    dir="rtl"
+                >
+                    <div
+                        className="bg-bg-card rounded-xl shadow-xl w-full max-w-5xl max-h-[92vh] flex flex-col text-text-default border border-border-default"
+                        onClick={(e) => e.stopPropagation()}
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="proposal-preview-title"
+                    >
+                        <header className="flex items-center justify-between p-4 border-b border-border-default flex-shrink-0">
+                            <h3 id="proposal-preview-title" className="text-lg font-bold truncate pr-2">
+                                {proposalPreview ? `תצוגה מקדימה — ${proposalPreview.title}` : 'תצוגה מקדימה'}
+                            </h3>
+                            <button
+                                type="button"
+                                onClick={closeProposalPreview}
+                                className="p-2 rounded-full text-text-muted hover:bg-bg-hover"
+                                aria-label="סגור תצוגה מקדימה"
+                            >
+                                <XMarkIcon className="w-5 h-5" />
+                            </button>
+                        </header>
+                        <div className="flex-1 min-h-[50vh] bg-bg-subtle/30 relative">
+                            {proposalPreviewLoading && (
+                                <p className="absolute inset-0 flex items-center justify-center text-sm text-text-muted">
+                                    מכין תצוגה מקדימה…
+                                </p>
+                            )}
+                            {proposalPreviewError && !proposalPreviewLoading && (
+                                <p className="p-4 text-sm text-red-600" role="alert">
+                                    {proposalPreviewError}
+                                </p>
+                            )}
+                            {proposalPreview?.kind === 'pdf' && !proposalPreviewLoading && (
+                                <iframe
+                                    title={proposalPreview.title}
+                                    src={proposalPreview.objectUrl}
+                                    className="w-full h-[min(78vh,720px)] border-0 bg-white"
+                                />
+                            )}
+                            {proposalPreview?.kind === 'html' && !proposalPreviewLoading && (
+                                <iframe
+                                    title={proposalPreview.title}
+                                    srcDoc={proposalPreview.html}
+                                    className="w-full h-[min(78vh,720px)] border-0 bg-white"
+                                    sandbox=""
+                                />
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {proposalEditModal && (
                 <div
                     className="fixed inset-0 z-[85] flex items-center justify-center p-4 bg-black/40"
@@ -2489,7 +3167,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     dir="rtl"
                 >
                     <div
-                        className="bg-bg-card rounded-xl shadow-xl w-full max-w-3xl max-h-[85vh] flex flex-col text-text-default"
+                        className="bg-bg-card rounded-xl shadow-xl w-full max-w-6xl max-h-[92vh] flex flex-col text-text-default"
                         onClick={(e) => e.stopPropagation()}
                         role="dialog"
                         aria-modal="true"
@@ -2514,14 +3192,15 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                     ? 'השינויים חלים רק על מייל זה — ההצעה השמורה לא תעודכן.'
                                     : 'השינויים חלים רק על מייל זה — התבנית המקורית לא תישמר.'}
                             </p>
-                            <RichTextArea
-                                key={proposalEditModal.rowIndex}
+                            <ProposalTemplateTinyMceEditor
+                                ref={proposalEditEditorRef}
+                                editorKey={`proposal-edit-${proposalEditModal.rowIndex}-${proposalEditModal.source}`}
                                 value={proposalEditDraft}
                                 onChange={setProposalEditDraft}
-                                fullToolbar
-                                minHeight="280px"
-                                className="border border-border-default rounded-lg bg-white"
-                                toolbarClassName="bg-bg-subtle/40"
+                                minHeight={700}
+                                showMenubar={false}
+                                onRequestImageInsert={() => openProposalEditMediaPicker('images')}
+                                onRequestAttachmentInsert={() => openProposalEditMediaPicker('attachments')}
                             />
                         </div>
                         <footer className="flex justify-end gap-2 p-4 border-t border-border-default flex-shrink-0">

@@ -9,12 +9,19 @@ export interface DateRange {
     label: string;
 }
 
+export type DateRangeFilterKind = 'open' | 'updated';
+
 interface DateRangeSelectorProps {
     value: DateRange | null;
     onChange: (range: DateRange | null) => void;
     placeholder?: string;
     className?: string;
     disabled?: boolean;
+    /** When set, shows open vs updated toggle above quick picks (e.g. jobs list). */
+    dateKind?: DateRangeFilterKind;
+    onDateKindChange?: (kind: DateRangeFilterKind) => void;
+    showDateKindToggle?: boolean;
+    dateKindActivePrefix?: { open: string; updated: string };
 }
 
 const DROPDOWN_WIDTH = 288;
@@ -27,7 +34,17 @@ const quickOptions = [
     { label: 'מתחילת השנה', type: 'ytd' }
 ];
 
-const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({ value, onChange, placeholder = "כל הזמנים", className = "", disabled = false }) => {
+const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
+    value,
+    onChange,
+    placeholder = 'כל הזמנים',
+    className = '',
+    disabled = false,
+    dateKind = 'open',
+    onDateKindChange,
+    showDateKindToggle = false,
+    dateKindActivePrefix = { open: 'נפתחה: ', updated: 'עודכנה: ' },
+}) => {
     const [isOpen, setIsOpen] = useState(false);
     const [showCustom, setShowCustom] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -120,6 +137,15 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({ value, onChange, 
 
     const isActive = !!value;
 
+    const buttonLabel = (() => {
+        if (!value) return placeholder;
+        if (showDateKindToggle) {
+            const prefix = dateKind === 'updated' ? dateKindActivePrefix.updated : dateKindActivePrefix.open;
+            return `${prefix}${value.label}`;
+        }
+        return value.label;
+    })();
+
     const dropdown = isOpen && dropdownPos ? createPortal(
         <div
             data-date-range-dropdown
@@ -132,6 +158,35 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({ value, onChange, 
             }}
             className="bg-bg-card border border-border-default rounded-xl shadow-xl p-2 animate-fade-in flex flex-col gap-1 max-h-[min(70vh,420px)] overflow-y-auto"
         >
+            {showDateKindToggle && onDateKindChange ? (
+                <div className="pb-2 mb-1 border-b border-border-subtle shrink-0 px-1">
+                    <span className="text-xs font-bold text-text-muted px-1 py-1 block">סוג תאריך</span>
+                    <div className="flex rounded-lg bg-bg-subtle p-0.5 gap-0.5">
+                        <button
+                            type="button"
+                            onClick={() => onDateKindChange('open')}
+                            className={`flex-1 text-center text-xs font-bold py-2 rounded-md transition-colors ${
+                                dateKind === 'open'
+                                    ? 'bg-white text-primary-700 shadow-sm'
+                                    : 'text-text-muted hover:text-text-default'
+                            }`}
+                        >
+                            תאריך פתיחה
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => onDateKindChange('updated')}
+                            className={`flex-1 text-center text-xs font-bold py-2 rounded-md transition-colors ${
+                                dateKind === 'updated'
+                                    ? 'bg-white text-primary-700 shadow-sm'
+                                    : 'text-text-muted hover:text-text-default'
+                            }`}
+                        >
+                            תאריך עדכון
+                        </button>
+                    </div>
+                </div>
+            ) : null}
             <div className="space-y-1 pb-2 border-b border-border-subtle shrink-0">
                 <span className="text-xs font-bold text-text-muted px-2 py-1 block">בחירה מהירה</span>
                 {quickOptions.map((opt, idx) => (
@@ -209,7 +264,7 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({ value, onChange, 
             >
                 <div className="flex items-center gap-2 truncate">
                     <CalendarIcon className={`w-4 h-4 flex-shrink-0 ${isActive ? 'text-primary-500' : 'text-text-subtle'}`} />
-                    <span className="text-sm truncate">{value?.label || placeholder}</span>
+                    <span className="text-sm truncate">{buttonLabel}</span>
                 </div>
                 {isActive && !disabled ? (
                     <div onClick={handleClear} className="p-0.5 rounded-full hover:bg-primary-100 text-primary-500 transition-colors">

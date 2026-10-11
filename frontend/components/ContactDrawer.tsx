@@ -571,7 +571,7 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
                                 <p className="text-xs text-primary-700 mb-4">הוסף את איש הקשר ללוח המשימות (Kanban) לניהול תהליך ממוקד.</p>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                     {processOptions.length === 0 ? (
-                                        <p className="col-span-full text-xs text-primary-700">אין תהליכי עבודה מוגדרים. הגדר אותם בהגדרות תהליכי עבודה.</p>
+                                        <p className="col-span-full text-xs text-primary-700">אין תהליכי לקוחות מוגדרים. הגדר אותם בהגדרות תהליכי לקוחות.</p>
                                     ) : (
                                         processOptions.map((p) => (
                                             <button

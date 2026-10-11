@@ -24,6 +24,8 @@ export type SendNotificationEmailAttachment = {
     cid?: string;
 };
 
+export type EmailDeliveryMode = 'separate' | 'combined';
+
 export type SendNotificationEmailBody = {
     toEmail: string;
     subject: string;
@@ -33,6 +35,9 @@ export type SendNotificationEmailBody = {
     messageType?: 'message' | 'task';
     taskPayload?: Record<string, unknown>;
     attachments?: SendNotificationEmailAttachment[];
+    /** `combined` → one message with all To (and optional BCC). Default: separate per recipient. */
+    emailDeliveryMode?: EmailDeliveryMode;
+    bccEmail?: string;
 };
 
 export type SendNotificationEmailResult = {
@@ -59,6 +64,8 @@ export async function sendNotificationEmail(body: SendNotificationEmailBody): Pr
             messageType: body.messageType ?? 'message',
             taskPayload: body.taskPayload ?? {},
             attachments: body.attachments?.length ? body.attachments : undefined,
+            emailDeliveryMode: body.emailDeliveryMode,
+            bccEmail: body.bccEmail,
         }),
     });
     if (!res.ok) throw new Error(await parseErr(res));

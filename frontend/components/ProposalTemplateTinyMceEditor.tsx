@@ -39,6 +39,8 @@ export type ProposalTemplateTinyMceEditorProps = {
     onChange: (html: string) => void;
     editorKey?: string;
     minHeight?: number;
+    /** When false, hides the File/Edit/View… menu row (toolbar remains). Default: true. */
+    showMenubar?: boolean;
     onRequestImageInsert?: () => void;
     onRequestAttachmentInsert?: () => void;
 };
@@ -71,7 +73,18 @@ const SIGNATURE_TABLE = `
 </table>`;
 
 const ProposalTemplateTinyMceEditor = forwardRef<ProposalTemplateEditorHandle, ProposalTemplateTinyMceEditorProps>(
-    ({ value, onChange, editorKey, minHeight = 420, onRequestImageInsert, onRequestAttachmentInsert }, ref) => {
+    (
+        {
+            value,
+            onChange,
+            editorKey,
+            minHeight = 420,
+            showMenubar = true,
+            onRequestImageInsert,
+            onRequestAttachmentInsert,
+        },
+        ref,
+    ) => {
         const editorRef = useRef<TinyMCEEditor | null>(null);
 
         useImperativeHandle(ref, () => ({
@@ -90,7 +103,7 @@ const ProposalTemplateTinyMceEditor = forwardRef<ProposalTemplateEditorHandle, P
         const init = useMemo<IAllProps['init']>(
             () => ({
                 height: minHeight,
-                menubar: 'file edit view insert format table tools',
+                menubar: showMenubar ? 'file edit view insert format table tools' : false,
                 directionality: 'rtl',
                 language: 'he_IL',
                 language_url: 'https://cdn.jsdelivr.net/npm/tinymce-i18n@24.12.30/langs8/he_IL.js',
@@ -206,7 +219,7 @@ const ProposalTemplateTinyMceEditor = forwardRef<ProposalTemplateEditorHandle, P
                     });
                 },
             }),
-            [minHeight, onRequestAttachmentInsert, onRequestImageInsert],
+            [minHeight, showMenubar, onRequestAttachmentInsert, onRequestImageInsert],
         );
 
         return (

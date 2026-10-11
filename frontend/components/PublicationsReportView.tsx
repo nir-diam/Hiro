@@ -19,6 +19,7 @@ interface JobPublication {
   city: string;
   region: string;
   candidatesCount: number;
+  referralsCount: number;
   views: number;
   board: string;
   publishedAt: string | null;
@@ -32,6 +33,7 @@ const allColumns = [
   { id: 'board', header: 'לוח פרסום', width: '8%' },
   { id: 'city', header: 'עיר', width: '7%' },
   { id: 'candidatesCount', header: 'מועמדים', width: '7%' },
+  { id: 'referralsCount', header: 'הפניות', width: '7%' },
   { id: 'conversion', header: 'יחס המרה', width: '11%' },
   { id: 'publishedAt', header: 'תחילת פרסום', width: '8%' },
   { id: 'unpublishedAt', header: 'סיום פרסום', width: '8%' },
@@ -55,6 +57,7 @@ const exportPublicationsCsv = (rows: JobPublication[]) => {
         'לוח פרסום',
         'עיר',
         'מועמדים',
+        'הפניות',
         'חשיפות',
         'יחס המרה %',
         'תחילת פרסום',
@@ -63,7 +66,7 @@ const exportPublicationsCsv = (rows: JobPublication[]) => {
     ];
     const lines = rows.map((job) => {
         const rate =
-            job.views > 0 ? ((job.candidatesCount / job.views) * 100).toFixed(1) : '0';
+            job.views > 0 ? ((job.referralsCount / job.views) * 100).toFixed(1) : '0';
         return [
             job.jobTitle,
             job.company,
@@ -71,6 +74,7 @@ const exportPublicationsCsv = (rows: JobPublication[]) => {
             job.board,
             job.city,
             job.candidatesCount,
+            job.referralsCount,
             job.views,
             rate,
             job.publishedAt ? new Date(job.publishedAt).toLocaleDateString('he-IL') : '',
@@ -107,8 +111,8 @@ const StatCard: React.FC<{ title: string; value: string | number; subValue?: str
     </div>
 );
 
-const ConversionBar: React.FC<{ candidates: number; views: number }> = ({ candidates, views }) => {
-    const rate = views > 0 ? (candidates / views) * 100 : 0;
+const ConversionBar: React.FC<{ referrals: number; views: number }> = ({ referrals, views }) => {
+    const rate = views > 0 ? (referrals / views) * 100 : 0;
     let colorClass = "bg-red-500";
     if (rate > 4) colorClass = "bg-green-500";
     else if (rate > 1.5) colorClass = "bg-yellow-500";
@@ -140,7 +144,7 @@ const JobPublicationCard: React.FC<{ job: JobPublication; onNavigate: (jobId: st
             </span>
         </div>
         
-        <div className="grid grid-cols-3 gap-2 bg-bg-subtle/30 p-2 rounded-lg">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 bg-bg-subtle/30 p-2 rounded-lg">
              <div className="flex flex-col items-center justify-center p-1">
                 <span className="text-xs text-text-muted mb-1">חשיפות</span>
                 <span className="font-bold text-text-default">{job.views.toLocaleString()}</span>
@@ -149,10 +153,14 @@ const JobPublicationCard: React.FC<{ job: JobPublication; onNavigate: (jobId: st
                 <span className="text-xs text-text-muted mb-1">מועמדים</span>
                 <span className="font-bold text-text-default">{job.candidatesCount}</span>
              </div>
-             <div className="flex flex-col items-center justify-center border-r border-border-subtle p-1 w-full">
+             <div className="flex flex-col items-center justify-center border-r border-border-subtle p-1">
+                <span className="text-xs text-text-muted mb-1">הפניות</span>
+                <span className="font-bold text-text-default">{job.referralsCount}</span>
+             </div>
+             <div className="flex flex-col items-center justify-center p-1 w-full">
                 <span className="text-xs text-text-muted mb-1">המרה</span>
                 <div className="w-full px-1">
-                     <ConversionBar candidates={job.candidatesCount} views={job.views} />
+                     <ConversionBar referrals={job.referralsCount} views={job.views} />
                 </div>
              </div>
         </div>
@@ -233,21 +241,24 @@ const DomainPerformanceChart: React.FC<{ data: JobPublication[]; onNavigate: (jo
 
     const domainMap = useMemo(() => {
         return data.reduce((acc, job) => {
-            if (!acc[job.domain]) acc[job.domain] = { candidates: 0, views: 0, count: 0, jobs: [] };
-            acc[job.domain].candidates += job.candidatesCount;
-            acc[job.domain].views += job.views;
-            acc[job.domain].count += 1;
-            acc[job.domain].jobs.push(job);
+            if (!acc[job.domain]) {
+                acc[job.domain] = { referrals: 0, views: 0, count: 0, jobs: [] };
+            }
+            const bucket = acc[job.domain];
+            bucket.referrals += job.referralsCount;
+            bucket.views += job.views;
+            bucket.count += 1;
+            bucket.jobs.push(job);
             return acc;
-        }, {} as Record<string, { candidates: number; views: number; count: number; jobs: JobPublication[] }>);
+        }, {} as Record<string, { referrals: number; views: number; count: number; jobs: JobPublication[] }>);
     }, [data]);
 
-    type DomainStat = { candidates: number; views: number; count: number; jobs: JobPublication[] };
+    type DomainStat = { referrals: number; views: number; count: number; jobs: JobPublication[] };
     const sortedDomains = (Object.entries(domainMap) as [string, DomainStat][])
-        .sort(([, a], [, b]) => b.candidates - a.candidates)
+        .sort(([, a], [, b]) => b.referrals - a.referrals)
         .slice(0, 5);
 
-    const maxVal = Math.max(...sortedDomains.map(([, s]) => s.candidates), 1);
+    const maxVal = Math.max(...sortedDomains.map(([, s]) => s.referrals), 1);
 
     return (
         <>
@@ -279,10 +290,10 @@ const DomainPerformanceChart: React.FC<{ data: JobPublication[]; onNavigate: (jo
                             <div className="relative h-9 bg-bg-subtle rounded-lg overflow-hidden flex items-center">
                                 <div
                                     className="absolute top-0 right-0 h-full bg-primary-100 group-hover:bg-primary-200 transition-colors duration-500"
-                                    style={{ width: `${(stats.candidates / maxVal) * 100}%` }}
+                                    style={{ width: `${(stats.referrals / maxVal) * 100}%` }}
                                 />
                                 <div className="relative z-10 w-full flex justify-between px-3 text-xs">
-                                    <span className="font-bold text-primary-900">{stats.candidates.toLocaleString()} מועמדים</span>
+                                    <span className="font-bold text-primary-900">{stats.referrals.toLocaleString()} הפניות</span>
                                     <span className="text-text-subtle hidden sm:inline font-medium">{stats.views.toLocaleString()} חשיפות</span>
                                 </div>
                             </div>
@@ -360,6 +371,7 @@ const PublicationsReportView: React.FC = () => {
                 city: r.city || '',
                 region: r.region || '',
                 candidatesCount: Number(r.candidatesCount) || 0,
+                referralsCount: Number(r.referralsCount) || 0,
                 views: Number(r.views) || 0,
                 board: r.sourceName || '',
                 publishedAt: r.publishedAt || null,
@@ -463,8 +475,8 @@ const PublicationsReportView: React.FC = () => {
                 let aVal: unknown = (a as Record<string, unknown>)[sortConfig.key];
                 let bVal: unknown = (b as Record<string, unknown>)[sortConfig.key];
                 if (sortConfig.key === 'conversion') {
-                    aVal = (a.candidatesCount || 0) / (a.views || 1);
-                    bVal = (b.candidatesCount || 0) / (b.views || 1);
+                    aVal = (a.referralsCount || 0) / (a.views || 1);
+                    bVal = (b.referralsCount || 0) / (b.views || 1);
                 }
                 if ((aVal ?? '') < (bVal ?? '')) return sortConfig.direction === 'asc' ? -1 : 1;
                 if ((aVal ?? '') > (bVal ?? '')) return sortConfig.direction === 'asc' ? 1 : -1;
@@ -477,10 +489,17 @@ const PublicationsReportView: React.FC = () => {
     // Stats Calculation
     const stats = useMemo(() => {
         const totalViews = processedData.reduce((acc, job) => acc + job.views, 0);
-        const totalCandidates = processedData.reduce((acc, job) => acc + job.candidatesCount, 0);
-        const avgConversion = totalViews > 0 ? ((totalCandidates / totalViews) * 100).toFixed(1) : '0';
+        const totalReferrals = processedData.reduce((acc, job) => acc + job.referralsCount, 0);
+        const candidatesByJob = new Map<string, number>();
+        for (const row of processedData) {
+            if (!candidatesByJob.has(row.jobId)) {
+                candidatesByJob.set(row.jobId, row.candidatesCount);
+            }
+        }
+        const totalCandidates = [...candidatesByJob.values()].reduce((acc, n) => acc + n, 0);
+        const avgConversion = totalViews > 0 ? ((totalReferrals / totalViews) * 100).toFixed(1) : '0';
         const activeJobs = processedData.length;
-        return { totalViews, totalCandidates, avgConversion, activeJobs };
+        return { totalViews, totalCandidates, totalReferrals, avgConversion, activeJobs };
     }, [processedData]);
 
     const requestSort = (key: string) => {
@@ -540,8 +559,10 @@ const PublicationsReportView: React.FC = () => {
                 return <span className="text-text-muted font-mono">{job.views.toLocaleString()}</span>;
             case 'candidatesCount':
                 return <span className="font-bold text-text-default text-base">{job.candidatesCount}</span>;
+            case 'referralsCount':
+                return <span className="font-bold text-text-default text-base">{job.referralsCount}</span>;
             case 'conversion':
-                return <ConversionBar candidates={job.candidatesCount} views={job.views} />;
+                return <ConversionBar referrals={job.referralsCount} views={job.views} />;
             default:
                 return String((job as unknown as Record<string, unknown>)[columnId] ?? '');
         }

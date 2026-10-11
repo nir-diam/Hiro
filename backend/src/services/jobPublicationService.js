@@ -1293,20 +1293,35 @@ const submissionCountsByJobIds = async (jobIds) => {
       jobId: { [Op.in]: jobIds },
       source: { [Op.like]: 'public_apply:%' },
     },
-    attributes: ['jobId', 'source'],
+    attributes: ['jobId', 'source', 'candidateId'],
     raw: true,
   });
 
+  /** jobId -> srcKey -> Set<candidateId> */
+  const byJob = new Map();
   for (const row of rows) {
     const jid = String(row.jobId || '');
-    if (!jid) continue;
-    let counts = result.get(jid);
-    if (!counts) {
-      counts = new Map();
-      result.set(jid, counts);
-    }
+    const cid = String(row.candidateId || '').trim();
+    if (!jid || !cid) continue;
     const src = String(row.source || '').replace(/^public_apply:/, '') || 'direct';
-    counts.set(src, (counts.get(src) || 0) + 1);
+    let jobMap = byJob.get(jid);
+    if (!jobMap) {
+      jobMap = new Map();
+      byJob.set(jid, jobMap);
+    }
+    let set = jobMap.get(src);
+    if (!set) {
+      set = new Set();
+      jobMap.set(src, set);
+    }
+    set.add(cid);
+  }
+  for (const [jid, jobMap] of byJob.entries()) {
+    const counts = new Map();
+    for (const [src, set] of jobMap.entries()) {
+      counts.set(src, set.size);
+    }
+    result.set(jid, counts);
   }
   return result;
 };
@@ -2114,7 +2129,7 @@ const resolveClientNameForHeroPoster = (client, options = {}) => {
   return String(client?.displayName || client?.name || '').trim();
 };
 
-const JOB_HERO_BRAND_SOURCES = new Set(['company', 'job_client']);
+const JOB_HERO_BRAND_SOURCES = new Set(['company', 'job_client', 'choice']);
 
 const normalizeHexColor = (raw) => {
   const s = String(raw || '').trim();
@@ -2125,6 +2140,18 @@ const readClientJobHeroBrandSource = (client) => {
   const meta = client?.metadata && typeof client.metadata === 'object' ? client.metadata : {};
   const v = String(meta.jobHeroBrandSource || 'company').trim();
   return JOB_HERO_BRAND_SOURCES.has(v) ? v : 'company';
+};
+
+const resolveRequestedHeroBrandSource = (publication, tenantClient, options = {}) => {
+  const defaultSource = readClientJobHeroBrandSource(tenantClient);
+  const fromOptions = options.heroBrandSource != null ? String(options.heroBrandSource).trim() : '';
+  const fromPublication =
+    publication?.heroBrandSource != null ? String(publication.heroBrandSource).trim() : '';
+  let raw = fromOptions || fromPublication || '';
+  if (raw === 'choice' || !raw) {
+    raw = defaultSource === 'choice' ? 'company' : defaultSource;
+  }
+  return raw === 'job_client' ? 'job_client' : 'company';
 };
 
 const buildCompanyBrandFromClient = (client) => {
@@ -2173,8 +2200,7 @@ const brandHasAssets = (brand) =>
 
 const resolveHeroBrandForGeneration = async (job, tenantClient, publication, options = {}) => {
   const defaultSource = readClientJobHeroBrandSource(tenantClient);
-  const sourceRaw = options.heroBrandSource ?? publication?.heroBrandSource ?? defaultSource;
-  const requestedSource = sourceRaw === 'job_client' ? 'job_client' : 'company';
+  const requestedSource = resolveRequestedHeroBrandSource(publication, tenantClient, options);
   const companyBrand = buildCompanyBrandFromClient(tenantClient);
   const employerBrand = await resolveJobEmployerBrand(job);
 
@@ -2463,6 +2489,9 @@ const listCompanyCreatedImagesForJob = async (jobKey) => {
 module.exports = {
   DEFAULT_CAREER_THEME,
   DEFAULT_LANDING_FIELDS,
+  resolveJobBySlug,
+  getPublicJobSlug,
+  getOrCreatePublication,
   buildLandingUrl,
   buildAppUrl,
   buildAppHashUrl: buildAppUrl,

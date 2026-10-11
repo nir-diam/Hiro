@@ -284,7 +284,7 @@ const approve = async (id, actor) => {
     reviewedByName: actorLabel(actor),
     reviewedAt: new Date(),
   });
-  const clientGamificationPoints = await clientGamificationService.addProfileUpdatePoints(row.clientId, 1);
+  const clientGamificationPoints = await clientGamificationService.reconcileProfileUpdatePoints(row.clientId);
   return toDto(row, { clientGamificationPoints });
 };
 

@@ -142,6 +142,23 @@ function fixedLinkedPlainLines(
     return lines;
 }
 
+function contactLinkedPlainLines(
+    organization: string,
+    candidate: string,
+    job: string,
+    client: string,
+    contact: string,
+): { label: string; value: string }[] {
+    const v = (s: string) => (String(s ?? '').trim() || EMPTY_LINKED_LABEL);
+    return [
+        { label: 'ארגון:', value: v(organization) },
+        { label: 'מועמד:', value: v(candidate) },
+        { label: 'משרה:', value: v(job) },
+        { label: 'לקוח:', value: v(client) },
+        { label: 'איש קשר:', value: v(contact) },
+    ];
+}
+
 function contactNameFromRow(row: Record<string, unknown> | undefined): string {
     if (!row) return '';
     const name = String(row.name ?? '').trim();
@@ -307,6 +324,8 @@ type LinkedPanel =
           rows: { label: string; node: React.ReactNode }[];
           /** Same fields as UI, for appending to outgoing email body */
           plainLines: { label: string; value: string }[];
+          /** Extra ids merged into taskPayload on submit (route-driven panels). */
+          submitLinkFields?: Record<string, string>;
       };
 
 function linkedValueNode(
@@ -637,38 +656,47 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
             previouslyFocusedElement.current = document.activeElement as HTMLElement;
             setTimeout(() => closeButtonRef.current?.focus(), 100);
 
-            const handleKeyDown = (event: KeyboardEvent) => {
-                if (event.key === 'Tab' && modalRef.current) {
-                    const focusableElements = modalRef.current.querySelectorAll<HTMLElement>(
-                        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-                    );
-                    const firstElement = focusableElements[0];
-                    const lastElement = focusableElements[focusableElements.length - 1];
-
-                    if (event.shiftKey) { // Shift+Tab
-                        if (document.activeElement === firstElement) {
-                            lastElement.focus();
-                            event.preventDefault();
-                        }
-                    } else { // Tab
-                        if (document.activeElement === lastElement) {
-                            firstElement.focus();
-                            event.preventDefault();
-                        }
-                    }
-                } else if (event.key === 'Escape') {
-                    onClose();
-                }
-            };
-
-            document.addEventListener('keydown', handleKeyDown);
-
             return () => {
-                document.removeEventListener('keydown', handleKeyDown);
                 previouslyFocusedElement.current?.focus();
             };
         }
-    }, [isOpen, onClose, resetCategoryPickerState]);
+    }, [isOpen, resetCategoryPickerState]);
+
+    useEffect(() => {
+        if (!isOpen) return;
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Tab' && modalRef.current) {
+                const focusableElements = modalRef.current.querySelectorAll<HTMLElement>(
+                    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+                );
+                const firstElement = focusableElements[0];
+                const lastElement = focusableElements[focusableElements.length - 1];
+
+                if (event.shiftKey) {
+                    if (document.activeElement === firstElement) {
+                        lastElement.focus();
+                        event.preventDefault();
+                    }
+                } else if (document.activeElement === lastElement) {
+                    firstElement.focus();
+                    event.preventDefault();
+                }
+            } else if (event.key === 'Escape') {
+                if (categoryDropdownOpen) {
+                    setCategoryDropdownOpen(false);
+                    setEditingCategoryId(null);
+                    setIsCreatingCategory(false);
+                    setCategoryError(null);
+                } else if (assigneeDropdownOpen) {
+                    setAssigneeDropdownOpen(false);
+                }
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+        return () => document.removeEventListener('keydown', handleKeyDown);
+    }, [isOpen, categoryDropdownOpen, assigneeDropdownOpen]);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -1118,45 +1146,125 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                 }
 
                 if (route.kind === 'contact') {
-                    const [cRes, listRes] = await Promise.all([
+                    const [cRes, contactRes] = await Promise.all([
                         fetch(`${apiBase}/api/clients/${encodeURIComponent(route.clientId)}`, {
                             credentials: 'include',
                             cache: 'no-store',
                             headers: jsonHeaders(),
                         }),
-                        fetch(`${apiBase}/api/clients/${encodeURIComponent(route.clientId)}/contacts`, {
-                            credentials: 'include',
-                            cache: 'no-store',
-                            headers: jsonHeaders(),
-                        }),
+                        fetch(
+                            `${apiBase}/api/clients/${encodeURIComponent(route.clientId)}/contacts/${encodeURIComponent(route.contactId)}`,
+                            {
+                                credentials: 'include',
+                                cache: 'no-store',
+                                headers: jsonHeaders(),
+                            },
+                        ),
                     ]);
                     if (!cRes.ok) {
                         const t = await cRes.text().catch(() => '');
                         fail(t || `HTTP ${cRes.status}`);
                         return;
                     }
-                    if (!listRes.ok) {
-                        const t = await listRes.text().catch(() => '');
-                        fail(t || `HTTP ${listRes.status}`);
+                    if (!contactRes.ok) {
+                        const t = await contactRes.text().catch(() => '');
+                        fail(t || `HTTP ${contactRes.status}`);
                         return;
                     }
                     const clientRow = (await cRes.json()) as Record<string, unknown>;
-                    const contacts = (await listRes.json()) as Record<string, unknown>[];
+                    const contactRow = (await contactRes.json()) as Record<string, unknown>;
                     if (cancelled) return;
                     const clientName =
                         String(clientRow.displayName || clientRow.name || '').trim() || 'לקוח';
-                    const contactRow = contacts.find(
-                        (c) => String(c.id ?? '') === String(route.contactId),
-                    );
                     const contactName = contactNameFromRow(contactRow);
-                    const plainLines = fixedLinkedPlainLines('', '', clientName, contactName);
-                    const candLabel = plainLines[0].value;
-                    const jobLabel = plainLines[1].value;
-                    const clientLabel = plainLines[2].value;
-                    const contactLabel = plainLines[3].value;
+                    const organizationId = contactRow?.organizationId
+                        ? String(contactRow.organizationId).trim()
+                        : '';
+                    const contactMeta =
+                        contactRow?.metadata && typeof contactRow.metadata === 'object'
+                            ? (contactRow.metadata as Record<string, unknown>)
+                            : null;
+                    const organizationTmpId = contactMeta?.organizationTmpId
+                        ? String(contactMeta.organizationTmpId).trim()
+                        : '';
+                    let organizationName = String(contactRow?.organizationName || '').trim();
+                    if (!organizationName && organizationId) {
+                        try {
+                            const orgRes = await fetch(
+                                `${apiBase}/api/organizations/${encodeURIComponent(organizationId)}`,
+                                {
+                                    credentials: 'include',
+                                    cache: 'no-store',
+                                    headers: jsonHeaders(),
+                                },
+                            );
+                            if (orgRes.ok) {
+                                const orgRow = (await orgRes.json()) as Record<string, unknown>;
+                                organizationName = String(orgRow.name || '').trim();
+                            }
+                        } catch {
+                            /* optional */
+                        }
+                    }
+                    if (!organizationName && organizationTmpId) {
+                        try {
+                            const orgRes = await fetch(
+                                `${apiBase}/api/organizations/tmp/${encodeURIComponent(organizationTmpId)}`,
+                                {
+                                    credentials: 'include',
+                                    cache: 'no-store',
+                                    headers: jsonHeaders(),
+                                },
+                            );
+                            if (orgRes.ok) {
+                                const orgRow = (await orgRes.json()) as Record<string, unknown>;
+                                organizationName = String(orgRow.name || '').trim();
+                            }
+                        } catch {
+                            /* optional */
+                        }
+                    }
+                    if (cancelled) return;
+
+                    const plainLines = contactLinkedPlainLines(
+                        organizationName,
+                        '',
+                        '',
+                        clientName,
+                        contactName,
+                    );
+                    const orgLabel = plainLines[0].value;
+                    const candLabel = plainLines[1].value;
+                    const jobLabel = plainLines[2].value;
+                    const clientLabel = plainLines[3].value;
+                    const contactLabel = plainLines[4].value;
+                    const orgHref = organizationId
+                        ? `/organizations/${encodeURIComponent(organizationId)}`
+                        : organizationTmpId
+                          ? `/organizations/tmp/${encodeURIComponent(organizationTmpId)}`
+                          : null;
+                    const submitLinkFields: Record<string, string> = {};
+                    if (organizationId) submitLinkFields.linkedOrganizationId = organizationId;
+                    if (organizationTmpId) submitLinkFields.linkedOrganizationTmpId = organizationTmpId;
+
                     setLinkedPanel({
                         phase: 'ok',
                         rows: [
+                            {
+                                label: 'ארגון:',
+                                node:
+                                    orgLabel === EMPTY_LINKED_LABEL || !orgHref ? (
+                                        <span className="text-text-default font-semibold">{orgLabel}</span>
+                                    ) : (
+                                        <a
+                                            href={orgHref}
+                                            className="text-primary-600 font-bold hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            {orgLabel}
+                                        </a>
+                                    ),
+                            },
                             {
                                 label: 'מועמד:',
                                 node: <span className="text-text-default font-semibold">{candLabel}</span>,
@@ -1197,6 +1305,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                             },
                         ],
                         plainLines,
+                        submitLinkFields: Object.keys(submitLinkFields).length ? submitLinkFields : undefined,
                     });
                     return;
                 }
@@ -1403,17 +1512,32 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                 linkFields.linkedOrganizationTmpId = route.id;
             }
         }
+        if (
+            linkedPanel.phase === 'ok'
+            && linkedPanel.submitLinkFields
+            && Object.keys(linkedPanel.submitLinkFields).length
+        ) {
+            Object.assign(linkFields, linkedPanel.submitLinkFields);
+        }
         const linkLabels = useOverride
             ? linkLabelsFromOverride(linkedOverride!)
-            : linkedPlain.length >= 3
+            : linkedPlain.length >= 1
               ? {
-                    ...(linkedPlain[0]?.label.startsWith('ארגון:')
-                        ? { linkedOrganizationLabel: linkedPlain[0].value }
-                        : { linkedCandidateLabel: linkedPlain[0].value }),
+                    ...(linkedPlain.find((l) => l.label.startsWith('ארגון:'))
+                        ? {
+                              linkedOrganizationLabel: linkedPlain.find((l) => l.label.startsWith('ארגון:'))!
+                                  .value,
+                          }
+                        : {}),
+                    ...(linkedPlain.find((l) => l.label.startsWith('מועמד:'))
+                        ? {
+                              linkedCandidateLabel: linkedPlain.find((l) => l.label.startsWith('מועמד:'))!.value,
+                          }
+                        : {}),
                     linkedJobLabel:
-                        linkedPlain.find((l) => l.label.startsWith('משרה:'))?.value ?? linkedPlain[1]?.value ?? '',
+                        linkedPlain.find((l) => l.label.startsWith('משרה:'))?.value ?? '',
                     linkedClientLabel:
-                        linkedPlain.find((l) => l.label.startsWith('לקוח:'))?.value ?? linkedPlain[2]?.value ?? '',
+                        linkedPlain.find((l) => l.label.startsWith('לקוח:'))?.value ?? '',
                     ...(linkedPlain.find((l) => l.label.startsWith('איש קשר:'))
                         ? { linkedContactLabel: linkedPlain.find((l) => l.label.startsWith('איש קשר:'))!.value }
                         : {}),
@@ -1531,23 +1655,23 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     const labelClass = 'block text-xs font-bold text-text-default mb-1';
 
     return (
-        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm" onClick={onClose}>
+        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm">
             <div
                 ref={modalRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby={titleId}
-                className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col overflow-hidden border border-border-default/50"
+                className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-5xl max-h-[min(92vh,900px)] flex flex-col overflow-hidden border border-border-default/50"
                 onClick={e => e.stopPropagation()}
                 style={{ animation: 'modalFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}
             >
                 <form onSubmit={handleSubmit} className="flex flex-col overflow-visible">
-                    <header className="flex items-center justify-between px-4 py-3 border-b border-border-default/50 bg-bg-subtle/30 flex-shrink-0">
+                    <header className="flex items-center justify-between px-5 py-4 border-b border-border-default/50 bg-bg-subtle/30 flex-shrink-0">
                         <div>
-                            <h2 id={titleId} className="text-lg font-black text-text-default tracking-tight leading-tight">
+                            <h2 id={titleId} className="text-xl font-black text-text-default tracking-tight leading-tight">
                                 יצירת פעילות חדשה
                             </h2>
-                            <p className="text-[11px] text-text-muted mt-0.5">הודעה · תזכורת · משימה</p>
+                            <p className="text-xs text-text-muted mt-1">הודעה · תזכורת · משימה</p>
                         </div>
                          <button ref={closeButtonRef} type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover hover:text-text-default transition-colors" aria-label="סגור">
                             <XMarkIcon className="w-5 h-5" />
@@ -1555,11 +1679,11 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                     </header>
 
                     <main
-                        className={`px-4 py-3 bg-bg-card overflow-visible relative ${
+                        className={`px-5 py-4 bg-bg-card overflow-y-auto overflow-x-visible relative flex-1 min-h-0 ${
                             categoryDropdownOpen || assigneeDropdownOpen ? 'z-30' : 'z-0'
                         }`}
                     >
-                        <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.15fr] gap-3">
+                        <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.2fr] gap-4">
                             {/* Controls column (RTL start) */}
                             <div className="space-y-2.5 order-2 lg:order-1 min-w-0">
                                 <div className="relative" ref={assigneePickerRef}>
@@ -1614,7 +1738,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                     )}
                                 </div>
 
-                                <div className="grid grid-cols-3 gap-2">
+                                <div className="space-y-2.5">
                                     <div className="relative" ref={categoryPickerRef}>
                                         <label className={labelClass}>קטגוריה</label>
                                         <button
@@ -1632,15 +1756,15 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                         {categoryDropdownOpen && (
                                             <div
                                                 role="listbox"
-                                                className="absolute top-full left-0 right-0 z-[120] mt-1 max-h-52 overflow-y-auto rounded-lg border border-border-default bg-bg-card shadow-lg"
+                                                className="absolute top-full left-0 right-0 z-[120] mt-1.5 max-h-72 overflow-y-auto rounded-xl border border-border-default bg-bg-card shadow-xl"
                                             >
-                                                <div className="p-1.5 space-y-0.5">
+                                                <div className="p-2 space-y-1">
                                                     <button
                                                         type="button"
                                                         role="option"
                                                         aria-selected={formData.category === 'כללי'}
                                                         onClick={() => selectCategory('כללי')}
-                                                        className={`w-full text-right text-xs rounded-md px-2 py-1.5 font-bold transition-colors ${
+                                                        className={`w-full text-right text-sm rounded-lg px-3 py-2 font-bold transition-colors ${
                                                             formData.category === 'כללי'
                                                                 ? 'bg-primary-50 text-primary-700'
                                                                 : 'text-text-default hover:bg-bg-subtle/80'
@@ -1649,7 +1773,14 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                         כללי
                                                     </button>
                                                     {flightCategories.map((cat) => (
-                                                        <div key={cat.id} className="flex items-center gap-1">
+                                                        <div
+                                                            key={cat.id}
+                                                            className={
+                                                                editingCategoryId === cat.id
+                                                                    ? 'rounded-lg border border-primary-200 bg-primary-50/40 p-2.5 space-y-2'
+                                                                    : 'flex items-start gap-1.5 group/cat'
+                                                            }
+                                                        >
                                                             {editingCategoryId === cat.id ? (
                                                                 <>
                                                                     <input
@@ -1660,37 +1791,39 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                                             if (e.key === 'Enter') void saveEditCategory();
                                                                             if (e.key === 'Escape') cancelEditCategory();
                                                                         }}
-                                                                        className="flex-1 min-w-0 text-xs rounded-md border border-border-default bg-bg-input px-2 py-1"
+                                                                        className="w-full text-sm rounded-lg border border-border-default bg-bg-input px-3 py-2.5 min-h-[42px] shadow-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
                                                                         autoFocus
                                                                         disabled={categorySaving}
                                                                     />
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => void saveEditCategory()}
-                                                                        disabled={categorySaving}
-                                                                        className="p-1 rounded-md text-primary-600 hover:bg-primary-50 disabled:opacity-50"
-                                                                        title="שמור"
-                                                                    >
-                                                                        <CheckIcon className="w-4 h-4" />
-                                                                    </button>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={cancelEditCategory}
-                                                                        disabled={categorySaving || deletingCategoryId === cat.id}
-                                                                        className="p-1 rounded-md text-text-muted hover:bg-bg-subtle disabled:opacity-50"
-                                                                        title="ביטול"
-                                                                    >
-                                                                        <XMarkIcon className="w-4 h-4" />
-                                                                    </button>
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => void deleteCategory(cat)}
-                                                                        disabled={categorySaving || deletingCategoryId === cat.id}
-                                                                        className="p-1 rounded-md text-text-muted hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
-                                                                        title="מחק קטגוריה"
-                                                                    >
-                                                                        <TrashIcon className="w-4 h-4" />
-                                                                    </button>
+                                                                    <div className="flex items-center justify-end gap-1">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => void saveEditCategory()}
+                                                                            disabled={categorySaving}
+                                                                            className="p-2 rounded-lg text-primary-600 hover:bg-primary-50 disabled:opacity-50"
+                                                                            title="שמור"
+                                                                        >
+                                                                            <CheckIcon className="w-5 h-5" />
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={cancelEditCategory}
+                                                                            disabled={categorySaving || deletingCategoryId === cat.id}
+                                                                            className="p-2 rounded-lg text-text-muted hover:bg-bg-subtle disabled:opacity-50"
+                                                                            title="ביטול"
+                                                                        >
+                                                                            <XMarkIcon className="w-5 h-5" />
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => void deleteCategory(cat)}
+                                                                            disabled={categorySaving || deletingCategoryId === cat.id}
+                                                                            className="p-2 rounded-lg text-text-muted hover:text-red-600 hover:bg-red-50 disabled:opacity-50"
+                                                                            title="מחק קטגוריה"
+                                                                        >
+                                                                            <TrashIcon className="w-5 h-5" />
+                                                                        </button>
+                                                                    </div>
                                                                 </>
                                                             ) : (
                                                                 <>
@@ -1699,7 +1832,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                                         role="option"
                                                                         aria-selected={formData.category === cat.name}
                                                                         onClick={() => selectCategory(cat.name)}
-                                                                        className={`flex-1 min-w-0 text-right text-xs rounded-md px-2 py-1.5 font-bold transition-colors truncate ${
+                                                                        className={`flex-1 min-w-0 text-right text-sm rounded-lg px-3 py-2 font-bold transition-colors whitespace-normal break-words leading-snug ${
                                                                             formData.category === cat.name
                                                                                 ? 'bg-primary-50 text-primary-700'
                                                                                 : 'text-text-default hover:bg-bg-subtle/80'
@@ -1714,10 +1847,10 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                                             startEditCategory(cat);
                                                                         }}
                                                                         disabled={categorySaving || Boolean(editingCategoryId)}
-                                                                        className="p-1 rounded-md text-text-muted hover:text-primary-600 hover:bg-primary-50 shrink-0 disabled:opacity-50 opacity-0 hover:opacity-100 focus-visible:opacity-100 transition-opacity"
+                                                                        className="p-1.5 rounded-lg text-text-muted hover:text-primary-600 hover:bg-primary-50 shrink-0 disabled:opacity-50 opacity-70 group-hover/cat:opacity-100 focus-visible:opacity-100 transition-opacity mt-0.5"
                                                                         title="ערוך קטגוריה"
                                                                     >
-                                                                        <PencilIcon className="w-3.5 h-3.5" />
+                                                                        <PencilIcon className="w-4 h-4" />
                                                                     </button>
                                                                 </>
                                                             )}
@@ -1731,15 +1864,15 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                             role="option"
                                                             aria-selected
                                                             onClick={() => selectCategory(formData.category)}
-                                                            className="w-full text-right text-xs rounded-md px-2 py-1.5 font-bold bg-primary-50 text-primary-700 truncate"
+                                                            className="w-full text-right text-sm rounded-lg px-3 py-2 font-bold bg-primary-50 text-primary-700 whitespace-normal break-words"
                                                         >
                                                             {formData.category}
                                                         </button>
                                                     )}
                                                 </div>
-                                                <div className="border-t border-border-subtle p-1.5">
+                                                <div className="border-t border-border-subtle p-2">
                                                     {isCreatingCategory ? (
-                                                        <div className="flex items-center gap-1">
+                                                        <div className="space-y-2">
                                                             <input
                                                                 type="text"
                                                                 value={newCategoryName}
@@ -1752,31 +1885,33 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                                     }
                                                                 }}
                                                                 placeholder="שם קטגוריה חדשה"
-                                                                className="flex-1 min-w-0 text-xs rounded-md border border-border-default bg-bg-input px-2 py-1"
+                                                                className="w-full text-sm rounded-lg border border-border-default bg-bg-input px-3 py-2.5 min-h-[42px] shadow-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
                                                                 autoFocus
                                                                 disabled={categorySaving}
                                                             />
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => void saveNewCategory()}
-                                                                disabled={categorySaving}
-                                                                className="p-1 rounded-md text-primary-600 hover:bg-primary-50 disabled:opacity-50"
-                                                                title="צור"
-                                                            >
-                                                                <CheckIcon className="w-4 h-4" />
-                                                            </button>
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => {
-                                                                    setIsCreatingCategory(false);
-                                                                    setNewCategoryName('');
-                                                                }}
-                                                                disabled={categorySaving}
-                                                                className="p-1 rounded-md text-text-muted hover:bg-bg-subtle disabled:opacity-50"
-                                                                title="ביטול"
-                                                            >
-                                                                <XMarkIcon className="w-4 h-4" />
-                                                            </button>
+                                                            <div className="flex items-center justify-end gap-1">
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => void saveNewCategory()}
+                                                                    disabled={categorySaving}
+                                                                    className="p-2 rounded-lg text-primary-600 hover:bg-primary-50 disabled:opacity-50"
+                                                                    title="צור"
+                                                                >
+                                                                    <CheckIcon className="w-5 h-5" />
+                                                                </button>
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={() => {
+                                                                        setIsCreatingCategory(false);
+                                                                        setNewCategoryName('');
+                                                                    }}
+                                                                    disabled={categorySaving}
+                                                                    className="p-2 rounded-lg text-text-muted hover:bg-bg-subtle disabled:opacity-50"
+                                                                    title="ביטול"
+                                                                >
+                                                                    <XMarkIcon className="w-5 h-5" />
+                                                                </button>
+                                                            </div>
                                                         </div>
                                                     ) : (
                                                         <button
@@ -1786,7 +1921,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                                 setEditingCategoryId(null);
                                                                 setCategoryError(null);
                                                             }}
-                                                            className="w-full flex items-center justify-center gap-1.5 text-xs font-bold text-primary-700 hover:bg-primary-50 rounded-md py-1.5 transition-colors"
+                                                            className="w-full flex items-center justify-center gap-1.5 text-sm font-bold text-primary-700 hover:bg-primary-50 rounded-lg py-2.5 transition-colors"
                                                         >
                                                             <PlusIcon className="w-4 h-4" />
                                                             קטגוריה חדשה
@@ -1796,9 +1931,10 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                             </div>
                                         )}
                                         {categoryError && (
-                                            <p className="text-[10px] text-red-600 mt-0.5">{categoryError}</p>
+                                            <p className="text-xs text-red-600 mt-1">{categoryError}</p>
                                         )}
                                     </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                     <div>
                                         <label className={labelClass}>במועד</label>
                                         <div className="relative">
@@ -1812,6 +1948,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                             <ClockIcon className="w-4 h-4 text-text-muted absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                                             <input type="time" name="dueTime" value={formData.dueTime} onChange={handleChange} className={`${fieldClass} pr-8`} />
                                         </div>
+                                    </div>
                                     </div>
                                 </div>
 
@@ -1932,8 +2069,8 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                     name="messageText"
                                     value={formData.messageText}
                                     onChange={handleChange as any}
-                                    rows={5}
-                                    className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition-all shadow-sm resize-none leading-snug"
+                                    rows={8}
+                                    className="w-full min-h-[180px] bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3 transition-all shadow-sm resize-y leading-relaxed"
                                     placeholder="כתוב כאן את תוכן ההודעה או המשימה..."
                                 />
                                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1980,7 +2117,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         </div>
                     </main>
 
-                    <footer className="relative z-10 flex justify-end items-center px-4 py-3 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 gap-2">
+                    <footer className="relative z-10 flex justify-end items-center px-5 py-4 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 gap-2">
                         <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-default hover:bg-bg-hover rounded-lg transition-colors">
                             ביטול
                         </button>

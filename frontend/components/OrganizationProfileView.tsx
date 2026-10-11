@@ -32,6 +32,10 @@ import {
     fetchPendingOrganizationProfile,
     invalidateOrganizationProfileCaches,
 } from '../services/organizationProfileApi';
+import ProfileTabCountBadge from './ProfileTabCountBadge';
+import { useOrganizationProfileTabIndicators } from '../hooks/useProfileTabIndicators';
+import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
+import { confirmLeaveWithoutSave } from '../utils/confirmLeaveWithoutSave';
 
 type Tab = 'details' | 'tasks' | 'contacts' | 'processes' | 'jobs' | 'events' | 'documents' | 'finance' | 'history';
 
@@ -90,6 +94,15 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
         () => Boolean((location.state as { backgroundEnrichment?: boolean } | null)?.backgroundEnrichment),
     );
     const [enrichmentJustFinished, setEnrichmentJustFinished] = useState(false);
+    const [detailsDirty, setDetailsDirty] = useState(false);
+
+    useUnsavedChangesGuard(detailsDirty);
+
+    const trySetActiveTab = (tab: Tab) => {
+        if (tab === activeTab) return;
+        if (detailsDirty && !confirmLeaveWithoutSave()) return;
+        setActiveTab(tab);
+    };
 
     // Single load: org + linked client (deduped — avoids StrictMode double-fetch).
     useEffect(() => {
@@ -214,6 +227,34 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
     const displayName = String(org?.name || client?.displayName || client?.name || '');
     const noopMessageModal = useCallback((_config: MessageModalConfig) => {}, []);
 
+    const tabIndicators = useOrganizationProfileTabIndicators({
+        clientId,
+        organizationId: organizationIdParam || null,
+        organizationTmpId: organizationTmpId || null,
+        enabled: Boolean(clientId),
+        reloadWhen: activeTab,
+    });
+
+    const tabIndicatorCount = useCallback(
+        (id: Tab): number | undefined => {
+            switch (id) {
+                case 'tasks':
+                    return tabIndicators.tasks || undefined;
+                case 'contacts':
+                    return tabIndicators.contacts || undefined;
+                case 'jobs':
+                    return tabIndicators.jobs || undefined;
+                case 'events':
+                    return tabIndicators.events || undefined;
+                case 'documents':
+                    return tabIndicators.documents || undefined;
+                default:
+                    return undefined;
+            }
+        },
+        [tabIndicators],
+    );
+
     const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
         { id: 'details', label: t('client_profile.tab_details'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
         { id: 'tasks', label: 'משימות', icon: <ClipboardDocumentCheckIcon className="w-5 h-5" /> },
@@ -280,6 +321,7 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                                     key={organizationIdParam || organizationTmpId || clientId || 'details'}
                                     client={clientForDetails}
                                     organizationId={organizationIdParam || undefined}
+                                    onDirtyChange={setDetailsDirty}
                                     onClientUpdated={(updated) => {
                                         setClient(updated);
                                         invalidateOrganizationProfileCaches({
@@ -423,7 +465,7 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                     {tabs.map((tab) => (
                         <button
                             key={tab.id}
-                            onClick={() => setActiveTab(tab.id)}
+                            onClick={() => trySetActiveTab(tab.id)}
                             className={`flex items-center gap-2 py-3 px-5 font-semibold transition-colors shrink-0 ${
                                 activeTab === tab.id
                                     ? 'border-b-2 border-primary-500 text-primary-600'
@@ -432,6 +474,7 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                         >
                             {React.cloneElement(tab.icon as React.ReactElement<{ className?: string }>, { className: 'w-5 h-5' })}
                             <span>{tab.label}</span>
+                            <ProfileTabCountBadge count={tabIndicatorCount(tab.id)} />
                         </button>
                     ))}
                 </nav>

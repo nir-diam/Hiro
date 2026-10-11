@@ -36,6 +36,9 @@ const modeBorderClass = (mode: SmartTagMode | undefined, type: SmartTagType): st
     return TYPE_DEFAULT_BORDER[type];
 };
 
+const buildSmartTagKey = (type: SmartTagType, label: string): string =>
+    `${type}::${String(label || '').trim().toLowerCase()}`;
+
 const modeToggleTitle = (mode: SmartTagMode | undefined): string => {
     const current =
         mode === 'mandatory' ? 'חובה' : mode === 'negative' ? 'שלילי' : 'רגיל';
@@ -522,15 +525,16 @@ const renderTagBadge = (
     onTagToggle?: (tagKey: string) => void,
     onTagSearch?: (tag: SmartTagData) => void,
 ) => {
-    const opensDegreeSearch = Boolean(onTagSearch && isAcademicDegreeCatalogTag(tag.label, tag.tagKey));
+    const modeKey = tag.tagKey || buildSmartTagKey(tag.type, tag.label);
+    const opensDegreeSearch = Boolean(onTagSearch && isAcademicDegreeCatalogTag(tag.label, modeKey));
     return (
         <SmartTagBadge
             key={key}
             {...tag}
             onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
             onToggleMode={
-                !opensDegreeSearch && onTagToggle && tag.tagKey
-                    ? () => onTagToggle(tag.tagKey!)
+                !opensDegreeSearch && onTagToggle && modeKey
+                    ? () => onTagToggle(modeKey)
                     : undefined
             }
             onSearch={opensDegreeSearch ? () => onTagSearch!(tag) : undefined}

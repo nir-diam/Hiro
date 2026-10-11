@@ -1,19 +1,6 @@
-import React, { useEffect, useRef, useState } from 'react';
-import {
-  XMarkIcon,
-  DocumentTextIcon,
-  BoldIcon,
-  ItalicIcon,
-  UnderlineIcon,
-  ListBulletIcon,
-  ListNumberIcon,
-  AlignLeftIcon,
-  AlignCenterIcon,
-  AlignRightIcon,
-  UndoIcon,
-  RedoIcon,
-  PhotoIcon,
-} from './Icons';
+import React, { useEffect, useState } from 'react';
+import { XMarkIcon, DocumentTextIcon } from './Icons';
+import ProposalTemplateTinyMceEditor from './ProposalTemplateTinyMceEditor';
 import {
   fetchProposalTemplates,
   type ProposalDto,
@@ -75,7 +62,6 @@ const ProposalModal: React.FC<Props> = ({
   contactId,
   clientName,
 }) => {
-  const editorRef = useRef<HTMLDivElement>(null);
   const [form, setForm] = useState<ProposalModalSavePayload>(emptyForm(clientId, contactId));
   const [templates, setTemplates] = useState<ProposalTemplateDto[]>([]);
   const [saving, setSaving] = useState(false);
@@ -113,23 +99,7 @@ const ProposalModal: React.FC<Props> = ({
       .catch(() => setTemplates([]));
   }, [isOpen, initialData, clientId, contactId]);
 
-  useEffect(() => {
-    if (!isOpen || !editorRef.current) return;
-    editorRef.current.innerHTML = form.contentHtml || '';
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, form.id, form.templateId]);
-
   if (!isOpen) return null;
-
-  const execCmd = (command: string, value?: string) => {
-    document.execCommand(command, false, value);
-    editorRef.current?.focus();
-  };
-
-  const handleInsertImage = () => {
-    const url = window.prompt('הכנס כתובת תמונה (לוגו / חתימה):');
-    if (url) execCmd('insertImage', url);
-  };
 
   const applyTemplate = (templateId: string) => {
     const t = templates.find((x) => x.id === templateId);
@@ -138,9 +108,6 @@ const ProposalModal: React.FC<Props> = ({
       templateId: templateId || null,
       contentHtml: t?.content || prev.contentHtml,
     }));
-    if (editorRef.current && t) {
-      editorRef.current.innerHTML = t.content || '';
-    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -148,8 +115,12 @@ const ProposalModal: React.FC<Props> = ({
     setSaving(true);
     setError(null);
     try {
-      const contentHtml = editorRef.current?.innerHTML || form.contentHtml || '';
-      await onSave({ ...form, contentHtml, clientId, contactId: form.contactId ?? contactId ?? null });
+      await onSave({
+        ...form,
+        contentHtml: form.contentHtml || '',
+        clientId,
+        contactId: form.contactId ?? contactId ?? null,
+      });
       onClose();
     } catch (err) {
       setError((err as Error)?.message || 'שמירה נכשלה');
@@ -315,34 +286,13 @@ const ProposalModal: React.FC<Props> = ({
 
           <section className="space-y-3">
             <h3 className="text-sm font-bold text-primary-700 uppercase tracking-wider">תוכן ההצעה</h3>
-            <div className="border border-border-default rounded-xl overflow-hidden bg-white">
-              <div className="flex items-center gap-1 border-b border-border-default p-2 bg-bg-subtle flex-wrap">
-                <button type="button" onClick={() => execCmd('formatBlock', 'H1')} className="px-2 py-1 hover:bg-bg-hover rounded text-sm font-bold">H1</button>
-                <button type="button" onClick={() => execCmd('formatBlock', 'H2')} className="px-2 py-1 hover:bg-bg-hover rounded text-sm font-bold">H2</button>
-                <div className="w-px h-5 bg-border-default mx-1" />
-                <button type="button" onClick={() => execCmd('bold')} className="p-1.5 hover:bg-bg-hover rounded"><BoldIcon className="w-4 h-4" /></button>
-                <button type="button" onClick={() => execCmd('italic')} className="p-1.5 hover:bg-bg-hover rounded"><ItalicIcon className="w-4 h-4" /></button>
-                <button type="button" onClick={() => execCmd('underline')} className="p-1.5 hover:bg-bg-hover rounded"><UnderlineIcon className="w-4 h-4" /></button>
-                <div className="w-px h-5 bg-border-default mx-1" />
-                <button type="button" onClick={() => execCmd('insertUnorderedList')} className="p-1.5 hover:bg-bg-hover rounded"><ListBulletIcon className="w-4 h-4" /></button>
-                <button type="button" onClick={() => execCmd('insertOrderedList')} className="p-1.5 hover:bg-bg-hover rounded"><ListNumberIcon className="w-4 h-4" /></button>
-                <div className="w-px h-5 bg-border-default mx-1" />
-                <button type="button" onClick={() => execCmd('justifyRight')} className="p-1.5 hover:bg-bg-hover rounded"><AlignRightIcon className="w-4 h-4" /></button>
-                <button type="button" onClick={() => execCmd('justifyCenter')} className="p-1.5 hover:bg-bg-hover rounded"><AlignCenterIcon className="w-4 h-4" /></button>
-                <button type="button" onClick={() => execCmd('justifyLeft')} className="p-1.5 hover:bg-bg-hover rounded"><AlignLeftIcon className="w-4 h-4" /></button>
-                <div className="w-px h-5 bg-border-default mx-1" />
-                <button type="button" onClick={handleInsertImage} className="p-1.5 hover:bg-bg-hover rounded" title="הוסף תמונה"><PhotoIcon className="w-4 h-4" /></button>
-                <div className="w-px h-5 bg-border-default mx-1" />
-                <button type="button" onClick={() => execCmd('undo')} className="p-1.5 hover:bg-bg-hover rounded"><UndoIcon className="w-4 h-4" /></button>
-                <button type="button" onClick={() => execCmd('redo')} className="p-1.5 hover:bg-bg-hover rounded"><RedoIcon className="w-4 h-4" /></button>
-              </div>
-              <div
-                ref={editorRef}
-                contentEditable
-                dir="rtl"
-                className="w-full p-4 outline-none text-sm leading-relaxed min-h-[220px] max-h-[360px] overflow-y-auto"
-              />
-            </div>
+            <ProposalTemplateTinyMceEditor
+              editorKey={`proposal-${form.id || 'new'}-${form.templateId || 'none'}`}
+              value={form.contentHtml}
+              onChange={(contentHtml) => setForm((p) => ({ ...p, contentHtml }))}
+              minHeight={700}
+              showMenubar={false}
+            />
           </section>
 
           <div>

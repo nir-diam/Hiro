@@ -797,6 +797,9 @@ const syncKanbanFromEventStageChange = async (
   if (!patchRes.ok) throw new Error('עדכון שלב ארגון נכשל');
 };
 
+/** Default due-date buckets shown on first load (excludes completed/cancelled). */
+const DEFAULT_JOURNAL_SELECTED_STATUSES = ['עתידי', 'להיום', 'באיחור'] as const;
+
 const getDynamicStatus = (status: string, dueDateStr: string | null) => {
   if (status === 'הושלם') return { label: 'הושלם', color: 'bg-green-100 text-green-700 border border-green-200' };
   if (status === 'בוטל') return { label: 'בוטל', color: 'bg-gray-100 text-gray-700 border border-gray-200' };
@@ -1786,8 +1789,6 @@ type Props = {
   scopeJobCompany?: string | null;
   /** Hide the top filter bar (e.g. on contact profile). */
   hideFilters?: boolean;
-  /** Always show description/history — no collapsed state (contact profile). */
-  alwaysShowDetails?: boolean;
   /** Fit inside CandidateProcessManagementModal shell. */
   embeddedInModal?: boolean;
   defaultActionPipelineId?: string | null;
@@ -1804,6 +1805,9 @@ type Props = {
   crossClientJournal?: boolean;
   onEventsChanged?: () => void;
   openMessageModal?: (config: MessageModalConfig) => void;
+  /** When nested inside another drawer/modal, stack entity drawers above the parent overlay. */
+  entityDrawerOverlayZIndexClass?: string;
+  onDirtyChange?: (dirty: boolean) => void;
 };
 
 const ClientsEventsJournalTab: React.FC<Props> = ({
@@ -1825,7 +1829,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   scopeJobTitle = null,
   scopeJobCompany = null,
   hideFilters = false,
-  alwaysShowDetails = false,
   embeddedInModal = false,
   defaultActionPipelineId = null,
   defaultProcessStageId = null,
@@ -1837,6 +1840,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   crossClientJournal = false,
   onEventsChanged,
   openMessageModal = (_config: MessageModalConfig) => {},
+  entityDrawerOverlayZIndexClass,
+  onDirtyChange,
 }) => {
   const { user } = useAuth();
   const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
@@ -2190,9 +2195,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     () => new Set(restoredJournalFilters?.selectedStageOutcomeKeys ?? []),
   );
   const [actionPipelineId, setActionPipelineId] = useState<string | null>(null);
-  const [selectedStatuses, setSelectedStatuses] = useState<Set<string>>(
-    () => new Set(restoredJournalFilters?.selectedStatuses ?? []),
-  );
+  const [selectedStatuses, setSelectedStatuses] = useState<Set<string>>(() => {
+    if (restoredJournalFilters) {
+      return new Set(restoredJournalFilters.selectedStatuses);
+    }
+    return new Set(DEFAULT_JOURNAL_SELECTED_STATUSES);
+  });
   const [selectedActiveStates, setSelectedActiveStates] = useState<Set<string>>(() => {
     const restored = restoredJournalFilters?.selectedActiveStates ?? [];
     return new Set(restored.length > 0 ? restored : ['פעיל']);
@@ -2360,6 +2368,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     { mode: 'outcome'; outcome: ActionOutcome } | { mode: 'stage' } | null
   >(null);
   const [pendingOutcomeDraft, setPendingOutcomeDraft] = useState<PendingOutcomeDraft | null>(null);
+  const journalHasUnsavedEdits = Boolean(
+    pendingOutcomeDraft || editingStatusUpdateKey || editingDescriptionId,
+  );
+  useEffect(() => {
+    onDirtyChange?.(journalHasUnsavedEdits);
+    return () => {
+      onDirtyChange?.(false);
+    };
+  }, [journalHasUnsavedEdits, onDirtyChange]);
   const [committingOutcome, setCommittingOutcome] = useState(false);
   const [isSavingDescription, setIsSavingDescription] = useState(false);
   const [savingStatusUpdateKey, setSavingStatusUpdateKey] = useState<string | null>(null);
@@ -2399,7 +2416,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     }
   }, []);
 
-  const drawerOverlayZ = embeddedInModal ? 'z-[80]' : 'z-[60]';
+  const drawerOverlayZ =
+    entityDrawerOverlayZIndexClass ?? (embeddedInModal ? 'z-[80]' : 'z-[60]');
 
   const openCandidateDrawer = useCallback((candidateId: string, name: string) => {
     setCandidateDrawer(buildCandidateDrawerStub(candidateId, name));
@@ -3283,6 +3301,16 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   );
   const statusOptions = ['עתידי', 'להיום', 'באיחור', 'הושלם', 'בוטל'];
   const activeStateOptions = ['פעיל', 'לא פעיל'];
+  const defaultSelectedStatuses = useMemo(
+    () => new Set<string>(DEFAULT_JOURNAL_SELECTED_STATUSES),
+    [],
+  );
+  const isDefaultStatusFilter = useCallback(
+    (statuses: Set<string>) =>
+      statuses.size === defaultSelectedStatuses.size &&
+      [...defaultSelectedStatuses].every((status) => statuses.has(status)),
+    [defaultSelectedStatuses],
+  );
   const defaultActiveStates = useMemo(() => new Set(['פעיל']), []);
   const isDefaultActiveStateFilter = useCallback(
     (states: Set<string>) =>
@@ -4954,7 +4982,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     selectedPipelineIds.size > 0 ||
     selectedSystemEventIds.size > 0 ||
     selectedStageOutcomeKeys.size > 0 ||
-    selectedStatuses.size > 0 ||
+    !isDefaultStatusFilter(selectedStatuses) ||
     !isDefaultActiveStateFilter(selectedActiveStates) ||
     selectedCompanies.size > 0 ||
     selectedEditors.size > 0 ||
@@ -4971,7 +4999,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     if (selectedCompanies.size > 0) count += 1;
     if (selectedEditors.size > 0) count += 1;
     if (selectedHandlingCoordinators.size > 0) count += 1;
-    if (selectedStatuses.size > 0) count += 1;
+    if (!isDefaultStatusFilter(selectedStatuses)) count += 1;
     if (!isDefaultActiveStateFilter(selectedActiveStates)) count += 1;
     if (dateFrom || dateTo) count += 1;
     if (entitySearchQuery.trim()) count += 1;
@@ -4985,6 +5013,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     selectedHandlingCoordinators,
     selectedStatuses,
     selectedActiveStates,
+    isDefaultStatusFilter,
     isDefaultActiveStateFilter,
     dateFrom,
     dateTo,
@@ -5006,7 +5035,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setSelectedPipelineIds(new Set());
     setSelectedSystemEventIds(new Set());
     setSelectedStageOutcomeKeys(new Set());
-    setSelectedStatuses(new Set());
+    setSelectedStatuses(new Set(DEFAULT_JOURNAL_SELECTED_STATUSES));
     setSelectedActiveStates(new Set(['פעיל']));
     setSelectedCompanies(new Set());
     setSelectedEditors(new Set());
@@ -5078,13 +5107,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         onRemove: () => removeFromSet(setSelectedSystemEventIds, sysKey),
       });
     }
-    for (const status of selectedStatuses) {
-      chips.push({
-        id: `status:${status}`,
-        group: 'סטטוס',
-        label: status,
-        onRemove: () => removeFromSet(setSelectedStatuses, status),
-      });
+    if (!isDefaultStatusFilter(selectedStatuses)) {
+      for (const status of selectedStatuses) {
+        chips.push({
+          id: `status:${status}`,
+          group: 'סטטוס',
+          label: status,
+          onRemove: () => removeFromSet(setSelectedStatuses, status),
+        });
+      }
     }
     if (!isDefaultActiveStateFilter(selectedActiveStates)) {
       for (const state of selectedActiveStates) {
@@ -5153,6 +5184,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     systemEventGroups,
     selectedStatuses,
     selectedActiveStates,
+    isDefaultStatusFilter,
     isDefaultActiveStateFilter,
     selectedCompanies,
     selectedEditors,
@@ -5571,7 +5603,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               className={filterTriggerClass}
             >
               <span className="truncate">
-                {selectedStatuses.size === 0 ? 'הכל' : `${selectedStatuses.size} סטטוסים`}
+                {selectedStatuses.size === 0
+                  ? 'הכל'
+                  : isDefaultStatusFilter(selectedStatuses)
+                    ? 'עתידי · להיום · באיחור'
+                    : `${selectedStatuses.size} סטטוסים`}
               </span>
               <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
             </button>
@@ -5740,7 +5776,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                   const isExiting = exitingEventIds.has(eventKey);
                   const rescheduleHighlight = rescheduleHighlights[eventKey];
                   const isSelected = expandedEventId === event.id;
-                  const isExpanded = alwaysShowDetails || isSelected;
+                  const isExpanded = isSelected;
                   const isInactive = displayEvent.isActive === false;
                   const hasPendingOutcomeDraft =
                     pendingOutcomeDraft?.eventKey === eventKey;
@@ -5782,9 +5818,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                     >
                     <div
                       id={`journal-event-${event.id}`}
-                      className={`border-2 rounded-2xl p-4 transition-all duration-300 relative ${
-                        alwaysShowDetails ? 'cursor-default' : 'cursor-pointer'
-                      } ${
+                      className={`border-2 rounded-2xl p-4 transition-all duration-300 relative cursor-pointer ${
                         isInactive
                           ? 'border-gray-200 bg-gray-50/80 opacity-60 hover:opacity-75'
                           : isSelected
@@ -5792,10 +5826,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                             : 'border-border-default hover:border-primary-300 hover:shadow-sm bg-white'
                       } ${rescheduleHighlight ? 'ring-2 ring-primary-300 shadow-lg shadow-primary-100/80' : ''}`}
                       onClick={() => {
-                        if (alwaysShowDetails) {
-                          setExpandedEventId(isSelected ? null : event.id);
-                          return;
-                        }
                         setExpandedEventId(isSelected ? null : event.id);
                       }}
                     >
@@ -5809,16 +5839,20 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                       ) : null}
                       <div className={`flex justify-between items-start mb-3 ${rescheduleHighlight ? 'pt-7' : ''}`}>
                         <div className="flex items-start gap-3">
-                          {!alwaysShowDetails ? (
                           <button
                             type="button"
-                            className={`mt-0.5 w-7 h-7 rounded-full flex items-center justify-center transition-colors ${
+                            aria-expanded={isExpanded}
+                            aria-label={isExpanded ? 'צמצם פרטי אירוע' : 'הרחב פרטי אירוע'}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setExpandedEventId(isSelected ? null : event.id);
+                            }}
+                            className={`mt-0.5 w-7 h-7 rounded-full flex items-center justify-center transition-colors shrink-0 ${
                               isExpanded ? 'bg-primary-100 text-primary-700' : 'bg-gray-100 text-gray-500'
                             }`}
                           >
                             {isExpanded ? <ChevronUpIcon className="w-5 h-5" /> : <ChevronDownIcon className="w-5 h-5" />}
                           </button>
-                          ) : null}
                           <div className="flex-1 min-w-0">
                             {!isInactive && editingDescriptionId === event.id ? (
                               <input
@@ -6083,13 +6117,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                       </div>
 
                       <div
-                        className={
-                          alwaysShowDetails
-                            ? 'mt-4'
-                            : `overflow-hidden transition-all duration-300 ${
-                                isExpanded ? 'max-h-[3000px] opacity-100 mt-4' : 'max-h-0 opacity-0'
-                              }`
-                        }
+                        className={`overflow-hidden transition-all duration-300 ${
+                          isExpanded ? 'max-h-[3000px] opacity-100 mt-4' : 'max-h-0 opacity-0'
+                        }`}
                       >
                         <div className="bg-white border border-border-default rounded-xl p-4 mb-4 shadow-sm group/desc relative">
                           {!isInactive && editingDescriptionId === event.id ? (

@@ -61,6 +61,7 @@ app.get('/jobs/:clientHint/public/:slug', jobPublicationController.getSharePrevi
 
 app.use('/api/agent/auth', require('./routes/agentAuthRoutes'));
 app.use('/api/agent', require('./routes/agentRoutes'));
+app.use('/api/public/v1', require('./routes/publicJobsApiRoutes'));
 
 app.use('/api', require('./middleware/rejectAgentTokenMiddleware'));
 

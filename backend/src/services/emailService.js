@@ -167,7 +167,21 @@ const resolveSendPlan = (ctx = {}) => {
   return { type: 'smtp', ...pickLegacyThenHiroFallback() };
 };
 
-async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail, attachments }) {
+const normalizeMailRecipientList = (value) => {
+  if (value == null || value === '') return [];
+  if (Array.isArray(value)) {
+    return value.map((x) => String(x || '').trim()).filter(Boolean);
+  }
+  if (typeof value === 'string') {
+    return value
+      .split(/[,;\n]/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
+async function sendWithResend(plan, { toEmail, bcc, subject, text, html, fromEmail, attachments }) {
   const resolvedFrom = fromEmail || plan.defaultFrom;
   if (!isValidEmail(resolvedFrom)) {
     throw new Error('From address must be set to a valid email (verified domain in Resend)');
@@ -200,10 +214,14 @@ async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail, a
     });
   }
 
+  const toList = normalizeMailRecipientList(toEmail);
+  const toField = toList.length <= 1 ? (toList[0] || String(toEmail || '').trim()) : toList;
+  const bccList = normalizeMailRecipientList(bcc);
   const resend = new Resend(plan.apiKey);
   const { data, error } = await resend.emails.send({
     from: resolvedFrom,
-    to: toEmail,
+    to: toField,
+    ...(bccList.length ? { bcc: bccList.length === 1 ? bccList[0] : bccList } : {}),
     subject,
     ...body,
   });
@@ -217,6 +235,7 @@ async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail, a
 
 const sendEmail = async ({
   toEmail,
+  bcc,
   subject,
   text,
   html,
@@ -243,6 +262,7 @@ const sendEmail = async ({
   if (plan.type === 'resend') {
     return sendWithResend(plan, {
       toEmail,
+      bcc,
       subject,
       text,
       html,
@@ -268,12 +288,15 @@ const sendEmail = async ({
     auth: { user, pass },
   });
 
+  const toList = normalizeMailRecipientList(toEmail);
+  const bccList = normalizeMailRecipientList(bcc);
   const mail = {
     from: resolvedFrom,
-    to: toEmail,
+    to: toList.length <= 1 ? (toList[0] || toEmail) : toList,
     subject,
     text: plainForSmtp,
     html,
+    ...(bccList.length ? { bcc: bccList.length === 1 ? bccList[0] : bccList } : {}),
   };
 
   if (Array.isArray(attachments) && attachments.length) {

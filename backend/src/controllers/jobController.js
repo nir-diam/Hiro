@@ -276,19 +276,7 @@ const get = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    let postingCode;
-    let exists = true;
-    const maxAttempts = 50;
-    let attempts = 0;
-    while (exists && attempts < maxAttempts) {
-      postingCode = String(Math.floor(1 + Math.random() * 999999));
-      const existing = await Job.findOne({ where: { postingCode } });
-      exists = !!existing;
-      attempts++;
-    }
-    if (exists) {
-      return res.status(500).json({ message: 'Could not generate unique posting code' });
-    }
+    const postingCode = await jobService.allocateNextPostingCode();
 
     let inboxPrefix = 'hiro';
     const user = req.dbUser;
@@ -931,11 +919,64 @@ const listBoardPublications = async (req, res) => {
           src->>'publishedAt'                         AS "publishedAt",
           src->>'unpublishedAt'                       AS "unpublishedAt",
           COALESCE(
-            (SELECT COUNT(*)::int
-             FROM candidates c
-             WHERE c."recruitmentSourceId"::text = src->>'id'),
+            (SELECT COUNT(DISTINCT jc."candidateId")::int
+             FROM job_candidates jc
+             WHERE jc."jobId" = j.id),
             0
           )                                           AS "candidatesCount",
+          COALESCE(
+            (
+              SELECT COUNT(DISTINCT jc."candidateId")::int
+              FROM job_candidates jc
+              WHERE jc."jobId" = j.id
+                AND (
+                  (
+                    jc.source LIKE 'public_apply:%'
+                    AND (
+                      jc.source = 'public_apply:' || COALESCE(NULLIF(TRIM(src->>'id'), ''), '')
+                      OR REPLACE(jc.source, 'public_apply:', '') = TRIM(COALESCE(src->>'id', ''))
+                      OR REPLACE(jc.source, 'public_apply:', '') = regexp_replace(
+                        lower(COALESCE(src->>'name', '')),
+                        '\s+',
+                        '_',
+                        'g'
+                      )
+                      OR EXISTS (
+                        SELECT 1
+                        FROM job_publications jp
+                        CROSS JOIN LATERAL jsonb_array_elements(
+                          COALESCE(jp."trackingLinks", '[]'::jsonb)
+                        ) AS tl
+                        WHERE jp."jobId" = j.id
+                          AND (
+                            tl->>'id' = src->>'id'
+                            OR tl->>'srcKey' = src->>'id'
+                            OR lower(COALESCE(tl->>'srcKey', '')) = lower(
+                              regexp_replace(COALESCE(src->>'name', ''), '\s+', '_', 'g')
+                            )
+                          )
+                          AND jc.source = 'public_apply:' || COALESCE(
+                            NULLIF(TRIM(tl->>'srcKey'), ''),
+                            NULLIF(TRIM(tl->>'id'), ''),
+                            'direct'
+                          )
+                      )
+                    )
+                  )
+                  OR (
+                    NULLIF(TRIM(src->>'id'), '') IS NOT NULL
+                    AND EXISTS (
+                      SELECT 1
+                      FROM candidates c
+                      WHERE c.id = jc."candidateId"
+                        AND c."isDeleted" = false
+                        AND c."recruitmentSourceId"::text = TRIM(src->>'id')
+                    )
+                  )
+                )
+            ),
+            0
+          )                                           AS "referralsCount",
           COALESCE(
             (
               SELECT GREATEST(

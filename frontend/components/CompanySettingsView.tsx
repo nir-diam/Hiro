@@ -200,8 +200,16 @@ const ClientBrandingSection: React.FC<{
     clientsListLoading = false,
 }) => {
     const { t } = useLanguage();
-    const [branding, setBranding] = useState<ClientBranding>({ logoUrl: null, primaryColor: '#1e293b' });
-    const [savedBranding, setSavedBranding] = useState<ClientBranding>({ logoUrl: null, primaryColor: '#1e293b' });
+    const [branding, setBranding] = useState<ClientBranding>({
+        logoUrl: null,
+        primaryColor: '#1e293b',
+        jobHeroBrandSource: 'company',
+    });
+    const [savedBranding, setSavedBranding] = useState<ClientBranding>({
+        logoUrl: null,
+        primaryColor: '#1e293b',
+        jobHeroBrandSource: 'company',
+    });
     const [brandingLoading, setBrandingLoading] = useState(false);
     const [brandingLoadError, setBrandingLoadError] = useState<string | null>(null);
     const [brandingSaveError, setBrandingSaveError] = useState<string | null>(null);
@@ -343,7 +351,8 @@ const ClientBrandingSection: React.FC<{
             <div>
                 <h3 className="text-lg font-bold text-text-default">לוגו וצבע מותג</h3>
                 <p className="text-sm text-text-muted mt-1">
-                    נשמר ישירות ברשומת הלקוח (logoUrl, primaryColor) — משמש בדפי נחיתה, מודעות Nano Banana ופרסום משרות.
+                    צבע ולוגו נשמרים ברשומת הלקוח (logoUrl, primaryColor) ומשמשים בדפי נחיתה, פרסום משרות ותמונות Nano Banana.
+                    ברירת המחדל למקור המותג בפרסום נקבעת כאן (חברה / לקוח / בחירה בכל משרה).
                 </p>
                 {clientId && (
                     <p className="text-xs text-text-subtle mt-2 font-mono dir-ltr text-right">
@@ -445,7 +454,7 @@ const ClientBrandingSection: React.FC<{
                                     }
                                     className="text-primary-600"
                                 />
-                                <span className="text-sm text-text-default">הגדרות החברה (סוכנות)</span>
+                                <span className="text-sm text-text-default">חברה (סוכנות)</span>
                             </label>
                             <label className="flex items-center gap-2 cursor-pointer">
                                 <input
@@ -457,10 +466,22 @@ const ClientBrandingSection: React.FC<{
                                     }
                                     className="text-primary-600"
                                 />
-                                <span className="text-sm text-text-default">הלקוח של המשרה (מעסיק)</span>
+                                <span className="text-sm text-text-default">לקוח (מעסיק במשרה)</span>
+                            </label>
+                            <label className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                    type="radio"
+                                    name="jobHeroBrandSource"
+                                    checked={branding.jobHeroBrandSource === 'choice'}
+                                    onChange={() =>
+                                        setBranding((prev) => ({ ...prev, jobHeroBrandSource: 'choice' as JobHeroBrandSource }))
+                                    }
+                                    className="text-primary-600"
+                                />
+                                <span className="text-sm text-text-default">בחירה — יוגדר בכל משרה בעמוד הפרסום</span>
                             </label>
                             <p className="text-xs text-text-muted">
-                                ברירת המחדל לפרסום משרה חדשה. ניתן לשנות למשרה בודדת בעמוד הפרסום.
+                                «חברה» משתמש בצבע מותג ראשי למעלה (למשל בורדו במימד אנושי). «לקוח» — מותג המעסיק; אם חסר — נופל לחברה.
                             </p>
                         </div>
                     </div>

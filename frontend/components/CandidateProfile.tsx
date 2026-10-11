@@ -444,7 +444,7 @@ const withTagModeMeta = (
   entry: SmartTagData,
   tagModes: Record<string, SmartTagMode>,
 ): SmartTagData => {
-  const tagKey = entry.tagKey || buildSmartTagKey(entry.type, entry.label);
+  const tagKey = buildSmartTagKey(entry.type, entry.label);
   return {
     ...entry,
     tagKey,
@@ -1131,7 +1131,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       const entry: SmartTagData = {
         label,
         type,
-        tagKey: detail.tagKey?.trim() || undefined,
+        mode: normalizeTagMode(detail.mode),
         isVerified: Boolean(detail.isCurrent),
         isAiSuggested: false,
         customTooltip: getTagTooltip(label),
@@ -1153,7 +1153,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       const entry: SmartTagData = {
         label,
         type,
-        tagKey: detail?.tagKey?.trim() || undefined,
+        mode: detail ? normalizeTagMode(detail.mode) : undefined,
         isVerified: Boolean(detail?.isCurrent),
         isAiSuggested: false,
         customTooltip: getTagTooltip(tag),
@@ -1726,9 +1726,14 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     setDuplicateSaveConfirmOpen(false);
   }, [candidateData.backendId, candidateData.id]);
 
+  const tagDetailsModeSignature = useMemo(
+    () => JSON.stringify(buildTagModesFromDetails(candidateData.tagDetails || [])),
+    [candidateData.tagDetails],
+  );
+
   useEffect(() => {
     setTagModes(buildTagModesFromDetails(candidateData.tagDetails || []));
-  }, [candidateData.id, candidateData.backendId, candidateData.tagDetails]);
+  }, [candidateData.id, candidateData.backendId, tagDetailsModeSignature]);
 
   const handleProfileSelect = (profile: MultiProfileOption) => {
     setSwitcherOpen(false);

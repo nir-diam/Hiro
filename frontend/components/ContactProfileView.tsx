@@ -22,7 +22,7 @@ import ContactHistoryTab from './ContactHistoryTab';
 import ContactEventsTab from './ContactEventsTab';
 import ClientContactProcessesTab from './ClientContactProcessesTab';
 import ClientJobsTab from './ClientJobsTab';
-import ClientTasksTab from './ClientTasksTab';
+import NotificationCenter from './NotificationCenter';
 import ContactFinanceTab from './ContactFinanceTab';
 import ContactEmailsTab from './ContactEmailsTab';
 import ContactSMSTab from './ContactSMSTab';
@@ -43,6 +43,10 @@ import {
 } from '../utils/contactFormModel';
 import { collectContactEmailAddresses } from '../utils/contactEmailMatch';
 import { useBreadcrumbContext } from '../context/BreadcrumbContext';
+import ProfileTabCountBadge from './ProfileTabCountBadge';
+import { useContactProfileTabIndicators } from '../hooks/useProfileTabIndicators';
+import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
+import { confirmLeaveWithoutSave } from '../utils/confirmLeaveWithoutSave';
 
 type MainTab =
   | 'details'
@@ -145,9 +149,16 @@ const SocialButton: React.FC<{
 
 interface ContactProfileViewProps {
   openMessageModal: (config: MessageModalConfig) => void;
+  openSummaryDrawer: (
+    candidate: import('./CandidatesListView').Candidate | number,
+    options?: import('../hooks/useUIState').SummaryDrawerOptions,
+  ) => void;
 }
 
-const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModal }) => {
+const ContactProfileView: React.FC<ContactProfileViewProps> = ({
+  openMessageModal,
+  openSummaryDrawer,
+}) => {
   const { clientId, contactId } = useParams<{ clientId: string; contactId: string }>();
   const [searchParams] = useSearchParams();
   const tabFromUrlRaw = searchParams.get('tab');
@@ -246,10 +257,36 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
     };
   }, [apiBase, clientId, contactId]);
 
+  const tabIndicators = useContactProfileTabIndicators({
+    clientId: clientId || null,
+    contactId: contactId || null,
+    contactName: contact?.name ? String(contact.name) : null,
+    organizationId: contact?.organizationId ? String(contact.organizationId) : null,
+    organizationTmpId: contact ? contactOrganizationTmpId(contact) : null,
+    enabled: Boolean(clientId && contactId && contact),
+    reloadWhen: activeTab,
+  });
+
+  const mainTabIndicatorCount = (id: MainTab): number | undefined => {
+    switch (id) {
+      case 'tasks':
+        return tabIndicators.tasks || undefined;
+      case 'events':
+        return tabIndicators.events || undefined;
+      case 'proposals':
+        return tabIndicators.proposals || undefined;
+      case 'jobs':
+        return tabIndicators.jobs || undefined;
+      default:
+        return undefined;
+    }
+  };
+
   const [formData, setFormData] = useState<ContactFormState | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [orgRecipientOptions, setOrgRecipientOptions] = useState<MessageRecipientOption[]>([]);
+  const [eventsJournalDirty, setEventsJournalDirty] = useState(false);
 
   useEffect(() => {
     if (contact) setFormData(contactFromApi(contact));
@@ -291,6 +328,29 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
       mainContactEmail: contact.mainContactEmail,
     });
   }, [formData, contact]);
+
+  const contactSavedKey = useMemo(() => {
+    if (!contact) return '';
+    return JSON.stringify(contactToApiPayload(contactFromApi(contact)));
+  }, [contact]);
+
+  const isContactFormDirty = useMemo(() => {
+    if (!formData || !contactSavedKey) return false;
+    return JSON.stringify(contactToApiPayload(formData)) !== contactSavedKey;
+  }, [formData, contactSavedKey]);
+
+  const hasUnsavedLeaveBlock = isContactFormDirty || eventsJournalDirty;
+
+  useUnsavedChangesGuard(hasUnsavedLeaveBlock);
+
+  const trySetMainTab = (tab: MainTab) => {
+    if (tab === activeTab) return;
+    if (hasUnsavedLeaveBlock && !confirmLeaveWithoutSave()) return;
+    setActiveTab(tab);
+    if (tab === 'communication') {
+      setCommunicationTab('personal_emails');
+    }
+  };
 
   if (isLoading) return <div className="text-center p-8">טוען...</div>;
   if (error || !contact) return <div className="text-center p-8">{error || 'איש קשר לא נמצא.'}</div>;
@@ -399,10 +459,13 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
         ) : null;
       case 'tasks':
         return (
-          <ClientTasksTab
-            clientId={clientId!}
-            organizationId={contact.organizationId ? String(contact.organizationId) : undefined}
-            contactName={contact.name}
+          <NotificationCenter
+            variant="embedded"
+            scopeClientId={clientId}
+            scopeContactId={contactId}
+            scopeContactName={contact.name}
+            scopeContactEmails={contactEmailList}
+            onOpenCandidateSummary={openSummaryDrawer}
           />
         );
       case 'processes':
@@ -442,6 +505,7 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
             defaultActionPipelineId={eventsPipelineId}
             defaultProcessStageId={eventsProcessStageId}
             openMessageModal={openMessageModal}
+            onJournalDirtyChange={setEventsJournalDirty}
           />
         );
       case 'finance':
@@ -566,12 +630,7 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
             <button
               key={tab.id}
               type="button"
-              onClick={() => {
-                setActiveTab(tab.id);
-                if (tab.id === 'communication') {
-                  setCommunicationTab('personal_emails');
-                }
-              }}
+              onClick={() => trySetMainTab(tab.id)}
               className={`flex items-center gap-2 py-3 px-5 font-semibold transition-colors shrink-0 ${
                 activeTab === tab.id
                   ? 'border-b-2 border-primary-500 text-primary-600'
@@ -582,6 +641,7 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
                 className: 'w-5 h-5',
               })}
               <span>{tab.label}</span>
+              <ProfileTabCountBadge count={mainTabIndicatorCount(tab.id)} />
             </button>
           ))}
         </nav>

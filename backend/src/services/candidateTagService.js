@@ -877,9 +877,18 @@ const normalizeJobSkillEntry = (skill) => {
       : skill.relevance_score != null && skill.relevance_score !== ''
         ? Number(skill.relevance_score)
         : null;
+  const explicitCatalogId = skill.tagId || skill.tag_id;
+  const catalogTagId =
+    explicitCatalogId != null && String(explicitCatalogId).trim()
+      ? String(explicitCatalogId).trim()
+      : isPersistedTagDetailId(skill.id)
+        ? String(skill.id).trim()
+        : null;
+
   return {
     name,
     tagKey,
+    catalogTagId,
     raw_type: skill.tagType || skill.tag_type || skill.type || 'skill',
     mode,
     tag_reason: typeof skill.tag_reason === 'string' ? skill.tag_reason.trim() : null,
@@ -889,6 +898,26 @@ const normalizeJobSkillEntry = (skill) => {
     raw_type_reason:
       skill.aiMode != null && String(skill.aiMode).trim() ? String(skill.aiMode).trim() : null,
   };
+};
+
+const resolveCatalogTagForJobSkill = async (payload) => {
+  const catalogId = payload?.catalogTagId ? String(payload.catalogTagId).trim() : '';
+  if (catalogId && isPersistedTagDetailId(catalogId)) {
+    const byId = await Tag.findByPk(catalogId);
+    const status = String(byId?.status || '').toLowerCase();
+    if (byId && status !== 'deprecated') {
+      return { tag: byId, created: false, payload };
+    }
+  }
+
+  const ensured = await ensureTagRecord(payload.tagKey, {
+    displayNameHe: payload.name,
+    displayNameEn: payload.name,
+    type: normalizeJobTagType(payload.raw_type),
+    source: 'job',
+  });
+  if (!ensured?.tag) return null;
+  return { tag: ensured.tag, created: ensured.created, payload };
 };
 
 const mapSystemTagsToJobSkills = (rows = []) =>
@@ -1064,17 +1093,7 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
   await SystemTag.destroy({ where: jobTagTypeWhere({ entity_id: jobId }) });
   if (!payloads.length) return [];
 
-  const resolved = await Promise.all(
-    payloads.map(async (payload) => {
-      const { tag, created } = await ensureTagRecord(payload.tagKey, {
-        displayNameHe: payload.name,
-        displayNameEn: payload.name,
-        type: normalizeJobTagType(payload.raw_type),
-        source: 'job',
-      });
-      return tag ? { tag, created, payload } : null;
-    }),
-  );
+  const resolved = await Promise.all(payloads.map((payload) => resolveCatalogTagForJobSkill(payload)));
 
   const byTagId = new Map();
   resolved.filter(Boolean).forEach((r) => {
@@ -1085,12 +1104,16 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
     Array.from(byTagId.values()).map(async ({ tag, created, payload }) => {
       const score = tagScoringEngine.scoreTag(payload);
       const isActive = systemTagIsActiveForCatalogTag(tag, { created });
+      const rawType =
+        normalizeJobTagType(tag.type) ||
+        normalizeJobTagType(payload.raw_type) ||
+        'skill';
       await SystemTag.create({
         type: SYSTEM_TAG_TYPE_JOB,
         entity_id: jobId,
         tag_id: tag.id,
         mode: payload.mode,
-        raw_type: payload.raw_type,
+        raw_type: rawType,
         tag_reason: payload.tag_reason,
         quote: payload.quote,
         confidence_score: payload.confidence_score,
@@ -1147,13 +1170,15 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
   const resolved = await runInBatches(
     payloads.map((payload) => async () => {
       const resolvedType = resolveIncomingTagType(payload);
-      const { tag, created } = await ensureTagRecord(payload.tagKey, {
+      const ensured = await ensureTagRecord(payload.tagKey, {
         displayNameHe: payload.name,
         type: resolvedType,
         contextSample: payload.quote || payload.context || payload.tag_reason || '',
         clientId,
       });
-      return tag ? { tag, created, payload, resolvedType } : null;
+      if (!ensured?.tag) return null;
+      const { tag, created } = ensured;
+      return { tag, created, payload, resolvedType };
     }),
     4, // max 4 concurrent tag lookups / creates
   );

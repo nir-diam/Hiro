@@ -3,6 +3,7 @@ import ClientsEventsJournalTab from './ClientsEventsJournalTab';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import type { MessageModalConfig } from '../hooks/useUIState';
+import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
 
 type ClientOption = { id: string; name: string; organizationId?: string | null };
 
@@ -26,6 +27,9 @@ const ClientEventsManagementView: React.FC<Props> = ({ openMessageModal }) => {
   const [linkedOrganizations, setLinkedOrganizations] = useState<ClientOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [journalDirty, setJournalDirty] = useState(false);
+
+  useUnsavedChangesGuard(journalDirty);
 
   useEffect(() => {
     if (!authReady || !apiBase || tenantClientId) return;
@@ -146,6 +150,7 @@ const ClientEventsManagementView: React.FC<Props> = ({ openMessageModal }) => {
           defaultClientId={defaultClientId}
           crossClientJournal={isPlatformAdmin}
           openMessageModal={openMessageModal}
+          onDirtyChange={setJournalDirty}
         />
       )}
     </div>

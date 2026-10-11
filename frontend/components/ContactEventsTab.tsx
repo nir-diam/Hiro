@@ -16,6 +16,7 @@ type Props = {
   defaultActionPipelineId?: string | null;
   defaultProcessStageId?: string | null;
   openMessageModal?: (config: MessageModalConfig) => void;
+  onJournalDirtyChange?: (dirty: boolean) => void;
 };
 
 const ContactEventsTab: React.FC<Props> = ({
@@ -32,6 +33,7 @@ const ContactEventsTab: React.FC<Props> = ({
   defaultActionPipelineId = null,
   defaultProcessStageId = null,
   openMessageModal,
+  onJournalDirtyChange,
 }) => {
   const scopedOrganizationName =
     (organizationName && String(organizationName).trim())
@@ -66,13 +68,13 @@ const ContactEventsTab: React.FC<Props> = ({
       scopeContactId={contactId}
       scopeContactName={contactName}
       scopeContactEmails={scopeContactEmails}
-      alwaysShowDetails
       contactProcessPipelineId={contactProcessPipelineId}
       contactProcessStageId={contactProcessStageId}
       defaultActionPipelineId={defaultActionPipelineId}
       defaultProcessStageId={defaultProcessStageId}
       autoSelectFirstEvent={Boolean(defaultActionPipelineId)}
       openMessageModal={openMessageModal}
+      onDirtyChange={onJournalDirtyChange}
     />
   );
 };

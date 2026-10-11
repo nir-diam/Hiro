@@ -16,6 +16,7 @@ import {
     NOTIFICATION_MESSAGES_REFRESH_EVENT,
     countIncomingMessagesFromApiRows,
 } from '../services/notificationInboxCounts';
+import { fetchNotificationMessageRows } from '../services/notificationMessagesApi';
 import { fetchOrgProfileUpdatesPendingCount } from '../services/organizationProfileUpdatesApi';
 
 const ActionButton: React.FC<{
@@ -140,21 +141,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
             return;
         }
         try {
-            const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-            const response = await fetch(`${apiBase}/api/email-uploads/messages`, {
-                method: 'GET',
-                cache: 'no-store',
-                credentials: 'include',
-                headers: {
-                    Accept: 'application/json',
-                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                },
-            });
-            if (!response.ok) {
-                setInboxAttentionCount(0);
-                return;
-            }
-            const rows: unknown = await response.json();
+            const rows = await fetchNotificationMessageRows(apiBase, { summary: true });
             setInboxAttentionCount(
                 countIncomingMessagesFromApiRows(rows, {
                     email: user?.email,

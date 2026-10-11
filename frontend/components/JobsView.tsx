@@ -13,7 +13,7 @@ import JobStatusModal from './JobStatusModal';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
-import DateRangeSelector, { DateRange } from './DateRangeSelector';
+import DateRangeSelector, { DateRange, type DateRangeFilterKind } from './DateRangeSelector';
 import SearchableSelect from './SearchableSelect';
 import JobsAIAnalysisModal from './JobsAIAnalysisModal'; // New Import
 import { WorkingHoursInput } from './WorkingHoursInput';
@@ -36,6 +36,23 @@ import { jobStatusFormToApi, JOB_STATUS_FORM_OPTIONS, type JobStatusFormLabel } 
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
 export type HealthProfile = 'standard' | 'high_volume' | 'executive' | 'disabled';
+
+/** YYYY-MM-DD in local timezone for range filters. */
+const jobDateFilterKey = (raw: string | null | undefined): string => {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value.length >= 10 ? value.slice(0, 10) : value;
+  }
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+const jobRecordUpdatedAt = (job: Job): string =>
+  String(job.updatedAt || job.openDate || '').trim();
 
 const formatJobOpenDate = (raw: string | null | undefined): string => {
   const value = String(raw || '').trim();
@@ -81,6 +98,8 @@ export interface Job {
   waitingForScreening: number;
   activeProcess: number;
   openDate: string;
+  /** Job record last update (Sequelize); not bumped by candidate pipeline activity alone. */
+  updatedAt?: string;
   recruiter: string;
   location: string;
   jobType: string | string[];
@@ -230,6 +249,7 @@ const initialFilters = {
     recruiter: '',
     fromDate: '',
     toDate: '',
+    dateFilterKind: 'open' as DateRangeFilterKind,
     field: '',
     role: '',
     priority: '',
@@ -728,6 +748,7 @@ const JobsView: React.FC = () => {
         { id: 'waitingForScreening', header: t('jobs.col_waiting') },
         { id: 'activeProcess', header: t('jobs.col_process') },
         { id: 'openDate', header: t('jobs.col_open_date') },
+        { id: 'lastUpdated', header: t('jobs.col_last_updated') },
         { id: 'recruiter', header: t('jobs.col_recruiter') },
         { id: 'listNotes', header: t('jobs.col_list_notes') },
         { id: 'id', header: t('jobs.col_id') },
@@ -1006,8 +1027,12 @@ const JobsView: React.FC = () => {
         setFilters(prev => ({
             ...prev,
             fromDate: range?.from || '',
-            toDate: range?.to || ''
+            toDate: range?.to || '',
         }));
+    };
+
+    const handleDateFilterKindChange = (kind: DateRangeFilterKind) => {
+        setFilters((prev) => ({ ...prev, dateFilterKind: kind }));
     };
     
     const [companyFilterState, setCompanyFilterState] = useState({
@@ -1074,8 +1099,18 @@ const JobsView: React.FC = () => {
                 (!filters.client || job.client === filters.client) &&
                 (filters.statuses.length === 0 || filters.statuses.includes(job.status)) &&
                 (!filters.recruiter || job.recruiter === filters.recruiter) &&
-                (!filters.fromDate || job.openDate >= filters.fromDate) &&
-                (!filters.toDate || job.openDate <= filters.toDate) &&
+                (() => {
+                    if (!filters.fromDate && !filters.toDate) return true;
+                    const key =
+                        filters.dateFilterKind === 'updated'
+                            ? jobDateFilterKey(jobRecordUpdatedAt(job))
+                            : jobDateFilterKey(job.openDate);
+                    if (!key) return false;
+                    return (
+                        (!filters.fromDate || key >= filters.fromDate) &&
+                        (!filters.toDate || key <= filters.toDate)
+                    );
+                })() &&
                 (!filters.field || job.field === filters.field) &&
                 (!filters.role || job.role === filters.role) &&
                 (!filters.priority || job.priority === filters.priority) &&
@@ -1112,14 +1147,24 @@ const JobsView: React.FC = () => {
                 let aValue: any;
                 let bValue: any;
         
-                const sortKey = sortConfig.key === 'salaryRange' 
-                    ? 'salaryMin' 
+                const sortKey = sortConfig.key === 'salaryRange'
+                    ? 'salaryMin'
                     : sortConfig.key === 'ageRange'
                     ? 'ageMin'
+                    : sortConfig.key === 'lastUpdated'
+                    ? 'updatedAt'
                     : sortConfig.key;
 
-                aValue = a[sortKey as keyof Job];
-                bValue = b[sortKey as keyof Job];
+                if (sortConfig.key === 'lastUpdated') {
+                    aValue = jobRecordUpdatedAt(a);
+                    bValue = jobRecordUpdatedAt(b);
+                } else if (sortConfig.key === 'openDate') {
+                    aValue = a.openDate || '';
+                    bValue = b.openDate || '';
+                } else {
+                    aValue = a[sortKey as keyof Job];
+                    bValue = b[sortKey as keyof Job];
+                }
         
                 if (aValue < bValue) {
                     return sortConfig.direction === 'asc' ? -1 : 1;
@@ -1240,6 +1285,12 @@ const JobsView: React.FC = () => {
               {formatJobOpenDate(job.openDate)}
             </span>
           );
+        case 'lastUpdated':
+          return (
+            <span className="text-text-default whitespace-nowrap tabular-nums">
+              {formatJobOpenDate(jobRecordUpdatedAt(job))}
+            </span>
+          );
         case 'id': return job.id;
         case 'salaryRange': return `${job.salaryMin.toLocaleString()}₪ - ${job.salaryMax.toLocaleString()}₪`;
         case 'ageRange': return `${job.ageMin} - ${job.ageMax}`;
@@ -1305,13 +1356,23 @@ const JobsView: React.FC = () => {
             });
         }
         if (filters.fromDate || filters.toDate) {
+            const kindPrefix =
+                filters.dateFilterKind === 'updated' ? 'עודכנה' : 'נפתחה';
+            const rangeLabel = dateRange?.label
+                ? `${kindPrefix}: ${dateRange.label}`
+                : `${kindPrefix}: ${filters.fromDate || '…'} – ${filters.toDate || '…'}`;
             chips.push({
                 id: 'dates',
                 group: 'תאריכים',
-                label: `${filters.fromDate || '…'} – ${filters.toDate || '…'}`,
+                label: rangeLabel,
                 onRemove: () => {
                     setDateRange(null);
-                    setFilters((prev) => ({ ...prev, fromDate: '', toDate: '' }));
+                    setFilters((prev) => ({
+                        ...prev,
+                        fromDate: '',
+                        toDate: '',
+                        dateFilterKind: 'open',
+                    }));
                 },
             });
         }
@@ -1442,7 +1503,7 @@ const JobsView: React.FC = () => {
             });
         }
         return chips;
-    }, [filters, t, handleJobScopeToggle]);
+    }, [filters, dateRange, t, handleJobScopeToggle]);
 
     const StatCard = ({ title, value, icon, color }: { title: string, value: string | number, icon: any, color: string }) => (
         <div className="bg-bg-card p-4 rounded-xl border border-border-default flex items-center justify-between shadow-sm">
@@ -1495,7 +1556,11 @@ const JobsView: React.FC = () => {
                  <StatCard title="זמן ממוצע לאיוש" value={stats.avgDays} icon={<ClockIcon className="w-5 h-5 text-blue-600"/>} color="bg-blue-50" />
             </div>
             
-            <div className="bg-bg-card p-3 rounded-xl border border-border-default">
+            <div
+                className={`bg-bg-card p-3 rounded-xl border border-border-default ${
+                    isSettingsOpen ? 'relative z-40' : ''
+                }`}
+            >
                 <div className="pb-2 -mb-2">
                     <div className="flex flex-wrap items-end gap-3">
                         <div className="relative flex-grow min-w-[15rem] flex-shrink-0">
@@ -1531,10 +1596,13 @@ const JobsView: React.FC = () => {
 
                         {/* Date Range Selector */}
                         <div className="min-w-[140px]">
-                            <DateRangeSelector 
-                                value={dateRange} 
-                                onChange={handleDateRangeChange} 
-                                placeholder={t('filter.last_updated') || 'תאריכים'}
+                            <DateRangeSelector
+                                value={dateRange}
+                                onChange={handleDateRangeChange}
+                                placeholder={t('jobs.filter_date') || 'תאריך'}
+                                showDateKindToggle
+                                dateKind={filters.dateFilterKind}
+                                onDateKindChange={handleDateFilterKindChange}
                             />
                         </div>
 
@@ -1597,10 +1665,10 @@ const JobsView: React.FC = () => {
                                 <button onClick={() => setViewMode('table')} title={t('candidates.view_list')} className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
                                 <button onClick={() => setViewMode('grid')} title={t('candidates.view_grid')} className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
                             </div>
-                             <div className="relative" ref={settingsRef}>
+                             <div className="relative z-50" ref={settingsRef}>
                                 <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2.5 bg-bg-subtle text-text-muted rounded-lg hover:bg-bg-hover"><Cog6ToothIcon className="w-5 h-5"/></button>
                                 {isSettingsOpen && (
-                                <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4 max-h-96 overflow-y-auto">
+                                <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-50 p-4 max-h-96 overflow-y-auto">
                                     <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
                                     <div className="space-y-2">
                                     {allColumns.map(column => (

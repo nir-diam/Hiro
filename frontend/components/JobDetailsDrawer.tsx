@@ -13,6 +13,9 @@ import {
     type JobEvent,
     getJobEventApiHeaders,
 } from './JobEventsView';
+import CandidateSummaryDrawer from './CandidateSummaryDrawer';
+import type { Candidate } from './CandidatesListView';
+import { buildCandidateDrawerStub } from '../utils/processEntityDrawers';
 
 // --- TYPES ---
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
@@ -253,7 +256,8 @@ const CandidatesContent: React.FC<{
     loading: boolean;
     error: string | null;
     onViewAll: () => void;
-}> = ({ job, candidates, loading, error, onViewAll }) => {
+    onCandidateClick: (candidate: JobCandidateSummary) => void;
+}> = ({ job, candidates, loading, error, onViewAll, onCandidateClick }) => {
     if (loading) {
         return (
             <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4 animate-fade-in">
@@ -282,7 +286,12 @@ const CandidatesContent: React.FC<{
              const initials = (candidate.avatar || candidate.name || '??').slice(0, 2);
              const matchScore = typeof candidate.matchScore === 'number' ? candidate.matchScore : null;
              return (
-                <div key={candidate.id} className="group flex items-center gap-3 bg-white p-3 rounded-xl border border-border-default shadow-sm hover:shadow-md hover:border-primary-300 transition-all relative overflow-hidden">
+                <button
+                    type="button"
+                    key={candidate.id}
+                    onClick={() => onCandidateClick(candidate)}
+                    className="group w-full text-right flex items-center gap-3 bg-white p-3 rounded-xl border border-border-default shadow-sm hover:shadow-md hover:border-primary-300 transition-all relative overflow-hidden cursor-pointer"
+                >
                     <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary-500 opacity-0 group-hover:opacity-100 transition-opacity"></div>
                     
                     <div className="relative shrink-0">
@@ -310,7 +319,7 @@ const CandidatesContent: React.FC<{
                             ) : null}
                         </div>
                     </div>
-                </div>
+                </button>
             );
         })}
         
@@ -346,8 +355,14 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
   const [candidatesLoading, setCandidatesLoading] = useState(false);
   const [eventsError, setEventsError] = useState<string | null>(null);
   const [candidatesError, setCandidatesError] = useState<string | null>(null);
+  const [candidateDrawer, setCandidateDrawer] = useState<Candidate | null>(null);
+  const [isCandidateDrawerOpen, setIsCandidateDrawerOpen] = useState(false);
 
   const jobApiId = job ? String(job.id).trim() : '';
+  const parentZMatch = overlayZIndexClass.match(/z-\[(\d+)\]/);
+  const candidateDrawerZ = parentZMatch
+    ? `z-[${Number(parentZMatch[1]) + 10}]`
+    : 'z-[70]';
 
   useEffect(() => {
     if (isOpen) {
@@ -441,6 +456,13 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
     navigate(`/jobs/edit/${jobId}?view=candidates`);
   };
 
+  const openCandidateDrawer = (summary: JobCandidateSummary) => {
+    const id = String(summary.id || '').trim();
+    if (!id) return;
+    setCandidateDrawer(buildCandidateDrawerStub(id, summary.name || 'מועמד'));
+    setIsCandidateDrawerOpen(true);
+  };
+
   if (!isOpen || !job) return null;
 
   const renderContent = () => {
@@ -454,6 +476,7 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
           loading={candidatesLoading}
           error={candidatesError}
           onViewAll={() => handleViewJobCandidates(job.id)}
+          onCandidateClick={openCandidateDrawer}
         />
       );
       default: return null;
@@ -521,6 +544,14 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
             }
         `}</style>
       </div>
+      <CandidateSummaryDrawer
+        candidate={candidateDrawer}
+        isOpen={isCandidateDrawerOpen && Boolean(candidateDrawer)}
+        onClose={() => setIsCandidateDrawerOpen(false)}
+        isFavorite={false}
+        onToggleFavorite={() => {}}
+        overlayZIndexClass={candidateDrawerZ}
+      />
     </div>
   );
 };

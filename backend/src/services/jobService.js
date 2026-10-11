@@ -729,6 +729,38 @@ const findByPostingCode = async (code) => {
   return hydrateJobSkills(job);
 };
 
+/** First posting code for newly created jobs (then +1 per job, no random). */
+const POSTING_CODE_FIRST = 1_000_000;
+
+/** Postgres advisory lock key — serializes posting-code allocation across app instances. */
+const POSTING_CODE_ALLOC_LOCK_KEY = 891_234;
+
+/**
+ * Next numeric posting code: max(existing numeric codes, POSTING_CODE_FIRST - 1) + 1.
+ * Legacy random 6-digit codes remain on old jobs; new jobs start at 1_000_000.
+ */
+const allocateNextPostingCode = async () => {
+  return sequelize.transaction(async (transaction) => {
+    await sequelize.query('SELECT pg_advisory_xact_lock(:lockKey)', {
+      replacements: { lockKey: POSTING_CODE_ALLOC_LOCK_KEY },
+      transaction,
+    });
+    const rows = await sequelize.query(
+      `SELECT MAX(CAST("postingCode" AS BIGINT)) AS max
+       FROM jobs
+       WHERE "postingCode" ~ '^[0-9]+$'`,
+      { type: QueryTypes.SELECT, transaction },
+    );
+    const maxRaw = rows?.[0]?.max;
+    const maxNum = maxRaw != null && maxRaw !== '' ? Number(maxRaw) : NaN;
+    const next =
+      Number.isFinite(maxNum)
+        ? Math.max(POSTING_CODE_FIRST, maxNum + 1)
+        : POSTING_CODE_FIRST;
+    return String(next);
+  });
+};
+
 const {
   classifyJobTaxonomyForAnalyze,
 } = require('./jobTaxonomyClassificationService');
@@ -892,6 +924,8 @@ module.exports = {
   update,
   remove,
   findByPostingCode,
+  allocateNextPostingCode,
+  POSTING_CODE_FIRST,
   analyzeRawDescription,
   hydrateJobSkills,
   hydrateJobsSkills,

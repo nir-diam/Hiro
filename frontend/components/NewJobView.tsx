@@ -1219,19 +1219,42 @@ function mapApiSkillRowToJobSkill(s: any, index: number): JobSkill {
     };
 }
 
+const CATALOG_TAG_ID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** API tagType for job save — preserve catalog degree/education types (not UI «certification» bucket). */
+function tagTypeForJobApiSave(tag: JobSkill): string | undefined {
+    const key = String(tag.key || tag.name || '').trim().toLowerCase();
+    if (key === 'academic_degree' || key === 'profile.degree' || key === 'degree.academic') {
+        return 'degree';
+    }
+    const t = String(tag.tagType || 'skill');
+    if (t === 'certification' && /\b(תואר|degree|academic)\b/i.test(String(tag.name || ''))) {
+        return 'degree';
+    }
+    if (t === 'education') return 'degree';
+    if (t === 'soft') return 'soft_skill';
+    return t;
+}
+
 function serializeSkillsForJobApi(skills: JobSkill[] | undefined): JobSkill[] {
-    return (Array.isArray(skills) ? skills : []).map((s) => ({
-        id: s.id,
-        name: String(s.name || '').trim(),
-        key: String(s.key || s.name || '').trim(),
-        mode: normalizeTagModeFromApi(s.mode),
-        source: s.source || 'manual',
-        tagType: s.tagType,
-        tag_reason: s.tag_reason,
-        quote: s.quote,
-        relevance_score: s.relevance_score,
-        aiMode: s.aiMode,
-    }));
+    return (Array.isArray(skills) ? skills : []).map((s) => {
+        const id = String(s.id || '').trim();
+        const catalogTagId = CATALOG_TAG_ID_RE.test(id) ? id : undefined;
+        return {
+            id: s.id,
+            ...(catalogTagId ? { tagId: catalogTagId } : {}),
+            name: String(s.name || '').trim(),
+            key: String(s.key || s.name || '').trim(),
+            mode: normalizeTagModeFromApi(s.mode),
+            source: s.source || 'manual',
+            tagType: tagTypeForJobApiSave(s),
+            tag_reason: s.tag_reason,
+            quote: s.quote,
+            relevance_score: s.relevance_score,
+            aiMode: s.aiMode,
+        };
+    });
 }
 
 /** After save, prefer persisted mandatory/negative from API; keep local toggle if API still says normal. */
@@ -1888,9 +1911,10 @@ interface NewJobViewProps {
   isEditing?: boolean;
   jobData?: any;
   isEmbedded?: boolean;
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
-const defaultPostingCode = String(Math.floor(1 + Math.random() * 999999));
+const defaultPostingCode = String(Math.floor(100000 + Math.random() * 900000));
 const defaultJobId = defaultPostingCode;
 const defaultUniqueEmail = `humand+${defaultPostingCode}@app.hiro.co.il`;
 
@@ -1955,7 +1979,14 @@ const initialJobState = {
     cvForwardSettings: { ...DEFAULT_CV_FORWARD_SETTINGS },
 };
 
-const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = false, jobData, isEmbedded = false }) => {
+const NewJobView: React.FC<NewJobViewProps> = ({
+  onCancel,
+  onSave,
+  isEditing = false,
+  jobData,
+  isEmbedded = false,
+  onDirtyChange,
+}) => {
     const navigate = useNavigate();
     const location = useLocation();
     const { jobId } = useParams<{ jobId: string }>();
@@ -2058,6 +2089,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const formDataRef = useRef(formData);
     formDataRef.current = formData;
     const loadedJobKeyRef = useRef<string>('');
+    const formSnapshotRef = useRef<string>('');
     const drivingLicensePicklistRef = useRef<PicklistValueRow[]>(
         sortDrivingLicensePicklistRows(DRIVING_LICENSE_FALLBACK),
     );
@@ -2122,7 +2154,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 (sourceJob as { jobFields?: unknown }).jobFields,
                 loadedJobField,
             );
-            const freshPostingCode = String(Math.floor(1 + Math.random() * 999999));
+            const freshPostingCode = String(Math.floor(100000 + Math.random() * 900000));
 
             setFormData(prev => ({
                 ...prev,
@@ -2256,7 +2288,22 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
              if (isDuplicating && location.state) {
                  navigate(location.pathname, { replace: true, state: {} });
              }
-    }, [isEditing, jobData, duplicateJobSeed, isDuplicating, location.pathname, location.state, navigate]);
+             if (isEditing && !sameJobReload) {
+                 queueMicrotask(() => {
+                     formSnapshotRef.current = JSON.stringify(formDataRef.current);
+                     onDirtyChange?.(false);
+                 });
+             }
+    }, [isEditing, jobData, duplicateJobSeed, isDuplicating, location.pathname, location.state, navigate, onDirtyChange]);
+
+    useEffect(() => {
+        if (!isEditing || !formSnapshotRef.current) {
+            onDirtyChange?.(false);
+            return;
+        }
+        const dirty = JSON.stringify(formData) !== formSnapshotRef.current;
+        onDirtyChange?.(dirty);
+    }, [formData, isEditing, onDirtyChange]);
 
     useEffect(() => {
         let cancelled = false;
@@ -2809,9 +2856,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     : [];
                 if (matchedAccountManagerIds.length) pendingAccountManagerNamesRef.current = [];
                 const allKeys = people.map((p) => p.key);
+                const defaultContactKeys = people.filter((p) => p.kind === 'contact').map((p) => p.key);
                 setFormData((prev) => {
                     const valid = (prev.contacts || []).filter((k) => allKeys.includes(k));
-                    const nextContacts = valid.length > 0 ? valid : allKeys;
+                    const nextContacts = valid.length > 0 ? valid : defaultContactKeys;
                     const validRecruiters = (prev.assignedRecruiters || []).filter((id) => staffIds.includes(id));
                     const validAccountManagers = (prev.assignedAccountManagers || []).filter((id) => staffIds.includes(id));
                     const nextRecruiters =
@@ -3824,6 +3872,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         }
         if (isEditing) {
             onSave(buildJobPayload());
+            formSnapshotRef.current = JSON.stringify(formDataRef.current);
+            onDirtyChange?.(false);
             alert('השינויים נשמרו בהצלחה');
             return;
         }
@@ -4814,7 +4864,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                             if (cat === 'role') return 'role';
                             if (cat === 'seniority') return 'seniority';
                             if (cat === 'industry') return 'industry';
-                            if (cat === 'certification' || cat === 'education') return 'certification';
+                            if (cat === 'education') return 'degree';
+                            if (cat === 'certification') return 'certification';
                             if (cat === 'language') return 'language';
                             if (cat === 'tool') return 'tool';
                             if (cat === 'soft_skill') return 'soft';

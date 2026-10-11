@@ -17,6 +17,8 @@ import PublishJobView from './PublishJobView';
 import HiroAIChat from './HiroAIChat';
 import InviteManagerModal from './InviteManagerModal';
 import { useLanguage } from '../context/LanguageContext';
+import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
+import { confirmLeaveWithoutSave } from '../utils/confirmLeaveWithoutSave';
 import { formatJobTagRelevanceScoreOnTenHe } from '../utils/tagWeightDisplay';
 
 interface Message {
@@ -109,6 +111,19 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
     const [eventsRefreshKey, setEventsRefreshKey] = useState(0);
     /** Live count from job_candidates (Job.associatedCandidates is often stale). */
     const [liveCandidateCount, setLiveCandidateCount] = useState<number | null>(null);
+    const [jobFormDirty, setJobFormDirty] = useState(false);
+
+    useUnsavedChangesGuard(jobFormDirty && mainView === 'edit');
+
+    const trySetMainView = useCallback(
+        (next: JobMainView) => {
+            if (jobFormDirty && mainView === 'edit' && next !== 'edit') {
+                if (!confirmLeaveWithoutSave()) return;
+            }
+            setMainView(next);
+        },
+        [jobFormDirty, mainView],
+    );
 
     const handleCandidateCountChange = useCallback((count: number) => {
         setLiveCandidateCount(count);
@@ -284,6 +299,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
             }
             const updated = await res.json();
             setJobDataState(updated);
+            setJobFormDirty(false);
             onSave(updated);
         } catch (err: any) {
             console.error('[ExistingJobView] failed to save job', err);
@@ -485,7 +501,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                 <div className="lg:col-span-9 space-y-6">
                     <div className="bg-bg-card/80 backdrop-blur-md rounded-xl border border-border-default p-1.5 flex items-center gap-2 shadow-sm">
                         <button 
-                            onClick={() => setMainView('candidates')}
+                            onClick={() => trySetMainView('candidates')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'candidates' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             <UserGroupIcon className="w-5 h-5" />
@@ -493,21 +509,21 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         </button>
                         <button
                             type="button"
-                            onClick={() => setMainView('sonar')}
+                            onClick={() => trySetMainView('sonar')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'sonar' ? 'bg-accent-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             <SonarIcon className={`w-5 h-5 ${mainView === 'sonar' ? 'animate-pulse' : ''}`} />
                             {t('job.tab_sonar')}
                         </button>
                         <button 
-                            onClick={() => setMainView('edit')}
+                            onClick={() => trySetMainView('edit')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'edit' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             <PencilIcon className="w-5 h-5" />
                             {t('job.tab_edit')}
                         </button>
                         <button 
-                            onClick={() => setMainView('events')}
+                            onClick={() => trySetMainView('events')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'events' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             <ClockIcon className="w-5 h-5" />
@@ -515,7 +531,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         </button>
                         <button
                             type="button"
-                            onClick={() => setMainView('publish')}
+                            onClick={() => trySetMainView('publish')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'publish' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             { 'פרסום משרה'}
@@ -530,11 +546,12 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         {mainView === 'edit' && (
                             <div className="p-6">
                                 <NewJobView
-                                    onCancel={() => setMainView('candidates')}
+                                    onCancel={() => trySetMainView('candidates')}
                                     onSave={handleJobSave}
                                     isEditing={true}
                                     jobData={jobDataState}
                                     isEmbedded={true}
+                                    onDirtyChange={setJobFormDirty}
                                 />
                             </div>
                         )}

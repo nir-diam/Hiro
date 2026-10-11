@@ -1,3 +1,5 @@
+import { invalidateNotificationMessagesCache } from './notificationMessagesApi';
+
 /** Dispatched after a task/message is saved so inbox views + TopBar badge refetch. */
 export const NOTIFICATION_MESSAGES_REFRESH_EVENT = 'hiro:notification-messages-refresh';
 
@@ -11,6 +13,7 @@ export type NotificationInboxRefreshDetail = {
 /** TopBar always refetches; pass `reloadNotificationList: true` when the messages list should reload too. */
 export function requestNotificationInboxCountsRefresh(detail?: NotificationInboxRefreshDetail): void {
     if (typeof window === 'undefined') return;
+    invalidateNotificationMessagesCache();
     window.dispatchEvent(
         new CustomEvent(NOTIFICATION_MESSAGES_REFRESH_EVENT, { detail: detail ?? {} }),
     );
@@ -79,12 +82,22 @@ export function countIncomingMessagesFromApiRows(
         if (!NOTIFICATION_MESSAGE_ID_REGEX.test(backendId)) continue;
         const status = row?.status;
         if (status === 'archived' || status === 'deleted') continue;
-        const isTask = Boolean(row?.isTask) || row?.messageType === 'task';
-        if (isTask) continue;
         const metadata =
             row?.metadata && typeof row.metadata === 'object' && row.metadata !== null
                 ? (row.metadata as Record<string, unknown>)
                 : {};
+        const senderThreadUnread = Boolean(metadata.senderThreadUnread);
+        const recipientThreadUnread = Boolean(metadata.recipientThreadUnread);
+        if (recipientThreadUnread && rowRecipientMatchesViewer(row, viewer?.email, viewer?.name)) {
+            c += 1;
+            continue;
+        }
+        if (senderThreadUnread && rowSentByViewer(row, viewer?.id)) {
+            c += 1;
+            continue;
+        }
+        const isTask = Boolean(row?.isTask) || row?.messageType === 'task';
+        if (isTask) continue;
         if (Boolean(metadata.taskCompleted)) continue;
         if (!rowInInboxForViewer(row, viewer)) continue;
         c += 1;

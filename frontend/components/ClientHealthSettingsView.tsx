@@ -803,7 +803,7 @@ const ClientHealthSettingsView: React.FC = () => {
                     <div className="text-sm text-text-muted px-2 py-3">טוען תהליכים…</div>
                 ) : pipelines.length === 0 ? (
                     <div className="text-sm text-text-muted px-2 py-3">
-                        אין תהליכים מוגדרים. הוסיפו תהליך ב&quot;הגדרות → תהליכי עבודה&quot;.
+                        אין תהליכים מוגדרים. הוסיפו תהליך ב&quot;הגדרות → תהליכי לקוחות&quot;.
                     </div>
                 ) : (
                     pipelines.map((pipeline) => (

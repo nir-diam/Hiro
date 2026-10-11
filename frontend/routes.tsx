@@ -44,6 +44,8 @@ import {
     resolveCandidatePortalPreviewId,
     sanitizeProfileDuplicatePayload,
 } from './utils/candidateProfileDuplicate';
+import { useUnsavedChangesGuard } from './hooks/useUnsavedChangesGuard';
+import { confirmLeaveWithoutSave } from './utils/confirmLeaveWithoutSave';
 import PipelineSettingsView from './components/PipelineSettingsView';
 import CandidatePipelineSettingsView from './components/CandidatePipelineSettingsView';
 import StatusSettingsView from './components/StatusSettingsView';
@@ -329,6 +331,22 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const [candidateList, setCandidateList] = useState<{ id: string }[]>([]);
     const [savedFormBaseline, setSavedFormBaseline] = useState<Record<string, unknown> | null>(null);
 
+    const hasUnsavedCandidateChanges = useMemo(
+        () => hasCandidateFormChanges(formData, savedFormBaseline),
+        [formData, savedFormBaseline],
+    );
+
+    useUnsavedChangesGuard(hasUnsavedCandidateChanges);
+
+    const runIfLeaveAllowed = useCallback(
+        (action: () => void) => {
+            if (!hasUnsavedCandidateChanges || confirmLeaveWithoutSave()) {
+                action();
+            }
+        },
+        [hasUnsavedCandidateChanges],
+    );
+
     const authHeaders = useCallback(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         return token ? { Authorization: `Bearer ${token}` } : {};
@@ -598,11 +616,13 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     };
 
     const handleProfileSwitch = (profileId: string | number) => {
-        setActiveProfileId(profileId);
-        const target = profiles.find(profile => (profile.backendId || profile.id) === profileId);
-        if (target?.backendId) {
-            navigate(`/candidates/${target.backendId}`);
-        }
+        runIfLeaveAllowed(() => {
+            setActiveProfileId(profileId);
+            const target = profiles.find((profile) => (profile.backendId || profile.id) === profileId);
+            if (target?.backendId) {
+                navigate(`/candidates/${target.backendId}`);
+            }
+        });
     };
 
     const handleAddProfile = useCallback(async () => {
@@ -875,7 +895,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     };
 
     const handleNavClick = (view: string) => {
-        props.handleSetActiveView(view);
+        if (view === props.activeView) return;
+        runIfLeaveAllowed(() => props.handleSetActiveView(view));
     };
 
     const [isChatOpen, setIsChatOpen] = useState(false);
@@ -925,12 +946,18 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
     const renderContent = () => {
         if (props.isMatchingJobs) {
-            return <JobMatchingView onBack={() => props.handleSetActiveView('details')} candidateName={formData.fullName} candidateId={String(formData.backendId || formData.id || '')} />;
+            return (
+                <JobMatchingView
+                    onBack={() => runIfLeaveAllowed(() => props.handleSetActiveView('details'))}
+                    candidateName={formData.fullName}
+                    candidateId={String(formData.backendId || formData.id || '')}
+                />
+            );
         }
         if (props.isScreening) {
             return (
                 <CandidateScreeningView
-                    onBack={() => props.handleSetActiveView('details')}
+                    onBack={() => runIfLeaveAllowed(() => props.handleSetActiveView('details'))}
                     candidateId={formData.backendId || formData.id}
                     candidate={formData}
                 />
@@ -1039,8 +1066,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     activeView={props.activeView}
                     setActiveView={handleNavClick}
                     candidateId={resolveCandidatePortalPreviewId(formData, formData.backendId || urlId)}
-                    onMatchJobsClick={props.handleMatchingClick}
-                    onScreenCandidateClick={props.handleScreeningClick}
+                    onMatchJobsClick={() => runIfLeaveAllowed(() => props.handleMatchingClick())}
+                    onScreenCandidateClick={() => runIfLeaveAllowed(() => props.handleScreeningClick())}
                     jobMatchesCount={
                         typeof formData.jobMatchesCount === 'number'
                             ? formData.jobMatchesCount
@@ -1075,8 +1102,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 isSharingProfileWithCandidate={isSharingProfileWithCandidate}
                 candidateList={candidateList}
                 onNavigateCandidate={(id) => {
-                    const search = location.search || '';
-                    navigate(`/candidates/${id}${search}`);
+                    runIfLeaveAllowed(() => {
+                        const search = location.search || '';
+                        navigate(`/candidates/${id}${search}`);
+                    });
                 }}
                 onGenerateExperienceSummary={handleGenerateExperienceSummary}
                 isGeneratingSummary={isGeneratingSummary}
@@ -1139,7 +1168,15 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/clients/:clientId', element: <ClientProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/organizations/tmp/:organizationTmpId', element: <OrganizationProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/organizations/:organizationId', element: <OrganizationProfileView openMessageModal={props.openMessageModal} /> },
-        { path: '/clients/:clientId/contacts/:contactId', element: <ContactProfileView openMessageModal={props.openMessageModal} /> },
+        {
+            path: '/clients/:clientId/contacts/:contactId',
+            element: (
+                <ContactProfileView
+                    openMessageModal={props.openMessageModal}
+                    openSummaryDrawer={props.openSummaryDrawer}
+                />
+            ),
+        },
         { path: '/notifications', element: <NotificationCenter onOpenCandidateSummary={props.openSummaryDrawer} /> },
         { path: '/communications', element: <CommunicationCenterView onOpenCandidateSummary={props.openSummaryDrawer} /> },
         { path: '/events-management', element: <ClientEventsManagementView openMessageModal={props.openMessageModal} /> },

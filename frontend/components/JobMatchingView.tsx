@@ -2,8 +2,15 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import {
   MagnifyingGlassIcon, ChevronDownIcon, TargetIcon, PlusIcon,
   CheckCircleIcon, Squares2X2Icon, TableCellsIcon, SparklesIcon,
-  XMarkIcon, ArrowPathIcon, FlagIcon, NoSymbolIcon,
+  XMarkIcon, ArrowPathIcon, FlagIcon, NoSymbolIcon, FunnelIcon,
 } from './Icons';
+import BulkAddToFilterModal from './BulkAddToFilterModal';
+import ScreeningCollisionWarningModal, { type ScreeningWarningAgg } from './ScreeningCollisionWarningModal';
+import {
+  fetchScreeningPrecheckForJob,
+  linkCandidateToJobFilter,
+  type JobFilterSaveOptions,
+} from '../utils/candidateJobFilterApi';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import AIFeedbackModal from './AIFeedbackModal';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
@@ -17,6 +24,12 @@ import {
   type JobMatchResult, type JobMatchIgnoreItem,
 } from '../utils/candidateJobMatchingApi';
 import { buildJobTagMatchCategories, type JobTagMatchInput } from '../utils/jobTagMatchCategories';
+import JobDetailsDrawer from './JobDetailsDrawer';
+import { authHeaders } from '../utils/authHeaders';
+import {
+  mapApiRecordToJobDetailsDrawerJob,
+  type JobDetailsDrawerJob,
+} from '../utils/jobDetailsDrawerUtils';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -109,6 +122,64 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const ignorePanelRef = useRef<HTMLDivElement>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  const [bulkFilterOpen, setBulkFilterOpen] = useState(false);
+  const [screeningCollisionOpen, setScreeningCollisionOpen] = useState(false);
+  const [screeningCollisionAgg, setScreeningCollisionAgg] = useState<ScreeningWarningAgg[]>([]);
+  const pendingFilterRef = useRef<{ jobId: string; options?: JobFilterSaveOptions } | null>(null);
+  const apiBase = import.meta.env.VITE_API_BASE || '';
+
+  const [drawerJob, setDrawerJob] = useState<JobDetailsDrawerJob | null>(null);
+  const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
+
+  const openJobDrawer = useCallback(
+    async (job: JobMatchResult) => {
+      const jobId = String(job.id || '').trim();
+      if (!jobId) return;
+      setDrawerJob(
+        mapApiRecordToJobDetailsDrawerJob(
+          {
+            id: jobId,
+            title: job.title,
+            client: job.client,
+            status: job.status,
+            city: job.city,
+            location: job.city,
+            jobType: job.jobType,
+            description: job.description,
+            requirements: job.requirements,
+            salaryMin: job.salaryMin,
+            salaryMax: job.salaryMax,
+            openDate: job.jobOpenDate,
+          } as Record<string, unknown>,
+          { jobId, jobTitle: job.title, client: job.client },
+        ),
+      );
+      setIsJobDrawerOpen(true);
+      if (!apiBase) return;
+      try {
+        const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}`, {
+          headers: authHeaders(true),
+          cache: 'no-store',
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const raw = (data?.job ?? data) as Record<string, unknown>;
+        if (raw && typeof raw === 'object') {
+          setDrawerJob(
+            mapApiRecordToJobDetailsDrawerJob(raw, {
+              jobId,
+              jobTitle: job.title,
+              client: job.client,
+            }),
+          );
+        }
+      } catch {
+        /* keep stub from match row */
+      }
+    },
+    [apiBase],
+  );
 
   // ── filters ──
   const [advancedFilters, setAdvancedFilters] = useState({
@@ -247,6 +318,43 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       setTimeout(() => setAssignError(null), 4000);
     }
   };
+
+  const runAddToFilter = useCallback(
+    async (jobId: string, options?: JobFilterSaveOptions) => {
+      if (!candidateId || !apiBase) {
+        setBulkFilterOpen(false);
+        return;
+      }
+      const ok = await linkCandidateToJobFilter(apiBase, candidateId, jobId, options);
+      setBulkFilterOpen(false);
+      if (ok) {
+        setFeedback('המועמד נוסף לסינון המשרה');
+        setTimeout(() => setFeedback(null), 4000);
+      } else {
+        setAssignError('הוספה לסינון נכשלה');
+        setTimeout(() => setAssignError(null), 4000);
+      }
+    },
+    [apiBase, candidateId],
+  );
+
+  const handleAddToFilterSave = useCallback(
+    async (jobId: string, options?: JobFilterSaveOptions) => {
+      if (!candidateId || !apiBase) {
+        setBulkFilterOpen(false);
+        return;
+      }
+      const precheck = await fetchScreeningPrecheckForJob(apiBase, candidateId, jobId);
+      if (precheck) {
+        pendingFilterRef.current = { jobId, options };
+        setScreeningCollisionAgg([precheck]);
+        setScreeningCollisionOpen(true);
+        return;
+      }
+      await runAddToFilter(jobId, options);
+    },
+    [apiBase, candidateId, runAddToFilter],
+  );
 
   const handleIgnoreJob = async (e: React.MouseEvent, jobId: string) => {
     e.stopPropagation();
@@ -541,7 +649,14 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               </p>
             </div>
             <div className="text-right">
-              <h4 className="font-bold text-text-default text-base">{job.title}</h4>
+              <button
+                type="button"
+                onClick={() => void openJobDrawer(job)}
+                className="font-bold text-text-default text-base text-right hover:text-primary-600 hover:underline transition-colors"
+                title="פתיחת פרטי משרה"
+              >
+                {job.title}
+              </button>
               <p className="text-sm text-text-muted flex items-center justify-end gap-2 flex-wrap">
                 <span>{job.client}</span>
                 {job.matchType === 'ai' && (
@@ -591,7 +706,17 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       <>
         <tr onClick={toggleExpand} className="bg-bg-card hover:bg-bg-hover transition-colors cursor-pointer">
           <td className="p-4">
-            <div className="font-bold text-text-default text-base">{job.title}</div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                void openJobDrawer(job);
+              }}
+              className="font-bold text-text-default text-base text-right hover:text-primary-600 hover:underline transition-colors block w-full"
+              title="פתיחת פרטי משרה"
+            >
+              {job.title}
+            </button>
             <div className="text-sm text-text-muted flex items-center gap-2 flex-wrap mb-1">
               <span>{job.client}</span>
               {job.matchType === 'ai' && (
@@ -749,6 +874,15 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
                 </div>
               )}
             </div>
+            <button
+              type="button"
+              onClick={() => setBulkFilterOpen(true)}
+              disabled={!candidateId}
+              className="flex items-center gap-2 font-semibold py-2 px-4 rounded-lg border border-primary-200 bg-primary-50 text-primary-800 hover:bg-primary-100 transition disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <FunnelIcon className="w-4 h-4" />
+              <span>הוספת לסינון</span>
+            </button>
           </div>
           <div className="relative">
             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
@@ -936,6 +1070,38 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           candidateName={candidateName}
         />
       )}
+
+      <BulkAddToFilterModal
+        isOpen={bulkFilterOpen}
+        onClose={() => setBulkFilterOpen(false)}
+        onSave={handleAddToFilterSave}
+        selectedCount={1}
+        candidateBackendIds={candidateId ? [candidateId] : []}
+      />
+      <ScreeningCollisionWarningModal
+        isOpen={screeningCollisionOpen}
+        onClose={() => {
+          setScreeningCollisionOpen(false);
+          pendingFilterRef.current = null;
+        }}
+        aggregate={screeningCollisionAgg}
+        onConfirm={() => {
+          const p = pendingFilterRef.current;
+          pendingFilterRef.current = null;
+          setScreeningCollisionOpen(false);
+          if (p) void runAddToFilter(p.jobId, p.options);
+        }}
+      />
+
+      <JobDetailsDrawer
+        job={drawerJob}
+        isOpen={isJobDrawerOpen}
+        onClose={() => {
+          setIsJobDrawerOpen(false);
+          setDrawerJob(null);
+        }}
+        overlayZIndexClass="z-[80]"
+      />
 
       {activeMatchPopup && activeMatchJob ? (
         <MatchScorePopup

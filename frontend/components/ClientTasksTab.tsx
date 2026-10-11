@@ -11,11 +11,22 @@ import {
 } from './Icons';
 import { authHeaders } from '../utils/authHeaders';
 import { CLIENT_JOURNAL_UPDATED_EVENT } from '../utils/clientJournalEvents';
+import {
+    INBOX_LINKED_TASK_TYPE,
+    mapInboxRowsForScope,
+    patchInboxNotification,
+    type InboxTaskScope,
+} from '../utils/inboxLinkedTasks';
+import { fetchNotificationMessageRows } from '../services/notificationMessagesApi';
+import {
+    NOTIFICATION_MESSAGES_REFRESH_EVENT,
+    requestNotificationInboxCountsRefresh,
+} from '../services/notificationInboxCounts';
 import { useAuth } from '../context/AuthContext';
 import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
 // --- TYPES ---
 
-/** Pipeline id from תהליכי עבודה settings (UUID) or legacy sales/retention. */
+/** Pipeline id from תהליכי לקוחות settings (UUID) or legacy sales/retention. */
 type TaskType = string;
 type TaskStatus = 'pending' | 'done';
 type TaskPriority = 'high' | 'medium' | 'low';
@@ -79,6 +90,9 @@ export interface ClientTask {
     contactId?: string;
     processStage?: string; // Linked to pipeline stage
     history?: TaskHistoryItem[]; // Added history
+    /** Backed by notification inbox (`/api/email-uploads/messages`). */
+    inboxNotificationId?: string;
+    inboxKind?: 'task' | 'message';
 }
 
 function mapPipelineOptions(rows: PipelineDto[]): PipelineOption[] {
@@ -533,6 +547,11 @@ const TaskCard: React.FC<{
                              <span className={`text-sm font-bold truncate ${isDone ? 'line-through text-text-muted' : 'text-text-default'}`}>
                                 {task.title}
                             </span>
+                            {task.inboxNotificationId ? (
+                                <span className="text-[10px] font-bold text-primary-700 bg-primary-50 border border-primary-200 px-2 py-0.5 rounded-full shrink-0">
+                                    {task.inboxKind === 'message' ? 'הודעה' : 'משימה'} · התראות
+                                </span>
+                            ) : null}
                          </div>
                          <div className="flex items-center gap-2">
                              {priorityBadge}
@@ -615,14 +634,14 @@ const TaskCard: React.FC<{
                                 className="flex items-center gap-1 text-xs font-semibold text-primary-600 bg-primary-50 px-3 py-1.5 rounded-lg hover:bg-primary-100 transition shadow-sm"
                             >
                                 <PencilIcon className="w-3.5 h-3.5" />
-                                ערוך
+                                {task.inboxNotificationId ? 'פתח בתיבת התראות' : 'ערוך'}
                             </button>
                             <button 
                                 onClick={(e) => { e.stopPropagation(); onDelete(task.id); }}
                                 className="flex items-center gap-1 text-xs font-semibold text-red-600 bg-white border border-red-100 px-3 py-1.5 rounded-lg hover:bg-red-50 transition shadow-sm"
                             >
                                 <TrashIcon className="w-3.5 h-3.5" />
-                                מחק
+                                {task.inboxNotificationId ? 'ארכיון' : 'מחק'}
                             </button>
                          </div>
                     </div>
@@ -698,6 +717,8 @@ interface ClientTasksTabProps {
     organizationName?: string;
     /** When set, show only tasks assigned to this contact (by assignee name). */
     contactName?: string;
+    /** When set, include inbox tasks linked to this contact id. */
+    contactId?: string;
     /** Used when `clientId` is omitted — required to create new tasks (pick target client). */
     clientPickerOptions?: PickerOption[];
     /** Used with tenant `clientId` — pick target org when creating tasks across linked orgs. */
@@ -711,10 +732,12 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     organizationTmpId,
     organizationName,
     contactName,
+    contactId,
     clientPickerOptions = EMPTY_PICKER_OPTIONS,
     organizationPickerOptions = EMPTY_PICKER_OPTIONS,
 }) => {
     const { user } = useAuth();
+    const navigate = useNavigate();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const tenantClientId = user?.clientId ? String(user.clientId).trim() : '';
     const [tasks, setTasks] = useState<ClientTask[]>([]);
@@ -842,14 +865,54 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
             const tasksUrl = aggregateMode
                 ? `${apiBase}/api/clients/all-tasks`
                 : `${apiBase}/api/clients/${clientId}/tasks${orgQs}`;
+            const inboxScope: InboxTaskScope = {
+                clientId: aggregateMode ? undefined : clientId,
+                organizationId,
+                organizationTmpId,
+                contactId,
+                contactName,
+            };
             try {
-                const res = await fetch(tasksUrl, { headers: authHeaders(true) });
-                if (!res.ok) throw new Error('Failed to load tasks');
-                const tasksData = await res.json();
+                const jobsUrl =
+                    clientId && organizationId
+                        ? `${apiBase}/api/organizations/${encodeURIComponent(organizationId)}/jobs?clientId=${encodeURIComponent(clientId)}`
+                        : null;
+                const [tasksRes, inboxRows, jobsRes] = await Promise.all([
+                    fetch(tasksUrl, { headers: authHeaders(true) }),
+                    aggregateMode
+                        ? Promise.resolve([] as Record<string, unknown>[])
+                        : fetchNotificationMessageRows(apiBase, { summary: true }).catch(
+                              () => [] as Record<string, unknown>[],
+                          ),
+                    jobsUrl
+                        ? fetch(jobsUrl, { headers: authHeaders(true) })
+                              .then((r) => (r.ok ? r.json() : []))
+                              .catch(() => [])
+                        : Promise.resolve([]),
+                ]);
+                if (!tasksRes.ok) throw new Error('Failed to load tasks');
+                const tasksData = await tasksRes.json();
                 const list = Array.isArray(tasksData) ? tasksData : (tasksData?.data ?? []);
                 const mapped = list.map((row: Record<string, unknown>) =>
                     mapTaskRow(row, clientId, orgNameById, organizationName),
                 );
+                if (!aggregateMode) {
+                    const jobList = Array.isArray(jobsRes) ? jobsRes : (jobsRes?.data ?? []);
+                    const organizationJobIds = new Set<string>(
+                        (Array.isArray(jobList) ? jobList : [])
+                            .map((j: Record<string, unknown>) => String(j?.id || '').trim())
+                            .filter(Boolean),
+                    );
+                    const scopeWithJobs: InboxTaskScope = {
+                        ...inboxScope,
+                        organizationJobIds: organizationJobIds.size ? organizationJobIds : undefined,
+                    };
+                    const inboxTasks = mapInboxRowsForScope(inboxRows, scopeWithJobs, organizationName);
+                    const seen = new Set(mapped.map((t) => t.id));
+                    for (const row of inboxTasks) {
+                        if (!seen.has(row.id)) mapped.push(row);
+                    }
+                }
                 setTasks(mapped);
             } catch (e: unknown) {
                 if (!opts?.silent) {
@@ -860,7 +923,17 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 if (!opts?.silent) setIsLoading(false);
             }
         },
-        [apiBase, clientId, organizationId, organizationTmpId, organizationName, aggregateMode, orgNameById],
+        [
+            apiBase,
+            clientId,
+            organizationId,
+            organizationTmpId,
+            organizationName,
+            aggregateMode,
+            orgNameById,
+            contactId,
+            contactName,
+        ],
     );
 
     useEffect(() => {
@@ -873,7 +946,11 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
             void loadTasks({ silent: true });
         };
         window.addEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onJournalUpdated);
-        return () => window.removeEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onJournalUpdated);
+        window.addEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onJournalUpdated);
+        return () => {
+            window.removeEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onJournalUpdated);
+            window.removeEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onJournalUpdated);
+        };
     }, [loadTasks]);
     
     // Filters State
@@ -889,6 +966,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     // Filtering Logic
     const filteredTasks = useMemo(() => {
         const scopedContactName = String(contactName || '').trim().toLowerCase();
+        const scopedContactId = String(contactId || '').trim();
         return tasks.filter(task => {
             const q = searchTerm.toLowerCase();
             const matchesSearch = !searchTerm
@@ -896,8 +974,12 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 || task.clientName?.toLowerCase().includes(q)
                 || task.organizationName?.toLowerCase().includes(q);
 
-            const matchesContact = !scopedContactName
-                || String(task.assignee || '').trim().toLowerCase() === scopedContactName;
+            const matchesContact =
+                (!scopedContactName && !scopedContactId)
+                || (scopedContactId && String(task.contactId || '').trim() === scopedContactId)
+                || (scopedContactName && String(task.assignee || '').trim().toLowerCase() === scopedContactName)
+                || (scopedContactName
+                    && String(task.contactName || '').trim().toLowerCase() === scopedContactName);
             
             const matchesStatus = 
                 filterStatus === 'all' || 
@@ -912,7 +994,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
 
             return matchesSearch && matchesContact && matchesStatus && matchesProcess && matchesStage && matchesPriority;
         });
-    }, [tasks, searchTerm, filterStatus, filterProcess, filterStage, filterPriority, contactName]);
+    }, [tasks, searchTerm, filterStatus, filterProcess, filterStage, filterPriority, contactName, contactId]);
 
     // SORTING LOGIC: Overdue -> High Priority -> Date
     const sortedTasks = useMemo(() => {
@@ -943,6 +1025,18 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
 
         setTasks(prev => prev.map(t => t.id === id ? ({ ...t, status: newStatus, history: newHistory, isOverdue: computeIsOverdue({ ...t, status: newStatus }) }) : t));
 
+        if (prevTask.inboxNotificationId && apiBase) {
+            try {
+                await patchInboxNotification(apiBase, prevTask.inboxNotificationId, {
+                    taskCompleted: newStatus === 'done',
+                });
+                requestNotificationInboxCountsRefresh();
+            } catch (_e) {
+                setTasks(prev => prev.map(t => t.id === id ? ({ ...t, status: prevTask.status, history: prevTask.history, isOverdue: computeIsOverdue(prevTask) }) : t));
+            }
+            return;
+        }
+
         const targetClientId = clientId || prevTask.clientId;
         if (!apiBase || !targetClientId) return;
         try {
@@ -958,12 +1052,23 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     };
 
     const handleDeleteTask = async (id: string) => {
-        if (!window.confirm('האם למחוק משימה זו?')) return;
-        const prevTasks = tasks;
         const row = tasks.find((t) => t.id === id);
+        const inboxArchive = Boolean(row?.inboxNotificationId);
+        if (!window.confirm(inboxArchive ? 'להעביר פריט זה לארכיון בתיבת ההתראות?' : 'האם למחוק משימה זו?')) return;
+        const prevTasks = tasks;
         const targetClientId = clientId || row?.clientId;
         setTasks(prev => prev.filter(t => t.id !== id));
-        if (!apiBase || !targetClientId) return;
+        if (!apiBase) return;
+        if (row?.inboxNotificationId) {
+            try {
+                await patchInboxNotification(apiBase, row.inboxNotificationId, { status: 'archived' });
+                requestNotificationInboxCountsRefresh();
+            } catch (_e) {
+                setTasks(prevTasks);
+            }
+            return;
+        }
+        if (!targetClientId) return;
         try {
             const res = await fetch(`${apiBase}/api/clients/${targetClientId}/tasks/${id}`, { method: 'DELETE', headers: authHeaders(true) });
             if (!res.ok) throw new Error('Delete failed');
@@ -988,6 +1093,10 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     };
 
     const handleEditTask = (task: ClientTask) => {
+        if (task.inboxNotificationId) {
+            navigate('/notifications');
+            return;
+        }
         setEditingTask(task);
         setIsModalOpen(true);
     };

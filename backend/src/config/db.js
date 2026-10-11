@@ -83,6 +83,7 @@ const connectDb = async () => {
   require('../models/SmsRsvpInboundLog');
   require('../models/SmsRsvpDeliveryLog');
   require('../models/OrganizationProfileUpdate');
+  require('../models/PublicSiteKey');
 
   const User = require('../models/User');
   const Client = require('../models/Client');
@@ -105,6 +106,10 @@ const connectDb = async () => {
   Job.hasOne(JobPublication, { foreignKey: 'jobId', as: 'publication' });
   JobPublication.belongsTo(Job, { foreignKey: 'jobId', as: 'job' });
 
+  const PublicSiteKey = require('../models/PublicSiteKey');
+  PublicSiteKey.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+  Client.hasMany(PublicSiteKey, { foreignKey: 'clientId', as: 'publicSiteKeys' });
+
   const ClientPipeline = require('../models/ClientPipeline');
   const ClientPipelineStage = require('../models/ClientPipelineStage');
   ClientPipeline.hasMany(ClientPipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
@@ -114,6 +119,67 @@ const connectDb = async () => {
   const CandidatePipelineStage = require('../models/CandidatePipelineStage');
   CandidatePipeline.hasMany(CandidatePipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
   CandidatePipelineStage.belongsTo(CandidatePipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
+
+  // public_site_keys: sync only adds indexes on existing tables — ensure columns exist first.
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS public_site_keys (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name VARCHAR(255) NOT NULL,
+      key_hash VARCHAR(64) NOT NULL DEFAULT '',
+      key_prefix VARCHAR(16) NOT NULL DEFAULT '',
+      mode VARCHAR(16) NOT NULL DEFAULT 'tenant',
+      client_id UUID NULL REFERENCES clients(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      site_labels JSONB DEFAULT '[]'::jsonb,
+      revoked_at TIMESTAMPTZ NULL
+    );
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS key_hash VARCHAR(64) NOT NULL DEFAULT '';
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS key_prefix VARCHAR(16) NOT NULL DEFAULT '';
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS mode VARCHAR(16) NOT NULL DEFAULT 'tenant';
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS client_id UUID NULL;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS site_labels JSONB DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ NULL;
+  `).catch(() => {});
+  await sequelize.query(`
+    DO $$
+    BEGIN
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'public_site_keys' AND column_name = 'keyPrefix'
+      ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'public_site_keys' AND column_name = 'key_prefix'
+      ) THEN
+        UPDATE public_site_keys SET key_prefix = "keyPrefix" WHERE key_prefix = '' AND "keyPrefix" IS NOT NULL;
+      END IF;
+      IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'public_site_keys' AND column_name = 'keyHash'
+      ) AND EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'public_site_keys' AND column_name = 'key_hash'
+      ) THEN
+        UPDATE public_site_keys SET key_hash = "keyHash" WHERE key_hash = '' AND "keyHash" IS NOT NULL;
+      END IF;
+    END $$;
+  `).catch(() => {});
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS public_site_keys_key_prefix ON public_site_keys (key_prefix);
+  `).catch(() => {});
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS public_site_keys_client_id ON public_site_keys (client_id);
+  `).catch(() => {});
 
   await sequelize.sync();
 

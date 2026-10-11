@@ -1,12 +1,18 @@
-import React, { useState, useEffect, useId } from 'react';
+import React, { useState, useEffect, useId, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
     XMarkIcon, BuildingOffice2Icon, CalendarDaysIcon, UserGroupIcon, MapPinIcon, 
     ArrowLeftIcon, CheckCircleIcon, PhoneIcon, EnvelopeIcon, BriefcaseIcon,
-    ClipboardDocumentCheckIcon
+    ClipboardDocumentCheckIcon, ClockIcon
 } from './Icons';
 import { Client } from './ClientsListView';
-import { useLanguage } from '../context/LanguageContext';
+import ClientsEventsJournalTab from './ClientsEventsJournalTab';
+
+function nestedEntityDrawerZIndexClass(parentOverlayZIndexClass: string): string {
+  const match = parentOverlayZIndexClass.match(/z-\[(\d+)\]/);
+  if (match) return `z-[${Number(match[1]) + 10}]`;
+  return 'z-[70]';
+}
 
 // --- MOCK DATA ---
 const mockClientTasks = [
@@ -204,9 +210,20 @@ const ClientDetailsDrawer: React.FC<ClientDetailsDrawerProps> = ({
   onClose,
   overlayZIndexClass = 'z-[60]',
 }) => {
-  const [activeTab, setActiveTab] = useState<'details' | 'tasks' | 'contacts'>('details');
+  const [activeTab, setActiveTab] = useState<'details' | 'tasks' | 'contacts' | 'journal'>('details');
   const titleId = useId();
   const navigate = useNavigate();
+  const entityDrawerZ = useMemo(
+    () => nestedEntityDrawerZIndexClass(overlayZIndexClass),
+    [overlayZIndexClass],
+  );
+  const journalClientOptions = useMemo(
+    () =>
+      client
+        ? [{ id: String(client.id), name: client.name || 'לקוח' }]
+        : [],
+    [client],
+  );
 
   useEffect(() => {
     if (isOpen) {
@@ -226,6 +243,18 @@ const ClientDetailsDrawer: React.FC<ClientDetailsDrawerProps> = ({
       case 'details': return <DetailsContent client={client} />;
       case 'tasks': return <TasksContent client={client} />;
       case 'contacts': return <ContactsContent client={client} />;
+      case 'journal':
+        return (
+          <div className="flex flex-col flex-1 min-h-0 -mx-5 -mb-5 h-full">
+            <ClientsEventsJournalTab
+              clientOptions={journalClientOptions}
+              defaultClientId={String(client.id)}
+              embeddedInModal
+              hideFilters
+              entityDrawerOverlayZIndexClass={entityDrawerZ}
+            />
+          </div>
+        );
       default: return null;
     }
   };
@@ -262,9 +291,14 @@ const ClientDetailsDrawer: React.FC<ClientDetailsDrawerProps> = ({
             <TabButton title="פרטים" isActive={activeTab === 'details'} onClick={() => setActiveTab('details')} icon={<BuildingOffice2Icon className="w-4 h-4"/>} />
             <TabButton title="משימות" isActive={activeTab === 'tasks'} onClick={() => setActiveTab('tasks')} icon={<ClipboardDocumentCheckIcon className="w-4 h-4"/>} />
             <TabButton title="אנשי קשר" isActive={activeTab === 'contacts'} onClick={() => setActiveTab('contacts')} icon={<UserGroupIcon className="w-4 h-4"/>} />
+            <TabButton title="יומן" isActive={activeTab === 'journal'} onClick={() => setActiveTab('journal')} icon={<ClockIcon className="w-4 h-4"/>} />
         </nav>
 
-        <main className="flex-1 overflow-y-auto p-5 custom-scrollbar relative bg-bg-subtle/30">
+        <main
+          className={`flex-1 min-h-0 relative bg-bg-subtle/30 flex flex-col ${
+            activeTab === 'journal' ? 'overflow-hidden p-0' : 'overflow-y-auto p-5 custom-scrollbar'
+          }`}
+        >
           {renderContent()}
         </main>
 

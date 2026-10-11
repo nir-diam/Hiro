@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LinkIcon, PencilIcon } from './Icons';
 import AccordionSection from './AccordionSection'; 
 import { useLanguage } from '../context/LanguageContext';
@@ -125,9 +125,15 @@ interface ClientDetailsTabProps {
     /** When set (e.g. organization profile), pending updates are scoped to this org — not any org on the client. */
     organizationId?: string | null;
     onClientUpdated?: (next: any) => void;
+    onDirtyChange?: (dirty: boolean) => void;
 }
 
-const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, organizationId, onClientUpdated }) => {
+const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({
+    client,
+    organizationId,
+    onClientUpdated,
+    onDirtyChange,
+}) => {
     const { t } = useLanguage();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const businessProfile = getClientBusinessProfile(client);
@@ -138,6 +144,7 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, organizatio
     const [pendingUpdate, setPendingUpdate] = useState<OrgProfileUpdateDto | null>(null);
     const [isSubmittingProfile, setIsSubmittingProfile] = useState(false);
     const [profileError, setProfileError] = useState<string | null>(null);
+    const profileEditBaselineRef = useRef<string>('');
 
     const scopedOrganizationId = organizationId?.trim() || null;
 
@@ -175,11 +182,12 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, organizatio
         : businessProfile;
 
     const startProfileEdit = () => {
-        if (hasPending && pendingUpdate) {
-            setProfileForm(businessProfileToOrgEditValues(pendingToProfile(pendingUpdate)));
-        } else {
-            setProfileForm(businessProfileToOrgEditValues(businessProfile));
-        }
+        const nextForm =
+            hasPending && pendingUpdate
+                ? businessProfileToOrgEditValues(pendingToProfile(pendingUpdate))
+                : businessProfileToOrgEditValues(businessProfile);
+        setProfileForm(nextForm);
+        profileEditBaselineRef.current = JSON.stringify(nextForm);
         setIsEditingProfile(true);
         setProfileError(null);
     };
@@ -187,8 +195,21 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, organizatio
     const cancelProfileEdit = () => {
         setIsEditingProfile(false);
         setProfileForm(businessProfileToOrgEditValues(businessProfile));
+        profileEditBaselineRef.current = '';
         setProfileError(null);
     };
+
+    const isProfileDirty =
+        isEditingProfile
+        && profileEditBaselineRef.current !== ''
+        && JSON.stringify(profileForm) !== profileEditBaselineRef.current;
+
+    useEffect(() => {
+        onDirtyChange?.(isProfileDirty);
+        return () => {
+            onDirtyChange?.(false);
+        };
+    }, [isProfileDirty, onDirtyChange]);
 
     const handleSubmitProfile = async () => {
         if (!client?.id) return;
@@ -199,6 +220,7 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, organizatio
             const row = await submitOrgProfileUpdate(client.id, payload, scopedOrganizationId);
             setPendingUpdate(row);
             setIsEditingProfile(false);
+            profileEditBaselineRef.current = '';
             if (row.clientGamificationPoints != null) {
                 dispatchClientGamificationUpdated(client.id, row.clientGamificationPoints);
                 onClientUpdated?.(mergeClientProfileUpdatePoints(client, row.clientGamificationPoints));

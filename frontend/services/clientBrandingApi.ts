@@ -7,13 +7,21 @@ const authHeaders = (json = false): Record<string, string> => {
   return h;
 };
 
-export type JobHeroBrandSource = 'company' | 'job_client';
+export type JobHeroBrandSource = 'company' | 'job_client' | 'choice';
+
+export type JobHeroBrandDefaultPolicy = JobHeroBrandSource;
+
+function parseJobHeroBrandSource(raw: unknown): JobHeroBrandDefaultPolicy {
+  const v = String(raw || 'company').trim();
+  if (v === 'job_client' || v === 'choice') return v;
+  return 'company';
+}
 
 export type ClientBranding = {
   logoUrl: string | null;
   primaryColor: string | null;
   /** Default brand source for Nano Banana job images (`clients.metadata`). */
-  jobHeroBrandSource?: JobHeroBrandSource;
+  jobHeroBrandSource?: JobHeroBrandDefaultPolicy;
 };
 
 const GOOGLE_FAVICON_MARKER = 'google.com/s2/favicons';
@@ -72,11 +80,10 @@ export async function fetchClientBranding(clientId: string): Promise<ClientBrand
     data.metadata && typeof data.metadata === 'object' && !Array.isArray(data.metadata)
       ? (data.metadata as Record<string, unknown>)
       : {};
-  const sourceRaw = String(meta.jobHeroBrandSource || 'company').trim();
   return {
     logoUrl: trimLogo(data.logoUrl),
     primaryColor: trimLogo(data.primaryColor) || '#1e293b',
-    jobHeroBrandSource: sourceRaw === 'job_client' ? 'job_client' : 'company',
+    jobHeroBrandSource: parseJobHeroBrandSource(meta.jobHeroBrandSource),
   };
 }
 
@@ -101,11 +108,10 @@ export async function saveClientBranding(
     data.metadata && typeof data.metadata === 'object' && !Array.isArray(data.metadata)
       ? (data.metadata as Record<string, unknown>)
       : {};
-  const sourceRaw = String(meta.jobHeroBrandSource || 'company').trim();
   return {
     logoUrl: trimLogo(data.logoUrl),
     primaryColor: trimLogo(data.primaryColor) || '#1e293b',
-    jobHeroBrandSource: sourceRaw === 'job_client' ? 'job_client' : 'company',
+    jobHeroBrandSource: parseJobHeroBrandSource(meta.jobHeroBrandSource),
   };
 }
 

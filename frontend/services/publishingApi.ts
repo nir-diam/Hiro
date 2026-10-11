@@ -337,6 +337,7 @@ export async function removeHeroGalleryImage(imageId: string, clientId?: string 
 }
 
 export type JobHeroBrandSource = 'company' | 'job_client';
+export type JobHeroBrandDefaultPolicy = 'company' | 'job_client' | 'choice';
 
 export type GenerateHeroImagePayload = {
   aspectRatio?: '16:9' | '4:3' | '3:4' | '1:1';
@@ -708,6 +709,7 @@ export type BoardPublicationRow = {
   publishedAt: string | null;
   unpublishedAt: string | null;
   candidatesCount: number;
+  referralsCount?: number;
   views?: number;
 };
 

@@ -23,6 +23,7 @@ import {
   deleteJobImage,
   generateHeroImage,
   type JobHeroBrandSource,
+  type JobHeroBrandDefaultPolicy,
   type LandingLayout,
   type LayoutVariantContent,
   type LandingLayoutsMap,
@@ -46,6 +47,24 @@ const normalizeHexColor = (v: unknown): string | null => {
 
 const publicationBrandHasAssets = (b: PublicationBranding | null | undefined): boolean =>
     Boolean(b && (String(b.logoUrl || '').trim() || normalizeHexColor(b.primaryColor)));
+
+const parseHeroBrandDefaultPolicy = (raw: unknown): JobHeroBrandDefaultPolicy => {
+    const v = String(raw || 'company').trim();
+    if (v === 'job_client' || v === 'choice') return v;
+    return 'company';
+};
+
+const resolveHeroBrandSourceForPublication = (pub: {
+    heroBrandSource?: string | null;
+    defaultHeroBrandSource?: string | null;
+}): { policy: JobHeroBrandDefaultPolicy; source: JobHeroBrandSource } => {
+    const policy = parseHeroBrandDefaultPolicy(pub.defaultHeroBrandSource);
+    if (policy === 'choice') {
+        const source: JobHeroBrandSource = pub.heroBrandSource === 'job_client' ? 'job_client' : 'company';
+        return { policy, source };
+    }
+    return { policy, source: policy };
+};
 
 const resolveHeroBrandPreview = (
     requestedSource: JobHeroBrandSource,
@@ -407,6 +426,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     const [heroGallery, setHeroGallery] = useState<CompanyCreatedImage[]>([]);
     const [heroGalleryLoading, setHeroGalleryLoading] = useState(false);
     const [heroBrandSource, setHeroBrandSource] = useState<JobHeroBrandSource>('company');
+    const [heroBrandDefaultPolicy, setHeroBrandDefaultPolicy] = useState<JobHeroBrandDefaultPolicy>('company');
     const [heroBrandColorOverride, setHeroBrandColorOverride] = useState<string | null>(null);
     const [tenantBranding, setTenantBranding] = useState<PublicationBranding | null>(null);
     const [employerBranding, setEmployerBranding] = useState<PublicationBranding | null>(null);
@@ -570,13 +590,9 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                 if (pub.clientLandingContact) {
                     setLandingContact(pub.clientLandingContact);
                 }
-                const pubSource =
-                    pub.heroBrandSource === 'job_client' || pub.heroBrandSource === 'company'
-                        ? pub.heroBrandSource
-                        : pub.defaultHeroBrandSource === 'job_client'
-                          ? 'job_client'
-                          : 'company';
-                setHeroBrandSource(pubSource);
+                const { policy, source } = resolveHeroBrandSourceForPublication(pub);
+                setHeroBrandDefaultPolicy(policy);
+                setHeroBrandSource(source);
                 const override = normalizeHexColor((pub as { heroBrandColorOverride?: string }).heroBrandColorOverride);
                 setHeroBrandColorOverride(override);
                 if (pub.tenantBranding) {
@@ -594,7 +610,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                     });
                 }
                 const preview = resolveHeroBrandPreview(
-                    pubSource,
+                    source,
                     pub.tenantBranding
                         ? {
                               clientName: pub.tenantBranding.clientName,
@@ -1234,37 +1250,56 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                         <div>
                             <p className="text-sm font-semibold text-text-default">מותג לתמונת Nano Banana</p>
                             <p className="text-xs text-text-muted mt-0.5">
-                                ברירת מחדל מהגדרות החברה — ניתן לשנות למשרה זו בלבד.
+                                {heroBrandDefaultPolicy === 'choice'
+                                    ? 'בהגדרות החברה נבחר «בחירה» — בחרו חברה או לקוח למשרה זו.'
+                                    : heroBrandDefaultPolicy === 'company'
+                                      ? 'בהגדרות החברה נקבע מותג החברה (צבע ראשי) — חל אוטומטית על פרסום זה.'
+                                      : 'בהגדרות החברה נקבע מותג לקוח המשרה — חל אוטומטית על פרסום זה.'}
                             </p>
                         </div>
-                        <div className="flex flex-wrap gap-4">
-                            <label className="flex items-center gap-2 cursor-pointer">
-                                <input
-                                    type="radio"
-                                    name="publishHeroBrandSource"
-                                    checked={heroBrandSource === 'company'}
-                                    onChange={() => {
-                                        setHeroBrandSource('company');
-                                        setHeroBrandColorOverride(null);
-                                    }}
-                                    className="text-primary-600"
+                        {heroBrandDefaultPolicy === 'choice' ? (
+                            <div className="flex flex-wrap gap-4">
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                        type="radio"
+                                        name="publishHeroBrandSource"
+                                        checked={heroBrandSource === 'company'}
+                                        onChange={() => {
+                                            setHeroBrandSource('company');
+                                            setHeroBrandColorOverride(null);
+                                        }}
+                                        className="text-primary-600"
+                                    />
+                                    <span className="text-sm">חברה</span>
+                                </label>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                        type="radio"
+                                        name="publishHeroBrandSource"
+                                        checked={heroBrandSource === 'job_client'}
+                                        onChange={() => {
+                                            setHeroBrandSource('job_client');
+                                            setHeroBrandColorOverride(null);
+                                        }}
+                                        className="text-primary-600"
+                                    />
+                                    <span className="text-sm">לקוח המשרה</span>
+                                </label>
+                            </div>
+                        ) : (
+                            <div className="flex flex-wrap items-center gap-2 text-sm">
+                                <span className="font-semibold text-text-default">
+                                    {heroBrandSource === 'job_client' ? 'לקוח המשרה' : 'חברה'}
+                                </span>
+                                <span className="text-text-muted">·</span>
+                                <span className="text-text-muted">{heroBrandPreview.brandName}</span>
+                                <span
+                                    className="inline-block w-4 h-4 rounded-full border border-border-default shrink-0"
+                                    style={{ backgroundColor: heroBrandPreview.baseColor }}
+                                    title={heroBrandPreview.baseColor}
                                 />
-                                <span className="text-sm">חברה</span>
-                            </label>
-                            <label className="flex items-center gap-2 cursor-pointer">
-                                <input
-                                    type="radio"
-                                    name="publishHeroBrandSource"
-                                    checked={heroBrandSource === 'job_client'}
-                                    onChange={() => {
-                                        setHeroBrandSource('job_client');
-                                        setHeroBrandColorOverride(null);
-                                    }}
-                                    className="text-primary-600"
-                                />
-                                <span className="text-sm">לקוח המשרה</span>
-                            </label>
-                        </div>
+                            </div>
+                        )}
                         <div className="flex flex-wrap items-center gap-3">
                             <label className="text-sm font-semibold text-text-muted">צבע למשרה זו</label>
                             <input

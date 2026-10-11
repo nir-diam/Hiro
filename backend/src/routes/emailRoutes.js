@@ -9,9 +9,11 @@ const REQUIRED_HANDLERS = [
   'downloadEmailUploadResume',
   'patchEmailUploadNotes',
   'getNotificationMessages',
+  'getNotificationMessageById',
   'downloadNotificationMessageAttachment',
   'updateNotificationMessageAssignee',
   'updateNotificationMessageStatus',
+  'replyToNotificationMessage',
   'send',
   'sendScreeningCv',
   'listScreeningCvReferrals',
@@ -35,6 +37,7 @@ router.get('/candidate/:candidateId', emailController.getByCandidate);
 
 // Static paths before /:id — otherwise Express may bind the wrong handler at registration time.
 router.get('/messages', authMiddleware, emailController.getNotificationMessages);
+router.get('/messages/:id', authMiddleware, emailController.getNotificationMessageById);
 router.get(
   '/messages/:id/attachments/:index',
   authMiddleware,
@@ -42,6 +45,7 @@ router.get(
 );
 router.patch('/messages/:id/assign', authMiddleware, emailController.updateNotificationMessageAssignee);
 router.patch('/messages/:id/status', authMiddleware, emailController.updateNotificationMessageStatus);
+router.post('/messages/:id/reply', authMiddleware, emailController.replyToNotificationMessage);
 router.post('/send', authMiddleware, emailController.send);
 router.post('/send-screening-cv', authMiddleware, emailController.sendScreeningCv);
 router.get('/screening-cv-referrals', authMiddleware, emailController.listScreeningCvReferrals);

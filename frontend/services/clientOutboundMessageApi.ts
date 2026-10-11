@@ -12,6 +12,8 @@ export type OutboundMessageAttachmentRef = {
     size?: number | null;
     notificationMessageId: string;
     index: number;
+    /** Index within `metadata.thread` when downloading a reply attachment. */
+    threadReplyIndex?: number;
     /** Stored on client journal events so downloads work even if notification metadata is missing. */
     contentBase64?: string | null;
 };
@@ -325,8 +327,16 @@ const parseAttachmentRefs = (
         .filter((row): row is OutboundMessageAttachmentRef => Boolean(row));
 };
 
-export function notificationAttachmentDownloadUrl(messageId: string, index: number): string {
-    return `${apiBase()}/api/email-uploads/messages/${encodeURIComponent(messageId)}/attachments/${index}`;
+export function notificationAttachmentDownloadUrl(
+    messageId: string,
+    index: number,
+    threadReplyIndex?: number,
+): string {
+    const base = `${apiBase()}/api/email-uploads/messages/${encodeURIComponent(messageId)}/attachments/${index}`;
+    if (threadReplyIndex != null && Number.isInteger(threadReplyIndex) && threadReplyIndex >= 0) {
+        return `${base}?threadReplyIndex=${threadReplyIndex}`;
+    }
+    return base;
 }
 
 export async function downloadNotificationMessageAttachment(
@@ -337,11 +347,14 @@ export async function downloadNotificationMessageAttachment(
         throw new Error('לא ניתן להוריד את הקובץ');
     }
 
-    const res = await fetch(notificationAttachmentDownloadUrl(messageId, attachment.index), {
-        method: 'GET',
-        headers: authHeaders(),
-        credentials: 'include',
-    });
+    const res = await fetch(
+        notificationAttachmentDownloadUrl(messageId, attachment.index, attachment.threadReplyIndex),
+        {
+            method: 'GET',
+            headers: authHeaders(),
+            credentials: 'include',
+        },
+    );
     if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(

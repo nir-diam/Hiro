@@ -260,7 +260,9 @@ const postingCodeFromPlusAddressText = (text = '') => {
   return m ? m[1] : null;
 };
 
-/** Fallback when plus-tagging missed: first standalone number with value > 800000 in the text. */
+const { POSTING_CODE_FIRST } = jobService;
+
+/** Fallback when plus-tagging missed: first standalone number >= POSTING_CODE_FIRST (1_000_000). */
 const extractPostingCodeFromLargeNumberInText = (text = '') => {
   const src = String(text || '').trim();
   if (!src) return null;
@@ -268,9 +270,9 @@ const extractPostingCodeFromLargeNumberInText = (text = '') => {
   let m;
   while ((m = re.exec(src)) !== null) {
     const digits = m[1];
-    if (digits.length > 8) continue;
+    if (digits.length > 12) continue;
     const n = Number(digits);
-    if (Number.isFinite(n) && n > 800000) return digits;
+    if (Number.isFinite(n) && n >= POSTING_CODE_FIRST) return digits;
   }
   return null;
 };
@@ -1906,6 +1908,13 @@ const downloadEmailUploadResume = async (req, res) => {
 async function resolveNotificationViewerContext(req) {
   const userId = req.user?.sub || req.user?.id;
   if (!userId) return null;
+  const jwtEmail = (req.user?.email || '').trim().toLowerCase();
+  if (jwtEmail) {
+    const user = await User.findByPk(userId, { attributes: ['id', 'name'] });
+    if (!user) return null;
+    const nameNorm = (user.name || '').trim().toLowerCase();
+    return { userId, emailNorm: jwtEmail, nameNorm };
+  }
   const user = await User.findByPk(userId, { attributes: ['id', 'email', 'name'] });
   if (!user) return null;
   const emailNorm = (user.email || '').trim().toLowerCase();
@@ -1951,6 +1960,143 @@ function buildNotificationAttachmentMetadata(smtpAttachments) {
     })
     .filter(Boolean);
   return rows.length ? rows : null;
+}
+
+function buildNotificationAttachmentMetadataFromRequest(rawAttachments) {
+  if (!Array.isArray(rawAttachments) || !rawAttachments.length) return null;
+  const smtpLike = rawAttachments
+    .map((a) => {
+      const contentB64 = typeof a?.content === 'string' ? a.content.trim() : '';
+      if (!contentB64) return null;
+      try {
+        const buf = Buffer.from(contentB64, 'base64');
+        if (!buf.length) return null;
+        return {
+          filename: String(a.filename || 'attachment'),
+          content: buf,
+          contentType: typeof a.contentType === 'string' ? a.contentType : undefined,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  return buildNotificationAttachmentMetadata(smtpLike);
+}
+
+function formatNotificationMessageRow(row) {
+  const plain = row.get ? row.get({ plain: true }) : row;
+  const s = plain.sender;
+  delete plain.sender;
+  const senderName = s?.name != null ? String(s.name).trim() : '';
+  const senderEmail = s?.email != null ? String(s.email).trim() : '';
+  return { ...plain, senderName, senderEmail };
+}
+
+/** List responses must never ship html or inline attachment bytes. */
+function stripNotificationHeavyFields(row, { maxTextLen, maxThreadTextLen } = {}) {
+  const out = { ...row };
+  delete out.html;
+  if (
+    maxTextLen != null &&
+    typeof out.text === 'string' &&
+    out.text.length > maxTextLen
+  ) {
+    out.text = `${out.text.slice(0, maxTextLen)}…`;
+  }
+  if (out.metadata && typeof out.metadata === 'object' && !Array.isArray(out.metadata)) {
+    const meta = { ...out.metadata };
+    if (Array.isArray(meta.attachments)) {
+      meta.attachments = meta.attachments.map((a) => {
+        if (!a || typeof a !== 'object') return a;
+        const { contentBase64, ...rest } = a;
+        return rest;
+      });
+    }
+    if (Array.isArray(meta.thread)) {
+      meta.thread = meta.thread.map((t) => {
+        if (!t || typeof t !== 'object') return t;
+        const copy = { ...t };
+        if (
+          maxThreadTextLen != null &&
+          typeof copy.text === 'string' &&
+          copy.text.length > maxThreadTextLen
+        ) {
+          copy.text = `${copy.text.slice(0, maxThreadTextLen)}…`;
+        }
+        if (Array.isArray(copy.attachments)) {
+          copy.attachments = copy.attachments.map((a) => {
+            if (!a || typeof a !== 'object') return a;
+            const { contentBase64, ...rest } = a;
+            return rest;
+          });
+        }
+        return copy;
+      });
+    }
+    out.metadata = meta;
+  }
+  return out;
+}
+
+function slimNotificationRowForSummary(row) {
+  return stripNotificationHeavyFields(row, { maxTextLen: 360, maxThreadTextLen: 240 });
+}
+
+const NOTIFICATION_MESSAGE_LIST_ATTRIBUTES = [
+  'id',
+  'toEmail',
+  'subject',
+  'text',
+  'messageType',
+  'status',
+  'isTask',
+  'assignee',
+  'assigneeId',
+  'category',
+  'dueDate',
+  'dueTime',
+  'sla',
+  'senderUserId',
+  'metadata',
+  'createdAt',
+  'updatedAt',
+];
+
+const NOTIFICATION_MESSAGE_LIST_INCLUDE = [
+  {
+    model: User,
+    as: 'sender',
+    attributes: ['id', 'name', 'email'],
+    required: false,
+  },
+];
+
+const NOTIFICATION_MESSAGE_LIST_ORDER = [
+  ['updatedAt', 'DESC'],
+  ['createdAt', 'DESC'],
+];
+
+function mergeNotificationRowsDeduped(rowSets, limit = 500) {
+  const byId = new Map();
+  for (const rows of rowSets) {
+    for (const row of rows) {
+      const plain = row.get ? row.get({ plain: true }) : row;
+      const id = plain?.id != null ? String(plain.id) : '';
+      if (!id || byId.has(id)) continue;
+      byId.set(id, row);
+    }
+  }
+  const merged = [...byId.values()];
+  merged.sort((a, b) => {
+    const pa = a.get ? a.get({ plain: true }) : a;
+    const pb = b.get ? b.get({ plain: true }) : b;
+    const ua = new Date(pa.updatedAt || pa.createdAt || 0).getTime();
+    const ub = new Date(pb.updatedAt || pb.createdAt || 0).getTime();
+    if (ub !== ua) return ub - ua;
+    return new Date(pb.createdAt || 0).getTime() - new Date(pa.createdAt || 0).getTime();
+  });
+  return merged.slice(0, limit);
 }
 
 function readNotificationMetadata(record) {
@@ -2083,11 +2229,11 @@ const getNotificationMessages = async (req, res) => {
     const trimmedLower = (col) =>
       Sequelize.fn('lower', Sequelize.fn('trim', Sequelize.col(col)));
 
-    const orConditions = [];
+    const recipientOr = [];
 
     if (ctx.emailNorm) {
       const emailListPattern = `%,${ctx.emailNorm},%`;
-      orConditions.push(
+      recipientOr.push(
         Sequelize.literal(
           `(',' || REPLACE(LOWER(TRIM(COALESCE("NotificationMessage"."toEmail", ''))), ' ', '') || ',') LIKE ${sequelize.escape(
             emailListPattern
@@ -2100,49 +2246,106 @@ const getNotificationMessages = async (req, res) => {
         )
       );
       if (ctx.nameNorm) {
-        orConditions.push(Sequelize.where(trimmedLower('assignee'), ctx.nameNorm));
+        recipientOr.push(Sequelize.where(trimmedLower('assignee'), ctx.nameNorm));
       }
     } else if (ctx.nameNorm) {
-      orConditions.push(Sequelize.where(trimmedLower('assignee'), ctx.nameNorm));
+      recipientOr.push(Sequelize.where(trimmedLower('assignee'), ctx.nameNorm));
     }
 
-    if (ctx.userId != null) {
-      orConditions.push({ senderUserId: ctx.userId });
-    }
-
-    if (orConditions.length === 0) {
+    if (recipientOr.length === 0 && ctx.userId == null) {
       res.set('Cache-Control', 'private, no-store');
       return res.json([]);
     }
 
-    const records = await NotificationMessage.findAll({
-      where: {
-        [Op.and]: [{ status: { [Op.ne]: 'deleted' } }, { [Op.or]: orConditions }],
-      },
-      include: [
-        {
-          model: User,
-          as: 'sender',
-          attributes: ['id', 'name', 'email'],
-          required: false,
-        },
-      ],
-      order: [['createdAt', 'DESC']],
+    const summary =
+      String(req.query?.summary || '').trim() === '1' ||
+      String(req.query?.summary || '').trim().toLowerCase() === 'true';
+
+    const scopeContactId = String(req.query?.contactId || '').trim();
+    const statusNotDeleted = { status: { [Op.ne]: 'deleted' } };
+    const listQueryBase = {
+      attributes: NOTIFICATION_MESSAGE_LIST_ATTRIBUTES,
+      include: NOTIFICATION_MESSAGE_LIST_INCLUDE,
+      order: NOTIFICATION_MESSAGE_LIST_ORDER,
       limit: 500,
-    });
-    const payload = records.map((r) => {
-      const row = r.get({ plain: true });
-      const s = row.sender;
-      delete row.sender;
-      const senderName = s?.name != null ? String(s.name).trim() : '';
-      const senderEmail = s?.email != null ? String(s.email).trim() : '';
-      return { ...row, senderName, senderEmail };
-    });
+    };
+
+    const contactScopeLiteral = scopeContactId
+      ? Sequelize.literal(
+          `"NotificationMessage"."metadata"->'taskPayload'->>'linkedContactId' = ${sequelize.escape(scopeContactId)}`
+        )
+      : null;
+
+    const queries = [];
+
+    if (ctx.userId != null) {
+      const senderWhere = contactScopeLiteral
+        ? { [Op.and]: [statusNotDeleted, { senderUserId: ctx.userId }, contactScopeLiteral] }
+        : { [Op.and]: [statusNotDeleted, { senderUserId: ctx.userId }] };
+      queries.push(NotificationMessage.findAll({ ...listQueryBase, where: senderWhere }));
+
+      const assigneeWhere = contactScopeLiteral
+        ? { [Op.and]: [statusNotDeleted, { assigneeId: ctx.userId }, contactScopeLiteral] }
+        : { [Op.and]: [statusNotDeleted, { assigneeId: ctx.userId }] };
+      queries.push(NotificationMessage.findAll({ ...listQueryBase, where: assigneeWhere }));
+    }
+
+    if (recipientOr.length) {
+      const recipientWhere = contactScopeLiteral
+        ? { [Op.and]: [statusNotDeleted, { [Op.or]: recipientOr }, contactScopeLiteral] }
+        : { [Op.and]: [statusNotDeleted, { [Op.or]: recipientOr }] };
+      queries.push(NotificationMessage.findAll({ ...listQueryBase, where: recipientWhere }));
+    }
+
+    const rowSets = await Promise.all(queries);
+    const records = mergeNotificationRowsDeduped(rowSets, 500);
+
+    let payload = records.map((r) => formatNotificationMessageRow(r));
+    payload = payload.map((row) =>
+      summary
+        ? slimNotificationRowForSummary(row)
+        : stripNotificationHeavyFields(row, { maxTextLen: 2000, maxThreadTextLen: 400 })
+    );
     res.set('Cache-Control', 'private, no-store');
     return res.json(payload);
   } catch (error) {
     console.error('[email][getNotificationMessages]', error);
     return res.status(500).json({ message: 'Failed to load notification messages' });
+  }
+};
+
+const getNotificationMessageById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isUuid =
+      typeof id === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+    if (!isUuid) {
+      return res.status(400).json({ message: 'id must be a valid UUID' });
+    }
+
+    const ctx = await resolveNotificationViewerContext(req);
+    if (!ctx) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const record = await NotificationMessage.findByPk(id, {
+      attributes: { exclude: ['html'] },
+      include: NOTIFICATION_MESSAGE_LIST_INCLUDE,
+    });
+    if (!record) {
+      return res.status(404).json({ message: 'Notification message not found' });
+    }
+    if (!notificationVisibleToViewer(record, ctx)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const payload = stripNotificationHeavyFields(formatNotificationMessageRow(record));
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(payload);
+  } catch (error) {
+    console.error('[email][getNotificationMessageById]', error);
+    return res.status(500).json({ message: 'Failed to load notification message' });
   }
 };
 
@@ -2167,11 +2370,29 @@ const downloadNotificationMessageAttachment = async (req, res) => {
     }
 
     let att = null;
-    const attachments = Array.isArray(record.metadata?.attachments) ? record.metadata.attachments : [];
-    if (attachments[idx]?.contentBase64) {
-      att = attachments[idx];
+    const threadReplyIndexRaw = req.query?.threadReplyIndex;
+    const threadReplyIndex =
+      threadReplyIndexRaw != null && String(threadReplyIndexRaw).trim() !== ''
+        ? Number(threadReplyIndexRaw)
+        : null;
+    if (
+      threadReplyIndex != null &&
+      Number.isInteger(threadReplyIndex) &&
+      threadReplyIndex >= 0
+    ) {
+      const thread = Array.isArray(record.metadata?.thread) ? record.metadata.thread : [];
+      const reply = thread[threadReplyIndex];
+      const replyAttachments = Array.isArray(reply?.attachments) ? reply.attachments : [];
+      if (replyAttachments[idx]?.contentBase64) {
+        att = replyAttachments[idx];
+      }
     } else {
-      att = await findOutboundAttachmentInClientEvents(id, idx);
+      const attachments = Array.isArray(record.metadata?.attachments) ? record.metadata.attachments : [];
+      if (attachments[idx]?.contentBase64) {
+        att = attachments[idx];
+      } else {
+        att = await findOutboundAttachmentInClientEvents(id, idx);
+      }
     }
     if (!att?.contentBase64) {
       return res.status(404).json({ message: 'Attachment not found' });
@@ -2198,6 +2419,111 @@ const downloadNotificationMessageAttachment = async (req, res) => {
   } catch (error) {
     console.error('[email][downloadNotificationMessageAttachment]', error);
     return res.status(500).json({ message: 'Failed to download attachment' });
+  }
+};
+
+const replyToNotificationMessage = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { text, markComplete, attachments: rawAttachments } = req.body || {};
+    const isUuid =
+      typeof id === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+    if (!isUuid) {
+      return res.status(400).json({ message: 'id must be a valid UUID' });
+    }
+
+    const bodyText = typeof text === 'string' ? text.trim() : '';
+    const attachmentRows = buildNotificationAttachmentMetadataFromRequest(rawAttachments);
+    if (!bodyText && !attachmentRows?.length) {
+      return res.status(400).json({ message: 'text or attachments required' });
+    }
+
+    const ctx = await resolveNotificationViewerContext(req);
+    if (!ctx?.userId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const record = await NotificationMessage.findByPk(id, {
+      include: [
+        {
+          model: User,
+          as: 'sender',
+          attributes: ['id', 'name', 'email'],
+          required: false,
+        },
+      ],
+    });
+    if (!record) {
+      return res.status(404).json({ message: 'Notification message not found' });
+    }
+    if (!record.senderUserId) {
+      return res.status(400).json({ message: 'Cannot reply to system notifications' });
+    }
+    if (!notificationVisibleToViewer(record, ctx)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const isSender =
+      record.senderUserId != null && String(record.senderUserId) === String(ctx.userId);
+    const isRecipient = notificationRecipientMatchesViewer(record, ctx);
+    if (!isSender && !isRecipient) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const author = await User.findByPk(ctx.userId, { attributes: ['id', 'name', 'email'] });
+    const authorName =
+      author?.name != null && String(author.name).trim()
+        ? String(author.name).trim()
+        : author?.email != null
+          ? String(author.email).trim()
+          : 'משתמש';
+    const authorEmail = author?.email != null ? String(author.email).trim() : '';
+
+    const now = new Date().toISOString();
+    const nextMeta = readNotificationMetadata(record);
+    const thread = Array.isArray(nextMeta.thread) ? [...nextMeta.thread] : [];
+    thread.push({
+      id: randomUUID(),
+      senderUserId: ctx.userId,
+      senderName: authorName,
+      senderEmail: authorEmail,
+      text: bodyText,
+      createdAt: now,
+      ...(attachmentRows?.length ? { attachments: attachmentRows } : {}),
+    });
+    nextMeta.thread = thread;
+    nextMeta.lastThreadAt = now;
+    nextMeta.lastReplyPreview = (bodyText || 'קובץ מצורף').replace(/\s+/g, ' ').trim().slice(0, 160);
+
+    if (isRecipient) {
+      nextMeta.recipientAnsweredAt = now;
+      nextMeta.senderThreadUnread = true;
+      nextMeta.recipientThreadUnread = false;
+      if (typeof markComplete === 'boolean' && markComplete) {
+        nextMeta.taskCompleted = true;
+      }
+    } else if (isSender) {
+      nextMeta.recipientThreadUnread = true;
+      nextMeta.senderThreadUnread = false;
+    }
+
+    await record.update({ metadata: nextMeta });
+    await record.reload({
+      include: [
+        {
+          model: User,
+          as: 'sender',
+          attributes: ['id', 'name', 'email'],
+          required: false,
+        },
+      ],
+    });
+
+    return res.json(formatNotificationMessageRow(record));
+  } catch (error) {
+    console.error('[email][replyToNotificationMessage]', error);
+    return res.status(500).json({ message: 'Failed to post reply' });
   }
 };
 
@@ -2260,7 +2586,8 @@ async function resolveRequesterEmail(req) {
 const updateNotificationMessageStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, taskCompleted, markRecipientRead, dueDate, dueTime } = req.body || {};
+    const { status, taskCompleted, markRecipientRead, dueDate, dueTime, threadReadByViewer } =
+      req.body || {};
     const isUuid =
       typeof id === 'string' &&
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
@@ -2272,9 +2599,18 @@ const updateNotificationMessageStatus = async (req, res) => {
     const hasMarkRecipientRead = markRecipientRead === true;
     const hasDueDate = dueDate !== undefined;
     const hasDueTime = dueTime !== undefined;
-    if (!hasStatus && !hasTaskCompleted && !hasMarkRecipientRead && !hasDueDate && !hasDueTime) {
+    const hasThreadReadByViewer = threadReadByViewer === true;
+    if (
+      !hasStatus &&
+      !hasTaskCompleted &&
+      !hasMarkRecipientRead &&
+      !hasDueDate &&
+      !hasDueTime &&
+      !hasThreadReadByViewer
+    ) {
       return res.status(400).json({
-        message: 'Provide status, taskCompleted, markRecipientRead, dueDate, and/or dueTime',
+        message:
+          'Provide status, taskCompleted, markRecipientRead, dueDate, dueTime, and/or threadReadByViewer',
       });
     }
 
@@ -2312,6 +2648,19 @@ const updateNotificationMessageStatus = async (req, res) => {
     if (hasMarkRecipientRead) {
       nextMeta.recipientReadAt = new Date().toISOString();
       metaTouched = true;
+    }
+    if (hasThreadReadByViewer && ctx.userId != null) {
+      const isSender =
+        record.senderUserId != null && String(record.senderUserId) === String(ctx.userId);
+      const isRecipient = notificationRecipientMatchesViewer(record, ctx);
+      if (isSender) {
+        nextMeta.senderThreadUnread = false;
+        metaTouched = true;
+      }
+      if (isRecipient) {
+        nextMeta.recipientThreadUnread = false;
+        metaTouched = true;
+      }
     }
     if (hasStatus) {
       const s = String(status).trim();
@@ -2568,7 +2917,140 @@ const send = async (req, res) => {
 
     const attachmentMetadata = buildNotificationAttachmentMetadata(smtpAttachments);
 
+    const emailDeliveryMode =
+      payload.emailDeliveryMode === 'combined' ? 'combined' : 'separate';
+    const bccCandidates = expandSendRecipients(payload.bcc, payload.bccEmail);
+    const toLower = new Set(recipients.map((r) => String(r).trim().toLowerCase()));
+    const bccSeen = new Set();
+    const bccRecipients = [];
+    for (const b of bccCandidates) {
+      const trimmed = String(b || '').trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (toLower.has(key) || bccSeen.has(key)) continue;
+      bccSeen.add(key);
+      bccRecipients.push(trimmed);
+    }
+
     const results = [];
+
+    if (emailDeliveryMode === 'combined') {
+      for (const emailCandidate of recipients) {
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(emailCandidate || '').trim())) {
+          return res.status(400).json({
+            message: 'בשליחה לכולם ביחד נדרשות כתובות מייל תקינות לכל הנמענים',
+          });
+        }
+      }
+      for (const b of bccRecipients) {
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(b || '').trim())) {
+          return res.status(400).json({ message: 'כתובת BCC אינה תקינה' });
+        }
+      }
+
+      const toEmailCombined = recipients.join(', ');
+      const assigneeField =
+        typeof assignee === 'string' && assignee.trim() ? assignee.trim() : toEmailCombined;
+
+      const savedMessage = await NotificationMessage.create({
+        toEmail: toEmailCombined,
+        subject: String(subject || ''),
+        text: storedText.trim() ? storedText : null,
+        html: storedHtml,
+        messageType: normalizedMessageType,
+        status: normalizedMessageType === 'task' ? 'tasks' : 'unread',
+        isTask: normalizedIsTask,
+        assignee: assigneeField,
+        assigneeId: req?.user?.sub || req?.user?.id || null,
+        isRepeat:
+          typeof category === 'string' &&
+          category.trim() === 'screening_cv' &&
+          composeCandidateId &&
+          composeScreeningRepeatPriorCount > 0,
+        category: typeof category === 'string' ? category : null,
+        dueDate: typeof dueDate === 'string' ? dueDate : null,
+        dueTime: typeof dueTime === 'string' ? dueTime : null,
+        submissionPopup: Boolean(submissionPopup),
+        submissionEmail: submissionEmail === undefined ? true : Boolean(submissionEmail),
+        sla: typeof sla === 'string' ? sla : null,
+        allocatedDays: Number.isFinite(Number(allocatedDays)) ? Number(allocatedDays) : null,
+        senderUserId: req?.user?.sub || req?.user?.id || null,
+        metadata: {
+          deliveryStatus: 'pending',
+          emailDeliveryMode: 'combined',
+          bccEmails: bccRecipients.length ? bccRecipients : undefined,
+          taskPayload:
+            taskPayload && typeof taskPayload === 'object' && !Array.isArray(taskPayload)
+              ? taskPayload
+              : {},
+          ...(attachmentMetadata ? { attachments: attachmentMetadata } : {}),
+        },
+      });
+
+      if (normalizedSkipSmtp) {
+        await patchNotificationMetadata(
+          savedMessage,
+          { deliveryStatus: 'in_app_only' },
+          { attachments: attachmentMetadata || undefined },
+        );
+        await logSendMessageModalAudit(toEmailCombined, savedMessage, null);
+        return res.json({
+          ok: true,
+          count: 1,
+          results: [{ notificationMessageId: savedMessage.id, to: toEmailCombined, messageId: null }],
+        });
+      }
+
+      let result;
+      try {
+        result = await emailService.sendEmail({
+          toEmail: recipients.length === 1 ? recipients[0] : recipients,
+          bcc: bccRecipients.length ? bccRecipients : undefined,
+          subject,
+          text: storedText || '',
+          html: storedHtml || undefined,
+          userRole: smtpUserRole,
+          clientName: smtpClientName,
+          senderEmail: smtpSenderEmail,
+          attachments: smtpAttachments || undefined,
+        });
+
+        await patchNotificationMetadata(
+          savedMessage,
+          {
+            deliveryStatus: 'sent',
+            providerMessageId: result?.messageId || null,
+          },
+          { attachments: attachmentMetadata || undefined },
+        );
+      } catch (sendErr) {
+        await patchNotificationMetadata(
+          savedMessage,
+          {
+            deliveryStatus: 'failed',
+            deliveryError: sendErr?.message || String(sendErr),
+          },
+          { attachments: attachmentMetadata || undefined },
+        );
+        throw sendErr;
+      }
+
+      await logSendMessageModalAudit(toEmailCombined, savedMessage, result?.messageId ?? null);
+
+      console.log('[email][send] sendEmail combined succeeded', { toCount: recipients.length, bccCount: bccRecipients.length });
+
+      return res.json({
+        ok: true,
+        count: 1,
+        results: [
+          {
+            notificationMessageId: savedMessage.id,
+            to: toEmailCombined,
+            messageId: result?.messageId || null,
+          },
+        ],
+      });
+    }
 
     for (const emailCandidate of recipients) {
       const isEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailCandidate);
@@ -3985,9 +4467,11 @@ module.exports = {
   getScreeningCvReferralById,
   patchScreeningCvReferral,
   getNotificationMessages,
+  getNotificationMessageById,
   downloadNotificationMessageAttachment,
   updateNotificationMessageStatus,
   updateNotificationMessageAssignee,
+  replyToNotificationMessage,
 };
 
 const normalizeStringArray = (val) => {

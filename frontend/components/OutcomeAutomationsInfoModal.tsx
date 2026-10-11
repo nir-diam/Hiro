@@ -41,11 +41,11 @@ function settingsGuideForPipeline(
     return {
       menuLabel: 'תהליכי מועמדים',
       path: '/settings/candidate-pipelines',
-      wrongPlaceHint: 'זהו תהליך גיוס מועמד — הפעולות מוגדרות ב«תהליכי מועמדים», לא ב«תהליכי עבודה» (שזה ללקוחות).',
+      wrongPlaceHint: 'זהו תהליך גיוס מועמד — הפעולות מוגדרות ב«תהליכי מועמדים», לא ב«תהליכי לקוחות» (שזה ללקוחות).',
     };
   }
   return {
-    menuLabel: 'תהליכי עבודה',
+    menuLabel: 'תהליכי לקוחות',
     path: '/settings/pipelines',
     wrongPlaceHint: null,
   };

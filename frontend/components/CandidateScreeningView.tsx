@@ -17,7 +17,15 @@ import {
     ClockIcon,
     ArrowPathIcon,
     DocumentTextIcon,
+    FunnelIcon,
 } from './Icons';
+import BulkAddToFilterModal from './BulkAddToFilterModal';
+import ScreeningCollisionWarningModal, { type ScreeningWarningAgg } from './ScreeningCollisionWarningModal';
+import {
+    fetchScreeningPrecheckForJob,
+    linkCandidateToJobFilter,
+    type JobFilterSaveOptions,
+} from '../utils/candidateJobFilterApi';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import ResumeViewer from './ResumeViewer';
 import { InternalOpinionEditorModal, OpinionQuillEditor, copyRichHtmlToClipboard } from './InternalOpinionEditorModal';
@@ -1268,6 +1276,11 @@ const CandidateScreeningView: React.FC<{
     const internalNotesTextareaRef = useRef<HTMLTextAreaElement>(null);
     const resumeSendCvAfterOpinionRef = useRef(false);
     const saveTimeoutByJobRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+    const [bulkFilterOpen, setBulkFilterOpen] = useState(false);
+    const [screeningCollisionOpen, setScreeningCollisionOpen] = useState(false);
+    const [screeningCollisionAgg, setScreeningCollisionAgg] = useState<ScreeningWarningAgg[]>([]);
+    const pendingFilterRef = useRef<{ jobId: string; options?: JobFilterSaveOptions } | null>(null);
+    const [poolReloadToken, setPoolReloadToken] = useState(0);
     const candidateResumeData = useMemo(
       () => buildResumeDataFromCandidate(candidate as any, candidateId),
       [candidate, candidateId]
@@ -1476,7 +1489,7 @@ const CandidateScreeningView: React.FC<{
           setJobs([]);
         })
         .finally(() => setJobsLoading(false));
-    }, [candidateId]);
+    }, [candidateId, poolReloadToken]);
 
     useEffect(() => {
       setSelectedJobs([]);
@@ -1799,6 +1812,41 @@ const CandidateScreeningView: React.FC<{
         setSelectedJobs([]);
       }
     };
+
+    const runAddToFilter = useCallback(
+      async (jobId: string, options?: JobFilterSaveOptions) => {
+        if (!candidateId || !apiBase) {
+          setBulkFilterOpen(false);
+          return;
+        }
+        const ok = await linkCandidateToJobFilter(apiBase, candidateId, jobId, options);
+        setBulkFilterOpen(false);
+        if (ok) {
+          setPoolReloadToken((n) => n + 1);
+        } else {
+          alert('הוספה לסינון נכשלה');
+        }
+      },
+      [candidateId, apiBase],
+    );
+
+    const handleAddToFilterSave = useCallback(
+      async (jobId: string, options?: JobFilterSaveOptions) => {
+        if (!candidateId || !apiBase) {
+          setBulkFilterOpen(false);
+          return;
+        }
+        const precheck = await fetchScreeningPrecheckForJob(apiBase, candidateId, jobId);
+        if (precheck) {
+          pendingFilterRef.current = { jobId, options };
+          setScreeningCollisionAgg([precheck]);
+          setScreeningCollisionOpen(true);
+          return;
+        }
+        await runAddToFilter(jobId, options);
+      },
+      [candidateId, apiBase, runAddToFilter],
+    );
 
     const closeRejectModal = useCallback(() => {
       setRejectModalOpen(false);
@@ -2178,6 +2226,15 @@ const CandidateScreeningView: React.FC<{
                 </div>
                  {/* Desktop Actions */}
                  <div className="hidden md:flex items-center gap-3">
+                    <button
+                        type="button"
+                        onClick={() => setBulkFilterOpen(true)}
+                        disabled={!candidateId}
+                        className="flex items-center gap-2 font-semibold py-2 px-4 rounded-lg border border-primary-200 bg-primary-50 text-primary-800 hover:bg-primary-100 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <FunnelIcon className="w-5 h-5" />
+                        <span>הוספת לסינון</span>
+                    </button>
                     <button
                         onClick={openRejectModal}
                         disabled={selectedJobs.length === 0}
@@ -2641,7 +2698,17 @@ const CandidateScreeningView: React.FC<{
             </div>
 
             {/* Mobile Bottom Actions Bar - Only visible on mobile */}
-            <div className="md:hidden absolute bottom-0 left-0 right-0 p-4 bg-bg-card border-t border-border-default flex items-center gap-3 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-30">
+            <div className="md:hidden absolute bottom-0 left-0 right-0 p-4 bg-bg-card border-t border-border-default flex items-center gap-2 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] z-30">
+                 <button
+                    type="button"
+                    onClick={() => setBulkFilterOpen(true)}
+                    disabled={!candidateId}
+                    className="flex items-center justify-center gap-1.5 bg-primary-50 text-primary-800 font-bold py-3 px-3 rounded-xl border border-primary-200 transition active:bg-primary-100 disabled:opacity-50"
+                    aria-label="הוספת לסינון"
+                >
+                    <FunnelIcon className="w-5 h-5 shrink-0" />
+                    <span className="text-xs">לסינון</span>
+                </button>
                  <button
                     onClick={openRejectModal}
                     disabled={selectedJobs.length === 0}
@@ -2660,6 +2727,28 @@ const CandidateScreeningView: React.FC<{
                     <PaperAirplaneIcon className="w-5 h-5" />
                 </button>
             </div>
+
+            <BulkAddToFilterModal
+                isOpen={bulkFilterOpen}
+                onClose={() => setBulkFilterOpen(false)}
+                onSave={handleAddToFilterSave}
+                selectedCount={1}
+                candidateBackendIds={candidateId ? [candidateId] : []}
+            />
+            <ScreeningCollisionWarningModal
+                isOpen={screeningCollisionOpen}
+                onClose={() => {
+                    setScreeningCollisionOpen(false);
+                    pendingFilterRef.current = null;
+                }}
+                aggregate={screeningCollisionAgg}
+                onConfirm={() => {
+                    const p = pendingFilterRef.current;
+                    pendingFilterRef.current = null;
+                    setScreeningCollisionOpen(false);
+                    if (p) void runAddToFilter(p.jobId, p.options);
+                }}
+            />
 
             {selectedJobForTags ? (
               <TagMatchPanel
