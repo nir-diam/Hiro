@@ -2,10 +2,22 @@ const Redis = require('ioredis');
 
 const REDIS_HOST = process.env.REDIS_HOST || 'master.redishiro.b0uufd.eun1.cache.amazonaws.com';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
+const REDIS_PASSWORD = process.env.REDIS_PASSWORD || process.env.REDIS_AUTH_TOKEN || '';
+const REDIS_USERNAME = process.env.REDIS_USERNAME || '';
 // TLS is required for AWS ElastiCache. Disable only for local/tunnel dev (REDIS_TLS=false).
 const REDIS_TLS = process.env.REDIS_TLS !== 'false';
 // Set REDIS_ENABLED=false to run the app without Redis (all cache ops become no-ops).
 const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+// When false, skip Redis on reads and fall back to DB; writes still update Redis when connected.
+const REDIS_READ_THROUGH = process.env.REDIS_READ_THROUGH !== 'false';
+// Background load of DB rows into Redis after startup (see candidateCacheWarmup).
+const REDIS_CACHE_WARMUP = process.env.REDIS_CACHE_WARMUP === 'true' || process.env.REDIS_CACHE_WARMUP === '1';
+const REDIS_CACHE_WARMUP_DELAY_MS = Math.max(
+  0,
+  Number.parseInt(process.env.REDIS_CACHE_WARMUP_DELAY_MS || '120000', 10) || 0,
+);
+
+const isReadThroughEnabled = () => REDIS_ENABLED && REDIS_READ_THROUGH && _isAlive;
 
 let redisClient = null;
 
@@ -19,6 +31,8 @@ const createRedisClient = () => {
   const client = new Redis({
     host: REDIS_HOST,
     port: REDIS_PORT,
+    ...(REDIS_PASSWORD ? { password: REDIS_PASSWORD } : {}),
+    ...(REDIS_USERNAME ? { username: REDIS_USERNAME } : {}),
     tls: REDIS_TLS ? {} : undefined,
     lazyConnect: true,
     // Fail commands immediately when not connected — no queuing.
@@ -92,4 +106,13 @@ const getRedisClient = () => {
   return redisClient;
 };
 
-module.exports = { connectRedis, getRedisClient, isRedisAvailable };
+module.exports = {
+  connectRedis,
+  getRedisClient,
+  isRedisAvailable,
+  isReadThroughEnabled,
+  REDIS_ENABLED,
+  REDIS_READ_THROUGH,
+  REDIS_CACHE_WARMUP,
+  REDIS_CACHE_WARMUP_DELAY_MS,
+};

@@ -1,11 +1,14 @@
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
+const readThrough = require('./readThroughCacheService');
+const redis = require('./redisService');
+const { isReadThroughEnabled } = require('../config/redis');
 const Client = require('../models/Client');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
 const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
-const organizationService = require('./organizationService');
 const organizationClientLinkPipelineService = require('./organizationClientLinkPipelineService');
 const clientOrganizationSyncService = require('./clientOrganizationSyncService');
+const { scheduleOrganizationEnrichment } = require('./organizationEnrichmentService');
 
 const isPlatformAdmin = (dbUser) =>
   dbUser?.role === 'super_admin' || dbUser?.role === 'admin';
@@ -153,6 +156,7 @@ const ORG_LINK_SUMMARY_ATTRIBUTES = [
   'businessModel',
   'productType',
   'activityStatus',
+  'createdAt',
 ];
 
 const clientToApiJson = (client) => {
@@ -167,27 +171,95 @@ const clientToApiJson = (client) => {
   return plain;
 };
 
-const list = async (options = {}) => {
-  const activeOnly = Boolean(options.activeOnly);
-  const q = {
-    order: [['name', 'ASC']],
-    attributes: { exclude: CLIENT_API_EXCLUDE },
-  };
-  if (activeOnly) {
-    q.where = { isActive: true };
-  }
-  const rows = await Client.findAll(q);
-  return rows.map(sanitizeClientDisplayName);
+const CLIENT_LIST_KEY = (activeOnly) => `clients:list:${activeOnly ? 'active' : 'all'}`;
+const CLIENT_API_REDIS_KEY = (id) => `client:api:${id}`;
+const CLIENT_LIST_TTL = 300;
+const CLIENT_API_REDIS_TTL = 3600;
+
+const invalidateClientRedis = async (id) => {
+  await readThrough.invalidate(CLIENT_LIST_KEY(true), CLIENT_LIST_KEY(false));
+  if (id) await readThrough.invalidate(CLIENT_API_REDIS_KEY(id));
 };
 
-const getById = async (id) => {
-  const client = await Client.findByPk(id);
-  if (!client) {
-    const err = new Error('Client not found');
-    err.status = 404;
-    throw err;
-  }
+const list = async (options = {}) => {
+  const activeOnly = Boolean(options.activeOnly);
+  return readThrough.getOrLoad(
+    CLIENT_LIST_KEY(activeOnly),
+    async () => {
+      const q = {
+        order: [['name', 'ASC']],
+        attributes: { exclude: CLIENT_API_EXCLUDE },
+      };
+      if (activeOnly) {
+        q.where = { isActive: true };
+      }
+      const rows = await Client.findAll(q);
+      return rows.map(sanitizeClientDisplayName);
+    },
+    { ttlSeconds: CLIENT_LIST_TTL },
+  );
+};
+
+const clientNotFound = () => {
+  const err = new Error('Client not found');
+  err.status = 404;
+  return err;
+};
+
+const getById = async (id, { include } = {}) => {
+  const includeBlobs = new Set(
+    (Array.isArray(include) ? include : include ? [include] : []).filter((col) =>
+      CLIENT_API_EXCLUDE.includes(col),
+    ),
+  );
+  const exclude = CLIENT_API_EXCLUDE.filter((col) => !includeBlobs.has(col));
+  const client = await Client.findByPk(id, {
+    attributes: exclude.length ? { exclude } : undefined,
+  });
+  if (!client) throw clientNotFound();
   return client;
+};
+
+/** Journal read: only id/name/events, optional contact-scoped JSON filter, 60s timeout. */
+const getByIdForJournal = async (id, { contactId } = {}) => {
+  const key = String(id || '').trim();
+  if (!key) throw clientNotFound();
+  const cid = String(contactId || '').trim();
+  const { sequelize } = Client;
+
+  return sequelize.transaction(async (t) => {
+    await sequelize.query('SET LOCAL statement_timeout = 60000', { transaction: t });
+    if (cid) {
+      const rows = await sequelize.query(
+        `SELECT id, name, "displayName",
+           COALESCE((
+             SELECT jsonb_agg(elem)
+             FROM jsonb_array_elements(COALESCE(events, '[]'::jsonb)) AS elem
+             WHERE elem->>'contactId' = :contactId
+                OR elem->'linkedTo'->>'id' = :contactId
+                OR COALESCE(elem->'metadata'->'linkedContacts', '[]'::jsonb)
+                   @> jsonb_build_array(jsonb_build_object('id', :contactId))
+           ), '[]'::jsonb) AS events
+         FROM clients
+         WHERE id = :id
+         LIMIT 1`,
+        {
+          replacements: { id: key, contactId: cid },
+          type: QueryTypes.SELECT,
+          transaction: t,
+        },
+      );
+      const row = rows[0];
+      if (!row) throw clientNotFound();
+      return row;
+    }
+    const client = await Client.findByPk(key, {
+      attributes: ['id', 'name', 'displayName', 'events'],
+      transaction: t,
+    });
+    if (!client) throw clientNotFound();
+    return client;
+  });
 };
 
 const CLIENT_BY_ID_CACHE_MS = 30_000;
@@ -197,6 +269,7 @@ const clientByIdApiCache = new Map();
 const invalidateClientApiCache = (id) => {
   const key = String(id || '').trim();
   if (key) clientByIdApiCache.delete(key);
+  invalidateClientRedis(key).catch(() => {});
 };
 
 /** Slim client row for HTTP API (no events journal blob / embedded documents). */
@@ -212,6 +285,15 @@ const getByIdForApi = async (id, { skipCache = false } = {}) => {
     if (hit && Date.now() - hit.at < CLIENT_BY_ID_CACHE_MS) {
       return hit.data;
     }
+    if (isReadThroughEnabled()) {
+      try {
+        const redisHit = await redis.get(CLIENT_API_REDIS_KEY(key));
+        if (redisHit) {
+          clientByIdApiCache.set(key, { at: Date.now(), data: redisHit });
+          return redisHit;
+        }
+      } catch (_) { /* fall through to DB */ }
+    }
   }
   const client = await Client.findByPk(key, {
     attributes: { exclude: CLIENT_API_EXCLUDE },
@@ -223,22 +305,25 @@ const getByIdForApi = async (id, { skipCache = false } = {}) => {
   }
   const data = clientToApiJson(client);
   clientByIdApiCache.set(key, { at: Date.now(), data });
+  if (isReadThroughEnabled()) {
+    redis.set(CLIENT_API_REDIS_KEY(key), data, { ttlSeconds: CLIENT_API_REDIS_TTL }).catch(() => {});
+  }
   return data;
 };
 
 const create = async (payload) => {
   const clean = buildClientCreatePayload(payload);
   const client = await Client.create(clean);
+  await invalidateClientRedis(client.id);
   return client;
 };
 
 /**
- * Platform admin: optionally link to existing org only (no OrganizationTmp staging).
- * Manager / staff: not used on client create.
+ * After Client.create: link an existing org immediately, or start Gemini classify +
+ * background enrichment for a typed company name (same deferred pipeline as organization-link).
  */
 const attachOrganizationAfterCreate = async (client, payload = {}, options = {}) => {
   if (!client?.id) return client;
-  if (options.skipOrganizationStaging) return client;
 
   const linkedId = coerceString(payload.linkedOrganizationId) || coerceString(payload.organizationId);
   if (linkedId) {
@@ -246,52 +331,16 @@ const attachOrganizationAfterCreate = async (client, payload = {}, options = {})
     if (linked) return linked;
   }
 
-  return client;
+  if (options.skipOrganizationStaging) return client;
+
+  return linkOrganizationForClient(client.id, {
+    ...payload,
+    name: coerceString(payload.name) || coerceString(payload.displayName) || client.name,
+    backgroundEnrichment: payload.backgroundEnrichment !== false,
+  });
 };
 
-/**
- * Client manager: link existing Organization or stage OrganizationTmp for their tenant client.
- * Does not create a new Client row.
- */
-const linkOrganizationForClient = async (clientId, payload = {}) => {
-  const client = await getById(clientId);
-  const linkedId = coerceString(payload.linkedOrganizationId) || coerceString(payload.organizationId);
-  const companyName = coerceString(payload.name) || client?.name || '';
-
-  console.log('[orgLinkPipeline] linkOrganizationForClient called', {
-    clientId,
-    companyName,
-    linkedOrganizationId: linkedId || null,
-    mode: linkedId ? 'link_existing' : 'new_company',
-  });
-
-  if (linkedId) {
-    console.log(`[orgLinkPipeline] linking client ${clientId} to existing org ${linkedId}`);
-    await clientOrganizationSyncService.linkClientToOrganization(clientId, linkedId, { fullSync: true });
-    const json = await getByIdWithLinks(clientId);
-    json.lastLinkedOrganizationId = linkedId;
-    console.log(`[orgLinkPipeline] ✓ linked client ${clientId} → org ${linkedId}`);
-    return json;
-  }
-
-  const patch = buildClientCreatePayload(payload);
-  const clientUpdates = {};
-  if (patch.industry) clientUpdates.industry = patch.industry;
-  if (patch.phone) clientUpdates.phone = patch.phone;
-  if (patch.logoUrl != null) clientUpdates.logoUrl = patch.logoUrl;
-  if (patch.metadata) {
-    clientUpdates.metadata = { ...(client.metadata || {}), ...patch.metadata };
-  }
-  if (Object.keys(clientUpdates).length) {
-    await client.update(clientUpdates);
-  }
-
-  const pipelineResult = await organizationClientLinkPipelineService.processNewCompanyForClientLink({
-    ...payload,
-    clientId,
-    name: payload.name || client.name,
-  });
-
+const applyClientOrganizationLinkPipelineResult = async (clientId, pipelineResult) => {
   if (pipelineResult?.organization?.id) {
     const orgId = String(pipelineResult.organization.id);
     console.log(`[orgLinkPipeline] linking client ${clientId} to new org ${orgId} (post-enrichment)`);
@@ -320,6 +369,109 @@ const linkOrganizationForClient = async (clientId, payload = {}) => {
   return json;
 };
 
+/**
+ * Client manager: link existing Organization or stage OrganizationTmp for their tenant client.
+ * Does not create a new Client row.
+ */
+const linkOrganizationForClient = async (clientId, payload = {}) => {
+  const client = await getById(clientId);
+  const linkedId = coerceString(payload.linkedOrganizationId) || coerceString(payload.organizationId);
+  const companyName = coerceString(payload.name) || client?.name || '';
+  const backgroundEnrichment = payload.backgroundEnrichment !== false;
+
+  console.log('[orgLinkPipeline] linkOrganizationForClient called', {
+    clientId,
+    companyName,
+    linkedOrganizationId: linkedId || null,
+    mode: linkedId ? 'link_existing' : 'new_company',
+    backgroundEnrichment,
+  });
+
+  if (linkedId) {
+    console.log(`[orgLinkPipeline] linking client ${clientId} to existing org ${linkedId}`);
+    await clientOrganizationSyncService.linkClientToOrganization(clientId, linkedId, { fullSync: true });
+    const json = await getByIdWithLinks(clientId);
+    json.lastLinkedOrganizationId = linkedId;
+    console.log(`[orgLinkPipeline] ✓ linked client ${clientId} → org ${linkedId}`);
+    return json;
+  }
+
+  const patch = buildClientCreatePayload(payload);
+  const clientUpdates = {};
+  if (patch.industry) clientUpdates.industry = patch.industry;
+  if (patch.phone) clientUpdates.phone = patch.phone;
+  if (patch.logoUrl != null) clientUpdates.logoUrl = patch.logoUrl;
+  if (patch.metadata) {
+    clientUpdates.metadata = { ...(client.metadata || {}), ...patch.metadata };
+  }
+  if (Object.keys(clientUpdates).length) {
+    await client.update(clientUpdates);
+  }
+
+  // Exact name only — alias matches must not steal a typed new company onto another org.
+  const existingOrg = companyName
+    ? await Organization.findOne({ where: { name: { [Op.iLike]: companyName } } })
+    : null;
+  if (existingOrg?.id) {
+    console.log(`[orgLinkPipeline] quick link — org already in DB (${existingOrg.id})`);
+    return applyClientOrganizationLinkPipelineResult(clientId, {
+      organization: existingOrg,
+      orgPipeline: { phase: 'skipped', reason: 'already_in_db', engine: 'gemini' },
+    });
+  }
+
+  if (backgroundEnrichment) {
+    if (!companyName) {
+      const err = new Error('Company name is required');
+      err.status = 400;
+      throw err;
+    }
+
+    let stubOrg;
+    try {
+      stubOrg = await Organization.create({
+        name: companyName,
+        dataConfidence: 'לביקורת',
+        comments: '',
+        history: [],
+      });
+    } catch (err) {
+      stubOrg = await Organization.findOne({ where: { name: { [Op.iLike]: companyName } } });
+      if (!stubOrg) {
+        console.error('[orgLinkPipeline] stub org create failed', err?.message || err);
+        throw err;
+      }
+    }
+
+    await clientOrganizationSyncService.linkClientToOrganization(clientId, stubOrg.id, { fullSync: true });
+    scheduleOrganizationEnrichment(stubOrg);
+    const json = await getByIdWithLinks(clientId);
+    json.lastLinkedOrganizationId = String(stubOrg.id);
+    json.orgPipeline = {
+      phase: 'enriching',
+      background: true,
+      engine: 'gemini',
+      companyName,
+      deferred: true,
+    };
+    console.log('[orgLinkPipeline] HTTP response — stub org linked, enrichment continues in background', {
+      clientId,
+      organizationId: stubOrg.id,
+      companyName,
+    });
+    return json;
+  }
+
+  const pipelineResult = await organizationClientLinkPipelineService.processNewCompanyForClientLink({
+    ...payload,
+    clientId,
+    name: payload.name || client.name,
+    backgroundEnrichment: false,
+  });
+
+  return applyClientOrganizationLinkPipelineResult(clientId, pipelineResult);
+};
+
 const getByIdWithLinks = async (id, opts = {}) => {
   const includeLinks = opts.includeLinks !== false;
   if (!includeLinks) {
@@ -337,7 +489,7 @@ const getByIdWithLinks = async (id, opts = {}) => {
             required: false,
             attributes: ORG_LINK_SUMMARY_ATTRIBUTES,
           },
-          { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
+          { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name', 'createdAt'] },
         ],
         order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
       })
@@ -427,7 +579,13 @@ const updateOrganizationLinkForClient = async (clientId, linkId, payload, actor)
 };
 
 const update = async (id, payload) => {
-  const client = await getById(id);
+  const payloadKeys = Object.keys(payload || {}).filter((k) => payload[k] !== undefined);
+  const eventsOnly = payloadKeys.length === 1 && payloadKeys[0] === 'events';
+  const blobKeys = CLIENT_API_EXCLUDE.filter((k) => payloadKeys.includes(k));
+  const client = eventsOnly
+    ? await getByIdForJournal(id)
+    : await getById(id, { include: blobKeys });
+  if (!client) throw clientNotFound();
   const merged = buildClientUpdatePayload(client, payload);
   const allowed = new Set(Object.keys(Client.rawAttributes));
   const clean = {};
@@ -475,6 +633,7 @@ const findIdByJobClientLabel = async (label) => {
 module.exports = {
   list,
   getById,
+  getByIdForJournal,
   CLIENT_API_EXCLUDE,
   getByIdForApi,
   invalidateClientApiCache,

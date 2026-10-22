@@ -1,7 +1,7 @@
 const { Op, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const redis = require('./redisService');
-const { isRedisAvailable } = require('../config/redis');
+const { isRedisAvailable, isReadThroughEnabled } = require('../config/redis');
 const { invalidateCandidateOpportunities, invalidateCandidateInAllJobMatches } = require('./matchingCacheService');
 const Candidate = require('../models/Candidate');
 const CandidatePipeline = require('../models/CandidatePipeline');
@@ -18,6 +18,13 @@ const { resolveEngineConfigForJob } = require('./matchingEngineService');
 const cityService = require('./cityService');
 const { syncCandidateTagDetailsFromPayload } = require('./candidateTagService');
 const { normalizeOriginalTextHistory } = require('../utils/parsedTextHistory');
+const {
+  stripCvDocumentTitleFromPersonName,
+  nameLooksLikeJobHeadline,
+  sanitizePersonNameFields,
+  nameLooksLikeCvDocumentTitle,
+  isPlaceholderPersonName,
+} = require('../utils/personName');
 const {
   LIST_IDENTITY_PARTITION_SQL,
   buildMergePlan,
@@ -136,7 +143,9 @@ const isNameTokenSubsequence = (shorter, longer) => {
  * and rebuilding from parts would wrongly save "אליהו יחזקאל".
  */
 const pickBestFullName = (...candidates) => {
-  const names = candidates.map((n) => trimStr(n)).filter(Boolean);
+  const names = candidates
+    .map((n) => stripCvDocumentTitleFromPersonName(trimStr(n)))
+    .filter(Boolean);
   if (!names.length) return '';
   let best = names[0];
   for (let i = 1; i < names.length; i += 1) {
@@ -165,7 +174,7 @@ const pickBestFullName = (...candidates) => {
 };
 
 const applySyncedNameParts = (p, fullName) => {
-  const full = trimStr(fullName);
+  const full = stripCvDocumentTitleFromPersonName(trimStr(fullName));
   if (!full) {
     p.fullName = 'מועמד חדש';
     p.firstName = null;
@@ -178,12 +187,30 @@ const applySyncedNameParts = (p, fullName) => {
   p.lastName = parts.lastName || null;
 };
 
+/** A job headline in fullName must not replace Gemini's first + last name. */
+const preferPersonNameOverHeadline = (fullIn, fromParts) => {
+  const fullBad = nameLooksLikeJobHeadline(fullIn);
+  const partsBad = nameLooksLikeJobHeadline(fromParts);
+  if (fullBad && fromParts && !partsBad) return fromParts;
+  if (fromParts && partsBad && fullIn && !fullBad) return fullIn;
+  return '';
+};
+
 const syncCandidateNameForCreate = (p) => {
-  const first = trimStr(p.firstName);
-  const last = trimStr(p.lastName);
-  const full = trimStr(p.fullName);
-  const fromParts = buildFullNameFromParts(first, last);
-  const best = pickBestFullName(full, fromParts);
+  const sanitized = sanitizePersonNameFields({
+    firstName: p.firstName,
+    lastName: p.lastName,
+    fullName: p.fullName,
+  });
+  if (sanitized.cleared) {
+    p.fullName = '';
+    p.firstName = null;
+    p.lastName = null;
+    return;
+  }
+  const fromParts = buildFullNameFromParts(sanitized.firstName, sanitized.lastName);
+  const best = preferPersonNameOverHeadline(sanitized.fullName, fromParts)
+    || pickBestFullName(sanitized.fullName, fromParts);
   if (best) {
     applySyncedNameParts(p, best);
   } else {
@@ -199,18 +226,20 @@ const syncCandidateNameForUpdate = (p, existing) => {
   const hasFull = Object.prototype.hasOwnProperty.call(p, 'fullName');
   if (!hasFirst && !hasLast && !hasFull) return;
 
-  const exFirst = trimStr(existing.firstName);
-  const exLast = trimStr(existing.lastName);
-  const exFull = trimStr(existing.fullName) || buildFullNameFromParts(exFirst, exLast);
+  const exFirst = stripCvDocumentTitleFromPersonName(trimStr(existing.firstName));
+  const exLast = stripCvDocumentTitleFromPersonName(trimStr(existing.lastName));
+  const exFull =
+    stripCvDocumentTitleFromPersonName(trimStr(existing.fullName))
+    || buildFullNameFromParts(exFirst, exLast);
 
-  const first = hasFirst ? trimStr(p.firstName) : exFirst;
-  const last = hasLast ? trimStr(p.lastName) : exLast;
-  const fullIn = hasFull ? trimStr(p.fullName) : '';
+  const first = stripCvDocumentTitleFromPersonName(hasFirst ? trimStr(p.firstName) : exFirst);
+  const last = stripCvDocumentTitleFromPersonName(hasLast ? trimStr(p.lastName) : exLast);
+  const fullIn = hasFull ? stripCvDocumentTitleFromPersonName(trimStr(p.fullName)) : '';
   const fromParts = buildFullNameFromParts(first, last);
 
   // Prefer fuller name among explicit full + parts. If the incoming name only drops a
   // middle token from the existing one (same first/last), keep the existing fuller form.
-  let best = pickBestFullName(fullIn, fromParts);
+  let best = preferPersonNameOverHeadline(fullIn, fromParts) || pickBestFullName(fullIn, fromParts);
   if (
     best
     && exFull
@@ -223,7 +252,32 @@ const syncCandidateNameForUpdate = (p, existing) => {
       best = exFull;
     }
   }
-  if (best) applySyncedNameParts(p, best);
+  if (best) {
+    applySyncedNameParts(p, best);
+    return;
+  }
+  const incomingOnly = sanitizePersonNameFields({
+    fullName: hasFull ? p.fullName : '',
+    firstName: hasFirst ? p.firstName : '',
+    lastName: hasLast ? p.lastName : '',
+  });
+  const rawIncoming = [hasFull ? p.fullName : '', hasFirst ? p.firstName : '', hasLast ? p.lastName : '']
+    .filter(Boolean)
+    .join(' ');
+  const existingClean = sanitizePersonNameFields({
+    fullName: existing?.fullName,
+    firstName: existing?.firstName,
+    lastName: existing?.lastName,
+  });
+  if (existingClean.fullName && !isPlaceholderPersonName(existingClean.fullName)) {
+    applySyncedNameParts(p, existingClean.fullName);
+    return;
+  }
+  if (incomingOnly.cleared || nameLooksLikeCvDocumentTitle(rawIncoming) || hasFull) {
+    p.fullName = '';
+    p.firstName = null;
+    p.lastName = null;
+  }
 };
 
 const enrichCandidateNameForRead = (payload) => {
@@ -967,14 +1021,22 @@ async function findByPkWithTagsForMatchScore(id) {
 }
 
 /** Batch load candidates with tags + scoring fields (Sonar / bulk engine scoring). */
-async function findManyWithTagsForMatchScore(ids) {
+async function findManyWithTagsForMatchScore(ids, options = {}) {
   const unique = [...new Set((ids || []).map((id) => String(id).trim()).filter(Boolean))];
   if (!unique.length) return [];
-  return Candidate.findAll({
+  const includeEmbedding = options.includeEmbedding !== false;
+  const attributes = includeEmbedding
+    ? [...LIST_GRID_ATTRIBUTES, ...LIST_SCORING_EXTRA_ATTRIBUTES]
+    : [...LIST_GRID_ATTRIBUTES, 'skills'];
+  const gridAttributes = options.omitExperienceJson
+    ? attributes.filter((name) => name !== 'workExperience' && name !== 'experience' && name !== 'companyExperiences')
+    : attributes;
+  const rows = await Candidate.findAll({
     where: { id: { [Op.in]: unique } },
-    include: includeCandidateTagsForList,
-    attributes: [...LIST_GRID_ATTRIBUTES, ...LIST_SCORING_EXTRA_ATTRIBUTES],
+    attributes: gridAttributes,
   });
+  await attachCandidateTagsBulk(rows);
+  return rows;
 }
 
 /** Plain candidate shaped like scored list rows for computeFullMatchScore. */
@@ -987,30 +1049,65 @@ function toPlainCandidateForMatchScore(candidateRow) {
 }
 
 const list = async () =>
-  (await Candidate.findAll({ include: includeCandidateTags })).map((r) => mapCandidateWithTags(r));
+  (await Candidate.findAll({
+    include: includeCandidateTags,
+    attributes: { exclude: ['originalText', 'documents', 'events', 'embedding'] },
+  })).map((r) => mapCandidateWithTags(r));
 
 /**
  * Lightweight candidate fetch for vector-search pre-filtering.
- * Loads only scalar fields + embedding — NO tags JOIN.
- * ~10x faster than list() for 600+ candidates.
+ * Never load CV blobs (searchText/workExperience) unless keyword match needs them.
  */
-const VECTOR_SEARCH_ATTRIBUTES = [
-  'id', 'embedding', 'searchText',
-  'status', 'address', 'salaryMin', 'salaryMax',
-  'gender', 'mobility', 'drivingLicense', 'drivingLicenses',
-  'jobScope', 'jobScopes', 'preferredWorkingHours', 'employmentType', 'employmentTypes',
-  'birthYear', 'birthMonth', 'birthDay', 'age',
-  'title', 'professionalSummary', 'industry', 'field', 'internalTags',
-  'workExperience', 'experience', 'languages', 'skills', 'preferredWorkModels',
-  'matchAnalysis', 'source', 'isArchived', 'isDeleted',
-];
+const VECTOR_SEARCH_CORE_ATTRIBUTES = ['id', 'embedding', 'status', 'address', 'salaryMin', 'salaryMax'];
+const VECTOR_SEARCH_KEYWORD_ATTRIBUTES = [...VECTOR_SEARCH_CORE_ATTRIBUTES, 'searchText'];
 
-const listSlimForVectorSearch = async () => {
-  const rows = await Candidate.findAll({
-    attributes: VECTOR_SEARCH_ATTRIBUTES,
-    where: { isDeleted: false, isArchived: false },
+/** Count + newest update for the on-disk embedding snapshot. Does not read the vectors. */
+const getVectorEmbeddingStamp = async () => {
+  const row = await Candidate.findOne({
+    attributes: [
+      [sequelize.fn('COUNT', sequelize.col('id')), 'n'],
+      [sequelize.fn('MAX', sequelize.col('updatedAt')), 'maxUpdated'],
+    ],
+    where: {
+      isDeleted: false,
+      isArchived: false,
+      embedding: { [Op.ne]: null },
+    },
+    raw: true,
   });
-  return rows.map((r) => r.get({ plain: true }));
+  const maxUpdated = row?.maxUpdated ? new Date(row.maxUpdated).getTime() : 0;
+  return {
+    n: Number(row?.n) || 0,
+    maxUpdated: Number.isFinite(maxUpdated) ? maxUpdated : 0,
+  };
+};
+
+const listSlimForVectorSearch = async ({ includeSearchText = false } = {}) => {
+  // The global 20s statement timeout is shorter than pulling every embedding from a remote DB.
+  return sequelize.transaction(async (transaction) => {
+    await sequelize.query("SET LOCAL statement_timeout = '120s'", { transaction });
+    return Candidate.findAll({
+      attributes: includeSearchText ? VECTOR_SEARCH_KEYWORD_ATTRIBUTES : VECTOR_SEARCH_CORE_ATTRIBUTES,
+      where: {
+        isDeleted: false,
+        isArchived: false,
+        embedding: { [Op.ne]: null },
+      },
+      raw: true,
+      transaction,
+    });
+  });
+};
+
+/** Embeddings for a known id set (Sonar distance filter). Avoids loading every candidate vector. */
+const listEmbeddingsByIds = async (ids, { includeSearchText = false } = {}) => {
+  const unique = [...new Set((ids || []).map((id) => String(id).trim()).filter(Boolean))];
+  if (!unique.length) return [];
+  return Candidate.findAll({
+    attributes: includeSearchText ? VECTOR_SEARCH_KEYWORD_ATTRIBUTES : VECTOR_SEARCH_CORE_ATTRIBUTES,
+    where: { id: { [Op.in]: unique }, isDeleted: false, isArchived: false },
+    raw: true,
+  });
 };
 
 /**
@@ -1692,7 +1789,9 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
     getJobEmbedding,
     buildLinkedInfoFromJobCandidate,
     buildIntentOptionsByCandidateIds,
+    invalidateCityCache,
   } = require('./matchingScoreService');
+  invalidateCityCache();
 
   const scores = new Map();
   const jid = jobId && String(jobId).trim();
@@ -2375,7 +2474,7 @@ const listByWorkedAtOrganization = async ({
 
 const getById = async (id, opts = {}) => {
   // Cache-aside: return from Redis when available (skip DB + join round-trip)
-  if (!opts.skipCache) {
+  if (!opts.skipCache && isReadThroughEnabled()) {
     try {
       const cached = await redis.get(CANDIDATE_KEY(id));
       if (cached) {
@@ -3534,6 +3633,8 @@ const listRelatedCandidates = async (candidateId) => {
 module.exports = {
   list,
   listSlimForVectorSearch,
+  listEmbeddingsByIds,
+  getVectorEmbeddingStamp,
   getById,
   getByUserId,
   listByUserId,

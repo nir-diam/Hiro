@@ -8,7 +8,14 @@ dotenv.config(); // fallback to default .env resolution
 const express = require('express');
 const corsMiddleware = require('./middleware/corsMiddleware');
 const { connectDb } = require('./config/db');
-const { connectRedis } = require('./config/redis');
+const {
+  connectRedis,
+  isRedisAvailable,
+  REDIS_ENABLED,
+  REDIS_READ_THROUGH,
+  REDIS_CACHE_WARMUP,
+  REDIS_CACHE_WARMUP_DELAY_MS,
+} = require('./config/redis');
 const authRoutes = require('./routes/authRoutes');
 const clientRoutes = require('./routes/clientRoutes');
 const organizationRoutes = require('./routes/organizationRoutes');
@@ -81,6 +88,42 @@ app.get('/health/db', async (_req, res) => {
   }
 });
 
+app.get('/health/redis', async (_req, res) => {
+  const started = Date.now();
+  if (!REDIS_ENABLED) {
+    return res.json({ status: 'disabled', enabled: false, ms: Date.now() - started });
+  }
+  try {
+    if (!isRedisAvailable()) {
+      return res.status(503).json({
+        status: 'unavailable',
+        enabled: true,
+        readThrough: REDIS_READ_THROUGH,
+        ms: Date.now() - started,
+        message: 'Redis not connected',
+      });
+    }
+    const { getRedisClient } = require('./config/redis');
+    const client = getRedisClient();
+    const pong = await client.ping();
+    res.json({
+      status: isRedisAvailable() ? 'ok' : 'degraded',
+      enabled: true,
+      readThrough: REDIS_READ_THROUGH,
+      pong,
+      ms: Date.now() - started,
+    });
+  } catch (err) {
+    res.status(503).json({
+      status: 'error',
+      enabled: true,
+      readThrough: REDIS_READ_THROUGH,
+      ms: Date.now() - started,
+      message: err.message || String(err),
+    });
+  }
+});
+
 app.use('/api/scripts', require('./routes/scriptRoutes'));
 
 const jobPublicationController = require('./controllers/jobPublicationController');
@@ -139,6 +182,20 @@ const start = async () => {
     await connectRedis().catch((err) => {
       console.warn('[server] Redis connection failed (non-fatal):', err.message);
     });
+    if (REDIS_CACHE_WARMUP && REDIS_ENABLED) {
+      const runWarmup = () => {
+        const { warmupCandidateCache } = require('./services/candidateCacheWarmup');
+        warmupCandidateCache().catch((err) => {
+          console.warn('[server] Redis cache warmup failed (non-fatal):', err.message || err);
+        });
+      };
+      if (REDIS_CACHE_WARMUP_DELAY_MS > 0) {
+        console.log(`[server] Redis cache warmup scheduled in ${REDIS_CACHE_WARMUP_DELAY_MS}ms`);
+        setTimeout(runWarmup, REDIS_CACHE_WARMUP_DELAY_MS);
+      } else {
+        runWarmup();
+      }
+    }
     app.listen(port, () => {
       const heapMb = Math.round(process.memoryUsage().heapTotal / 1024 / 1024);
       console.log(
