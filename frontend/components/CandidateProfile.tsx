@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, useId, useLayoutEffect } from 'react';
 import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon, VideoCameraIcon, ShareIcon } from './Icons';
-import { MessageMode } from '../hooks/useUIState';
+import { MessageMode, type MessageModalConfig } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
 import { SmartTagType, SmartTagData, SmartTagTooltipPanel, SmartTagMode } from './SmartTagTypes';
@@ -383,12 +383,7 @@ interface MultiProfileOption {
 
 interface CandidateProfileProps {
     candidateData: any;
-    onOpenMessageModal: (config: {
-        mode: MessageMode;
-        candidateName: string;
-        candidatePhone: string;
-        candidateEmail?: string | null;
-    }) => void;
+    onOpenMessageModal: (config: MessageModalConfig) => void;
     onTagsChange: (tags: string[]) => void;
     /** Supports functional updates so async handlers (e.g. resume upload) merge on latest state. */
     onFormChange: (data: any | ((prev: any) => any)) => void;
@@ -1684,13 +1679,24 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         : typeof candidateData.id === 'string' && candidateData.id.trim()
           ? candidateData.id.trim()
           : undefined;
+    const email = String(candidateData.email || candidateData.contactEmail || '').trim() || undefined;
+    const phone = String(candidateData.phone || '').trim();
     onOpenMessageModal({
         mode,
         recipientType: 'candidate',
         candidateName: displayFullName,
-        candidatePhone: candidateData.phone,
-        candidateEmail: candidateData.email || candidateData.contactEmail || undefined,
+        candidatePhone: phone,
+        candidateEmail: email,
         candidateId: cid,
+        recipientOptions: cid
+          ? [{
+              id: cid,
+              name: displayFullName,
+              email: email || '',
+              phone,
+            }]
+          : undefined,
+        initialRecipientIds: cid ? [cid] : undefined,
     });
   };
 
@@ -2541,6 +2547,13 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             onClose={() => setIsTagSelectorOpen(false)}
             onSave={handleTagSelectorSave}
             existingTags={Array.isArray(candidateData.tags) ? candidateData.tags : []}
+            associatedTagIds={
+              Array.isArray(candidateData.tagDetails)
+                ? candidateData.tagDetails.map((d) => d.tagId).filter(Boolean) as string[]
+                : []
+            }
+            context="candidate"
+            candidateId={candidateId ? String(candidateId) : undefined}
             initialCategory={tagSelectorCategory}
         />
 

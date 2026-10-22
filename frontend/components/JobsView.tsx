@@ -10,6 +10,9 @@ import {
 } from './Icons';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import JobStatusModal from './JobStatusModal';
+import OrganizationPreviewDrawer, {
+  type OrganizationPreviewDrawerTarget,
+} from './OrganizationPreviewDrawer';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
@@ -28,7 +31,7 @@ import {
     stickyTableHeaderCellClass,
 } from '../utils/stickyTableHeader';
 import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
-import { fetchAllJobs, fetchJobsForTenantScope } from '../services/jobsApi';
+import { fetchJobsGrid, type JobsGridFacets, type JobsGridStats } from '../services/jobsApi';
 import { FormMultiSelect } from './FormMultiSelect';
 import { jobStatusFormToApi, JOB_STATUS_FORM_OPTIONS, type JobStatusFormLabel } from '../utils/jobStatusLabels';
 
@@ -54,6 +57,17 @@ const jobDateFilterKey = (raw: string | null | undefined): string => {
 const jobRecordUpdatedAt = (job: Job): string =>
   String(job.updatedAt || job.openDate || '').trim();
 
+const formatJobLocationPreview = (location: string | null | undefined, maxItems = 3): { preview: string; full: string } => {
+  const parts = String(location || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (!parts.length) return { preview: '—', full: '' };
+  const full = parts.join(', ');
+  if (parts.length <= maxItems) return { preview: full, full };
+  return { preview: `${parts.slice(0, maxItems).join(', ')}...`, full };
+};
+
 const formatJobOpenDate = (raw: string | null | undefined): string => {
   const value = String(raw || '').trim();
   if (!value) return '—';
@@ -75,6 +89,7 @@ export interface Job {
   id: number;
   title: string;
   client: string;
+  organizationId?: string | null;
   field: string;
   role: string;
   priority: Priority;
@@ -97,6 +112,8 @@ export interface Job {
   associatedCandidates: number;
   waitingForScreening: number;
   activeProcess: number;
+  /** Screening CV sends (`notification_messages.category = screening_cv`). */
+  referralsCount?: number;
   openDate: string;
   /** Job record last update (Sequelize); not bumped by candidate pipeline activity alone. */
   updatedAt?: string;
@@ -263,7 +280,7 @@ const initialFilters = {
     validityDays: '',
     recruitingCoordinator: '',
     accountManager: '',
-    salaryMin: 5000,
+    salaryMin: 0,
     salaryMax: 50000,
     ageMin: 18,
     ageMax: 70,
@@ -275,6 +292,15 @@ const initialFilters = {
     jobScopes: [] as string[],
     workingHours: 'גמיש',
 };
+
+type JobsListFilters = typeof initialFilters;
+
+/** Advanced sliders default to UI bounds; only narrow the grid when the user moves them. */
+const isJobsListNumericRangeFilterActive = (
+    filters: JobsListFilters,
+    minKey: 'salaryMin' | 'ageMin' | 'positionsMin',
+    maxKey: 'salaryMax' | 'ageMax' | 'positionsMax',
+) => filters[minKey] !== initialFilters[minKey] || filters[maxKey] !== initialFilters[maxKey];
 
 // --- HELPER FUNCTIONS ---
 const getJobHealthData = (job: Job) => {
@@ -643,6 +669,14 @@ const JobCard: React.FC<{
                  <StarRating rating={job.rating} onRate={onRate} />
                  <div className="text-xs text-text-muted flex gap-3">
                      <span title={t('jobs.col_candidates')}>{job.associatedCandidates} <UserIcon className="w-3 h-3 inline"/></span>
+                     <Link
+                         to={`/jobs/edit/${job.id}?view=referrals`}
+                         onClick={(e) => e.stopPropagation()}
+                         title={t('jobs.col_referrals')}
+                         className="text-primary-700 hover:underline"
+                     >
+                         {Number(job.referralsCount) || 0} {t('jobs.col_referrals')}
+                     </Link>
                      <span title={t('jobs.col_open_date')}>{formatJobOpenDate(job.openDate)}</span>
                  </div>
             </div>
@@ -660,39 +694,161 @@ const JobsView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [jobs, setJobs] = useState<Job[]>([]);
     const [loadingJobs, setLoadingJobs] = useState(false);
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [totalJobs, setTotalJobs] = useState(0);
+    const [debouncedSearch, setDebouncedSearch] = useState('');
+    const [gridFacets, setGridFacets] = useState<JobsGridFacets | null>(null);
+    const [gridStats, setGridStats] = useState<JobsGridStats>({
+        attentionNeeded: 0,
+        totalWaiting: 0,
+        momentumJobs: 0,
+        avgDays: 0,
+    });
+    const pageSizeOptions = useMemo(() => [25, 50, 100, 200], []);
+    const totalPages = Math.max(1, Math.ceil((totalJobs || 0) / pageSize));
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const [orgDrawerTarget, setOrgDrawerTarget] = useState<OrganizationPreviewDrawerTarget | null>(null);
+    const [isOrgDrawerOpen, setIsOrgDrawerOpen] = useState(false);
     const [filters, setFilters] = useState(initialFilters);
+    const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>({
+        key: 'openDate',
+        direction: 'desc',
+    });
     
     const loadJobs = useCallback(async (opts?: { active?: () => boolean }) => {
         const isActive = () => opts?.active?.() ?? true;
         setLoadingJobs(true);
         try {
-            const payload = isTenantUser ? await fetchJobsForTenantScope() : await fetchAllJobs();
+            const cities = filters.locations.filter((loc) => loc.type === 'city').map((loc) => loc.value);
+            const regions = filters.locations.filter((loc) => loc.type === 'region').map((loc) => loc.value);
+            const payload = await fetchJobsGrid(
+                {
+                    page,
+                    limit: pageSize,
+                    search: debouncedSearch,
+                    statuses: filters.statuses.join(','),
+                    client: filters.client,
+                    recruiter: filters.recruiter,
+                    field: filters.field,
+                    role: filters.role,
+                    priority: filters.priority,
+                    clientType: filters.clientType,
+                    gender: filters.gender,
+                    mobility: filters.mobility,
+                    licenseType: filters.licenseType,
+                    jobId: filters.jobId,
+                    postingCode: filters.postingCode,
+                    recruitingCoordinator: filters.recruitingCoordinator,
+                    accountManager: filters.accountManager,
+                    companyIndustry: filters.companyIndustry,
+                    jobScopes: filters.jobScopes.join(','),
+                    cities: cities.join(','),
+                    regions: regions.join(','),
+                    fromDate: filters.fromDate,
+                    toDate: filters.toDate,
+                    dateKind: filters.dateFilterKind,
+                    salaryMin: filters.salaryMin,
+                    salaryMax: filters.salaryMax,
+                    salaryRangeActive: isJobsListNumericRangeFilterActive(filters, 'salaryMin', 'salaryMax'),
+                    ageMin: filters.ageMin,
+                    ageMax: filters.ageMax,
+                    ageRangeActive: isJobsListNumericRangeFilterActive(filters, 'ageMin', 'ageMax'),
+                    positionsMin: filters.positionsMin,
+                    positionsMax: filters.positionsMax,
+                    positionsRangeActive: isJobsListNumericRangeFilterActive(filters, 'positionsMin', 'positionsMax'),
+                    workingHours: filters.workingHours,
+                    validityDays: filters.validityDays,
+                    sort: sortConfig?.key || 'openDate',
+                    dir: sortConfig?.direction || 'desc',
+                },
+                isTenantUser,
+            );
             if (!isActive()) return;
-            const rows = payload as Job[];
+            const rows = payload.jobs as Job[];
             setJobs(rows);
-            const baseline: Record<string, string> = {};
-            rows.forEach((job: Job) => {
-                baseline[String(job.id)] = String(job.listNotes || '');
+            setTotalJobs(payload.total);
+            if (payload.facets) setGridFacets(payload.facets);
+            if (payload.stats) setGridStats(payload.stats);
+            setListNotesBaseline((prev) => {
+                const next = { ...prev };
+                rows.forEach((job: Job) => {
+                    next[String(job.id)] = String(job.listNotes || '');
+                });
+                return next;
             });
-            setListNotesBaseline(baseline);
         } catch (err) {
             if (isActive()) console.error('[JobsView] loadJobs', err);
         } finally {
             if (isActive()) setLoadingJobs(false);
         }
-    }, [isTenantUser]);
+    }, [isTenantUser, page, pageSize, debouncedSearch, filters, sortConfig]);
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => setDebouncedSearch(filters.searchTerm.trim()), 300);
+        return () => window.clearTimeout(timer);
+    }, [filters.searchTerm]);
+
+    const gridFilterSignature = useMemo(
+        () =>
+            JSON.stringify({
+                search: debouncedSearch,
+                statuses: filters.statuses,
+                client: filters.client,
+                recruiter: filters.recruiter,
+                field: filters.field,
+                role: filters.role,
+                priority: filters.priority,
+                clientType: filters.clientType,
+                gender: filters.gender,
+                mobility: filters.mobility,
+                licenseType: filters.licenseType,
+                jobId: filters.jobId,
+                postingCode: filters.postingCode,
+                recruitingCoordinator: filters.recruitingCoordinator,
+                accountManager: filters.accountManager,
+                companyIndustry: filters.companyIndustry,
+                jobScopes: filters.jobScopes,
+                locations: filters.locations,
+                fromDate: filters.fromDate,
+                toDate: filters.toDate,
+                dateFilterKind: filters.dateFilterKind,
+                salaryMin: filters.salaryMin,
+                salaryMax: filters.salaryMax,
+                ageMin: filters.ageMin,
+                ageMax: filters.ageMax,
+                positionsMin: filters.positionsMin,
+                positionsMax: filters.positionsMax,
+                workingHours: filters.workingHours,
+                validityDays: filters.validityDays,
+                sort: sortConfig,
+                pageSize,
+            }),
+        [debouncedSearch, filters, sortConfig, pageSize],
+    );
+    const prevGridFilterSignature = useRef(gridFilterSignature);
 
     useEffect(() => {
         if (!authReady) return;
+        if (prevGridFilterSignature.current !== gridFilterSignature) {
+            prevGridFilterSignature.current = gridFilterSignature;
+            if (page !== 1) {
+                setPage(1);
+                return;
+            }
+        }
         let active = true;
         void loadJobs({ active: () => active });
         return () => {
             active = false;
         };
-    }, [loadJobs, authReady]);
+    }, [loadJobs, authReady, gridFilterSignature, page]);
+
+    useEffect(() => {
+        if (page > totalPages) setPage(totalPages);
+    }, [page, totalPages]);
 
 
     const persistJobUpdate = useCallback(async (id: number, updates: Partial<Job>) => {
@@ -711,6 +867,7 @@ const JobsView: React.FC = () => {
         const res = await fetch(`${apiBase}/api/jobs/${id}`, { method: 'DELETE' });
         if (!res.ok) throw new Error('Failed to delete job');
         setJobs(prev => prev.filter(job => job.id !== id));
+        setTotalJobs((prev) => Math.max(0, prev - 1));
     }, [apiBase]);
     
     // --- New state for Date Range ---
@@ -747,6 +904,7 @@ const JobsView: React.FC = () => {
         { id: 'associatedCandidates', header: t('jobs.col_candidates') },
         { id: 'waitingForScreening', header: t('jobs.col_waiting') },
         { id: 'activeProcess', header: t('jobs.col_process') },
+        { id: 'referralsCount', header: t('jobs.col_referrals') },
         { id: 'openDate', header: t('jobs.col_open_date') },
         { id: 'lastUpdated', header: t('jobs.col_last_updated') },
         { id: 'recruiter', header: t('jobs.col_recruiter') },
@@ -769,7 +927,7 @@ const JobsView: React.FC = () => {
     ], [t]);
 
     const defaultVisibleColumns = useMemo(
-        () => ['rating', 'health', 'title', 'priority', 'client', 'status', 'associatedCandidates', 'waitingForScreening', 'activeProcess', 'openDate', 'recruiter', 'listNotes'],
+        () => ['rating', 'health', 'title', 'priority', 'client', 'status', 'associatedCandidates', 'waitingForScreening', 'activeProcess', 'referralsCount', 'openDate', 'recruiter', 'listNotes'],
         [],
     );
     const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
@@ -802,10 +960,6 @@ const JobsView: React.FC = () => {
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
-    const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>({
-        key: 'openDate',
-        direction: 'desc',
-    });
     const jobScopeOptions = ['משרה מלאה', 'משרה חלקית', 'משמרות', 'פרילנס'];
 
     const requestSort = (key: string) => {
@@ -1062,165 +1216,29 @@ const JobsView: React.FC = () => {
     };
 
 
-    const sortedAndFilteredJobs = useMemo(() => {
-        let filtered = jobs.filter(job => {
-            const search = filters.searchTerm.toLowerCase().trim();
-            const postingCodeHay = String(job.postingCode || '').toLowerCase();
-            const matchesSearch = !search ||
-                String(job.title || '').toLowerCase().includes(search) ||
-                String(job.client || '').toLowerCase().includes(search) ||
-                String(job.location || '').toLowerCase().includes(search) ||
-                String(job.id).includes(search) ||
-                postingCodeHay.includes(search);
-            const postingCodeFilter = String(filters.postingCode || '').trim().toLowerCase();
-
-            const checkMobility = () => {
-                if (filters.mobility === '') return true;
-                if (filters.mobility === 'כן') return job.mobility;
-                if (filters.mobility === 'לא') return !job.mobility;
-                return true;
-            };
-
-            const matchesLocation = filters.locations.length === 0 || 
-                filters.locations.some(loc => 
-                    (loc.type === 'city' && job.city === loc.value) ||
-                    (loc.type === 'region' && job.region === loc.value)
-                );
-            
-            const matchesCompanyIndustry = !filters.companyIndustry || job.field === filters.companyIndustry;
-            
-            // Check Job Scope
-            const matchesScope = filters.jobScopes.length === 0 || 
-               (Array.isArray(job.jobType) 
-                    ? job.jobType.some(t => filters.jobScopes.includes(t)) 
-                    : filters.jobScopes.includes(job.jobType as string));
-
-            return matchesSearch &&
-                (!filters.client || job.client === filters.client) &&
-                (filters.statuses.length === 0 || filters.statuses.includes(job.status)) &&
-                (!filters.recruiter || job.recruiter === filters.recruiter) &&
-                (() => {
-                    if (!filters.fromDate && !filters.toDate) return true;
-                    const key =
-                        filters.dateFilterKind === 'updated'
-                            ? jobDateFilterKey(jobRecordUpdatedAt(job))
-                            : jobDateFilterKey(job.openDate);
-                    if (!key) return false;
-                    return (
-                        (!filters.fromDate || key >= filters.fromDate) &&
-                        (!filters.toDate || key <= filters.toDate)
-                    );
-                })() &&
-                (!filters.field || job.field === filters.field) &&
-                (!filters.role || job.role === filters.role) &&
-                (!filters.priority || job.priority === filters.priority) &&
-                (!filters.clientType || job.clientType === filters.clientType) &&
-                matchesLocation &&
-                (!filters.gender || job.gender === filters.gender) &&
-                checkMobility() &&
-                (!filters.licenseType || job.licenseType === filters.licenseType) &&
-                (!filters.jobId || String(job.id) === filters.jobId) &&
-                (!postingCodeFilter || postingCodeHay.includes(postingCodeFilter)) &&
-                (!filters.recruitingCoordinator || job.recruitingCoordinator === filters.recruitingCoordinator) &&
-                (!filters.accountManager || job.accountManager === filters.accountManager) &&
-                jobNumericRangeMatchesFilter(job.salaryMin, job.salaryMax, filters.salaryMin, filters.salaryMax) &&
-                jobNumericRangeMatchesFilter(job.ageMin, job.ageMax, filters.ageMin, filters.ageMax) &&
-                jobNumericRangeMatchesFilter(job.openPositions, job.openPositions, filters.positionsMin, filters.positionsMax) &&
-                (() => {
-                    const wh = String(filters.workingHours || '').trim();
-                    if (!wh || wh === 'גמיש' || wh === 'ללא אילוצי שעות') return true;
-                    const hay = [
-                        job.description,
-                        String(job.internalNotes || ''),
-                        ...(Array.isArray(job.requirements) ? job.requirements : []).map((r) => String(r)),
-                    ]
-                        .join(' ')
-                        .toLowerCase();
-                    return hay.includes(wh.toLowerCase());
-                })() &&
-                matchesCompanyIndustry &&
-                matchesScope;
-        });
-
-        if (sortConfig !== null) {
-            filtered.sort((a, b) => {
-                let aValue: any;
-                let bValue: any;
-        
-                const sortKey = sortConfig.key === 'salaryRange'
-                    ? 'salaryMin'
-                    : sortConfig.key === 'ageRange'
-                    ? 'ageMin'
-                    : sortConfig.key === 'lastUpdated'
-                    ? 'updatedAt'
-                    : sortConfig.key;
-
-                if (sortConfig.key === 'lastUpdated') {
-                    aValue = jobRecordUpdatedAt(a);
-                    bValue = jobRecordUpdatedAt(b);
-                } else if (sortConfig.key === 'openDate') {
-                    aValue = a.openDate || '';
-                    bValue = b.openDate || '';
-                } else {
-                    aValue = a[sortKey as keyof Job];
-                    bValue = b[sortKey as keyof Job];
-                }
-        
-                if (aValue < bValue) {
-                    return sortConfig.direction === 'asc' ? -1 : 1;
-                }
-                if (aValue > bValue) {
-                    return sortConfig.direction === 'asc' ? 1 : -1;
-                }
-                return 0;
-            });
-        }
-        
-        return filtered;
-
-    }, [jobs, filters, sortConfig]);
-
-    const stats = useMemo(() => {
-        const activeJobs = jobs.filter(j => j.status === 'פתוחה');
-        
-        // 1. Attention Needed: Jobs with 'critical' priority OR red health indicator
-        const attentionNeeded = activeJobs.filter(j => {
-             const health = getJobHealthData(j);
-             return j.priority === 'קריטית' || health.color === 'bg-red-500';
-        }).length;
-
-        // 2. Bottleneck: Total candidates waiting for screening
-        const totalWaiting = activeJobs.reduce((acc, j) => acc + j.waitingForScreening, 0);
-
-        // 3. Momentum: Jobs with active processes
-        const momentumJobs = activeJobs.filter(j => j.activeProcess > 0).length;
-
-        // 4. Efficiency: Average days open
-        const totalDays = activeJobs.reduce((acc, j) => {
-            const days = Math.ceil((new Date().getTime() - new Date(j.openDate).getTime()) / (1000 * 60 * 60 * 24));
-            return acc + days;
-        }, 0);
-        const avgDays = activeJobs.length ? Math.round(totalDays / activeJobs.length) : 0;
-
-        return { attentionNeeded, totalWaiting, momentumJobs, avgDays };
-    }, [jobs]);
+    const sortedAndFilteredJobs = jobs;
+    const stats = gridStats;
     
     // Check if all displayed are selected
     const areAllVisibleSelected = sortedAndFilteredJobs.length > 0 && sortedAndFilteredJobs.every(j => selectedIds.has(j.id));
 
     const filterOptions = useMemo(() => ({
-        recruiters: [...new Set(jobs.map(j => j.recruiter))],
+        recruiters: gridFacets?.recruiters?.length ? gridFacets.recruiters : [...new Set(jobs.map(j => j.recruiter))],
         statuses: [...new Set(jobs.map(j => j.status as string))] as JobStatus[],
-        fields: [...new Set(jobs.map(j => j.field))],
-        clients: [...new Set(jobs.map(j => j.client))].sort((a, b) => String(a).localeCompare(String(b), 'he')),
-        roles: [...new Set(jobs.map(j => j.role))],
+        fields: gridFacets?.fields?.length ? gridFacets.fields : [...new Set(jobs.map(j => j.field))],
+        clients: (gridFacets?.clients?.length ? gridFacets.clients : [...new Set(jobs.map(j => j.client))]).sort((a, b) => String(a).localeCompare(String(b), 'he')),
+        roles: gridFacets?.roles?.length ? gridFacets.roles : [...new Set(jobs.map(j => j.role))],
         priorities: ['רגילה', 'דחופה', 'קריטית'],
-        clientTypes: [...new Set(jobs.map(j => j.clientType))],
+        clientTypes: gridFacets?.clientTypes?.length ? gridFacets.clientTypes : [...new Set(jobs.map(j => j.clientType))],
         genders: ['זכר', 'נקבה', 'לא משנה'],
         licenseTypes: ['A', 'B', 'C', 'C1', 'אין'],
-        recruitingCoordinators: [...new Set(jobs.map(j => j.recruitingCoordinator))],
-        accountManagers: [...new Set(jobs.map(j => j.accountManager))]
-    }), [jobs]);
+        recruitingCoordinators: gridFacets?.recruitingCoordinators?.length
+            ? gridFacets.recruitingCoordinators
+            : [...new Set(jobs.map(j => j.recruitingCoordinator))],
+        accountManagers: gridFacets?.accountManagers?.length
+            ? gridFacets.accountManagers
+            : [...new Set(jobs.map(j => j.accountManager))]
+    }), [jobs, gridFacets]);
 
     const clientFilterOptions = useMemo(
         () => filterOptions.clients.map(client => ({ id: client, label: client })),
@@ -1257,6 +1275,16 @@ const JobsView: React.FC = () => {
         setDraggingColumn(null);
     };
 
+    const openOrganizationDrawer = useCallback((ref: { organizationId: string; name: string }) => {
+        const orgId = String(ref.organizationId || '').trim();
+        if (!orgId) return;
+        setOrgDrawerTarget({
+            organizationId: orgId,
+            name: ref.name || '',
+        });
+        setIsOrgDrawerOpen(true);
+    }, []);
+
     const renderCell = (job: Job, columnId: string) => {
       switch(columnId) {
         case 'rating': return <StarRating rating={job.rating || 0} onRate={(r) => handleRateJob(job.id, r)} />;
@@ -1268,6 +1296,23 @@ const JobsView: React.FC = () => {
                 <Link to={`/jobs/edit/${job.id}`} onClick={(e) => e.stopPropagation()} className="font-semibold text-primary-700 hover:underline">{job.title}</Link>
              </div>
            );
+        case 'client': {
+            const label = String(job.client || '').trim() || '—';
+            const orgId = job.organizationId != null ? String(job.organizationId).trim() : '';
+            if (!orgId) return <span className="text-text-default">{label}</span>;
+            return (
+                <button
+                    type="button"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        openOrganizationDrawer({ organizationId: orgId, name: label });
+                    }}
+                    className="text-primary-700 font-medium hover:underline text-right"
+                >
+                    {label}
+                </button>
+            );
+        }
         case 'status': return (
             <button 
                 onClick={(e) => { e.stopPropagation(); openStatusModal(job); }}
@@ -1279,6 +1324,16 @@ const JobsView: React.FC = () => {
         case 'associatedCandidates': return <span className="font-semibold text-text-default text-center block">{job.associatedCandidates}</span>;
         case 'waitingForScreening': return <span className="font-medium text-amber-600 text-center block">{job.waitingForScreening}</span>;
         case 'activeProcess': return <span className="font-medium text-green-600 text-center block">{job.activeProcess}</span>;
+        case 'referralsCount':
+          return (
+            <Link
+              to={`/jobs/edit/${job.id}?view=referrals`}
+              onClick={(e) => e.stopPropagation()}
+              className="font-medium text-primary-700 hover:underline text-center block"
+            >
+              {Number(job.referralsCount) || 0}
+            </Link>
+          );
         case 'openDate':
           return (
             <span className="text-text-default whitespace-nowrap tabular-nums">
@@ -1294,6 +1349,17 @@ const JobsView: React.FC = () => {
         case 'id': return job.id;
         case 'salaryRange': return `${job.salaryMin.toLocaleString()}₪ - ${job.salaryMax.toLocaleString()}₪`;
         case 'ageRange': return `${job.ageMin} - ${job.ageMax}`;
+        case 'location': {
+          const { preview, full } = formatJobLocationPreview(job.location);
+          return (
+            <span
+              className="text-text-default whitespace-nowrap max-w-[280px] truncate inline-block align-middle"
+              title={full || undefined}
+            >
+              {preview}
+            </span>
+          );
+        }
         case 'mobility': return job.mobility ? t('filter.status_active') : t('filter.status_inactive');
         case 'listNotes':
           return (
@@ -1642,7 +1708,6 @@ const JobsView: React.FC = () => {
                                     onClose={() => setIsCompanyFilterOpen(false)}
                                     filters={companyFilterState}
                                     setFilters={setCompanyFilterState}
-                                    onApply={loadJobs}
                                 />
                             )}
                         </div>
@@ -1695,6 +1760,49 @@ const JobsView: React.FC = () => {
                             <ActiveFilterChips chips={jobActiveFilterChips} />
                         </div>
                     ) : null}
+                    <div className="flex flex-wrap items-center justify-between gap-2 mt-3 pt-2 border-t border-border-subtle">
+                        <span className="text-xs text-text-muted">
+                            {loadingJobs ? 'טוען משרות…' : `${totalJobs.toLocaleString('he-IL')} משרות`}
+                        </span>
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+                            <label className="flex items-center gap-1 whitespace-nowrap">
+                                <span>בדף</span>
+                                <select
+                                    value={pageSize}
+                                    onChange={(event) => {
+                                        setPageSize(Number(event.target.value));
+                                        setPage(1);
+                                    }}
+                                    className="bg-white border border-border-default rounded px-2 py-1 text-[11px]"
+                                >
+                                    {pageSizeOptions.map((option) => (
+                                        <option key={option} value={option}>
+                                            {option}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            <button
+                                type="button"
+                                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                                disabled={page <= 1 || loadingJobs}
+                                className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                                קודם
+                            </button>
+                            <span className="text-xs text-text-default">
+                                {page} / {totalPages}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                                disabled={page >= totalPages || loadingJobs}
+                                className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                                הבא
+                            </button>
+                        </div>
+                    </div>
                 </div>
 
                 {isAdvancedFilterOpen && (
@@ -1747,7 +1855,7 @@ const JobsView: React.FC = () => {
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 mt-4 border-t border-border-default">
                              <DoubleRangeSlider 
                                 label={t('filter.salary_internal')}
-                                min={5000} max={50000} step={1000} 
+                                min={0} max={50000} step={1000} 
                                 valueMin={Number(filters.salaryMin)} valueMax={Number(filters.salaryMax)} 
                                 onChange={handleSliderChange} 
                                 nameMin="salaryMin" nameMax="salaryMax" 
@@ -1953,16 +2061,53 @@ const JobsView: React.FC = () => {
                 ) : (
                     <div className="text-center py-16 flex flex-col items-center">
                         <BriefcaseIcon className="w-16 h-16 text-text-subtle mb-4"/>
-                        <h3 className="text-xl font-bold text-text-default">לא נמצאו משרות</h3>
-                        <p className="mt-2 text-text-muted">נסה לשנות את תנאי החיפוש או ליצור משרה חדשה.</p>
+                        <h3 className="text-xl font-bold text-text-default">
+                            {loadingJobs ? 'טוען משרות…' : 'לא נמצאו משרות'}
+                        </h3>
+                        <p className="mt-2 text-text-muted">
+                            {loadingJobs ? 'מביא תוצאות מהשרת לפי הסינון הנבחר.' : 'נסה לשנות את תנאי החיפוש או ליצור משרה חדשה.'}
+                        </p>
                     </div>
                 )}
+                {totalJobs > 0 ? (
+                    <div className="flex flex-wrap items-center justify-end gap-2 mt-3">
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.max(1, p - 1))}
+                            disabled={page <= 1 || loadingJobs}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            קודם
+                        </button>
+                        <span className="text-xs text-text-default">
+                            {page} / {totalPages}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                            disabled={page >= totalPages || loadingJobs}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            הבא
+                        </button>
+                    </div>
+                ) : null}
             </main>
             
             <JobDetailsDrawer
                 job={selectedJob}
                 isOpen={isDrawerOpen}
                 onClose={() => setIsDrawerOpen(false)}
+            />
+
+            <OrganizationPreviewDrawer
+                target={orgDrawerTarget}
+                isOpen={isOrgDrawerOpen && Boolean(orgDrawerTarget)}
+                onClose={() => {
+                    setIsOrgDrawerOpen(false);
+                    setOrgDrawerTarget(null);
+                }}
+                tenantClientId={user?.clientId ?? null}
             />
             
             <JobStatusModal 

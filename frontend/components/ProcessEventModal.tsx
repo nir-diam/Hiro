@@ -28,6 +28,12 @@ const formatAssigneeList = (names: string[]): string => {
   return unique.join(', ');
 };
 
+/** Default event title, e.g. "אירוע מכירות". */
+const defaultEventTitle = (processName: string): string => {
+  const name = String(processName || '').trim();
+  return name ? `אירוע ${name}` : '';
+};
+
 type PipelineWithKind = PipelineDto & { kind: 'client' | 'candidate' };
 
 export type ProcessEventSavePayload = {
@@ -198,6 +204,8 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
   const modalOpenSessionRef = useRef(false);
   /** When staff list loads after process change, apply pipeline default assignees for this process. */
   const pendingAssigneeProcessIdRef = useRef<string | null>(null);
+  /** Stop auto-filling the title once the user edits it. */
+  const titleTouchedRef = useRef(false);
 
   useEffect(() => {
     if (!isOpen) {
@@ -207,6 +215,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     if (modalOpenSessionRef.current) return;
     modalOpenSessionRef.current = true;
     pendingAssigneeProcessIdRef.current = null;
+    titleTouchedRef.current = Boolean(String(initialData?.title || '').trim());
     setFormData({
       title: initialData?.title || '',
       processId: initialData?.processId || '',
@@ -347,6 +356,9 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
         return {
           ...prev,
           processId,
+          title: titleTouchedRef.current
+            ? prev.title
+            : defaultEventTitle(pipeline?.name || '') || prev.title,
           stageId,
           contactId: nextContactId,
           contactName: nextContactName,
@@ -603,7 +615,10 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                     type="text"
                     required
                     value={formData.title}
-                    onChange={(e) => setFormData({ ...formData, title: e.target.value })}
+                    onChange={(e) => {
+                      titleTouchedRef.current = true;
+                      setFormData({ ...formData, title: e.target.value });
+                    }}
                     className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all shadow-sm"
                     placeholder="למשל: תיאום פגישת היכרות..."
                     autoFocus
@@ -636,6 +651,9 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                         setFormData({
                           ...formData,
                           processId: newProcess,
+                          title: titleTouchedRef.current
+                            ? formData.title
+                            : defaultEventTitle(newPipeline?.name || ''),
                           stageId: nextStageId,
                           assigneeValues: nextAssigneeValues,
                           slaValue: stage?.slaLimit ?? formData.slaValue,

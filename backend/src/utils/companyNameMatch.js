@@ -42,6 +42,17 @@ const companyNameLookupVariants = (name) => {
     add(afterParen);
   }
 
+  const compactCompanyKey = (value) =>
+    String(value || '')
+      .toLowerCase()
+      .replace(/&/g, 'and')
+      .replace(/[^a-z0-9\u0590-\u05ff]+/gi, '');
+
+  for (const key of [...variants]) {
+    const compact = compactCompanyKey(key);
+    if (compact.length >= 4) variants.add(compact);
+  }
+
   return [...variants];
 };
 
@@ -102,6 +113,17 @@ const resolveOrgIdFromLabelMap = (searchLabel, labelToOrgIdMap) => {
   return best;
 };
 
+/** Exact variant keys only — no substring fuzzy match (avoids alias → wrong org). */
+const resolveOrgIdFromLabelMapExact = (searchLabel, labelToOrgIdMap) => {
+  if (!labelToOrgIdMap || typeof labelToOrgIdMap.get !== 'function') return null;
+  const variants = companyNameLookupVariants(searchLabel);
+  for (const key of variants) {
+    if (isInsignificantLookupVariant(key)) continue;
+    if (labelToOrgIdMap.has(key)) return labelToOrgIdMap.get(key);
+  }
+  return null;
+};
+
 /**
  * Pick best option from [{ id, label }] list for an AI/client label.
  */
@@ -125,6 +147,7 @@ module.exports = {
   companyNameLookupVariants,
   namesLikelySameCompany,
   resolveOrgIdFromLabelMap,
+  resolveOrgIdFromLabelMapExact,
   findBestLabelOptionMatch,
   MIN_FUZZY_LEN,
 };

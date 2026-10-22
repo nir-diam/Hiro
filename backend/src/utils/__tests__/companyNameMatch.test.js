@@ -17,6 +17,12 @@ describe('companyNameMatch', () => {
     expect(namesLikelySameCompany('Union Motors - GEELY', 'Union Motors')).toBe(true);
   });
 
+  it('treats hyphen, spaces, and ampersand as the same brand', () => {
+    expect(namesLikelySameCompany('D-AND-D', 'D AND D')).toBe(true);
+    expect(namesLikelySameCompany('D-AND-D', 'D&D')).toBe(true);
+    expect(namesLikelySameCompany('D-AND-D', 'D-AND-D יבוא ושיווק')).toBe(true);
+  });
+
   it('does not match unrelated companies', () => {
     expect(namesLikelySameCompany('יוניון מוטורס - GEELY', 'מימד אנושי')).toBe(false);
     expect(namesLikelySameCompany('ABC Corp', 'XYZ Ltd')).toBe(false);

@@ -7,6 +7,8 @@ const { loadTaxonomyIndex } = require('./jobTaxonomyResolver');
 
 const PROMPT_ID = 'job_taxonomy_mapping';
 const TOP_K_CATEGORIES = 5;
+/** Cap paths in the LLM prompt so input + output stay within token limits. */
+const MAX_PATHS_FOR_LLM = 48;
 const GENERAL_LABEL = 'כללי';
 const CONFIDENCE_THRESHOLD = 0.5;
 
@@ -27,6 +29,11 @@ function norm(s) {
 
 function parseJsonFromLlm(raw) {
   const text = String(raw || '').trim();
+  if (!text) {
+    const err = new Error('Empty LLM response');
+    err.code = 'LLM_EMPTY';
+    throw err;
+  }
   let cleaned = text;
   if (cleaned.startsWith('```')) {
     cleaned = cleaned.replace(/^```[a-zA-Z]*\s*/, '');
@@ -39,7 +46,13 @@ function parseJsonFromLlm(raw) {
     firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace
       ? cleaned.slice(firstBrace, lastBrace + 1)
       : cleaned;
-  return JSON.parse(candidate);
+  try {
+    return JSON.parse(candidate);
+  } catch (parseErr) {
+    const err = new Error(parseErr.message || 'Invalid JSON from LLM');
+    err.code = 'LLM_JSON_TRUNCATED';
+    throw err;
+  }
 }
 
 /**
@@ -280,9 +293,12 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '') {
     categoryIds = allCats.slice(0, TOP_K_CATEGORIES);
   }
 
-  const availablePaths = buildAvailablePaths(categoryIds, index);
+  let availablePaths = buildAvailablePaths(categoryIds, index);
   if (!availablePaths.length) {
     return buildFallbackResult('לא נמצאו נתיבים זמינים בטקסונומיה');
+  }
+  if (availablePaths.length > MAX_PATHS_FOR_LLM) {
+    availablePaths = availablePaths.slice(0, MAX_PATHS_FOR_LLM);
   }
 
   const promptRow = await promptService.ensureById(PROMPT_ID);
@@ -327,7 +343,7 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '') {
       responseMimeType: 'application/json',
       generationConfig: {
         temperature: promptRow.temperature ?? 0.1,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 4096,
       },
       promptId: PROMPT_ID,
       llmInputJson: {
@@ -346,7 +362,15 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '') {
 
     return applyMappingDecision(mappingDecision, availablePaths);
   } catch (e) {
-    console.error('[jobTaxonomyClassification] LLM classification failed:', e.message);
+    const truncated =
+      e?.code === 'LLM_JSON_TRUNCATED' ||
+      e?.code === 'LLM_EMPTY' ||
+      /Unexpected end of JSON|JSON/i.test(String(e?.message || ''));
+    if (truncated) {
+      console.warn('[jobTaxonomyClassification] LLM JSON incomplete — using fallback:', e.message);
+    } else {
+      console.error('[jobTaxonomyClassification] LLM classification failed:', e.message);
+    }
     return buildFallbackResult('שגיאה בסיווג אוטומטי — נדרש אישור ידני');
   }
 }

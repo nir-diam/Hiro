@@ -19,6 +19,9 @@ const JobCluster = sequelize.define(
       allowNull: false,
       references: { model: JobCategory, key: 'id' },
     },
+    publicSlug: { type: DataTypes.STRING(120), allowNull: true },
+    slugAliases: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
+    slugLocked: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     embedding: { type: DataTypes.JSONB, allowNull: true },
   },
   {

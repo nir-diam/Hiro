@@ -47,6 +47,8 @@ const Candidate = sequelize.define(
     location: DataTypes.STRING,
     title: DataTypes.STRING,
     professionalSummary: DataTypes.TEXT,
+    /** v7 CV parse: up to 3 short explicit facts from the CV (replaces marketing summary on printable CV). */
+    keyFacts: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [], field: 'key_facts' },
     profilePicture: DataTypes.STRING,
     /** Short promotional self-intro video for recruiters. */
     profileVideoUrl: DataTypes.STRING,
@@ -60,6 +62,7 @@ const Candidate = sequelize.define(
     languages: { type: DataTypes.JSONB, defaultValue: [] },
     salaryMin: DataTypes.INTEGER,
     salaryMax: DataTypes.INTEGER,
+    /** Job rows: title, company, startDate/endDate (Present ok), description (\\n bullets or null), roleTag, tagId, datesSuspicious, isMilitaryService. */
     workExperience: { type: DataTypes.JSONB, defaultValue: [] },
     industryAnalysis: { type: DataTypes.JSONB, defaultValue: {} },
     /** Denormalized array of all companies/experiences for cross-experience search.

@@ -3,6 +3,7 @@ import React, { useRef } from 'react';
 import { BookmarkIcon, BookmarkIconSolid, ExclamationTriangleIcon, MapPinIcon, ClockIcon, BriefcaseIcon, SparklesIcon } from './Icons';
 import { Candidate } from './CandidatesListView';
 import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
+import CvReviewBadge from './CvReviewBadge';
 import { formatCandidatePoolLastActive } from '../utils/formatCandidatePoolLastActive';
 
 interface CandidateCardProps {
@@ -145,6 +146,7 @@ const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile,
                             title={candidate.name}
                         >
                             <span className="truncate">{candidate.name}</span>
+                            <CvReviewBadge internalTags={candidate.internalTags} />
                             <CandidateApprovedByCandidateBadge approved={candidate.approveByCandidate} className="w-4 h-4" />
                         </h3>
                         {hasMissingFields && (

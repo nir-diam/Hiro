@@ -101,7 +101,6 @@ function formatTagHesitationForExport(r: TagAiDecisionDto): string {
 }
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 import DebouncedCommentsTextarea from './DebouncedCommentsTextarea';
-import { AI_DECISION_USER_NOTES_FIELD_PROPS } from '../utils/agentDecisionNotes';
 
 const TAG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -362,6 +361,55 @@ const getEffectiveAiDecision = (decision: TagAiDecisionDto): 'merge' | 'create' 
     if (reviewer === 'create' || reviewer === 'delete') return reviewer;
     if (reviewer === 'merge' || reviewer === 'auto_merge') return 'merge';
     return decision.aiDecision;
+};
+
+const TAG_CORRECTIONS_TABLE_SCROLL_CLASS =
+    'overflow-auto overscroll-contain min-w-0 w-full max-h-[min(72vh,calc(100dvh-14rem))] [scrollbar-width:thin]';
+
+const TAG_CORRECTIONS_ROW_CLASS =
+    '[content-visibility:auto] [contain-intrinsic-size:auto_160px]';
+
+const LAZY_NOTES_FIELD_PROPS = {
+    wrapperClassName: 'min-w-[180px] max-w-none w-full',
+    rows: 3,
+    className: 'min-h-[72px]',
+} as const;
+
+/** Preview first — mount a textarea only when the cell is edited (tables with 50+ rows otherwise keep hundreds of form controls in the DOM). */
+const LazyNotesCell: React.FC<{
+    value: string | null | undefined;
+    onSave: (next: string) => Promise<void>;
+    placeholder?: string;
+}> = ({ value, onSave, placeholder = 'הוסף הערה…' }) => {
+    const [editing, setEditing] = useState(false);
+    const text = String(value || '').trim();
+    if (editing) {
+        return (
+            <DebouncedCommentsTextarea
+                {...LAZY_NOTES_FIELD_PROPS}
+                value={value}
+                onSave={onSave}
+                placeholder={placeholder}
+                autoFocus
+            />
+        );
+    }
+    return (
+        <button
+            type="button"
+            onClick={() => setEditing(true)}
+            className="w-full min-h-[72px] text-right rounded-lg border border-transparent hover:border-border-default hover:bg-white px-2 py-1.5 transition-colors"
+            title={text || placeholder}
+        >
+            {text ? (
+                <p className="text-xs leading-relaxed text-text-default line-clamp-4 whitespace-pre-wrap" dir="auto">
+                    {text}
+                </p>
+            ) : (
+                <span className="text-xs text-text-muted/70">{placeholder}</span>
+            )}
+        </button>
+    );
 };
 
 const getDecisionStatusBucket = (
@@ -1735,7 +1783,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                         )}
                     </div>
 
-                    <HorizontalScrollArea pinHeader scrollClassName={ADMIN_TABLE_SCROLL_CLASS}>
+                    <HorizontalScrollArea pinHeader scrollClassName={TAG_CORRECTIONS_TABLE_SCROLL_CLASS}>
                         <table className={`w-full min-w-[1680px] text-right text-sm ${STICKY_TABLE_CLASS}`} dir="rtl">
                             <thead className="border-b border-border-subtle">
                                 <tr>
@@ -1780,7 +1828,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                     <tr><td colSpan={isMultiSelectMode ? 12 : 11} className="p-8 text-center text-text-muted">לא נמצאו תוצאות לסינון הנוכחי.</td></tr>
                                 ) : (
                                     paginatedAiDecisions.map((decision) => (
-                                        <tr key={decision.id} className={`hover:bg-bg-hover transition-all duration-500 ${
+                                        <tr key={decision.id} className={`hover:bg-bg-hover ${TAG_CORRECTIONS_ROW_CLASS} ${
                                             manualQueuedDecisions.has(decision.id) ? 'opacity-40 grayscale bg-gray-100' :
                                             decision.status === 'overridden' ? 'opacity-60 bg-gray-50' : ''
                                         } ${selectedDecisions.has(decision.id) ? 'bg-primary-50/50' : ''}`}>
@@ -1844,7 +1892,9 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                     <span>{new Date(decision.actionDate).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
                                                 </div>
                                             </td>
-                                            <td className="p-4 text-text-muted align-top text-xs leading-relaxed" dir="auto">{decision.contextSample}</td>
+                                            <td className="p-4 text-text-muted align-top text-xs leading-relaxed" dir="auto" title={decision.contextSample}>
+                                                <p className="line-clamp-4">{decision.contextSample}</p>
+                                            </td>
                                             <td className="p-4 align-top">
                                                 <div className="flex items-center gap-2 mb-2">
                                                     {(() => {
@@ -1889,7 +1939,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                     const label  = isHigh ? `התלבטות קשה: ${lvl}%` : isMed ? `התלבטות בינונית: ${lvl}%` : `ודאי / נמוך: ${lvl}%`;
                                                     const barColor = isHigh ? 'bg-red-500' : isMed ? 'bg-amber-500' : 'bg-green-500';
                                                     const badgeCls = isHigh
-                                                        ? 'bg-red-50 text-red-700 border-red-100 animate-pulse'
+                                                        ? 'bg-red-50 text-red-700 border-red-100'
                                                         : isMed
                                                             ? 'bg-amber-50 text-amber-700 border-amber-100'
                                                             : 'bg-green-50 text-green-700 border-green-100';
@@ -1906,14 +1956,14 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                                     {label}
                                                                 </span>
                                                                 {isHigh && (
-                                                                    <span className="text-[9px] font-black tracking-wider uppercase bg-red-600 text-white px-1.5 py-0.5 rounded animate-bounce shadow-sm" title="מומלץ לבדוק ביסודיות">בחינה דחופה</span>
+                                                                    <span className="text-[9px] font-black tracking-wider uppercase bg-red-600 text-white px-1.5 py-0.5 rounded shadow-sm" title="מומלץ לבדוק ביסודיות">בחינה דחופה</span>
                                                                 )}
                                                             </div>
                                                             <div className="w-full bg-gray-100 rounded-full h-1.5 overflow-hidden">
                                                                 <div className={`h-full transition-all duration-500 rounded-full ${barColor}`} style={{ width: `${lvl}%` }} />
                                                             </div>
                                                             {decision.dilemmaReasoning && (
-                                                                <p className="text-xs text-text-muted leading-relaxed font-normal bg-bg-subtle/40 p-2 rounded-lg border border-border-subtle/50 italic" dir="auto">
+                                                                <p className="text-xs text-text-muted leading-relaxed font-normal bg-bg-subtle/40 p-2 rounded-lg border border-border-subtle/50 italic line-clamp-4" dir="auto" title={decision.dilemmaReasoning}>
                                                                     &ldquo;{decision.dilemmaReasoning}&rdquo;
                                                                 </p>
                                                             )}
@@ -1997,8 +2047,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                 </div>
                                             </td>
                                             <td className="p-4 align-top">
-                                                <DebouncedCommentsTextarea
-                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                <LazyNotesCell
                                                     value={decision.agentNotes}
                                                     onSave={async (agentNotes) => {
                                                         const res = await updateTagAiDecisionFields(decision.id, { agentNotes });
@@ -2011,8 +2060,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                 />
                                             </td>
                                             <td className="p-4 align-top">
-                                                <DebouncedCommentsTextarea
-                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                <LazyNotesCell
                                                     value={decision.agentVerdict}
                                                     onSave={async (agentVerdict) => {
                                                         const res = await updateTagAiDecisionFields(decision.id, { agentVerdict });
@@ -2025,8 +2073,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                 />
                                             </td>
                                             <td className="p-4 align-top">
-                                                <DebouncedCommentsTextarea
-                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                <LazyNotesCell
                                                     value={decision.comments}
                                                     onSave={async (comments) => {
                                                         const res = await updateTagAiDecisionComments(decision.id, comments);
@@ -2039,8 +2086,7 @@ const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = 
                                                 />
                                             </td>
                                             <td className="p-4 align-top">
-                                                <DebouncedCommentsTextarea
-                                                    {...AI_DECISION_USER_NOTES_FIELD_PROPS}
+                                                <LazyNotesCell
                                                     value={decision.userVerdict}
                                                     onSave={async (userVerdict) => {
                                                         const res = await updateTagAiDecisionFields(decision.id, { userVerdict });

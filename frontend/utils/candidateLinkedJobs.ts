@@ -37,6 +37,7 @@ export type CandidateJobLink = {
   inviteCandidate: boolean;
   inviteClient: boolean;
   clientId?: string;
+  organizationId?: string;
 };
 
 function stripHtml(html: string): string {
@@ -75,6 +76,12 @@ export function mapLinkedJobRow(row: LinkedJobApiRow): CandidateJobLink {
         ? String(job.clientId)
         : job.client_id != null
           ? String(job.client_id)
+          : undefined,
+    organizationId:
+      job.organizationId != null
+        ? String(job.organizationId)
+        : job.organization_id != null
+          ? String(job.organization_id)
           : undefined,
   };
 }

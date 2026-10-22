@@ -4,7 +4,7 @@ import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { 
     BriefcaseIcon, UserGroupIcon, Cog6ToothIcon, PlusIcon, ChevronDownIcon, 
     PencilIcon, SparklesIcon, GenderMaleIcon, GenderFemaleIcon, MapPinIcon, TrashIcon, XMarkIcon,
-    BellIcon, ShareIcon, CheckCircleIcon, UserIcon, NoSymbolIcon, TagIcon, InformationCircleIcon,
+    ShareIcon, CheckCircleIcon, UserIcon, NoSymbolIcon, TagIcon, InformationCircleIcon,
     MagnifyingGlassIcon, BuildingOffice2Icon, GlobeAmericasIcon, ChevronUpIcon, ExclamationTriangleIcon, CheckIcon,
     PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon, AcademicCapIcon, WrenchScrewdriverIcon,
     ClipboardDocumentIcon,
@@ -16,12 +16,17 @@ import { GoogleGenAI, Type } from '@google/genai';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import { jobFieldKey } from '../utils/portalJobFilters';
 import LocationSelector, { LocationItem } from './LocationSelector';
+import {
+    expandLocationItemsToCityNames,
+    fetchAllCityGroups,
+    type LocationGroup,
+} from '../utils/citySearchApi';
 import SearchableSelect from './SearchableSelect';
 import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
-import { matchOrgOption } from '../utils/matchCompanyLabel';
+import { matchOrgOption, matchOrgOptionExact } from '../utils/matchCompanyLabel';
 import { jobStatusApiToForm, jobStatusFormToApi } from '../utils/jobStatusLabels';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
 import { saveJobPublication, patchJobBoardSources } from '../services/publishingApi';
@@ -41,6 +46,10 @@ import {
     sortDrivingLicensePicklistRows,
 } from '../services/picklistValuesApi';
 import { fetchClientUsageSettings } from '../services/usageSettingsApi';
+import {
+    fetchClientMatchingEngineConfigs,
+    type ClientMatchingEnginePresetDto,
+} from '../services/matchingEngineClientApi';
 import { CLIENT_MODULE_DIGITAL_SCREENING, isClientModuleEnabled } from '../utils/clientModules';
 import JobCvForwardSettingsCard from './JobCvForwardSettingsCard';
 import {
@@ -105,13 +114,56 @@ interface LanguageRequirement {
   level: string;
 }
 
+type RecruitmentSourceSelectionHistoryEntry = {
+    at: string;
+    userId?: string | null;
+    userName: string;
+    selected: boolean;
+};
+
 interface RecruitmentSource {
     id: string;
     name: string;
     selected: boolean;
     status: PublicationStatus;
     alertDays: number | null;
+    selectionHistory?: RecruitmentSourceSelectionHistoryEntry[];
 }
+
+const normalizeRecruitmentSourceSelectionHistory = (
+    raw: unknown,
+): RecruitmentSourceSelectionHistoryEntry[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .map((row) => {
+            if (!row || typeof row !== 'object') return null;
+            const at = String((row as { at?: unknown }).at || '').trim();
+            if (!at) return null;
+            return {
+                at,
+                userId:
+                    (row as { userId?: unknown }).userId != null
+                        ? String((row as { userId?: unknown }).userId)
+                        : null,
+                userName: String((row as { userName?: unknown }).userName || 'משתמש').trim() || 'משתמש',
+                selected: Boolean((row as { selected?: unknown }).selected),
+            };
+        })
+        .filter((row): row is RecruitmentSourceSelectionHistoryEntry => row != null);
+};
+
+const formatSourceSelectionHistoryWhen = (iso: string): string => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleString('he-IL', {
+        day: 'numeric',
+        month: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+    });
+};
 
 // --- CONSTANTS ---
 const priorityOptions = ['רגילה', 'דחופה', 'קריטית'] as const;
@@ -381,12 +433,29 @@ const deriveLocationsFromJob = (jobData: any): LocationItem[] => {
     if (Array.isArray(jobData?.locations) && jobData.locations.length) {
         return jobData.locations.map((loc: LocationItem) => ({ ...loc }));
     }
-    const locationStr = String(jobData?.location || jobData?.city || '').trim();
-    if (!locationStr) return [];
-    if (locationStr.includes(LOCATION_SEP)) {
-        return locationStr.split(LOCATION_SEP).map((value: string) => ({ type: 'city' as const, value: value.trim() })).filter((loc: LocationItem) => loc.value);
+    const items: LocationItem[] = [];
+    const locationStr = String(jobData?.location || '').trim();
+    const cityStr = String(jobData?.city || '').trim();
+    const sourceLoc = locationStr || cityStr;
+    if (sourceLoc) {
+        if (sourceLoc.includes(LOCATION_SEP)) {
+            for (const value of sourceLoc.split(LOCATION_SEP)) {
+                const v = value.trim();
+                if (v) items.push({ type: 'city', value: v });
+            }
+        } else {
+            items.push({ type: 'city', value: sourceLoc });
+        }
     }
-    return [{ type: 'city', value: locationStr }];
+    const regionStr = String(jobData?.region || '').trim();
+    if (regionStr) {
+        for (const r of regionStr.split(',').map((s: string) => s.trim()).filter(Boolean)) {
+            if (!items.some((l) => l.type === 'region' && l.value === r)) {
+                items.push({ type: 'region', value: r });
+            }
+        }
+    }
+    return items;
 };
 
 const disqualificationReasons = [
@@ -432,20 +501,6 @@ type JobDistributionOption = {
 
 function jobDistributionKey(kind: 'contact' | 'user', id: string): string {
     return `${kind}:${id}`;
-}
-
-/** Extract persisted job.contacts (kind + id) before distribution list is loaded. */
-function jobContactsToKeys(raw: unknown): string[] | null {
-    if (!Array.isArray(raw) || raw.length === 0) return null;
-    const keys: string[] = [];
-    for (const item of raw) {
-        if (!item || typeof item !== 'object') continue;
-        const o = item as Record<string, unknown>;
-        const kind = o.kind === 'user' ? 'user' : o.kind === 'contact' ? 'contact' : null;
-        const id = o.id != null ? String(o.id).trim() : '';
-        if (kind && id) keys.push(jobDistributionKey(kind, id));
-    }
-    return keys.length > 0 ? keys : null;
 }
 
 // Recruitment sources are loaded dynamically per-client from the API (active only).
@@ -582,7 +637,7 @@ const TechnicalIdentifiers: React.FC<{
     postingCode: string;
     creationDate: string;
     uniqueEmail: string;
-    onPostingCodeChange: (value: string) => void;
+    postingCodeReadOnly?: boolean;
     validityDays: number;
     reScreeningCooldownMonths: number;
     requireOriginalCv: boolean;
@@ -601,7 +656,7 @@ const TechnicalIdentifiers: React.FC<{
     postingCode,
     creationDate,
     uniqueEmail,
-    onPostingCodeChange,
+    postingCodeReadOnly = true,
     validityDays,
     reScreeningCooldownMonths,
     requireOriginalCv,
@@ -618,19 +673,28 @@ const TechnicalIdentifiers: React.FC<{
 }) => {
     const [isOpen, setIsOpen] = useState(defaultTechIdsOpen);
     const [uniqueEmailCopied, setUniqueEmailCopied] = useState(false);
+    const [postingCodeCopied, setPostingCodeCopied] = useState(false);
+    const [jobIdCopied, setJobIdCopied] = useState(false);
     const { t } = useLanguage();
 
-    const handleCopyUniqueEmail = async () => {
-        const value = String(uniqueEmail || '').trim();
-        if (!value) return;
+    const copyFieldValue = async (value: string, markCopied: (v: boolean) => void) => {
+        const trimmed = String(value || '').trim();
+        if (!trimmed) return;
         try {
-            await navigator.clipboard.writeText(value);
-            setUniqueEmailCopied(true);
-            window.setTimeout(() => setUniqueEmailCopied(false), 2000);
+            await navigator.clipboard.writeText(trimmed);
+            markCopied(true);
+            window.setTimeout(() => markCopied(false), 2000);
         } catch {
             /* ignore */
         }
     };
+
+    const handleCopyUniqueEmail = () => void copyFieldValue(uniqueEmail, setUniqueEmailCopied);
+    const handleCopyPostingCode = () => void copyFieldValue(postingCode, setPostingCodeCopied);
+    const handleCopyJobId = () => void copyFieldValue(jobId, setJobIdCopied);
+
+    const copyButtonClass =
+        'absolute left-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-text-muted hover:text-primary-600 hover:bg-bg-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-text-muted disabled:hover:bg-transparent';
 
     return (
         <div className="mt-6 pt-4 border-t border-border-default space-y-4">
@@ -653,8 +717,8 @@ const TechnicalIdentifiers: React.FC<{
 
             {isOpen && (
                 <div className="space-y-4 animate-fade-in">
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div className="md:col-span-2">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-12 gap-4">
+                        <div className="xl:col-span-6">
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.unique_email')}</label>
                             <div className="relative">
                                 <input 
@@ -665,11 +729,11 @@ const TechnicalIdentifiers: React.FC<{
                                 />
                                 <button
                                     type="button"
-                                    onClick={() => void handleCopyUniqueEmail()}
+                                    onClick={handleCopyUniqueEmail}
                                     disabled={!String(uniqueEmail || '').trim()}
                                     title={uniqueEmailCopied ? t('new_job.copied') : t('new_job.copy_unique_email')}
                                     aria-label={uniqueEmailCopied ? t('new_job.copied') : t('new_job.copy_unique_email')}
-                                    className="absolute left-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-text-muted hover:text-primary-600 hover:bg-bg-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-text-muted disabled:hover:bg-transparent"
+                                    className={copyButtonClass}
                                 >
                                     {uniqueEmailCopied ? (
                                         <CheckIcon className="w-4 h-4 text-green-600" />
@@ -679,33 +743,69 @@ const TechnicalIdentifiers: React.FC<{
                                 </button>
                             </div>
                         </div>
-                        <div>
+                        <div className="xl:col-span-3">
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.posting_code')}</label>
+                            <div className="relative">
+                                <input
+                                    type="text"
+                                    value={postingCode}
+                                    readOnly={postingCodeReadOnly}
+                                    placeholder={postingCodeReadOnly && !postingCode ? 'יווקצע בשמירה' : undefined}
+                                    className={`w-full min-w-[10rem] border border-border-default text-sm rounded-lg py-2.5 pl-10 pr-3 font-mono tracking-wide transition ${
+                                        postingCodeReadOnly
+                                            ? 'bg-bg-subtle/50 text-text-muted cursor-not-allowed text-center'
+                                            : 'bg-bg-input text-text-default text-center'
+                                    }`}
+                                />
+                                <button
+                                    type="button"
+                                    onClick={handleCopyPostingCode}
+                                    disabled={!String(postingCode || '').trim()}
+                                    title={postingCodeCopied ? t('new_job.copied') : 'העתק קוד פרסום'}
+                                    aria-label={postingCodeCopied ? t('new_job.copied') : 'העתק קוד פרסום'}
+                                    className={copyButtonClass}
+                                >
+                                    {postingCodeCopied ? (
+                                        <CheckIcon className="w-4 h-4 text-green-600" />
+                                    ) : (
+                                        <ClipboardDocumentIcon className="w-4 h-4" />
+                                    )}
+                                </button>
+                            </div>
+                        </div>
+                        <div className="xl:col-span-3">
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.creation_date')}</label>
                             <input 
                                 type="text" 
-                                value={postingCode} 
-                                onChange={(e) => onPostingCodeChange(e.target.value)}
-                                className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-center transition"
+                                value={creationDate} 
+                                disabled 
+                                className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
                             />
                         </div>
-                        <div className="grid grid-cols-2 gap-2">
-                            <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.job_id')}</label>
+                        <div className="md:col-span-2 xl:col-span-12">
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.job_id')}</label>
+                            <div className="relative w-full">
                                 <input 
                                     type="text" 
                                     value={jobId} 
                                     disabled 
-                                    className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
+                                    dir="ltr"
+                                    className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg py-2.5 pl-10 pr-3 cursor-not-allowed font-mono text-left" 
                                 />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.creation_date')}</label>
-                                <input 
-                                    type="text" 
-                                    value={creationDate} 
-                                    disabled 
-                                    className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
-                                />
+                                <button
+                                    type="button"
+                                    onClick={handleCopyJobId}
+                                    disabled={!String(jobId || '').trim()}
+                                    title={jobIdCopied ? t('new_job.copied') : 'העתק מזהה משרה'}
+                                    aria-label={jobIdCopied ? t('new_job.copied') : 'העתק מזהה משרה'}
+                                    className={copyButtonClass}
+                                >
+                                    {jobIdCopied ? (
+                                        <CheckIcon className="w-4 h-4 text-green-600" />
+                                    ) : (
+                                        <ClipboardDocumentIcon className="w-4 h-4" />
+                                    )}
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -761,145 +861,136 @@ const PriorityToggle: React.FC<{
 
 // ... (SourceRow, MultiSelect, DoubleRangeSlider, SmartTag omitted for brevity, assumed unchanged)
 
-const SourceRow: React.FC<{
-    source: RecruitmentSource;
-    onToggleSelect: () => void;
-    onStatusChange: (newStatus: PublicationStatus) => void;
-    onAlertChange: (days: number | null) => void;
-}> = ({ source, onToggleSelect, onStatusChange, onAlertChange }) => {
-    // ... (Implementation unchanged)
-    const [isAlertPopoverOpen, setIsAlertPopoverOpen] = useState(false);
-    const [daysInput, setDaysInput] = useState<number>(source.alertDays || 3);
+const SourceSelectionHistoryPopup: React.FC<{
+    selectionHistory: RecruitmentSourceSelectionHistoryEntry[];
+}> = ({ selectionHistory }) => (
+    <div
+        className="absolute top-full right-0 mt-1.5 w-[min(20rem,calc(100vw-2rem))] bg-bg-card border border-border-default rounded-lg shadow-xl z-50 p-3 text-right animate-fade-in"
+        onClick={(e) => e.stopPropagation()}
+    >
+        <p className="text-xs font-bold text-text-default mb-2">היסטוריית סימון</p>
+        {selectionHistory.length === 0 ? (
+            <p className="text-xs text-text-muted py-2">אין רשומות עדיין.</p>
+        ) : (
+            <div className="max-h-44 overflow-y-auto custom-scrollbar">
+                <table className="w-full text-[11px] border-collapse">
+                    <thead>
+                        <tr className="text-text-muted border-b border-border-subtle">
+                            <th className="py-1.5 pl-2 font-semibold text-right">תאריך</th>
+                            <th className="py-1.5 px-2 font-semibold text-right">משתמש</th>
+                            <th className="py-1.5 pr-2 font-semibold text-right">סימון</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {selectionHistory.map((row, idx) => (
+                            <tr key={`${row.at}-${idx}`} className="border-b border-border-subtle/60 last:border-0">
+                                <td className="py-1.5 pl-2 text-text-muted whitespace-nowrap font-mono">
+                                    {formatSourceSelectionHistoryWhen(row.at)}
+                                </td>
+                                <td className="py-1.5 px-2 text-text-default truncate max-w-[7rem]" title={row.userName}>
+                                    {row.userName}
+                                </td>
+                                <td className="py-1.5 pr-2 font-semibold whitespace-nowrap">
+                                    <span className={row.selected ? 'text-green-700' : 'text-text-muted'}>
+                                        {row.selected ? 'הופעל' : 'כובה'}
+                                    </span>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        )}
+    </div>
+);
+
+const useSourceHistoryPopover = () => {
+    const [isOpen, setIsOpen] = useState(false);
     const popoverRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
-                setIsAlertPopoverOpen(false);
+                setIsOpen(false);
             }
         };
-        if (isAlertPopoverOpen) {
+        if (isOpen) {
             document.addEventListener('mousedown', handleClickOutside);
         }
         return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [isAlertPopoverOpen]);
+    }, [isOpen]);
 
-    const handleBellClick = (e: React.MouseEvent) => {
+    const toggle = (e: React.MouseEvent) => {
         e.stopPropagation();
-        setIsAlertPopoverOpen(!isAlertPopoverOpen);
+        e.preventDefault();
+        setIsOpen((open) => !open);
     };
 
-    const handleEnableAlert = () => {
-        onAlertChange(daysInput);
-        setIsAlertPopoverOpen(false);
-    };
+    return { isOpen, popoverRef, toggle };
+};
 
-    const handleDisableAlert = () => {
-        onAlertChange(null);
-        setIsAlertPopoverOpen(false);
-    };
-
-    const toggleStatus = (e: React.MouseEvent) => {
-        e.stopPropagation();
-        const nextStatus = source.status === 'draft' ? 'published' : 'draft';
-        onStatusChange(nextStatus);
-    };
+const SourceRow: React.FC<{
+    source: RecruitmentSource;
+    onToggleSelect: () => void;
+}> = ({ source, onToggleSelect }) => {
+    const { isOpen, popoverRef, toggle } = useSourceHistoryPopover();
+    const selectionHistory = normalizeRecruitmentSourceSelectionHistory(source.selectionHistory);
 
     return (
         <div className="flex items-center justify-between p-3 border-b border-border-subtle last:border-0 hover:bg-bg-hover transition-colors rounded-lg">
-            <label className="flex items-center gap-3 cursor-pointer flex-grow">
+            <label className="flex items-center gap-3 cursor-pointer flex-grow min-w-0">
                 <input 
                     type="checkbox" 
                     checked={source.selected} 
                     onChange={onToggleSelect}
-                    className="w-4 h-4 text-primary-600 rounded border-gray-300 focus:ring-primary-500 transition-all"
+                    className="w-4 h-4 text-primary-600 rounded border-gray-300 focus:ring-primary-500 transition-all shrink-0"
                 />
-                <span className={`text-sm font-medium ${source.selected ? 'text-text-default' : 'text-text-muted'}`}>{source.name}</span>
-            </label>
-            
-            <div className="flex items-center gap-3">
-                {source.selected && (
-                    <button 
-                        onClick={toggleStatus}
-                        className={`text-xs font-bold px-3 py-1 rounded-full border transition-all duration-200 ${
-                            source.status === 'published' 
-                                ? 'bg-green-100 text-green-700 border-green-200 hover:bg-green-200' 
-                                : 'bg-gray-100 text-gray-500 border-gray-200 hover:bg-gray-200'
-                        }`}
-                        title={source.status === 'published' ? 'לחץ להעברה לטיוטה' : 'לחץ לפרסום'}
+                <span className={`text-sm font-medium truncate ${source.selected ? 'text-text-default' : 'text-text-muted'}`}>{source.name}</span>
+                <div className="relative shrink-0" ref={popoverRef}>
+                    <button
+                        type="button"
+                        onClick={toggle}
+                        className="p-0.5 rounded-full text-text-subtle hover:text-primary-600 hover:bg-primary-50 transition-colors"
+                        title="היסטוריית סימון מקור"
+                        aria-label="היסטוריית סימון מקור"
                     >
-                        {source.status === 'published' ? 'פורסם' : 'טיוטה'}
+                        <InformationCircleIcon className="w-4 h-4" />
                     </button>
-                )}
-
-                {source.selected && (
-                    <div className="relative">
-                        <button 
-                            type="button"
-                            onClick={handleBellClick}
-                            className={`p-1.5 rounded-full transition-colors relative ${
-                                source.alertDays !== null 
-                                    ? 'text-primary-600 bg-primary-50 ring-1 ring-primary-200' 
-                                    : 'text-text-subtle hover:text-text-default hover:bg-bg-subtle'
-                            }`}
-                            title={source.alertDays !== null ? `התראה ${source.alertDays} ימים לפני סיום` : 'הגדר התראת סיום'}
-                        >
-                            <BellIcon className="w-4 h-4" />
-                            {source.alertDays !== null && (
-                                <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
-                                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary-400 opacity-75"></span>
-                                  <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-primary-500"></span>
-                                </span>
-                            )}
-                        </button>
-
-                        {isAlertPopoverOpen && (
-                            <div 
-                                ref={popoverRef}
-                                className="absolute top-full left-0 mt-2 w-64 bg-bg-card border border-border-default rounded-lg shadow-xl z-50 p-4 animate-fade-in"
-                                onClick={(e) => e.stopPropagation()}
-                            >
-                                <div className="absolute -top-2 left-3 w-4 h-4 bg-bg-card border-t border-l border-border-default transform rotate-45"></div>
-                                <h4 className="text-sm font-bold text-text-default mb-3">התראת סיום פרסום</h4>
-                                
-                                <div className="space-y-3">
-                                    <div>
-                                        <label className="block text-xs text-text-muted mb-1">התראה לפני (ימים):</label>
-                                        <input 
-                                            type="number" 
-                                            min="1" 
-                                            max="30" 
-                                            value={daysInput} 
-                                            onChange={(e) => setDaysInput(Number(e.target.value))}
-                                            className="w-full bg-bg-input border border-border-default rounded px-2 py-1 text-sm focus:ring-primary-500 focus:border-primary-500"
-                                        />
-                                    </div>
-                                    
-                                    <div className="flex gap-2 pt-1">
-                                        <button 
-                                            onClick={handleEnableAlert}
-                                            className="flex-1 bg-primary-600 text-white text-xs font-bold py-1.5 rounded hover:bg-primary-700 transition"
-                                        >
-                                            עדכן
-                                        </button>
-                                        {source.alertDays !== null && (
-                                            <button 
-                                                onClick={handleDisableAlert}
-                                                className="flex-1 bg-bg-subtle text-text-muted text-xs font-bold py-1.5 rounded hover:text-red-500 transition border border-transparent hover:border-border-default"
-                                            >
-                                                בטל
-                                            </button>
-                                        )}
-                                    </div>
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
+                    {isOpen && <SourceSelectionHistoryPopup selectionHistory={selectionHistory} />}
+                </div>
+            </label>
         </div>
     );
 };
+
+const PublishingSourceTitleChip: React.FC<{
+    source: RecruitmentSource;
+}> = ({ source }) => {
+    const { isOpen, popoverRef, toggle } = useSourceHistoryPopover();
+    const selectionHistory = normalizeRecruitmentSourceSelectionHistory(source.selectionHistory);
+
+    return (
+        <div className="relative" ref={popoverRef}>
+            <button
+                type="button"
+                onClick={toggle}
+                title="היסטוריית סימון מקור"
+                className={`max-w-[10rem] truncate text-xs font-semibold px-2 py-0.5 rounded-md border transition-colors ${
+                    source.selected
+                        ? 'bg-primary-50 text-primary-700 border-primary-100 hover:bg-primary-100'
+                        : 'bg-bg-subtle text-text-muted border-border-default hover:bg-bg-hover'
+                }`}
+            >
+                {source.name}
+            </button>
+            {isOpen && <SourceSelectionHistoryPopup selectionHistory={selectionHistory} />}
+        </div>
+    );
+};
+
+const wasRecruitmentSourceEverSelected = (source: RecruitmentSource): boolean =>
+    Boolean(source.selected) ||
+    normalizeRecruitmentSourceSelectionHistory(source.selectionHistory).some((row) => row.selected);
 
 const MultiSelect: React.FC<{
     label: string;
@@ -1914,10 +2005,6 @@ interface NewJobViewProps {
   onDirtyChange?: (dirty: boolean) => void;
 }
 
-const defaultPostingCode = String(Math.floor(100000 + Math.random() * 900000));
-const defaultJobId = defaultPostingCode;
-const defaultUniqueEmail = `humand+${defaultPostingCode}@app.hiro.co.il`;
-
 const initialJobState = {
     clientName: '',
     /** AI / free-text תחום (when job field selector empty) */
@@ -1930,15 +2017,17 @@ const initialJobState = {
     clientTypeLabel: 'כללי',
     openPositions: 1,
     rating: 0,
-    jobId: defaultJobId, 
-    postingCode: defaultPostingCode, 
-    uniqueEmail: defaultUniqueEmail,
+    jobId: '',
+    postingCode: '',
+    uniqueEmail: '',
     creationDate: new Date().toLocaleDateString('he-IL'),
     /** ISO string for PUT payload; null = use "now" on create */
     openDateIso: null as string | null,
     status: 'טיוטה', 
     priority: 'רגילה' as Priority, 
     healthProfile: 'standard',
+    /** null = client default (Company Settings matching_engine_preset_id) */
+    matchingEnginePresetId: null as number | null,
     availabilityOptions: [] as string[],
     jobType: ['מלאה'], 
     jobField: null as SelectedJobField | null,
@@ -2032,9 +2121,33 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     const [isClientConfirmed, setIsClientConfirmed] = useState(false);
     const [activeClients, setActiveClients] = useState<Array<{ id: string; label: string }>>([]);
     const [activeClientsLoading, setActiveClientsLoading] = useState(false);
-    const [orgOptions, setOrgOptions] = useState<Array<{ id: string; label: string; clientId: string | null }>>([]);
+    const [orgOptions, setOrgOptions] = useState<
+        Array<{ id: string; label: string; clientId: string | null; isPrimary?: boolean }>
+    >([]);
     const [orgOptionsLoading, setOrgOptionsLoading] = useState(false);
     const [selectedOrg, setSelectedOrg] = useState<{ orgId: string | null; clientId: string | null }>({ orgId: null, clientId: null });
+    const selectedOrgRef = useRef(selectedOrg);
+    selectedOrgRef.current = selectedOrg;
+    const cityGroupsRef = useRef<LocationGroup[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        void fetchAllCityGroups().then((groups) => {
+            if (!cancelled) cityGroupsRef.current = groups;
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+    const ensureCityGroupsLoaded = useCallback(async () => {
+        if (cityGroupsRef.current.length) return;
+        cityGroupsRef.current = await fetchAllCityGroups();
+    }, []);
+    const pendingAiClientRef = useRef<{ label: string; orgId: string | null } | null>(null);
+    const [orgFieldError, setOrgFieldError] = useState(false);
+    const commitSelectedOrg = useCallback((next: { orgId: string | null; clientId: string | null }) => {
+        selectedOrgRef.current = next;
+        setSelectedOrg(next);
+    }, []);
 
     // filteredOrgOptions: self-name is already excluded at fetch time; alias for clarity.
     const filteredOrgOptions = orgOptions;
@@ -2084,12 +2197,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     const [saveMessage, setSaveMessage] = useState<string | null>(null);
     const [jobFieldError, setJobFieldError] = useState(false);
     const [publishingSourcesLoading, setPublishingSourcesLoading] = useState(false);
+    const [matchingEnginePresets, setMatchingEnginePresets] = useState<ClientMatchingEnginePresetDto[]>([]);
+    const [matchingEnginePresetsLoading, setMatchingEnginePresetsLoading] = useState(false);
+    const [matchingEnginePresetsError, setMatchingEnginePresetsError] = useState<string | null>(null);
+    const [clientDefaultMatchingPresetId, setClientDefaultMatchingPresetId] = useState<number | null>(null);
 
     const navRef = useRef<HTMLDivElement>(null);
     const formDataRef = useRef(formData);
     formDataRef.current = formData;
     const loadedJobKeyRef = useRef<string>('');
     const formSnapshotRef = useRef<string>('');
+    const editHydratedRef = useRef(false);
+    /** Until the user edits, keep syncing baseline (async hydrate/normalizers must not mark dirty). */
+    const userTouchedFormRef = useRef(false);
     const drivingLicensePicklistRef = useRef<PicklistValueRow[]>(
         sortDrivingLicensePicklistRows(DRIVING_LICENSE_FALLBACK),
     );
@@ -2110,6 +2230,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     /** Job stores recruiter as display name — resolve to staff user ids once client staff loads. */
     const pendingRecruiterNamesRef = useRef<string[]>([]);
     const pendingAccountManagerNamesRef = useRef<string[]>([]);
+    /** When client/org scope changes, distribution checkboxes reset (no carry-over from prior job or client). */
+    const distributionScopeRef = useRef<{ clientId: string; orgId: string }>({ clientId: '', orgId: '' });
 
     const clientStaffUserOptions = useMemo(
         () =>
@@ -2130,22 +2252,30 @@ const NewJobView: React.FC<NewJobViewProps> = ({
         if (!isEditing && duplicateBootstrapRef.current) {
             duplicateBootstrapRef.current.consumed = true;
         }
-             const candidateLocations = deriveLocationsFromJob(sourceJob);
-             const contactsFromJob = jobContactsToKeys(sourceJob.contacts);
-            const hydratedSkills: JobSkill[] = Array.isArray(sourceJob.skills)
-                ? sourceJob.skills.map((s: any, i: number) => mapApiSkillRowToJobSkill(s, i))
-                : [];
-            const jobKey = sourceJob.id != null ? String(sourceJob.id) : '';
-            const sameJobReload = Boolean(jobKey && loadedJobKeyRef.current === jobKey);
+        const candidateLocations = deriveLocationsFromJob(sourceJob);
+        const hydratedSkills: JobSkill[] = Array.isArray(sourceJob.skills)
+            ? sourceJob.skills.map((s: any, i: number) => mapApiSkillRowToJobSkill(s, i))
+            : [];
+        const jobKey = sourceJob.id != null ? String(sourceJob.id) : '';
+        const sameJobReload = Boolean(jobKey && loadedJobKeyRef.current === jobKey);
 
-            if (sameJobReload && hydratedSkills.length) {
-                setFormData((prev) => ({
-                    ...prev,
-                    skills: mergeJobSkillsWithLocalModes(hydratedSkills, prev.skills || []),
-                }));
-                return;
+        if (isEditing && !sameJobReload) {
+            editHydratedRef.current = false;
+            userTouchedFormRef.current = false;
+            formSnapshotRef.current = '';
+        }
+
+        if (sameJobReload && hydratedSkills.length) {
+            setFormData((prev) => ({
+                ...prev,
+                skills: mergeJobSkillsWithLocalModes(hydratedSkills, prev.skills || []),
+            }));
+            if (isEditing) {
+                editHydratedRef.current = true;
             }
-            if (jobKey) loadedJobKeyRef.current = jobKey;
+            return;
+        }
+        if (jobKey) loadedJobKeyRef.current = jobKey;
 
             const loadedField = sourceJob.field != null ? String(sourceJob.field).trim() : '';
             const loadedRole = sourceJob.role != null ? String(sourceJob.role).trim() : '';
@@ -2154,7 +2284,6 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 (sourceJob as { jobFields?: unknown }).jobFields,
                 loadedJobField,
             );
-            const freshPostingCode = String(Math.floor(100000 + Math.random() * 900000));
 
             setFormData(prev => ({
                 ...prev,
@@ -2169,7 +2298,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                     : sourceJob.publicDescription
                       ? normalizeValueForEditor(String(sourceJob.publicDescription))
                       : prev.publicDescription,
-                regionLabel: sourceJob.region || prev.regionLabel,
+                regionLabel: sourceJob.region != null ? String(sourceJob.region).trim() : '',
                 clientTypeLabel: sourceJob.clientType || prev.clientTypeLabel,
                 openPositions: typeof sourceJob.openPositions === 'number' ? sourceJob.openPositions : prev.openPositions,
                 rating: typeof sourceJob.rating === 'number' ? sourceJob.rating : prev.rating,
@@ -2204,6 +2333,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                       : prev.openDateIso,
                 priority: sourceJob.priority || prev.priority,
                 healthProfile: sourceJob.healthProfile || 'standard',
+                matchingEnginePresetId: (() => {
+                    const raw = (sourceJob as { matchingEnginePresetId?: unknown }).matchingEnginePresetId;
+                    if (raw == null || raw === '') return null;
+                    const n = Number(raw);
+                    return Number.isFinite(n) ? n : null;
+                })(),
                 availabilityOptions: availabilityOptionsFromJob(sourceJob),
                 jobType: Array.isArray(sourceJob.jobType)
                     ? sourceJob.jobType
@@ -2226,19 +2361,17 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 
                 languages: sourceJob.languages || [],
                 skills: hydratedSkills.length ? hydratedSkills : prev.skills,
-                locations: candidateLocations.length ? candidateLocations : prev.locations,
+                locations: candidateLocations,
                 gender: mapJobGenderSelection(sourceJob.gender),
                 mobility: jobMobilityBooleanToFormValue(sourceJob.mobility, mobilityPicklistRef.current),
                 drivingLicenses: licenseTypesFromJob(sourceJob, drivingLicensePicklistRef.current),
-                jobId: isDuplicating ? freshPostingCode : (sourceJob.id || prev.jobId),
-                postingCode: isDuplicating
-                    ? freshPostingCode
-                    : sourceJob.postingCode || prev.postingCode,
+                jobId: isEditing ? (sourceJob.id || prev.jobId) : '',
+                postingCode: isDuplicating ? '' : (isEditing ? (sourceJob.postingCode || prev.postingCode) : ''),
                 uniqueEmail: isDuplicating
-                    ? `humand+${freshPostingCode}@app.hiro.co.il`
-                    : sourceJob.postingCode
-                      ? `humand+${sourceJob.postingCode}@app.hiro.co.il`
-                      : (sourceJob.uniqueEmail || prev.uniqueEmail),
+                    ? ''
+                    : isEditing
+                      ? (sourceJob.uniqueEmail || prev.uniqueEmail || '')
+                      : '',
                 creationDate: isDuplicating
                     ? new Date().toLocaleDateString('he-IL')
                     : sourceJob.openDate
@@ -2256,9 +2389,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                     typeof sourceJob.requireOriginalCv === 'boolean' ? sourceJob.requireOriginalCv : prev.requireOriginalCv,
                 cvForwardSettings: cvForwardSettingsFromJob(sourceJob.cvForwardSettings),
                 recruitmentSources: Array.isArray(sourceJob.recruitmentSources)
-                    ? sourceJob.recruitmentSources
+                    ? sourceJob.recruitmentSources.map((src: RecruitmentSource) => ({
+                          ...src,
+                          selectionHistory: normalizeRecruitmentSourceSelectionHistory(src.selectionHistory),
+                      }))
                     : prev.recruitmentSources,
-                ...(contactsFromJob !== null ? { contacts: contactsFromJob } : {}),
              }));
              if (sourceJob.aiRawDescription) {
                  setPastedJobText(String(sourceJob.aiRawDescription));
@@ -2280,30 +2415,51 @@ const NewJobView: React.FC<NewJobViewProps> = ({
              }
              // Restore organizationId link when editing an existing job
              if (sourceJob.organizationId) {
-                 setSelectedOrg({
+                 commitSelectedOrg({
                      orgId: String(sourceJob.organizationId),
                      clientId: sourceJob.clientId ? String(sourceJob.clientId) : null,
                  });
+                 setIsClientConfirmed(true);
              }
              if (isDuplicating && location.state) {
                  navigate(location.pathname, { replace: true, state: {} });
              }
-             if (isEditing && !sameJobReload) {
-                 queueMicrotask(() => {
-                     formSnapshotRef.current = JSON.stringify(formDataRef.current);
-                     onDirtyChange?.(false);
-                 });
+             if (isEditing) {
+                 editHydratedRef.current = true;
              }
     }, [isEditing, jobData, duplicateJobSeed, isDuplicating, location.pathname, location.state, navigate, onDirtyChange]);
 
     useEffect(() => {
-        if (!isEditing || !formSnapshotRef.current) {
+        if (!isEditing) {
+            editHydratedRef.current = false;
+            userTouchedFormRef.current = false;
             onDirtyChange?.(false);
             return;
         }
-        const dirty = JSON.stringify(formData) !== formSnapshotRef.current;
-        onDirtyChange?.(dirty);
+        if (!editHydratedRef.current) {
+            onDirtyChange?.(false);
+            return;
+        }
+        const serialized = JSON.stringify(formData);
+        if (!userTouchedFormRef.current) {
+            formSnapshotRef.current = serialized;
+            onDirtyChange?.(false);
+            return;
+        }
+        onDirtyChange?.(serialized !== formSnapshotRef.current);
     }, [formData, isEditing, onDirtyChange]);
+
+    const markJobFormEditedByUser = (event?: React.SyntheticEvent) => {
+        if (!isEditing || !editHydratedRef.current) return;
+        if (event?.type === 'click') {
+            const el = event.target as HTMLElement | null;
+            const interactive = el?.closest(
+                'button, [role="button"], [role="option"], [role="radio"], [role="checkbox"], label, select, input, textarea, [contenteditable="true"]',
+            );
+            if (!interactive) return;
+        }
+        userTouchedFormRef.current = true;
+    };
 
     useEffect(() => {
         let cancelled = false;
@@ -2435,14 +2591,6 @@ const NewJobView: React.FC<NewJobViewProps> = ({
         };
     }, [apiBase]);
 
-    useEffect(() => {
-        if (!isTenantUser || !user?.clientId || isEditing) return;
-        const match = activeClients.find((c) => c.id === user.clientId);
-        if (!match) return;
-        setFormData((prev) => (prev.clientName.trim() ? prev : { ...prev, clientName: match.label }));
-        setIsClientConfirmed(true);
-    }, [isTenantUser, user?.clientId, activeClients, isEditing]);
-
     // Load organization options:
     //   - Admins: all organizations from /api/organizations
     //   - Tenant users: only orgs linked to their client via ClientOrganizationLink
@@ -2456,7 +2604,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             ...(token ? { Authorization: `Bearer ${token}` } : {}),
         };
 
-        const fetchPromise: Promise<Array<{ id: string; label: string; clientId: string | null }>> =
+        const fetchPromise: Promise<
+            Array<{ id: string; label: string; clientId: string | null; isPrimary?: boolean }>
+        > =
             isTenantUser && user?.clientId
                 // Tenant users: orgs linked to their client via ClientOrganizationLink
                 ? fetch(`${apiBase}/api/clients/${encodeURIComponent(user.clientId)}/linked-organizations`, { credentials: 'include', headers })
@@ -2465,14 +2615,30 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                         const list = Array.isArray(rows) ? rows : [];
                         return (list as Record<string, unknown>[])
                             .map((row) => {
-                                const org = (row.organization ?? row.organizationTmp) as Record<string, unknown> | undefined;
-                                if (!org) return null;
-                                const label = String(org.name || '').trim();
-                                const id = String(org.id ?? '');
-                                return { id, label, clientId: String(user.clientId || '') };
+                                const nested = row.organization;
+                                const org = nested && typeof nested === 'object'
+                                    ? nested as Record<string, unknown>
+                                    : null;
+                                const id = String(row.organizationId || org?.id || '').trim();
+                                if (!id || (row.organizationTmpId && !row.organizationId)) return null;
+                                const label = String(org?.name || org?.legalName || org?.nameEn || '').trim();
+                                if (!label) return null;
+                                return {
+                                    id,
+                                    label,
+                                    clientId: String(user.clientId || ''),
+                                    isPrimary: row.isPrimary === true,
+                                };
                             })
-                            .filter((o): o is { id: string; label: string; clientId: string } => !!o && !!o.label)
-                            .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                            .filter(
+                                (o): o is { id: string; label: string; clientId: string; isPrimary?: boolean } =>
+                                    !!o && !!o.id && !!o.label,
+                            )
+                            .sort((a, b) => {
+                                if (a.isPrimary && !b.isPrimary) return -1;
+                                if (!a.isPrimary && b.isPrimary) return 1;
+                                return a.label.localeCompare(b.label, 'he');
+                            });
                     })
                 : fetch(`${apiBase}/api/organizations?limit=500`, { credentials: 'include', headers })
                     .then((r) => r.ok ? r.json() : Promise.reject(new Error('load orgs')))
@@ -2483,8 +2649,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                                 ? (data as Record<string, unknown[]>).data
                                 : [];
                         return (list as Record<string, unknown>[])
-                            .map((o) => ({ id: String(o.id ?? ''), label: String(o.name || '').trim(), clientId: null as string | null }))
-                            .filter((o) => o.label)
+                            .map((o) => ({ id: String(o.id ?? '').trim(), label: String(o.name || '').trim(), clientId: null as string | null }))
+                            .filter((o) => o.id && o.label)
                             .sort((a, b) => a.label.localeCompare(b.label, 'he'));
                     });
 
@@ -2536,22 +2702,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     const applyOrgSelectionById = useCallback(
         (orgId: string | null) => {
             if (!orgId) {
-                setSelectedOrg({ orgId: null, clientId: null });
+                commitSelectedOrg({ orgId: null, clientId: null });
                 return;
             }
 
             const match = orgOptions.find((o) => String(o.id) === String(orgId));
-            if (!match) {
-                setSelectedOrg({ orgId: null, clientId: null });
-                return;
-            }
+            if (!match) return;
 
             if (isTenantUser && user?.clientId) {
-                setSelectedOrg({ orgId: match.id, clientId: user.clientId });
+                commitSelectedOrg({ orgId: match.id, clientId: user.clientId });
                 return;
             }
 
-            setSelectedOrg({ orgId: match.id, clientId: match.clientId ?? null });
+            commitSelectedOrg({ orgId: match.id, clientId: match.clientId ?? null });
 
             if (apiBase && !match.clientId) {
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -2565,13 +2728,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                     .then((r) => (r.ok ? r.json() : null))
                     .then((data: { clientId: string | null; clientName: string | null } | null) => {
                         if (data?.clientId) {
-                            setSelectedOrg({ orgId: match.id, clientId: data.clientId });
+                            commitSelectedOrg({ orgId: match.id, clientId: data.clientId });
                         }
                     })
                     .catch(() => { /* silent */ });
             }
         },
-        [orgOptions, isTenantUser, user?.clientId, apiBase],
+        [orgOptions, isTenantUser, user?.clientId, apiBase, commitSelectedOrg],
     );
 
     const applyOrgSelectionFromLabel = useCallback(
@@ -2582,44 +2745,105 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 return;
             }
 
-            const match = matchOrgOption(trimmed, orgOptions);
-            if (!match) {
-                setSelectedOrg({ orgId: null, clientId: null });
-                return;
-            }
+            const match = isTenantUser
+                ? matchOrgOptionExact(trimmed, orgOptions)
+                : matchOrgOption(trimmed, orgOptions);
+            if (!match) return;
 
             applyOrgSelectionById(match.id);
         },
-        [orgOptions, applyOrgSelectionById],
+        [orgOptions, applyOrgSelectionById, isTenantUser],
     );
+
+    const applyDetectedHiringCompany = useCallback(
+        (label: string, suggestedOrgId?: string | null) => {
+            const trimmed = String(label || '').trim();
+            const suggested = suggestedOrgId != null ? String(suggestedOrgId).trim() : '';
+            let match = suggested
+                ? orgOptions.find((o) => String(o.id) === suggested) ?? null
+                : null;
+            if (!match && trimmed) match = matchOrgOption(trimmed, orgOptions);
+            if (!match && suggested && trimmed && !isTenantUser) {
+                const injected = { id: suggested, label: trimmed, clientId: null as string | null };
+                setOrgOptions((prev) =>
+                    prev.some((o) => String(o.id) === suggested) ? prev : [...prev, injected],
+                );
+                match = injected;
+            }
+            if (!match) return false;
+            setOrgFieldError(false);
+            setFormData((prev) => ({ ...prev, clientName: match.label }));
+            if (orgOptions.some((o) => String(o.id) === String(match.id))) {
+                applyOrgSelectionById(match.id);
+            } else {
+                commitSelectedOrg({
+                    orgId: match.id,
+                    clientId:
+                        (isTenantUser && user?.clientId ? user.clientId : match.clientId) || null,
+                });
+            }
+            setIsClientConfirmed(true);
+            pendingAiClientRef.current = null;
+            return true;
+        },
+        [orgOptions, isTenantUser, user?.clientId, applyOrgSelectionById, commitSelectedOrg],
+    );
+
+    useEffect(() => {
+        const pending = pendingAiClientRef.current;
+        if (!pending || orgOptionsLoading) return;
+        if (selectedOrgRef.current.orgId) {
+            pendingAiClientRef.current = null;
+            return;
+        }
+        applyDetectedHiringCompany(pending.label, pending.orgId);
+    }, [orgOptions, orgOptionsLoading, applyDetectedHiringCompany]);
 
     const handleOrgSelect = useCallback(
         (orgId: string | number | null) => {
             if (orgId == null) {
                 setFormData((prev) => ({ ...prev, clientName: '' }));
+                setIsClientConfirmed(false);
                 applyOrgSelectionById(null);
                 return;
             }
             const match = orgOptions.find((o) => String(o.id) === String(orgId));
             if (!match) return;
+            setOrgFieldError(false);
             setFormData((prev) => ({ ...prev, clientName: match.label }));
             applyOrgSelectionById(match.id);
+            setIsClientConfirmed(true);
         },
         [orgOptions, applyOrgSelectionById],
     );
 
     useEffect(() => {
+        if (isTenantUser) return;
         if (!resolvedOrganizationId || selectedOrg.orgId === resolvedOrganizationId) return;
         const match = orgOptions.find((o) => String(o.id) === String(resolvedOrganizationId));
         if (!match) return;
-        setSelectedOrg((prev) => ({
-            orgId: resolvedOrganizationId,
-            clientId:
-                prev.clientId ||
-                (isTenantUser && user?.clientId ? user.clientId : match.clientId) ||
-                null,
-        }));
+        setSelectedOrg((prev) => {
+            const next = {
+                orgId: resolvedOrganizationId,
+                clientId:
+                    prev.clientId ||
+                    (isTenantUser && user?.clientId ? user.clientId : match.clientId) ||
+                    null,
+            };
+            selectedOrgRef.current = next;
+            return next;
+        });
     }, [resolvedOrganizationId, selectedOrg.orgId, orgOptions, isTenantUser, user?.clientId]);
+
+    useEffect(() => {
+        if (isEditing || isDuplicating || orgOptionsLoading) return;
+        if (selectedOrg.orgId || orgOptions.length !== 1) return;
+        const only = orgOptions[0];
+        setOrgFieldError(false);
+        setFormData((prev) => (prev.clientName === only.label ? prev : { ...prev, clientName: only.label }));
+        applyOrgSelectionById(only.id);
+        setIsClientConfirmed(true);
+    }, [isEditing, isDuplicating, orgOptionsLoading, orgOptions, selectedOrg.orgId, applyOrgSelectionById]);
 
     useEffect(() => {
         if (!resolvedClientId) {
@@ -2643,6 +2867,73 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             cancelled = true;
         };
     }, [resolvedClientId]);
+
+    useEffect(() => {
+        if (!resolvedClientId) {
+            setMatchingEnginePresets([]);
+            setMatchingEnginePresetsError(null);
+            setMatchingEnginePresetsLoading(false);
+            setClientDefaultMatchingPresetId(null);
+            return;
+        }
+        let cancelled = false;
+        setMatchingEnginePresetsLoading(true);
+        setMatchingEnginePresetsError(null);
+        void Promise.all([
+            fetchClientMatchingEngineConfigs(resolvedClientId),
+            fetchClientUsageSettings(resolvedClientId),
+        ])
+            .then(([presets, usage]) => {
+                if (cancelled) return;
+                setMatchingEnginePresets(Array.isArray(presets) ? presets : []);
+                const pid = usage?.matchingEnginePresetId;
+                setClientDefaultMatchingPresetId(
+                    typeof pid === 'number' && Number.isFinite(pid) ? pid : null,
+                );
+            })
+            .catch((e: Error) => {
+                if (!cancelled) {
+                    setMatchingEnginePresets([]);
+                    setMatchingEnginePresetsError(e.message || 'טעינת תבניות שקלול נכשלה');
+                }
+            })
+            .finally(() => {
+                if (!cancelled) setMatchingEnginePresetsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [resolvedClientId]);
+
+    const matchingPresetLabel = useCallback((preset: ClientMatchingEnginePresetDto) => {
+        return preset.label?.trim() || preset.configKey?.trim() || `תבנית #${preset.id}`;
+    }, []);
+
+    const clientDefaultMatchingPresetLabel = useMemo(() => {
+        if (clientDefaultMatchingPresetId == null) {
+            return 'ברירת מחדל לפי הגדרות החברה';
+        }
+        const preset = matchingEnginePresets.find((p) => p.id === clientDefaultMatchingPresetId);
+        return preset
+            ? `ברירת מחדל: ${matchingPresetLabel(preset)}`
+            : 'ברירת מחדל לפי הגדרות החברה';
+    }, [clientDefaultMatchingPresetId, matchingEnginePresets, matchingPresetLabel]);
+
+    const selectedJobMatchingPreset = useMemo(
+        () =>
+            formData.matchingEnginePresetId != null
+                ? matchingEnginePresets.find((p) => p.id === formData.matchingEnginePresetId)
+                : null,
+        [formData.matchingEnginePresetId, matchingEnginePresets],
+    );
+
+    useEffect(() => {
+        if (!resolvedClientId) return;
+        if (formData.matchingEnginePresetId == null) return;
+        if (matchingEnginePresetsLoading) return;
+        if (matchingEnginePresets.some((p) => p.id === formData.matchingEnginePresetId)) return;
+        setFormData((prev) => ({ ...prev, matchingEnginePresetId: null }));
+    }, [resolvedClientId, matchingEnginePresets, matchingEnginePresetsLoading, formData.matchingEnginePresetId]);
 
     useEffect(() => {
         if (!resolvedClientId || !apiBase) {
@@ -2730,6 +3021,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                             selected: savedSelected,
                             status: savedStatus,
                             alertDays: saved?.alertDays ?? null,
+                            selectionHistory: normalizeRecruitmentSourceSelectionHistory(saved?.selectionHistory),
                         };
                     });
                     return { ...prev, recruitmentSources: merged };
@@ -2763,8 +3055,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             setDistributionFetchError(null);
             pendingRecruiterNamesRef.current = [];
             pendingAccountManagerNamesRef.current = [];
-            setFormData((prev) => ({ ...prev, assignedRecruiters: [], assignedAccountManagers: [] }));
+            distributionScopeRef.current = { clientId: '', orgId: '' };
+            setFormData((prev) => ({ ...prev, contacts: [], assignedRecruiters: [], assignedAccountManagers: [] }));
             return;
+        }
+        const scopeKey = {
+            clientId: resolvedClientId,
+            orgId: resolvedOrganizationId || '',
+        };
+        const scopeChanged =
+            distributionScopeRef.current.clientId !== scopeKey.clientId
+            || distributionScopeRef.current.orgId !== scopeKey.orgId;
+        if (scopeChanged) {
+            setFormData((prev) => ({ ...prev, contacts: [] }));
         }
         setDistributionLoading(true);
         setDistributionFetchError(null);
@@ -2856,10 +3159,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                     : [];
                 if (matchedAccountManagerIds.length) pendingAccountManagerNamesRef.current = [];
                 const allKeys = people.map((p) => p.key);
-                const defaultContactKeys = people.filter((p) => p.kind === 'contact').map((p) => p.key);
+                if (scopeChanged) {
+                    distributionScopeRef.current = scopeKey;
+                }
                 setFormData((prev) => {
                     const valid = (prev.contacts || []).filter((k) => allKeys.includes(k));
-                    const nextContacts = valid.length > 0 ? valid : defaultContactKeys;
+                    const nextContacts = scopeChanged ? [] : valid;
                     const validRecruiters = (prev.assignedRecruiters || []).filter((id) => staffIds.includes(id));
                     const validAccountManagers = (prev.assignedAccountManagers || []).filter((id) => staffIds.includes(id));
                     const nextRecruiters =
@@ -2956,8 +3261,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({
         try {
             const res = await fetch(`${apiBase}/api/jobs/ai/analyze`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: textToSend }),
+                headers: authHeaders(true),
+                body: JSON.stringify({
+                    text: textToSend,
+                    ...(resolvedClientId ? { clientId: resolvedClientId } : {}),
+                }),
             });
 
             if (!res.ok) {
@@ -2967,8 +3275,20 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             const json = await res.json();
             const raw = json?.data || {};
             // Normalize API field names to form shape (API may return title/description/licenseType; form uses jobTitle/jobDescription/drivingLicense)
+            const aiClientLabel = String(
+                raw.clientResolvedName
+                || raw.client
+                || raw.clientName
+                || raw.company
+                || raw.companyName
+                || raw.employer
+                || raw.organizationName
+                || '',
+            ).trim();
+
             const extractedData = {
                 ...raw,
+                client: aiClientLabel || raw.client,
                 jobTitle: raw.title ?? raw.jobTitle,
                 jobDescription: raw.description ?? raw.jobDescription,
                 drivingLicenses: licenseTypesFromJob(raw, drivingLicensePicklistRef.current),
@@ -2985,6 +3305,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             const filledList: string[] = [];
             const missingList: string[] = [];
 
+            if (aiClientLabel) { filledList.push('שם החברה'); }
             if (extractedData.jobTitle) { filled.add('jobTitle'); filledList.push('כותרת המשרה'); } else missingList.push('כותרת המשרה');
             if (extractedData.jobDescription) { filled.add('jobDescription'); filledList.push('תיאור המשרה'); } else missingList.push('תיאור המשרה');
             if (extractedData.requirements) { filled.add('requirements'); filledList.push('דרישות המשרה'); } else missingList.push('דרישות המשרה');
@@ -3165,7 +3486,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
 
                 return {
                 ...prev,
-                clientName: (extractedData.client || prev.clientName || '').trim() || prev.clientName,
+                clientName: aiClientLabel || prev.clientName,
                 aiField: nextAiField,
                 aiRole: nextAiRole,
                 jobFields: fromAiJobField ? [fromAiJobField] : prev.jobFields,
@@ -3245,19 +3566,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             setAiFilledFields(filled);
             setParseSummaryData({ filled: filledList, missing: missingList });
 
-            const aiClientLabel = String(
-                raw.clientResolvedName || extractedData.client || '',
-            ).trim();
-            const orgFromApiId = raw.suggestedOrganizationId
-                ? orgOptions.find((o) => String(o.id) === String(raw.suggestedOrganizationId))
-                : null;
-            const orgMatch = orgFromApiId || matchOrgOption(aiClientLabel, orgOptions);
-            if (orgMatch) {
-                setFormData((prev) => ({ ...prev, clientName: orgMatch.label }));
-                applyOrgSelectionFromLabel(orgMatch.label);
-                setIsClientConfirmed(true);
-            } else if (aiClientLabel) {
-                applyOrgSelectionFromLabel(aiClientLabel);
+            if (!selectedOrgRef.current.orgId && (aiClientLabel || raw.suggestedOrganizationId)) {
+                pendingAiClientRef.current = {
+                    label: aiClientLabel,
+                    orgId: raw.suggestedOrganizationId ? String(raw.suggestedOrganizationId) : null,
+                };
+                applyDetectedHiringCompany(aiClientLabel, raw.suggestedOrganizationId);
             }
 
             aiPasteAnalyzeUsedRef.current = true;
@@ -3556,47 +3870,82 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     };
 
     // Persist board sources to the backend immediately (only when editing an existing job)
+    const mergeRecruitmentSourcesFromServer = (
+        current: RecruitmentSource[],
+        saved: RecruitmentSource[],
+    ): RecruitmentSource[] => {
+        const byId = new Map(saved.map((s) => [s.id, s]));
+        return current.map((row) => {
+            const server = byId.get(row.id);
+            if (!server) return row;
+            return {
+                ...row,
+                ...server,
+                selectionHistory: normalizeRecruitmentSourceSelectionHistory(
+                    server.selectionHistory ?? row.selectionHistory,
+                ),
+            };
+        });
+    };
+
+    const appendOptimisticSelectionHistory = (
+        source: RecruitmentSource,
+        selected: boolean,
+    ): RecruitmentSourceSelectionHistoryEntry[] => {
+        const actorName =
+            (user?.name && String(user.name).trim()) ||
+            (user?.email && String(user.email).trim()) ||
+            'משתמש';
+        const entry: RecruitmentSourceSelectionHistoryEntry = {
+            at: new Date().toISOString(),
+            userId: user?.id != null ? String(user.id) : null,
+            userName: actorName,
+            selected,
+        };
+        return [entry, ...normalizeRecruitmentSourceSelectionHistory(source.selectionHistory)].slice(0, 50);
+    };
+
     const persistBoardSources = (updatedSources: RecruitmentSource[]) => {
         if (!isEditing || !formData.jobId) return;
-        void patchJobBoardSources(formData.jobId, updatedSources).catch((e) => {
-            console.warn('[board-sources] auto-save failed:', e?.message);
-        });
+        void patchJobBoardSources(formData.jobId, updatedSources)
+            .then((saved) => {
+                setFormData((prev) => ({
+                    ...prev,
+                    recruitmentSources: mergeRecruitmentSourcesFromServer(prev.recruitmentSources, saved as RecruitmentSource[]),
+                }));
+            })
+            .catch((e) => {
+                console.warn('[board-sources] auto-save failed:', e?.message);
+            });
     };
 
     const toggleSourceSelection = (sourceId: string) => {
         setFormData(prev => {
-            const next = prev.recruitmentSources.map(s =>
-                s.id === sourceId
-                    ? { ...s, selected: !s.selected, status: !s.selected ? ('published' as PublicationStatus) : ('draft' as PublicationStatus) }
-                    : s,
-            );
+            const next = prev.recruitmentSources.map(s => {
+                if (s.id !== sourceId) return s;
+                const selected = !s.selected;
+                return {
+                    ...s,
+                    selected,
+                    status: selected ? ('published' as PublicationStatus) : ('draft' as PublicationStatus),
+                    selectionHistory: appendOptimisticSelectionHistory(s, selected),
+                };
+            });
             persistBoardSources(next);
             return { ...prev, recruitmentSources: next };
         });
     };
 
-    const handleSourceStatusChange = (sourceId: string, newStatus: PublicationStatus) => {
-        setFormData(prev => {
-            const next = prev.recruitmentSources.map(s =>
-                s.id === sourceId ? { ...s, status: newStatus } : s,
-            );
-            persistBoardSources(next);
-            return { ...prev, recruitmentSources: next };
-        });
-    };
-
-    const handleSourceAlertChange = (sourceId: string, days: number | null) => {
-        setFormData(prev => {
-            const next = prev.recruitmentSources.map(s =>
-                s.id === sourceId ? { ...s, alertDays: days } : s,
-            );
-            persistBoardSources(next);
-            return { ...prev, recruitmentSources: next };
-        });
-    };
-    
     const handleLocationsChange = (newLocations: LocationItem[]) => {
-        setFormData(prev => ({ ...prev, locations: newLocations }));
+        const regions = newLocations
+            .filter((loc) => loc.type === 'region')
+            .map((loc) => loc.value.trim())
+            .filter(Boolean);
+        setFormData((prev) => ({
+            ...prev,
+            locations: newLocations,
+            regionLabel: regions.join(', '),
+        }));
     };
 
     const openJobFieldSelector = () => {
@@ -3640,14 +3989,28 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     };
 
     const savedJobFields = resolveFormJobFields(formData);
+    const publishingTitleSources = useMemo(
+        () => formData.recruitmentSources.filter(wasRecruitmentSourceEverSelected),
+        [formData.recruitmentSources],
+    );
 
     const buildJobPayload = () => {
         const data = formDataRef.current;
         const jobFields = resolveFormJobFields(data);
         const field = jobFields[0] ?? data.jobField;
-        const cityValues = (data.locations || []).filter((loc: LocationItem) => loc.type === 'city').map((loc: LocationItem) => loc.value.trim()).filter(Boolean);
-        const firstCity = cityValues[0] || '';
-        const locationString = cityValues.length ? cityValues.join(LOCATION_SEP) : '';
+        const locationItems = data.locations || [];
+        const explicitCityValues = locationItems
+            .filter((loc: LocationItem) => loc.type === 'city')
+            .map((loc: LocationItem) => loc.value.trim())
+            .filter(Boolean);
+        const expandedCityValues = expandLocationItemsToCityNames(
+            locationItems,
+            cityGroupsRef.current,
+        );
+        const primaryCity = explicitCityValues[0] || expandedCityValues[0] || '';
+        const locationString = expandedCityValues.length
+            ? expandedCityValues.join(LOCATION_SEP)
+            : '';
         const genderValue = (() => {
             const includesMale = data.gender.includes('male');
             const includesFemale = data.gender.includes('female');
@@ -3700,13 +4063,17 @@ const NewJobView: React.FC<NewJobViewProps> = ({
         return {
             title: data.jobTitle || 'משרה חדשה',
             publicJobTitle: data.publicJobTitle?.trim() || undefined,
-            client: data.clientName || 'לקוח כללי',
+            client: (() => {
+                const orgId = String(selectedOrgRef.current.orgId || '').trim();
+                const selectedLabel = orgOptions.find((o) => String(o.id) === orgId)?.label;
+                return selectedLabel || data.clientName || 'לקוח כללי';
+            })(),
             field: field?.category || data.aiField || '',
             role: field?.role || data.aiRole || '',
             jobFields,
             priority: data.priority,
             clientType: data.clientTypeLabel || 'כללי',
-            city: firstCity,
+            city: primaryCity,
             region: (data.regionLabel || '').trim(),
             gender: genderValue,
             mobility: mobilityBoolForJobPayload(data.mobility, mobilityPicklistRef.current),
@@ -3716,7 +4083,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             availabilityOptions: (data.availabilityOptions || []).map((v: string) => String(v).trim()).filter(Boolean),
             availability:
                 (data.availabilityOptions || []).map((v: string) => String(v).trim()).filter(Boolean)[0] || null,
-            postingCode: data.postingCode,
+            ...(isEditing && String(data.postingCode || '').trim()
+                ? { postingCode: String(data.postingCode).trim() }
+                : {}),
             validityDays: (() => {
                 const n = Number(data.validityDays);
                 if (!Number.isFinite(n)) return 60;
@@ -3748,25 +4117,32 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             requirements,
             rating: typeof data.rating === 'number' ? data.rating : 0,
             healthProfile: data.healthProfile,
+            matchingEnginePresetId:
+                data.matchingEnginePresetId != null && Number.isFinite(Number(data.matchingEnginePresetId))
+                    ? Number(data.matchingEnginePresetId)
+                    : null,
             internalNotes: mergeWorkingHoursIntoNotes(
                 data.internalNotes || '',
                 String(data.preferredWorkingHours || 'גמיש'),
             ),
             aiRawDescription: pastedJobText || undefined,
-            uniqueEmail: data.uniqueEmail,
+            /** Server assigns uniqueEmail + postingCode on create */
+            ...(isEditing ? { uniqueEmail: data.uniqueEmail } : {}),
             /** Server strips this; triggers audit_logs after Job.create with real job id */
             aiPasteAnalyzeUsed: aiPasteAnalyzeUsedRef.current === true,
             // Always send clientId (resolved from org selection, tenant account, or legacy match).
             clientId: resolvedClientId || undefined,
             // Resolve organizationId: explicit selection → existing job value → match by company name in options list.
             organizationId: (() => {
-                if (selectedOrg.orgId) return selectedOrg.orgId;
+                const explicit = String(selectedOrgRef.current.orgId || selectedOrg.orgId || '').trim();
+                if (explicit) return explicit;
                 if (isEditing && jobData) {
                     const existingOrgId = (jobData as Record<string, unknown>).organizationId;
                     if (existingOrgId) return String(existingOrgId);
                 }
-                // Auto-resolve: find the org in the loaded options whose label matches the current company name
-                const nameMatch = matchOrgOption(data.clientName, filteredOrgOptions);
+                const nameMatch = isTenantUser
+                    ? matchOrgOptionExact(data.clientName, filteredOrgOptions)
+                    : matchOrgOption(data.clientName, filteredOrgOptions);
                 return nameMatch?.id || undefined;
             })(),
             contacts: contactObjects,
@@ -3776,6 +4152,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 selected: source.selected,
                 status: source.status,
                 alertDays: source.alertDays,
+                selectionHistory: normalizeRecruitmentSourceSelectionHistory(source.selectionHistory),
             })),
             telephoneQuestions: data.telephoneQuestions,
             digitalQuestions: data.digitalQuestions,
@@ -3795,9 +4172,16 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             alert(t('new_job.job_field_required'));
             return null;
         }
+        if (!String(selectedOrgRef.current.orgId || '').trim()) {
+            setOrgFieldError(true);
+            document.getElementById('general-info')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            alert('יש לבחור חברה');
+            return null;
+        }
         setSaveMessage(null);
         setIsSaving(true);
         try {
+            await ensureCityGroupsLoaded();
             const res = await fetch(`${apiBase}/api/jobs`, {
                 method: 'POST',
                 headers: authHeaders(true),
@@ -3808,6 +4192,18 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 throw new Error(errorBody?.message || 'Failed to create job');
             }
             const createdJob = await res.json();
+            if (createdJob?.id) {
+                const allocatedCode = String(createdJob.postingCode || '').trim();
+                const codeNum = /^\d+$/.test(allocatedCode) ? Number(allocatedCode) : NaN;
+                const postingFromServer =
+                    Number.isFinite(codeNum) && codeNum >= 1_000_000 ? allocatedCode : '';
+                setFormData((prev) => ({
+                    ...prev,
+                    jobId: String(createdJob.id),
+                    postingCode: postingFromServer,
+                    uniqueEmail: String(createdJob.uniqueEmail || '').trim(),
+                }));
+            }
             const pubSeed = duplicatePublicationRef.current;
             if (pubSeed && createdJob?.id) {
                 try {
@@ -3853,6 +4249,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             return;
         }
         if (isEditing) {
+            await ensureCityGroupsLoaded();
             onSave(buildJobPayload());
             navigate(`/jobs/${formData.jobId}/publish`);
             return;
@@ -3871,8 +4268,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             return;
         }
         if (isEditing) {
+            await ensureCityGroupsLoaded();
             onSave(buildJobPayload());
             formSnapshotRef.current = JSON.stringify(formDataRef.current);
+            userTouchedFormRef.current = false;
             onDirtyChange?.(false);
             alert('השינויים נשמרו בהצלחה');
             return;
@@ -3886,7 +4285,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     };
 
     return (
-        <div className="max-w-5xl mx-auto space-y-6 pb-20">
+        <div
+            className="max-w-5xl mx-auto space-y-6 pb-20"
+            onChangeCapture={(e) => markJobFormEditedByUser(e)}
+            onInputCapture={(e) => markJobFormEditedByUser(e)}
+            onClickCapture={(e) => markJobFormEditedByUser(e)}
+        >
             <style>{`
                 .no-scrollbar::-webkit-scrollbar { display: none; }
                 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -4037,8 +4441,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             <div className="space-y-8">
                 <SectionCard id="general-info" title={t('new_job.section_general')} icon={<BriefcaseIcon className="w-5 h-5"/>} className="z-10 relative">
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        <div className="lg:col-span-1">
-                           <label className="block text-sm font-semibold text-text-muted mb-1.5">שם החברה</label>
+                        <div className="lg:col-span-1 relative z-30">
+                           <label className="block text-sm font-semibold text-text-muted mb-1.5">
+                                שם החברה
+                                <span className="text-red-500 mr-0.5" aria-hidden> *</span>
+                           </label>
                             {isClientLocked ? (
                                 <div className="flex items-center gap-2">
                                     <div className="w-full bg-primary-50 border border-primary-200 text-primary-900 font-bold text-sm rounded-lg p-2.5 flex items-center justify-between">
@@ -4073,8 +4480,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                                     <button
                                         type="button"
                                         onClick={() => {
-                                            applyOrgSelectionFromLabel(formData.clientName);
-                                            setIsClientConfirmed(true);
+                                            if (!selectedOrg.orgId) {
+                                                applyOrgSelectionFromLabel(formData.clientName);
+                                            }
+                                            if (selectedOrgRef.current.orgId) {
+                                                setOrgFieldError(false);
+                                                setIsClientConfirmed(true);
+                                            }
                                         }}
                                         disabled={!formData.clientName}
                                         className="bg-primary-600 text-white font-bold p-2.5 rounded-lg hover:bg-primary-700 disabled:opacity-50"
@@ -4083,6 +4495,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                                     </button>
                                 </div>
                             )}
+                            {orgFieldError && !selectedOrg.orgId ? (
+                                <p className="mt-1.5 text-xs font-semibold text-red-600">יש לבחור חברה מקושרת</p>
+                            ) : !orgOptionsLoading && orgSearchableOptions.length === 0 ? (
+                                <p className="mt-1.5 text-xs text-text-muted">לא נמצאו חברות מקושרות לחשבון</p>
+                            ) : null}
                        </div>
 
                        <div className="lg:col-span-1">
@@ -4145,16 +4562,63 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                             />
                        </div>
                        
-                       <div className="lg:col-span-1">
-                           <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.health_profile')}</label>
-                           <div className="relative">
-                               <select name="healthProfile" value={formData.healthProfile} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 pr-9 appearance-none focus:ring-primary-500 focus:border-primary-500 cursor-pointer">
-                                    <option value="standard">רגיל (Standard)</option>
-                                    <option value="high_volume">מסת גיוס (Volume)</option>
-                                    <option value="executive">בכירים (Executive)</option>
-                                </select>
-                               <div className={`absolute top-1/2 left-3 -translate-y-1/2 w-3 h-3 rounded-full ${formData.healthProfile === 'high_volume' ? 'bg-orange-500' : formData.healthProfile === 'executive' ? 'bg-purple-500' : 'bg-green-500'}`}></div>
-                               <ChevronDownIcon className="absolute top-1/2 right-3 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" />
+                       <div className="lg:col-span-1 space-y-4">
+                           <div>
+                               <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.health_profile')}</label>
+                               <div className="relative">
+                                   <select name="healthProfile" value={formData.healthProfile} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 pr-9 appearance-none focus:ring-primary-500 focus:border-primary-500 cursor-pointer">
+                                        <option value="standard">רגיל (Standard)</option>
+                                        <option value="high_volume">מסת גיוס (Volume)</option>
+                                        <option value="executive">בכירים (Executive)</option>
+                                    </select>
+                                   <div className={`absolute top-1/2 left-3 -translate-y-1/2 w-3 h-3 rounded-full ${formData.healthProfile === 'high_volume' ? 'bg-orange-500' : formData.healthProfile === 'executive' ? 'bg-purple-500' : 'bg-green-500'}`}></div>
+                                   <ChevronDownIcon className="absolute top-1/2 right-3 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" />
+                               </div>
+                           </div>
+                           <div>
+                               <label className="block text-sm font-semibold text-text-muted mb-1.5">תבניות שקלול</label>
+                               <div className="relative">
+                                   <select
+                                       name="matchingEnginePresetId"
+                                       value={formData.matchingEnginePresetId ?? ''}
+                                       disabled={!resolvedClientId || matchingEnginePresetsLoading}
+                                       onChange={(e) => {
+                                           const raw = e.target.value;
+                                           setFormData((prev) => ({
+                                               ...prev,
+                                               matchingEnginePresetId:
+                                                   raw === '' ? null : Number(raw),
+                                           }));
+                                       }}
+                                       className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 pr-9 appearance-none focus:ring-primary-500 focus:border-primary-500 cursor-pointer disabled:opacity-60"
+                                   >
+                                       <option value="">{clientDefaultMatchingPresetLabel}</option>
+                                       {matchingEnginePresets.map((preset) => (
+                                           <option key={preset.id} value={preset.id}>
+                                               {matchingPresetLabel(preset)}
+                                           </option>
+                                       ))}
+                                   </select>
+                                   <SparklesIcon className="absolute top-1/2 left-3 -translate-y-1/2 w-4 h-4 text-primary-500 pointer-events-none" />
+                                   <ChevronDownIcon className="absolute top-1/2 right-3 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" />
+                               </div>
+                               {!resolvedClientId ? (
+                                   <p className="text-xs text-text-muted mt-1.5">בחר לקוח / ארגון כדי לטעון תבניות.</p>
+                               ) : matchingEnginePresetsLoading ? (
+                                   <p className="text-xs text-text-muted mt-1.5">טוען תבניות שקלול…</p>
+                               ) : matchingEnginePresetsError ? (
+                                   <p className="text-xs text-red-600 mt-1.5">{matchingEnginePresetsError}</p>
+                               ) : matchingEnginePresets.length === 0 ? (
+                                   <p className="text-xs text-text-muted mt-1.5">אין תבניות זמינות ללקוח זה.</p>
+                               ) : selectedJobMatchingPreset?.description ? (
+                                   <p className="text-xs text-text-muted mt-1.5 leading-relaxed">
+                                       {selectedJobMatchingPreset.description}
+                                   </p>
+                               ) : formData.matchingEnginePresetId == null ? (
+                                   <p className="text-xs text-text-muted mt-1.5">
+                                       שקלול התאמה למשרה זו ישתמש ב{clientDefaultMatchingPresetLabel}.
+                                   </p>
+                               ) : null}
                            </div>
                        </div>
                        
@@ -4228,12 +4692,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                            <PriorityToggle value={formData.priority} onChange={(p) => setFormData(prev => ({ ...prev, priority: p }))} />
                        </div>
                     </div>
-                    <TechnicalIdentifiers 
-                        jobId={formData.postingCode} 
-                        postingCode={formData.postingCode} 
-                        uniqueEmail={`humand+${formData.postingCode}@app.hiro.co.il`}
+                    <TechnicalIdentifiers
+                        jobId={formData.jobId}
+                        postingCode={formData.postingCode}
+                        uniqueEmail={formData.uniqueEmail}
                         creationDate={formData.creationDate}
-                        onPostingCodeChange={(value) => setFormData(prev => ({ ...prev, postingCode: value, uniqueEmail: `humand+${value}@app.hiro.co.il` }))}
+                        postingCodeReadOnly
                         validityDays={formData.validityDays}
                         reScreeningCooldownMonths={formData.reScreeningCooldownMonths}
                         requireOriginalCv={formData.requireOriginalCv}
@@ -4595,7 +5059,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                                                      }`}
                                                  >
                                                      {person.kind === 'user' ? 'משתמש' : 'איש קשר'}
-                                                 </span>
+                                                </span>
                                              </div>
                                              <div className="text-xs text-text-muted truncate">{person.subtitle}</div>
                                          </div>
@@ -4605,7 +5069,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                          </div>
 
                          <div>
-                             <h4 className="font-bold text-text-default mb-3">{t('new_job.publishing')}</h4>
+                             <div className="flex items-center gap-2 flex-wrap mb-3">
+                                 <h4 className="font-bold text-text-default">{t('new_job.publishing')}</h4>
+                                 {publishingTitleSources.map((source) => (
+                                     <PublishingSourceTitleChip key={source.id} source={source} />
+                                 ))}
+                             </div>
                              <div className="space-y-2 max-h-60 overflow-y-auto border border-border-default rounded-lg p-2 bg-bg-subtle/30">
                                  {publishingSourcesLoading ? (
                                      <p className="text-sm text-text-muted p-4 text-center">{t('sources.loading')}</p>
@@ -4619,8 +5088,6 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                                              key={source.id}
                                              source={source}
                                              onToggleSelect={() => toggleSourceSelection(source.id)}
-                                             onStatusChange={(status) => handleSourceStatusChange(source.id, status)}
-                                             onAlertChange={(days) => handleSourceAlertChange(source.id, days)}
                                          />
                                      ))
                                  )}
@@ -4848,16 +5315,22 @@ const NewJobView: React.FC<NewJobViewProps> = ({
             isOpen={isTagSelectorOpen}
             onClose={() => setIsTagSelectorOpen(false)}
             existingTags={(formData.skills || []).map((s) => s.key || s.name)}
+            associatedTagIds={(formData.skills || []).map((s) => s.id).filter((id) => id && !String(id).startsWith('custom-'))}
+            context="job"
+            jobId={isEditing && jobData?.id != null ? String(jobData.id) : undefined}
+            contextText={[formData.jobTitle, formData.jobDescription, formData.requirements].filter(Boolean).join('\n')}
+            jobFieldCategory={formData.jobFields?.[0]?.category || formData.jobField?.category || undefined}
+            enableRequiredTagToggle
             initialCategory="all"
             onSave={(selected: GlobalTagOption[]) => {
-                        const existingKeys = new Set((formData.skills || []).map((s) => s.key || s.name));
+                        const existingKeys = new Set((formData.skills || []).map((s) => s.key || s.name || s.id));
                 const newTags: JobSkill[] = selected
-                    .filter((t) => !existingKeys.has(t.id))
+                    .filter((t) => !existingKeys.has(t.id) && !existingKeys.has(t.tagKey || '') && !existingKeys.has(t.nameHe))
                     .map((t) => ({
                         id: t.id,
                         name: t.nameHe || t.nameEn,
                         key: t.tagKey || t.nameEn || t.nameHe,
-                        mode: 'normal',
+                        mode: t.saveMode === 'mandatory' ? 'mandatory' : 'normal',
                         source: 'global',
                         tagType: ((): SmartTagType => {
                             const cat = t.category;

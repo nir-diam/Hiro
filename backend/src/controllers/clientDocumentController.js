@@ -28,20 +28,27 @@ function sanitizeDocumentRow(doc) {
 }
 
 const list = async (req, res) => {
-  const client = await clientService.getById(req.params.id);
-  let docs = Array.isArray(client.documents) ? client.documents : [];
-  const organizationId = req.query?.organizationId
-    ? String(req.query.organizationId).trim()
-    : null;
-  const organizationTmpId = req.query?.organizationTmpId
-    ? String(req.query.organizationTmpId).trim()
-    : null;
-  if (organizationTmpId) {
-    docs = docs.filter((d) => String(d?.organizationTmpId || '') === organizationTmpId);
-  } else if (organizationId) {
-    docs = docs.filter((d) => String(d?.organizationId || '') === organizationId);
+  try {
+    const client = await clientService.getById(req.params.id, { include: ['documents'] });
+    let docs = Array.isArray(client.documents) ? client.documents : [];
+    const organizationId = req.query?.organizationId
+      ? String(req.query.organizationId).trim()
+      : null;
+    const organizationTmpId = req.query?.organizationTmpId
+      ? String(req.query.organizationTmpId).trim()
+      : null;
+    if (organizationTmpId) {
+      docs = docs.filter((d) => String(d?.organizationTmpId || '') === organizationTmpId);
+    } else if (organizationId) {
+      docs = docs.filter((d) => String(d?.organizationId || '') === organizationId);
+    }
+    res.json(docs.map(sanitizeDocumentRow));
+  } catch (err) {
+    const timedOut = err?.parent?.code === '57014' || /statement timeout/i.test(String(err?.message || ''));
+    res.status(err.status || (timedOut ? 504 : 500)).json({
+      message: err.message || 'Failed to list documents',
+    });
   }
-  res.json(docs.map(sanitizeDocumentRow));
 };
 
 // Presigned URL flow (frontend uploads directly to S3)
@@ -69,7 +76,7 @@ const createUploadUrl = async (req, res) => {
 // After upload, attach metadata row into client.documents
 const attach = async (req, res) => {
   try {
-    const client = await clientService.getById(req.params.id);
+    const client = await clientService.getById(req.params.id, { include: ['documents'] });
     const prev = Array.isArray(client.documents) ? client.documents : [];
     const payload = req.body || {};
 
@@ -114,7 +121,7 @@ const attach = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const client = await clientService.getById(req.params.id);
+    const client = await clientService.getById(req.params.id, { include: ['documents'] });
     const prev = Array.isArray(client.documents) ? client.documents : [];
     const docId = String(req.params.docId);
     const payload = req.body || {};
@@ -131,7 +138,7 @@ const update = async (req, res) => {
 
 const remove = async (req, res) => {
   try {
-    const client = await clientService.getById(req.params.id);
+    const client = await clientService.getById(req.params.id, { include: ['documents'] });
     const prev = Array.isArray(client.documents) ? client.documents : [];
     const docId = String(req.params.docId);
     const doc = prev.find((d) => String(d.id) === docId);

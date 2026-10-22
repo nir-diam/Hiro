@@ -16,6 +16,7 @@ const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { filterSerpOrganicResults } = require('../utils/filterSerpOrganicResults');
 const { scheduleOrganizationEmbedding } = require('./organizationEmbeddingService');
 const { buildCompanyEnrichmentPrompt } = require('../prompts/companyEnrichmentPrompt');
+const { isGenericBucketName } = require('../constants/genericOrganizationBuckets');
 
 const ACTIVITY_STATUSES = new Set(['פעילה', 'לא פעילה', 'בפירוק', 'לא ידוע']);
 
@@ -622,6 +623,36 @@ const hasStoredContact = (org, field) => {
   return !!String(plain?.[field] || '').trim();
 };
 
+const quoteForPrompt = (value) =>
+  String(value || '')
+    .replace(/["״“”']/g, '׳')
+    .trim();
+
+const storedPlain = (org) => (org?.get ? org.get({ plain: true }) : org) || {};
+
+/**
+ * Explicit mismatch drops only the rejected website and contacts discovered in this run.
+ * A skipped or failed check does not write nulls over phone, email, or an existing site.
+ */
+const applyWebsiteVerificationGate = (target, existing, verification, rejectedUrl) => {
+  if (!target) return target;
+  if (!verification || verification.uncertain || verification.isMatch == null) return target;
+  if (verification.isMatch === true) {
+    target.dataConfidence = 'לביקורת';
+    return target;
+  }
+  const stored = storedPlain(existing);
+  const storedWebsite = String(stored.website || '').trim();
+  const rejected = String(rejectedUrl || '').trim();
+  if (storedWebsite && storedWebsite === rejected) target.website = null;
+  else delete target.website;
+  for (const field of ['linkedinUrl', 'phone', 'email']) {
+    delete target[field];
+  }
+  target.dataConfidence = 'אין התאמה';
+  return target;
+};
+
 /** Never overwrite phone/email on persist when the org already has them. */
 const applyContactPreserveOnUpdates = (updates, existingOrg) => {
   if (!updates || !existingOrg) return updates;
@@ -892,6 +923,10 @@ const enrichOrganizationById = async (orgId) => {
 
   const companyName = (org.name || '').trim();
   if (!companyName) return null;
+  if (isGenericBucketName(companyName)) {
+    console.log(`[orgEnrich] skip generic bucket org "${companyName}" (${orgId})`);
+    return null;
+  }
 
   console.log(`[orgEnrich] starting enrichment for "${companyName}" (${orgId})`);
 
@@ -957,14 +992,11 @@ const enrichOrganizationById = async (orgId) => {
     });
     console.log(`[orgVerify] "${companyName}" → is_match=${verification.isMatch} | ${verification.reason}`);
 
-    if (!verification.isMatch) {
-      // Nullify contact/web fields to prevent data pollution
-      updates.website    = null;
-      updates.linkedinUrl = null;
-      updates.phone      = null;
-      updates.email      = null;
-      updates.dataConfidence = 'אין התאמה';
-      console.warn(`[orgVerify] "${companyName}" – mismatch detected. Nullified web/contact fields, dataConfidence=אין התאמה`);
+    if (verification.uncertain || verification.isMatch == null) {
+      console.log(`[orgVerify] "${companyName}" – verification skipped (${verification.reason}). Kept stored contacts.`);
+    } else if (!verification.isMatch) {
+      applyWebsiteVerificationGate(updates, org, verification, detectedWebsite);
+      console.log(`[orgVerify] "${companyName}" – rejected ${detectedWebsite}. Stored phone/email kept. ${verification.reason}`);
     } else {
       updates.dataConfidence = 'לביקורת';
       console.log(`[orgVerify] "${companyName}" – match confirmed. dataConfidence=לביקורת`);
@@ -1017,6 +1049,28 @@ const persistEnrichmentResults = async (suggestions = []) => {
 };
 
 const pendingEnrichmentIds = new Set();
+const orgEnrichJobQueue = [];
+let orgEnrichJobsRunning = 0;
+const ORG_ENRICH_MAX_CONCURRENT = Math.max(
+  1,
+  Math.min(3, Number(process.env.ORG_ENRICH_MAX_CONCURRENT || 1) || 1),
+);
+
+const pumpOrgEnrichQueue = () => {
+  while (orgEnrichJobsRunning < ORG_ENRICH_MAX_CONCURRENT && orgEnrichJobQueue.length) {
+    const orgId = orgEnrichJobQueue.shift();
+    orgEnrichJobsRunning += 1;
+    enrichOrganizationById(orgId)
+      .catch((err) => {
+        console.error('[orgEnrich] background enrichment failed', orgId, err?.message || err);
+      })
+      .finally(() => {
+        pendingEnrichmentIds.delete(String(orgId));
+        orgEnrichJobsRunning = Math.max(0, orgEnrichJobsRunning - 1);
+        pumpOrgEnrichQueue();
+      });
+  }
+};
 
 const strField = (org, key) => {
   const plain = org?.get ? org.get({ plain: true }) : org;
@@ -1041,23 +1095,20 @@ const isOrganizationEnrichmentPending = (orgId) => {
 const scheduleOrganizationEnrichment = (org) => {
   if (!org?.id) return;
   const id = String(org.id);
+  const label = org.name || org.get?.({ plain: true })?.name || '';
+  if (isGenericBucketName(label)) return;
   if (pendingEnrichmentIds.has(id)) return;
   pendingEnrichmentIds.add(id);
-  setImmediate(() => {
-    enrichOrganizationById(org.id)
-      .catch((err) => {
-        console.error('[orgEnrich] background enrichment failed', org.id, err?.message || err);
-      })
-      .finally(() => {
-        pendingEnrichmentIds.delete(id);
-      });
-  });
+  orgEnrichJobQueue.push(org.id);
+  setImmediate(pumpOrgEnrichQueue);
 };
 
 /** Background enrich only when the org record is still missing website/linkedin/location/description. */
 const scheduleOrganizationEnrichmentIfNeeded = (org) => {
   if (!organizationNeedsEnrichment(org)) return;
-  console.log(`[orgEnrich] scheduling enrichment for thin org ${org.id} "${org.name || ''}"`);
+  const label = org.name || org.get?.({ plain: true })?.name || '';
+  if (isGenericBucketName(label)) return;
+  console.log(`[orgEnrich] scheduling enrichment for thin org ${org.id} "${label}"`);
   scheduleOrganizationEnrichment(org);
 };
 
@@ -1073,28 +1124,28 @@ const scheduleOrganizationEnrichmentIfNeeded = (org) => {
  * @returns {Promise<{ isMatch: boolean, reason: string }>}
  */
 const verifyOrganizationWebsite = async ({ companyNameCv, candidateContext = '', extractedUrl }) => {
-  const NO_MATCH = { isMatch: false, reason: 'verification skipped – missing inputs' };
+  const SKIPPED = { isMatch: null, uncertain: true, reason: 'verification skipped – missing inputs' };
 
-  if (!companyNameCv || !extractedUrl) return NO_MATCH;
+  if (!companyNameCv || !extractedUrl) return SKIPPED;
 
-  const contextLine = candidateContext
-    ? `\nהקשר פעילות המועמד: "${candidateContext}"`
-    : '';
+  const safeName = quoteForPrompt(companyNameCv);
+  const safeContext = quoteForPrompt(candidateContext);
+  const contextLine = safeContext ? `\nהקשר פעילות המועמד: '${safeContext}'` : '';
 
   const prompt = `
 אתה סוכן בקרת איכות של מאגר חברות.
-עליך לקבוע האם כתובת האתר שנמצאה אכן שייכת לחברה המוזכרת, בהתאם לשם החברה והקשר הפעילות.
+עליך לקבוע האם כתובת האתר שנמצאה אכן שייכת לעסק המוזכר.
 
-שם החברה (מקורות החיים): "${companyNameCv}"${contextLine}
+שם העסק: '${safeName}'${contextLine}
 כתובת האתר שנמצאה: ${extractedUrl}
 
 ענה אך ורק ב-JSON תקני בפורמט הבא (ללא הסבר נוסף):
 { "is_match": true/false, "reason": "הסבר קצר" }
 
 כללים:
-- is_match = true רק אם יש התאמה לוגית ומקצועית ברורה בין שם החברה לבין מטרת האתר.
-- is_match = false אם האתר שייך לחברה אחרת, לפלטפורמת דרושים, לוויקיפדיה, לחדשות, וכדומה.
-- is_match = false אם לא ניתן לאמת התאמה בביטחון סביר.
+- רו"ח, בע"מ, עו"ד, יועץ מס, סוכנות לביטוח הם חלק מהשם ולא חברה אחרת.
+- is_match = true אם שם העסק מופיע באתר, או שהדומיין הוא העסק עצמו, כולל דף פייסבוק/לינקדאין או אינדקס (בזק 144, דפי זהב, דאנס) של אותו עסק.
+- is_match = false רק אם האתר שייך בבירור לעסק אחר, ללוח דרושים, לוויקיפדיה או לכתבה חדשותית.
 `.trim();
 
   try {
@@ -1109,13 +1160,13 @@ const verifyOrganizationWebsite = async ({ companyNameCv, candidateContext = '',
     const parsed = parseJsonResponse(raw);
     if (!parsed || typeof parsed.is_match !== 'boolean') {
       console.warn('[orgVerify] unexpected Gemini response:', String(raw).substring(0, 200));
-      return NO_MATCH;
+      return { isMatch: null, uncertain: true, reason: 'unparseable response' };
     }
 
-    return { isMatch: parsed.is_match, reason: String(parsed.reason || '') };
+    return { isMatch: parsed.is_match, uncertain: false, reason: String(parsed.reason || '') };
   } catch (err) {
     console.warn('[orgVerify] Gemini call failed:', err?.message || err);
-    return NO_MATCH;
+    return { isMatch: null, uncertain: true, reason: err?.message || 'gemini failed' };
   }
 };
 
@@ -1131,6 +1182,8 @@ module.exports = {
   persistEnrichmentResults,
   hasStoredContact,
   verifyOrganizationWebsite,
+  applyWebsiteVerificationGate,
+  quoteForPrompt,
   // ── Search helpers (single source of truth) ──────────────────────────────
   searchAllFieldsWithGemini,
   fetchSearchContext,

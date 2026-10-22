@@ -31,6 +31,30 @@ const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
 const { mergeProfileApprovalEvent, recordProfileApprovalClientJournal, recordProfileApprovalJobLinkJournals } = require('../utils/candidateProfileApprovalEvent');
 const { recordDuplicateResumeHashIngest } = require('../utils/candidateCanonicalLinkEvent');
+const { stripCvDocumentTitleFromPersonName, nameLooksLikeJobHeadline } = require('../utils/personName');
+const { extractDocxXmlText } = require('../utils/docxXmlText');
+const { sniffResumeKind } = require('../utils/resumeFileKind');
+const {
+  resolveGeminiModelName,
+  maybeUpgradeParseWithPro,
+  roleTagsFromExperience,
+  assessCvParseQuality,
+  applyInboundContact,
+  activeTagCount,
+} = require('../services/cvParseQuality');
+const { syncTagsWithRetry, stampCvParseQuality } = require('../services/cvParseQualityService');
+const {
+  CV_PARSING_PROMPT_ID,
+  buildResumeResponseSchema,
+  getResumePromptTemplate,
+} = require('../services/cvParsingPromptService');
+const {
+  normalizeWorkExperience,
+  ensureRoleTagCoverage,
+  enrichWorkExperienceRoleTags,
+  attachTagIdsToWorkExperience,
+  workExperienceTagLinksChanged,
+} = require('../utils/workExperienceNormalize');
 const pipelineOutcomeService = require('../services/pipelineOutcomeService');
 const candidatePipelineService = require('../services/candidatePipelineService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
@@ -412,8 +436,9 @@ const looksLikePersonNameLine = (s) => {
     return false;
   }
   if (/קורות\s*חיים|curriculum|resume\b/i.test(t)) return false;
+  if (nameLooksLikeJobHeadline(t)) return false;
   const tokens = t.split(/\s+/).filter(Boolean);
-  if (tokens.length < 2 || tokens.length > 5) return false;
+  if (tokens.length < 2 || tokens.length > 4) return false;
   const heb = (t.match(HEBREW_CHAR_RE) || []).length;
   const lat = (t.match(/[A-Za-z]/g) || []).length;
   if (heb >= 4) return tokens.every((w) => /[\u0590-\u05FF]{2,}/u.test(w) || /^[A-Za-z]{2,}$/u.test(w));
@@ -429,13 +454,16 @@ const extractNameCandidatesFromResumeText = (text) => {
     .filter(Boolean);
   const out = [];
   for (const line of lines.slice(0, 15)) {
-    if (looksLikePersonNameLine(line)) out.push(line);
+    const cleaned = stripCvDocumentTitleFromPersonName(line) || line;
+    if (looksLikePersonNameLine(cleaned)) out.push(cleaned);
   }
   return out;
 };
 
 const pickFullerName = (...candidates) => {
-  const names = candidates.map((n) => String(n || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  const names = candidates
+    .map((n) => stripCvDocumentTitleFromPersonName(String(n || '').replace(/\s+/g, ' ').trim()))
+    .filter(Boolean);
   if (!names.length) return null;
   let best = names[0];
   for (let i = 1; i < names.length; i += 1) {
@@ -466,18 +494,86 @@ const pickFullerName = (...candidates) => {
  * Always prefers the fullest name when one is a token-subsequence of another
  * (keeps middle names like "ארי").
  */
+const geminiPersonName = (aiResult) => {
+  const full = stripCvDocumentTitleFromPersonName(strOrNull(aiResult?.fullName) || '');
+  const parts = [strOrNull(aiResult?.firstName), strOrNull(aiResult?.lastName)]
+    .map((part) => stripCvDocumentTitleFromPersonName(part || ''))
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+  if (full && !nameLooksLikeJobHeadline(full)) return full;
+  if (parts && !nameLooksLikeJobHeadline(parts)) return parts;
+  return '';
+};
+
+const aiIdentityLooksLikeHeadline = (aiResult) => {
+  const raw =
+    strOrNull(aiResult?.fullName)
+    || [strOrNull(aiResult?.firstName), strOrNull(aiResult?.lastName)].filter(Boolean).join(' ');
+  return Boolean(raw) && nameLooksLikeJobHeadline(raw) && !geminiPersonName(aiResult);
+};
+
+const applyChosenPersonName = (ai, chosen, prev) => {
+  const parts = namePartsFromFullName(stripCvDocumentTitleFromPersonName(chosen) || chosen);
+  ai.fullName = parts.fullName;
+  ai.firstName = parts.firstName;
+  ai.lastName = parts.lastName;
+  if (normalizeNameForCompare(prev) !== normalizeNameForCompare(parts.fullName)) {
+    console.log('[cv-name-resolve] chose identity name', {
+      chosen: parts.fullName,
+      previous: prev,
+    });
+  }
+  return parts.fullName;
+};
+
 const resolveCandidateIdentityName = (aiResult, { fileName = null, resumeText = null } = {}) => {
   const hintInfo = extractNameHintFromFileName(fileName);
   const hint = hintInfo?.name || (typeof fileName === 'string' && looksLikePersonNameLine(fileName) ? fileName : null);
-  const headerNames = extractNameCandidatesFromResumeText(resumeText);
+  const headerNames = extractNameCandidatesFromResumeText(resumeText)
+    .filter((line) => !nameLooksLikeJobHeadline(line));
   const ai = aiResult && typeof aiResult === 'object' ? { ...aiResult } : {};
-  const aiFull =
-    strOrNull(ai.fullName)
-    || [strOrNull(ai.firstName), strOrNull(ai.lastName)].filter(Boolean).join(' ')
-    || '';
+  const aiFull = geminiPersonName(ai);
+
+  // Gemini already named the person. A CV headline must not replace that name.
+  // A filename or header may only extend it when it is the same person with more tokens.
+  if (aiFull && !nameFieldsLookUnreliable(ai)) {
+    let chosen = aiFull;
+    const samePerson = [];
+    if (hint && !nameLooksLikeJobHeadline(hint)) {
+      samePerson.push({ name: hint, source: 'filename', confident: Boolean(hintInfo?.confident) });
+    }
+    for (const header of headerNames) samePerson.push({ name: header, source: 'header', confident: false });
+    for (const candidate of samePerson) {
+      if (
+        !isNameTokenSubsequence(chosen, candidate.name)
+        && !isNameTokenSubsequence(candidate.name, chosen)
+      ) {
+        continue;
+      }
+      const fuller = pickFullerName(chosen, candidate.name);
+      if (fuller) chosen = fuller;
+    }
+    if (hintInfo?.confident && hint && !nameLooksLikeJobHeadline(hint)) {
+      const a = nameTokenList(aiFull);
+      const h = nameTokenList(hint);
+      const clearlyDifferent =
+        a.length >= 2
+        && h.length >= 2
+        && a[0] !== h[0]
+        && a[a.length - 1] !== h[h.length - 1]
+        && !isNameTokenSubsequence(aiFull, hint)
+        && !isNameTokenSubsequence(hint, aiFull);
+      if (!clearlyDifferent) chosen = pickFullerName(chosen, hint) || hint;
+    }
+    const saved = applyChosenPersonName(ai, chosen, aiFull);
+    return { ai, hint: hint || null, chosen: saved };
+  }
 
   const candidates = [];
-  if (hint) candidates.push({ name: hint, source: 'filename', confident: Boolean(hintInfo?.confident) });
+  if (hint && !nameLooksLikeJobHeadline(hint)) {
+    candidates.push({ name: hint, source: 'filename', confident: Boolean(hintInfo?.confident) });
+  }
   for (const h of headerNames) candidates.push({ name: h, source: 'header', confident: false });
   if (aiFull) candidates.push({ name: aiFull, source: 'ai', confident: false });
 
@@ -541,21 +637,11 @@ const resolveCandidateIdentityName = (aiResult, { fileName = null, resumeText = 
     if (!clearlyDifferent) chosen = hint;
   }
 
-  const parts = namePartsFromFullName(chosen);
-  const prev = aiFull || null;
-  ai.fullName = parts.fullName;
-  ai.firstName = parts.firstName;
-  ai.lastName = parts.lastName;
-  if (normalizeNameForCompare(prev) !== normalizeNameForCompare(parts.fullName)) {
-    console.log('[cv-name-resolve] chose identity name', {
-      chosen: parts.fullName,
-      previous: prev,
-      hint: hint || null,
-      header: headerNames[0] || null,
-      confidentFile: Boolean(hintInfo?.confident),
-    });
+  if (!chosen || nameLooksLikeJobHeadline(chosen)) {
+    return { ai, hint: hint || null, chosen: aiFull || null };
   }
-  return { ai, hint: hint || null, chosen: parts.fullName };
+  const saved = applyChosenPersonName(ai, chosen, aiFull || null);
+  return { ai, hint: hint || null, chosen: saved };
 };
 
 /**
@@ -1392,6 +1478,9 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
   const hi = normalizeStringArray(ai.highlights);
   if (hi.length) out.highlights = hi.slice(0, 50);
 
+  const kf = normalizeStringArray(ai.keyFacts);
+  if (kf.length) out.keyFacts = kf.slice(0, 3);
+
   const it = normalizeStringArray(ai.internalTags);
   if (it.length) out.internalTags = it.slice(0, 100);
 
@@ -1418,87 +1507,6 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
   if (full) out.fullName = full;
 
   return out;
-};
-
-const MILITARY_EXPERIENCE_RE =
-  /צה["']?ל|צבא|שירות\s+צבאי|שירות\s+בצבא|\bidf\b|חיל\s+ה|חייל|מג"ב|גולני|נח"ל|עוצב|שב"?ס|מודיעין|שריון|חיל\s+האוויר|חיל\s+הים|חיל\s+התותחנים|חיל\s+החימוש|חיל\s+הלוגיסטיקה|חיל\s+הקשר|חיל\s+המשלוחים|חיל\s+הרפואה|חיל\s+החינוך|חיל\s+המשטרה|משטרה\s+צבאית/i;
-
-const isMilitaryWorkEntry = (entry) => {
-  if (!entry || typeof entry !== 'object') return false;
-  if (entry.isMilitary === true || entry.type === 'military' || entry.category === 'military') {
-    return true;
-  }
-  const blob = [entry.title, entry.company, entry.companyField, entry.description]
-    .filter((v) => v != null && String(v).trim())
-    .join(' ');
-  return MILITARY_EXPERIENCE_RE.test(blob);
-};
-
-const normalizeWorkExperience = (arr) => {
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .map((x, idx) => {
-      if (!x || typeof x !== 'object') return null;
-      const title = String(x.title || '').trim();
-      const company = String(x.company || '').trim();
-      const description = String(x.description || '').trim();
-      if (!title && !company && !description) return null;
-      const startDate = String(x.startDate || '').trim() || '2000-01';
-      const endDate = String(x.endDate || '').trim() || (startDate || '2000-12');
-      const base = {
-        id: x.id || idx + 1,
-        title: title || 'ניסיון תעסוקתי',
-        company,
-        companyField: String(x.companyField || '').trim(),
-        startDate,
-        endDate,
-        description: description || [title, company].filter(Boolean).join(' - '),
-      };
-      return isMilitaryWorkEntry({ title, company, companyField: base.companyField, description, ...x })
-        ? { ...base, isMilitary: true }
-        : base;
-    })
-    .filter(Boolean);
-};
-
-const normalizeRoleKey = (value) =>
-  String(value || '')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .toLowerCase();
-
-const ensureRoleTagCoverage = (existingTags = [], workExperience = []) => {
-  const sourceTags = Array.isArray(existingTags) ? existingTags : [];
-  const experienceList = Array.isArray(workExperience) ? workExperience : [];
-  const roleNameSet = new Set(
-    sourceTags
-      .filter((tag) => tag && typeof tag === 'object' && String(tag.raw_type || '').toLowerCase() === 'role')
-      .map((tag) => normalizeRoleKey(tag.name))
-      .filter(Boolean),
-  );
-
-  const merged = [...sourceTags];
-  if(false){
-  for (const exp of experienceList) {
-    const title = String(exp?.title || '').trim();
-    if (!title) continue;
-    const normalizedTitle = normalizeRoleKey(title);
-    if (!normalizedTitle || roleNameSet.has(normalizedTitle)) continue;
-    merged.push({
-      name: title,
-      evidence: title,
-      raw_type: 'Role',
-      context: 'Core',
-      raw_type_reason: 'Direct job title from workExperience entry.',
-      tag_reason: 'Auto-added to guarantee at least one Role tag per workExperience title.',
-      is_current: !exp?.endDate,
-      confidence_score: 1,
-    });
-    roleNameSet.add(normalizedTitle);
-  }
-  }
-
-  return merged;
 };
 
 const normalizeEducation = (arr) => {
@@ -1604,16 +1612,48 @@ const CandidateOrganization = require('../models/CandidateOrganization');
 const Organization = require('../models/Organization');
 const { isGenericBucketName } = require('../constants/genericOrganizationBuckets');
 
-const ensureOrganizationsFromExperience = async (experience, candidateId = null) => {
+/** One resume-org sync at a time so email bursts do not stack Gemini classify jobs. */
+let experienceOrgSyncTail = Promise.resolve();
+
+const ensureOrganizationsFromExperienceWorker = async (
+  experience,
+  candidateId = null,
+  options = {},
+) => {
+  const syncContext = options.context || 'resume';
   const companyNames = extractCompanyNames(experience);
   if (!companyNames.length) return;
-  console.debug('[candidateController] syncing organizations for workExperience', { companyNames });
+  console.debug('[candidateController] syncing organizations for workExperience', {
+    companyNames,
+    context: syncContext,
+  });
   try {
     // Process sequentially to avoid saturating the DB connection pool.
     // findOrCreateByName + CandidateOrganization.findOrCreate both open transactions.
     for (const name of companyNames) {
+      if (!organizationService.isPlausibleEmployerName(name)) {
+        console.debug('[candidateController] skipping implausible employer name', { name });
+        continue;
+      }
       console.debug('[candidateController] ensuring organization', { name });
-      const org = await organizationService.findOrCreateByName(name, { candidateId });
+      let org = null;
+      let orgTimer;
+      try {
+        org = await Promise.race([
+          organizationService.findOrCreateByName(name, {
+            candidateId,
+            context: syncContext,
+          }),
+          new Promise((_, reject) => {
+            orgTimer = setTimeout(() => reject(new Error(`org sync timed out for "${name}"`)), 90_000);
+          }),
+        ]);
+      } catch (orgErr) {
+        console.error('[candidateController] organization sync skipped', name, orgErr?.message || orgErr);
+        continue;
+      } finally {
+        clearTimeout(orgTimer);
+      }
       console.debug('[candidateController] ensured organization', { name, orgId: org?.id });
       // Only create link when we got a real Organization instance (not OrganizationTmp)
       // and the organization is not a generic bucket (כללי / גנרי).
@@ -1634,6 +1674,12 @@ const ensureOrganizationsFromExperience = async (experience, candidateId = null)
   } catch (err) {
     console.error('Failed to sync organizations for work experience', err);
   }
+};
+
+const ensureOrganizationsFromExperience = (experience, candidateId = null, options = {}) => {
+  const run = () => ensureOrganizationsFromExperienceWorker(experience, candidateId, options);
+  experienceOrgSyncTail = experienceOrgSyncTail.then(run, run);
+  return experienceOrgSyncTail;
 };
 
 const generateExperienceSummary = async (req, res) => {
@@ -1780,7 +1826,8 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
     "companyField": string|null,
     "startDate": string|null,   // YYYY-MM if possible
     "endDate": string|null,     // YYYY-MM or "Present"
-    "description": string|null
+    "description": string|null,
+    "roleTag": string|null      // exact tags[].name for a raw_type "role" tag linked to this job
   }],
   "education": [{ "value": string|null }]
 }
@@ -1794,57 +1841,12 @@ Rules:
 - skills.soft = interpersonal/behavioral skills (e.g., תקשורת בין-אישית, עבודת צוות, מנהיגות, שירותיות, סדר וארגון, פתרון בעיות). Max 30.
 - skills.technical = tools/technologies/platforms/methods/certifications (e.g., Excel, SQL, Python, React, Salesforce, Google Ads, Power BI, Jira, AWS, Docker). Max 30.
 - Prefer realistic date formats; if only year exists use YYYY-01 / YYYY-12.
+- Each workExperience row MUST include roleTag matching one role tag in tags[] (same name string).
 - Always include top-level "availability" and "preferredWorkingHours" (null when not stated); see the appended schedule rules at the end of this prompt.
 
 Output constraints:
 - Return STRICT JSON (double quotes, no trailing commas).
 - Do not wrap in \`\`\` fences.
-`;
-
-/** Appended to DB cv_parsing template so schedule fields are emitted even when the stored prompt omits them from its example schema. */
-const CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX = `
---- Backend-required JSON keys (add to the SAME single JSON object; use null when not stated in the CV) ---
-- "availability": string|null — Notice period, start date, or employment readiness ONLY if explicitly written (e.g. מיידי, חודש התראה, זמין מ-…).
-- "preferredWorkingHours": string|null — Preferred daily work schedule ONLY if explicit. If absent in the CV, use null (do not guess).
-  When present, use ONE of: "גמיש", "ללא אילוצי שעות", or a single 24h range "HH:mm-HH:mm" with zero-padded hours (e.g. "09:00-18:00").
-  Map phrases like "שעות גמישות", "משמרות גמישות", "flexible hours" to "גמיש".
-`;
-
-/**
- * Forces the model to attach a verbatim source quote to every candidate tag.
- * Distinct from `tag_reason` (which may paraphrase) and `evidence` (the legacy
- * field name): `quote` MUST be a literal substring of the input CV text,
- * so the candidate profile can highlight which sentence triggered the tag.
- */
-const CV_PARSING_TAG_QUOTE_APPENDIX = `
---- Required additional field on EVERY object inside the "tags" array ---
-- "quote": string|null — The EXACT, verbatim substring copied character-by-character from the
-  input CV text that caused this tag to be created.
-  STRICT RULES:
-  * MUST be a literal substring of the input CV — no paraphrase, no synonyms, no translation,
-    no punctuation/whitespace edits beyond trimming leading/trailing spaces.
-  * Pick the SHORTEST span that proves the tag (usually a phrase or short sentence). Hard cap ~240 characters.
-  * If the same evidence supports multiple tags, repeat the quote per tag — do NOT deduplicate.
-  * If the CV does not contain a verbatim phrase that justifies the tag, set "quote" to null (very rare).
-  * "quote" is REQUIRED on every tag object and is IN ADDITION to "tag_reason" and the legacy "evidence" field.
-  * If you also emit the legacy "evidence" field, it MUST equal "quote" (same verbatim substring).
-`;
-
-/** Overrides any legacy "10-15 tags" / hard-cap wording in the stored cv_parsing prompt. */
-const CV_PARSING_TAG_COUNT_APPENDIX = `
---- Tag count (OVERRIDES any earlier cap in this prompt) ---
-- There is NO maximum tag count. Extract every relevant professional tag supported by evidence in the CV.
-- Include roles, skills, tools, seniority, industry, methodologies, degrees, and soft skills whenever they appear.
-- Still aim for at least 1-2 Role tags, one Seniority tag, and one Industry tag when the CV supports them.
-`;
-
-/** Military service → workExperience (shown separately as ניסיון צבאי in formatted CV). */
-const CV_PARSING_MILITARY_APPENDIX = `
---- Military service (שירות צבאי) ---
-- If the CV mentions IDF / צה"ל / שירות צבאי / army service, add one or more entries to workExperience.
-- Use company "צה"ל" (or the specific unit/branch name when stated) and title = role/rank/position when stated.
-- Include startDate/endDate when the CV states service years or dates.
-- Do NOT omit military service — it belongs in workExperience like civilian jobs (the UI splits it automatically).
 `;
 
 /** Sequelize attribute type → short label for LLM context */
@@ -1876,155 +1878,6 @@ const buildCandidateModelSchemaJsonForPrompt = () => {
   return JSON.stringify(out, null, 2);
 };
 
-/**
- * Gemini-compatible response schema for CV parsing.
- * Forces the LLM to return EVERY top-level field every time, in the right shape.
- *
- * IMPORTANT: Gemini's structured-output schema is a strict SUBSET of OpenAPI 3,
- * and `gemini-3-flash-preview` is more restrictive than older models. The
- * keywords confirmed to work on this model are:
- *   type, items, properties, required, enum, nullable, description, propertyOrdering.
- * Things known to break (HTTP 400 INVALID_ARGUMENT):
- *   maxLength, minLength, pattern, minimum, maximum, maxItems, minItems,
- *   additionalProperties, oneOf/anyOf/allOf, `nullable: true` on required arrays.
- *
- * Array sizes and string lengths therefore live in the PROMPT only (Brevity rules),
- * and the truncation salvager (`salvageTruncatedJson`) plus the validate-and-repair
- * pass cover whatever leaks through.
- */
-const buildResumeResponseSchema = 
-() => ({
-  type: 'object',
-  description: 'Parsed CV data. Every key MUST be present even if its value is null/empty.',
-  propertyOrdering: [
-    'firstName', 'lastName', 'fullName', 'email', 'phone', 'address',
-    'birthYear', 'birthMonth', 'birthDay', 'age',
-    'maritalStatus', 'gender',
-    'mobility', 'drivingLicenses',
-    'availability', 'preferredWorkingHours',
-    'title', 'professionalSummary',
-    'skills', 'tags', 'languages', 'workExperience', 'education',
-    'industryAnalysis',
-  ],
-  required: [
-    'firstName', 'lastName', 'fullName', 'email', 'phone', 'address',
-    'birthYear', 'birthMonth', 'birthDay', 'age',
-    'maritalStatus', 'gender',
-    'mobility', 'drivingLicenses',
-    'availability', 'preferredWorkingHours',
-    'title', 'professionalSummary',
-    'skills', 'tags', 'languages', 'workExperience', 'education',
-  ],
-  properties: {
-    firstName:           { type: 'string', nullable: true },
-    lastName:            { type: 'string', nullable: true },
-    fullName:            { type: 'string', nullable: true },
-    email:               { type: 'string', nullable: true },
-    phone:               { type: 'string', nullable: true },
-    address:             { type: 'string', nullable: true },
-    birthYear:           { type: 'integer', nullable: true, description: '4-digit year, e.g. 1985' },
-    birthMonth:          { type: 'integer', nullable: true, description: '1-12' },
-    birthDay:            { type: 'integer', nullable: true, description: '1-31' },
-    age:                 { type: 'integer', nullable: true, description: 'Computed from birth date if known' },
-    maritalStatus:       { type: 'string', nullable: true },
-    gender:              { type: 'string', nullable: true },
-    mobility:            { type: 'string', nullable: true, description: 'Must be one of the allowed mobility values' },
-    drivingLicenses: {
-      type: 'array',
-      items: { type: 'string' },
-      description: 'Allowed driving-license codes. Up to 10 items.',
-    },
-    availability:        { type: 'string', nullable: true, description: 'Notice period / start availability if stated in CV' },
-    preferredWorkingHours: {
-      type: 'string',
-      nullable: true,
-      description: 'גמיש | ללא אילוצי שעות | HH:mm-HH:mm when explicit in CV; otherwise null',
-    },
-    title:               { type: 'string', nullable: true },
-    professionalSummary: { type: 'string', nullable: true, description: '2-3 short lines, ≤ 600 chars, no fluff' },
-    skills: {
-      type: 'object',
-      required: ['soft', 'technical'],
-      properties: {
-        soft:      { type: 'array', items: { type: 'string' }, description: 'Up to 30 items.' },
-        technical: { type: 'array', items: { type: 'string' }, description: 'Up to 30 items.' },
-      },
-    },
-    tags: {
-      type: 'array',
-      description: 'All relevant professional tags from the CV (no fixed limit). Include 1-2 Role tags, at least one Seniority, and at least one Industry when present.',
-      items: {
-        type: 'object',
-        required: ['name', 'evidence', 'quote', 'raw_type', 'context'],
-        properties: {
-          name:             { type: 'string' },
-          evidence:         { type: 'string', description: 'Verbatim short snippet from the CV. ≤ 160 chars. Same string as `quote`.' },
-          quote:            { type: 'string', nullable: true, description: 'EXACT verbatim substring of the CV text justifying this tag. ≤ 240 chars. Same as `evidence`. null only if no verbatim phrase exists.' },
-          raw_type: {
-            type: 'string',
-            enum: ['role', 'skill', 'tool', 'degree', 'certification', 'language', 'methodology', 'seniority', 'industry', 'soft_skill'],
-          },
-          context: {
-            type: 'string',
-            enum: ['Core', 'Tool', 'Degree', 'Profile'],
-          },
-          raw_type_reason:  { type: 'string', nullable: true, description: 'One Hebrew sentence, ≤ 160 chars.' },
-          tag_reason:       { type: 'string', nullable: true, description: 'One Hebrew sentence explanation (paraphrase OK), ≤ 160 chars.' },
-          is_current:       { type: 'boolean', nullable: true },
-          confidence_score: { type: 'number',  nullable: true },
-        },
-      },
-    },
-    languages: {
-      type: 'array',
-      description: 'Up to 10 items.',
-      items: {
-        type: 'object',
-        required: ['name'],
-        properties: {
-          name:      { type: 'string' },
-          level:     { type: 'integer', nullable: true, description: '0..100' },
-          levelText: { type: 'string',  nullable: true },
-        },
-      },
-    },
-    workExperience: {
-      type: 'array',
-      description: 'Up to 20 items, most recent first.',
-      items: {
-        type: 'object',
-        required: ['title', 'company'],
-        properties: {
-          title:        { type: 'string', nullable: true },
-          company:      { type: 'string', nullable: true },
-          companyField: { type: 'string', nullable: true },
-          startDate:    { type: 'string', nullable: true, description: 'YYYY-MM' },
-          endDate:      { type: 'string', nullable: true, description: 'YYYY-MM or "Present"' },
-          description:  { type: 'string', nullable: true, description: '2-4 short bullet sentences, ≤ 600 chars' },
-        },
-      },
-    },
-    education: {
-      type: 'array',
-      description: 'Up to 10 items.',
-      items: {
-        type: 'object',
-        required: ['value'],
-        properties: {
-          value: { type: 'string' },
-        },
-      },
-    },
-    industryAnalysis: {
-      type: 'object',
-      properties: {
-        primaryIndustry: { type: 'string', nullable: true },
-        years:           { type: 'number', nullable: true },
-      },
-    },
-  },
-});
-
 /** Required top-level keys we expect the LLM to return; used by the validate-and-repair pass. */
 const RESUME_REQUIRED_TOP_KEYS = [
   'firstName', 'lastName', 'fullName', 'email', 'phone',
@@ -2051,25 +1904,7 @@ const findMissingResumeKeys = (parsed) => {
   return missing;
 };
 
-const getResumePromptTemplate = async () => {
-  try {
-    const record = await promptService.getById('cv_parsing');
-    const schemaJson = buildCandidateModelSchemaJsonForPrompt();
-    const mobilityPicklist = await picklistService.formatCategoryValuesForLlmPrompt('mobility');
-    const drivingPicklist = await picklistService.formatCategoryValuesForLlmPrompt('driving_license');
-    let template = String(record.template || '');
-    template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
-    template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
-    template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
-    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}\n${CV_PARSING_MILITARY_APPENDIX}`;
-    return { ...record, template };
-  } catch (err) {
-    console.warn('[attachMedia-ai] cv_parsing prompt missing', err.message || err);
-    return null;
-  }
-};
-
-const parseResumeWithAi = async ({ resumeText, fileNameHint = null }) => {
+const parseResumeWithAi = async ({ resumeText, fileNameHint = null, model = null }) => {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     console.log('[attachMedia-ai] missing GEMINI_API_KEY/API_KEY/GOOGLE_API_KEY -> skip ai');
@@ -2084,6 +1919,7 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null }) => {
     return null;
   }
   const promptRecord = await getResumePromptTemplate();
+  const chosenModel = resolveGeminiModelName(model || promptRecord?.model, null);
   const systemPrompt = promptRecord?.template
     ? String(promptRecord.template).replace('{candidate_tag}', getCandidateTagsSchemaText())
     : buildAiResumePrompt(getCandidateTagsSchemaText());
@@ -2096,20 +1932,29 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null }) => {
     temperature: 0.1,
     maxOutputTokens: 16384,
     responseMimeType: 'application/json',
+    responseSchema: buildResumeResponseSchema(),
     thinkingConfig: { thinkingBudget: 0 },
   };
 
-  console.log('[attachMedia-ai] calling gemini', { resumeLen: cvText.length, fileNameHint: fileNameHint || null });
+  const promptIdForLog = promptRecord?.id || CV_PARSING_PROMPT_ID;
+  console.log('[attachMedia-ai] calling gemini', {
+    resumeLen: cvText.length,
+    fileNameHint: fileNameHint || null,
+    model: chosenModel || 'gemini-3-flash-preview',
+    promptId: promptIdForLog,
+  });
   const raw = await sendChat({
     apiKey,
     systemPrompt,
     message: `CV TEXT (verbatim, do not summarize before extracting):${nameHintLine}\n\n${cvText}`,
     generationConfig,
-    promptId: 'cv_parsing',
+    promptId: promptIdForLog,
+    model: chosenModel,
     llmInputJson: {
       cvTextLength: cvText.length,
       cvTextPreview: cvText.slice(0, 4000),
       fileNameHint: fileNameHint || null,
+      model: chosenModel || 'gemini-3-flash-preview',
     },
   });
   const rawStr = String(raw || '');
@@ -2146,7 +1991,8 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null }) => {
         systemPrompt,
         message: repairMessage,
         generationConfig,
-        promptId: 'cv_parsing',
+        promptId: promptIdForLog,
+        model: chosenModel,
         llmInputJson: {
           pass: 'repair',
           missingKeys: missing,
@@ -2176,7 +2022,7 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null }) => {
  * Build and fire a Gemini generateContent request with the given user parts.
  * Used by both the native-PDF and page-image CV parsing paths.
  */
-const _callGeminiForCvParsing = async (userParts, label) => {
+const _callGeminiForCvParsing = async (userParts, label, modelOverride = null) => {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) return null;
 
@@ -2185,7 +2031,12 @@ const _callGeminiForCvParsing = async (userParts, label) => {
     ? String(promptRecord.template).replace('{candidate_tag}', getCandidateTagsSchemaText())
     : buildAiResumePrompt(getCandidateTagsSchemaText());
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const chosenModel = resolveGeminiModelName(
+    modelOverride || promptRecord?.model,
+    'gemini-3-flash-preview',
+  );
+  console.log('[cv-parse] model', { path: label, model: chosenModel });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${chosenModel}:generateContent?key=${apiKey}`;
   const body = {
     systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
     contents: [{ role: 'user', parts: userParts }],
@@ -2654,7 +2505,11 @@ const create = async (req, res) => {
     if (embedText.length > 3) {
       void tryEmbedCandidate(candidate.id, embedText);
     }
-    await ensureOrganizationsFromExperience(enrichedCandidate.workExperience, enrichedCandidate.id);
+    void ensureOrganizationsFromExperience(enrichedCandidate.workExperience, enrichedCandidate.id, {
+      context: 'candidate_profile',
+    }).catch((err) => {
+      console.error('[candidateController] org sync after create failed', err?.message || err);
+    });
     await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
     const enrichedAfter = await candidateService.getById(candidate.id);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
@@ -2766,7 +2621,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
       aiResult = (await parseResumeWithAi({ resumeText: text, fileNameHint })) || {};
       const missingAfterTextAi = findMissingResumeKeys(aiResult);
       const textParseMostlyFailed = missingAfterTextAi.length >= RESUME_REQUIRED_TOP_KEYS.length - 2;
-      if (pdfBuffer && (textParseMostlyFailed || nameFieldsLookUnreliable(aiResult) || textGarbled)) {
+      if (pdfBuffer && (textParseMostlyFailed || nameFieldsLookUnreliable(aiResult) || textGarbled || aiIdentityLooksLikeHeadline(aiResult))) {
         if (!visionAiResult) {
           console.log('[cv-vision] text AI weak — trying native PDF vision', {
             missingKeys: missingAfterTextAi.length,
@@ -2787,6 +2642,24 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     } else if (visionAiResult) {
       aiResult = visionAiResult;
     }
+    let parseMeta = { model: null, retriedWithPro: false };
+    try {
+      const promptForModel = await getResumePromptTemplate();
+      const configuredModel = resolveGeminiModelName(promptForModel?.model, 'gemini-3-flash-preview');
+      const upgraded = await maybeUpgradeParseWithPro(aiResult, {
+        resumeText: text,
+        fileNameHint,
+        modelUsed: configuredModel,
+        parseWithModel: parseResumeWithAi,
+      });
+      if (upgraded?.ai) aiResult = upgraded.ai;
+      parseMeta = {
+        model: upgraded?.model || configuredModel,
+        retriedWithPro: Boolean(upgraded?.retriedWithPro),
+      };
+    } catch (upgradeErr) {
+      console.warn('[cv-parse] quality retry skipped', upgradeErr?.message || upgradeErr);
+    }
     aiResult = applyFileNameNameHint(aiResult, fileName, text).ai;
 
     const fallback = extractStructuredFields(text);
@@ -2804,7 +2677,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
       techSkills = heuristic.technical;
     }
 
-    const normalizedWorkExperience = normalizeWorkExperience(aiResult.workExperience || fallback.workExperience);
+    let normalizedWorkExperience = normalizeWorkExperience(aiResult.workExperience || fallback.workExperience);
 
     const aiTagObjects = Array.isArray(aiResult.tags)
       ? aiResult.tags
@@ -2822,7 +2695,10 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
           })
           .filter(Boolean)
       : [];
-    const roleCoveredTags = ensureRoleTagCoverage(aiTagObjects, normalizedWorkExperience);
+    const roleTagEnriched = enrichWorkExperienceRoleTags(normalizedWorkExperience, aiTagObjects);
+    const roleCovered = ensureRoleTagCoverage(roleTagEnriched.tagEntries, roleTagEnriched.workExperience);
+    normalizedWorkExperience = roleCovered.workExperience;
+    const roleCoveredTags = roleCovered.tagEntries;
 
     let tags = normalizeStringArray(roleCoveredTags.map((t) => t.name));
     if (!tags.length && (softSkills.length || techSkills.length)) {
@@ -2854,6 +2730,11 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
         strOrNull(fallback.summary) ??
         persist.professionalSummary ??
         null,
+      ...(normalizeStringArray(aiResult.keyFacts).slice(0, 3).length
+        ? { keyFacts: normalizeStringArray(aiResult.keyFacts).slice(0, 3) }
+        : persist.keyFacts?.length
+          ? { keyFacts: persist.keyFacts }
+          : {}),
       skills: {
         soft: softSkills.slice(0, 50),
         technical: techSkills.slice(0, 50),
@@ -2946,22 +2827,37 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     }
 
     void tryEmbedCandidate(createdCandidate.id);
-    void ensureOrganizationsFromExperience(createdCandidate.workExperience, createdCandidate.id);
+    void ensureOrganizationsFromExperience(createdCandidate.workExperience, createdCandidate.id, {
+      context: 'candidate_profile',
+    });
+    let savedTagCount = 0;
     if (aiTagsForSync.length) {
-      await candidateTagService.syncTagsForCandidate(createdCandidate.id, aiTagsForSync);
+      const synced = await syncTagsWithRetry(createdCandidate.id, aiTagsForSync, {
+        source: candidatePayload.source,
+      });
+      savedTagCount = activeTagCount(synced);
 
       const tagsLabel = aiTagsForSync
         .map((t) => t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name)
         .filter(Boolean)
         .slice(0, 12)
         .join(', ');
-      systemEventEmitter.emit(req, {
-        ...SYSTEM_EVENTS.CV_TAGS,
-        entityType: 'Candidate',
-        entityId: createdCandidate.id,
-        entityName: createdCandidate.fullName,
-        params: { tags: tagsLabel || `${aiTagsForSync.length} תגיות` },
-      });
+      if (savedTagCount) {
+        systemEventEmitter.emit(req, {
+          ...SYSTEM_EVENTS.CV_TAGS,
+          entityType: 'Candidate',
+          entityId: createdCandidate.id,
+          entityName: createdCandidate.fullName,
+          params: { tags: tagsLabel || `${aiTagsForSync.length} תגיות` },
+        });
+      }
+      const refreshedForLink = await candidateService.getById(createdCandidate.id);
+      const roleEnsured = ensureRoleTagCoverage([], refreshedForLink?.workExperience || []);
+      const linkedExp = attachTagIdsToWorkExperience(roleEnsured.workExperience, synced);
+      if (workExperienceTagLinksChanged(refreshedForLink?.workExperience, linkedExp)) {
+        await candidateService.update(createdCandidate.id, { workExperience: linkedExp });
+        createdCandidate = await candidateService.getById(stubId);
+      }
     }
 
     finalCandidateId = createdCandidate.id;
@@ -3002,9 +2898,27 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     await candidateCompletenessService.refreshCandidateDataStatusAfterSave(finalCandidateId, req);
 
     const enrichedCandidate = await candidateService.getById(finalCandidateId);
+    const parseQuality = assessCvParseQuality({
+      fullName: enrichedCandidate?.fullName,
+      firstName: enrichedCandidate?.firstName,
+      lastName: enrichedCandidate?.lastName,
+      email: enrichedCandidate?.email,
+      phone: enrichedCandidate?.phone,
+      workExperience: enrichedCandidate?.workExperience,
+      tagCount: savedTagCount,
+      extractedTextLength: String(text || '').trim().length,
+      hasResumeFile: Boolean(buffer?.length),
+    });
+    await stampCvParseQuality(finalCandidateId, parseQuality, {
+      source: candidatePayload.source,
+      model: parseMeta.model,
+      textLength: String(text || '').trim().length,
+      retriedWithPro: parseMeta.retriedWithPro,
+    });
+    const stampedCandidate = (await candidateService.getById(finalCandidateId)) || enrichedCandidate;
     scheduleCvForwardFromRequest(req, {
       candidateId: finalCandidateId,
-      candidate: enrichedCandidate,
+      candidate: stampedCandidate,
       resumeBuffer: buffer,
       resumeFileName: fileName,
       resumeMimeType: mimeType,
@@ -3013,12 +2927,12 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     });
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     const portalAccountExists = await candidateService.identityHasPortalAccount({
-      email: enrichedCandidate?.email,
-      phone: enrichedCandidate?.phone,
-      idNumber: enrichedCandidate?.idNumber,
+      email: stampedCandidate?.email,
+      phone: stampedCandidate?.phone,
+      idNumber: stampedCandidate?.idNumber,
     });
     if (sendWelcome && !identityAttached && !portalAccountExists) {
-      messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, {
+      messageTemplateService.queueCandidateWelcomeEmail(stampedCandidate, {
         clientId: welcomeClientId,
         ...welcomePlaceholderContextFromRequest(req),
       });
@@ -3027,7 +2941,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     return {
       statusCode: identityAttached ? 200 : 201,
       body: {
-        candidate: enrichedCandidate,
+        candidate: stampedCandidate,
         parsed: aiResult,
         identityReused,
         identityLinked,
@@ -3690,6 +3604,7 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
 
   let mergedUpdates = {};
   let aiTagEntries = [];
+  let enrichParseMeta = { model: null, retriedWithPro: false };
   let workingText = String(extraText || '');
   try {
     workingText = String(extraText || '');
@@ -3723,7 +3638,7 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
       const missingAfterTextAi = findMissingResumeKeys(textAi);
       const textParseMostlyFailed = missingAfterTextAi.length >= RESUME_REQUIRED_TOP_KEYS.length - 2;
       if (textAi && typeof textAi === 'object') {
-        if (pdfBuffer && (textParseMostlyFailed || nameFieldsLookUnreliable(textAi) || textGarbled)) {
+        if (pdfBuffer && (textParseMostlyFailed || nameFieldsLookUnreliable(textAi) || textGarbled || aiIdentityLooksLikeHeadline(textAi))) {
           console.log('[cv-vision][enrich] text AI weak — vision fallback', {
             candidateId: baseCandidate?.id,
             missingKeys: missingAfterTextAi.length,
@@ -3748,6 +3663,23 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
     }
 
     if (ai && typeof ai === 'object') {
+      try {
+        const promptForModel = await getResumePromptTemplate();
+        const configuredModel = resolveGeminiModelName(promptForModel?.model, 'gemini-3-flash-preview');
+        const upgraded = await maybeUpgradeParseWithPro(ai, {
+          resumeText: workingText,
+          fileNameHint,
+          modelUsed: configuredModel,
+          parseWithModel: parseResumeWithAi,
+        });
+        if (upgraded?.ai) ai = upgraded.ai;
+        enrichParseMeta = {
+          model: upgraded?.model || configuredModel,
+          retriedWithPro: Boolean(upgraded?.retriedWithPro),
+        };
+      } catch (upgradeErr) {
+        console.warn('[cv-parse] enrich quality retry skipped', upgradeErr?.message || upgradeErr);
+      }
       ai = applyFileNameNameHint(ai, options.fileName || options.filename || null, workingText).ai;
       const candidateUpdates = { ...buildPersistFieldsFromAiParse(ai, {}) };
       if (
@@ -3809,10 +3741,13 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
         }
       }
 
-      aiTagEntries = Array.isArray(ai.tags) ? ai.tags : [];
-
-      const exp = normalizeWorkExperience(ai.workExperience);
+      let exp = normalizeWorkExperience(ai.workExperience);
+      const rawTags = Array.isArray(ai.tags) ? ai.tags.filter(Boolean) : [];
+      const roleTagEnriched = enrichWorkExperienceRoleTags(exp, rawTags);
+      const roleCovered = ensureRoleTagCoverage(roleTagEnriched.tagEntries, roleTagEnriched.workExperience);
+      exp = roleCovered.workExperience;
       if (exp.length) candidateUpdates.workExperience = exp;
+      aiTagEntries = roleCovered.tagEntries;
 
       const edu = normalizeEducation(ai.education);
       if (edu.length) candidateUpdates.education = edu;
@@ -3842,17 +3777,52 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
   }
 
   mergedUpdates = filterPreservedCandidateFields(mergedUpdates, baseCandidate, preserveFields);
+  if (options.inbound) {
+    const contact = applyInboundContact(
+      { email: mergedUpdates.email, phone: mergedUpdates.phone },
+      options.inbound,
+    );
+    if (contact.email && !mergedUpdates.email) mergedUpdates.email = contact.email;
+    if (contact.phone && !mergedUpdates.phone) mergedUpdates.phone = contact.phone;
+  }
 
   if (Object.keys(mergedUpdates).length > 0) {
     await candidateService.update(baseCandidate.id, mergedUpdates);
   }
+  let savedTagCount = 0;
   if (aiTagEntries.length) {
-    await candidateTagService.syncTagsForCandidate(baseCandidate.id, aiTagEntries);
+    const synced = await syncTagsWithRetry(baseCandidate.id, aiTagEntries, { source: 'resume-enrich' });
+    savedTagCount = activeTagCount(synced);
+    const refreshedForLink = await candidateService.getById(baseCandidate.id);
+    const roleEnsured = ensureRoleTagCoverage([], refreshedForLink?.workExperience || []);
+    const linkedExp = attachTagIdsToWorkExperience(roleEnsured.workExperience, synced);
+    if (workExperienceTagLinksChanged(refreshedForLink?.workExperience, linkedExp)) {
+      await candidateService.update(baseCandidate.id, { workExperience: linkedExp });
+    }
   }
   void tryEmbedCandidate(baseCandidate.id);
   const refreshedCandidate = await candidateService.getById(baseCandidate.id);
-  void ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id);
-  return refreshedCandidate;
+  void ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id, {
+    context: 'candidate_profile',
+  });
+  const parseQuality = assessCvParseQuality({
+    fullName: refreshedCandidate?.fullName,
+    firstName: refreshedCandidate?.firstName,
+    lastName: refreshedCandidate?.lastName,
+    email: refreshedCandidate?.email,
+    phone: refreshedCandidate?.phone,
+    workExperience: refreshedCandidate?.workExperience,
+    tagCount: savedTagCount,
+    extractedTextLength: String(workingText || '').trim().length,
+    hasResumeFile: Boolean(options.pdfBuffer?.length || baseCandidate?.resumeUrl),
+  });
+  await stampCvParseQuality(baseCandidate.id, parseQuality, {
+    source: refreshedCandidate?.source || baseCandidate?.source || null,
+    model: enrichParseMeta.model,
+    textLength: String(workingText || '').trim().length,
+    retriedWithPro: enrichParseMeta.retriedWithPro,
+  });
+  return (await candidateService.getById(baseCandidate.id)) || refreshedCandidate;
 };
 
 async function extractUploadTextFromBuffer(buffer, mimeType) {
@@ -3979,13 +3949,27 @@ const extractLegacyDocText = async (buffer) => {
 };
 
 const extractDocxText = async (buffer) => {
+  let fromMammoth = '';
   try {
     const resDoc = await mammoth.extractRawText({ buffer });
-    if (resDoc.value) return normalizeResumeSearchText(resDoc.value);
+    if (resDoc.value) fromMammoth = normalizeResumeSearchText(resDoc.value);
   } catch (e) {
     console.log('[embed-parse-docx-error]', e.message || e);
   }
-  return '';
+  let fromXml = '';
+  try {
+    fromXml = normalizeResumeSearchText(extractDocxXmlText(buffer));
+  } catch (e) {
+    console.log('[embed-parse-docx-xml-error]', e.message || e);
+  }
+  if (fromXml.length > fromMammoth.length) {
+    console.log('[docx-extract] xml walk beat mammoth', {
+      xml: fromXml.length,
+      mammoth: fromMammoth.length,
+    });
+    return fromXml;
+  }
+  return fromMammoth;
 };
 
 const extractFromBuffer = async (buffer, ct) => {
@@ -4035,6 +4019,13 @@ const extractFromBuffer = async (buffer, ct) => {
     if (looksDocx || looksLegacyDocByType) {
       return '';
     }
+
+    const kind = sniffResumeKind(buffer);
+    if (kind === 'jpeg' || kind === 'png') {
+      return extractTextFromImageBuffer(buffer);
+    }
+    if (kind === 'pdf') return '';
+    if (kind === 'docx' || kind === 'doc') return '';
 
     const asText = buffer.toString('utf8');
     if (asText && asText.trim()) return normalizeResumeSearchText(asText);
@@ -4276,10 +4267,12 @@ const extractStructuredFields = (text) => {
   const pipeParts = firstLine.split('|').map((p) => p.trim()).filter(Boolean);
   const nameCandidate = (() => {
     const raw = pipeParts[0] ? pipeParts[0].split(',')[0].trim() : firstLine.split(',')[0].trim();
-    if (!raw) return undefined;
-    if (/\d/.test(raw) || raw.includes('@')) return undefined;
-    if (raw.length < 2 || raw.length > 80) return undefined;
-    return raw;
+    const cleaned = stripCvDocumentTitleFromPersonName(raw);
+    if (!cleaned) return undefined;
+    if (/\d/.test(cleaned) || cleaned.includes('@')) return undefined;
+    if (cleaned.length < 2 || cleaned.length > 80) return undefined;
+    if (nameLooksLikeJobHeadline(cleaned)) return undefined;
+    return cleaned;
   })();
   const phoneRegex = /(\+?972[-\s]?\d{1,3}[-\s]?\d{6,8}|\b0\d[-\s]?\d{7,8}\b|\+?\d{2,3}[-\s]?\d{7,10})/;
   const addressCandidate = (() => {
@@ -4607,11 +4600,16 @@ const semanticSearch = async (req, res) => {
     if (!query || !query.trim()) {
       return res.status(400).json({ message: 'query is required' });
     }
+    const rawLimit = Number(limit);
+    const safeLimit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(Math.trunc(rawLimit), 1), 50)
+      : 20;
     const results = await searchCandidates({
       query,
       filters,
-      limit: limit || 20,
-      maxInlineEmbedRebuild: 5,
+      limit: safeLimit,
+      maxLimitCap: safeLimit,
+      maxInlineEmbedRebuild: 0,
     });
     await candidateService.attachLatestJobSubmissions(results);
     const jid = bodyJobId != null && String(bodyJobId).trim() !== '' ? String(bodyJobId).trim() : '';
@@ -5507,12 +5505,15 @@ const getJobMatches = async (req, res) => {
     const tenantClientId = await getStaffClientIdFromRequest(req);
     const data = await candidateJobMatchingService.computeMatchesForCandidate(candidateId, {
       limit: body.limit,
+      offset: body.offset,
       minScore: body.minScore,
       statuses: body.statuses,
       clientIds: body.clientIds,
       cities: body.cities,
       jobTypes: body.jobTypes,
       useVector: body.useVector,
+      hardFilters: body.hardFilters,
+      affinityLevel: body.affinityLevel,
       tenantClientId,
     });
     res.set('Cache-Control', 'private, no-store');
@@ -5679,11 +5680,9 @@ const patchWorkExperienceOrganization = async (req, res) => {
 
     // Re-sync organization links only when org changed
     if (orgChanged) {
-      try {
-        await ensureOrganizationsFromExperience(experience, id);
-      } catch (err) {
+      void ensureOrganizationsFromExperience(experience, id, { context: 'candidate_profile' }).catch((err) => {
         console.warn('[patchWorkExperienceOrganization] org sync failed', err?.message || err);
-      }
+      });
     }
 
     res.json({ success: true, workExperience: experience });

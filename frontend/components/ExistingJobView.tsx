@@ -8,9 +8,10 @@ import NewJobView from './NewJobView';
 import { 
     PencilIcon, ClockIcon, UserGroupIcon, ChevronDownIcon, SparklesIcon, 
     UserPlusIcon, ArrowLeftIcon, ChartBarIcon, FunnelIcon, ShareIcon,
-    CheckCircleIcon, ExclamationTriangleIcon, FireIcon, ChevronUpIcon, SonarIcon
+    CheckCircleIcon, ExclamationTriangleIcon, FireIcon, ChevronUpIcon, SonarIcon, PaperAirplaneIcon
 } from './Icons';
 import JobCandidatesView from './JobCandidatesView';
+import ReferralsView from './ReferralsView';
 import JobSonarView from './JobSonarView';
 import JobEventsView, { getJobEventApiHeaders } from './JobEventsView';
 import PublishJobView from './PublishJobView';
@@ -20,6 +21,7 @@ import { useLanguage } from '../context/LanguageContext';
 import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
 import { confirmLeaveWithoutSave } from '../utils/confirmLeaveWithoutSave';
 import { formatJobTagRelevanceScoreOnTenHe } from '../utils/tagWeightDisplay';
+import type { MessageModalConfig } from '../hooks/useUIState';
 
 interface Message {
     role: 'user' | 'model';
@@ -81,19 +83,21 @@ interface ExistingJobViewProps {
   onCancel: () => void;
   onSave: (jobData: any) => void;
   openSummaryDrawer: (candidate: Candidate | number) => void;
+  openMessageModal?: (config: MessageModalConfig) => void;
+  onOpenNewTask?: () => void;
 }
 
-type JobMainView = 'edit' | 'events' | 'candidates' | 'publish' | 'sonar';
+type JobMainView = 'edit' | 'events' | 'candidates' | 'referrals' | 'publish' | 'sonar';
 
 const jobMainViewFromQuery = (raw: string | null): JobMainView | null => {
     const key = String(raw || '').trim().toLowerCase();
-    if (key === 'candidates' || key === 'edit' || key === 'events' || key === 'publish' || key === 'sonar') {
+    if (key === 'candidates' || key === 'referrals' || key === 'edit' || key === 'events' || key === 'publish' || key === 'sonar') {
         return key;
     }
     return null;
 };
 
-const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, openSummaryDrawer }) => {
+const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, openSummaryDrawer, openMessageModal, onOpenNewTask = () => {} }) => {
     const { t } = useLanguage();
     const [searchParams] = useSearchParams();
     const [mainView, setMainView] = useState<JobMainView>('edit');
@@ -121,8 +125,11 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                 if (!confirmLeaveWithoutSave()) return;
             }
             setMainView(next);
+            if (jobId) {
+                navigate(`/jobs/edit/${jobId}?view=${next}`, { replace: true });
+            }
         },
-        [jobFormDirty, mainView],
+        [jobFormDirty, mainView, jobId, navigate],
     );
 
     const handleCandidateCountChange = useCallback((count: number) => {
@@ -149,6 +156,13 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
         if (fromQuery) setMainView(fromQuery);
     }, [jobId, searchParams]);
 
+    const jobAuthHeaders = useCallback((): HeadersInit => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        const h: HeadersInit = {};
+        if (token) (h as Record<string, string>).Authorization = `Bearer ${token}`;
+        return h;
+    }, []);
+
     useEffect(() => {
         if (!jobId) {
             setJobLoading(false);
@@ -159,7 +173,9 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
             try {
                 setJobLoading(true);
                 setJobError(null);
-                const res = await fetch(`${apiBase}/api/jobs/${jobId}`);
+                const res = await fetch(`${apiBase}/api/jobs/${jobId}`, {
+                    headers: jobAuthHeaders(),
+                });
                 if (!res.ok) {
                     throw new Error(res.statusText || 'Failed to load job');
                 }
@@ -167,6 +183,21 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                 if (active) {
                     setJobDataState(data);
                     setLiveCandidateCount(null);
+                    try {
+                        const viewRes = await fetch(`${apiBase}/api/jobs/${jobId}/record-staff-view`, {
+                            method: 'POST',
+                            headers: jobAuthHeaders(),
+                        });
+                        if (viewRes.ok) {
+                            const meta = (await viewRes.json()) as {
+                                lastOpenedByName?: string | null;
+                                lastOpenedAt?: string | null;
+                            };
+                            setJobDataState((prev) => ({ ...prev, ...meta }));
+                        }
+                    } catch {
+                        /* non-fatal */
+                    }
                 }
             } catch (err: any) {
                 console.error('[ExistingJobView] failed to load job', err);
@@ -180,7 +211,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
         return () => {
             active = false;
         };
-    }, [apiBase, jobId]);
+    }, [apiBase, jobId, jobAuthHeaders]);
 
     const initializeChat = () => {
         if (chatSession) return;
@@ -394,6 +425,27 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                             })}
                         </div>
                     ) : null}
+                    {(() => {
+                        const openedName = (jobDataState as { lastOpenedByName?: string | null }).lastOpenedByName;
+                        const openedAt = (jobDataState as { lastOpenedAt?: string | null }).lastOpenedAt;
+                        if (!openedAt || !openedName) return null;
+                        const when = new Date(String(openedAt));
+                        if (Number.isNaN(when.getTime())) return null;
+                        return (
+                            <div
+                                className="flex w-full min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1 border-t border-white/25 pt-2 text-[11px] font-semibold text-white sm:text-xs"
+                                title="מי פתח את עמוד המשרה לאחרונה בממשק הצוות"
+                            >
+                                <ClockIcon className="h-4 w-4 shrink-0 text-primary-100" aria-hidden />
+                                <span className="text-primary-100">נפתח לאחרונה:</span>
+                                <span>{openedName}</span>
+                                <span className="text-primary-200/80">·</span>
+                                <span dir="ltr" className="font-mono text-[10px] sm:text-[11px]">
+                                    {when.toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}
+                                </span>
+                            </div>
+                        );
+                    })()}
                 </div>
 
                 <div className="relative z-10 flex w-full shrink-0 flex-row items-stretch gap-1.5 lg:w-auto lg:gap-2">
@@ -509,6 +561,14 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         </button>
                         <button
                             type="button"
+                            onClick={() => trySetMainView('referrals')}
+                            className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'referrals' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
+                        >
+                            <PaperAirplaneIcon className="w-5 h-5" />
+                            {t('job.tab_referrals')}
+                        </button>
+                        <button
+                            type="button"
                             onClick={() => trySetMainView('sonar')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'sonar' ? 'bg-accent-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
@@ -539,20 +599,42 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                     </div>
 
                     <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm min-h-[600px]">
-                        {mainView === 'candidates' && <JobCandidatesView openSummaryDrawer={openSummaryDrawer} jobId={jobDataState.id} />}
+                        {mainView === 'candidates' && (
+                            <JobCandidatesView
+                                openSummaryDrawer={openSummaryDrawer}
+                                jobId={jobId || jobDataState.id}
+                                jobTitle={jobDataState.title}
+                                openMessageModal={openMessageModal}
+                                onOpenNewTask={onOpenNewTask}
+                            />
+                        )}
+                        {mainView === 'referrals' && (
+                            <div className="p-6">
+                                <ReferralsView
+                                    onOpenNewTask={onOpenNewTask}
+                                    jobId={jobId || jobDataState.id}
+                                    jobTitle={jobDataState.title}
+                                />
+                            </div>
+                        )}
                         {mainView === 'sonar' && (
                             <JobSonarView jobId={jobDataState.id} job={jobDataState as Record<string, unknown>} openSummaryDrawer={openSummaryDrawer} />
                         )}
                         {mainView === 'edit' && (
                             <div className="p-6">
-                                <NewJobView
-                                    onCancel={() => trySetMainView('candidates')}
-                                    onSave={handleJobSave}
-                                    isEditing={true}
-                                    jobData={jobDataState}
-                                    isEmbedded={true}
-                                    onDirtyChange={setJobFormDirty}
-                                />
+                                {jobLoading || !jobDataState?.id ? (
+                                    <div className="text-sm text-text-muted py-12 text-center">טוען פרטי משרה...</div>
+                                ) : (
+                                    <NewJobView
+                                        key={jobDataState.id}
+                                        onCancel={() => trySetMainView('candidates')}
+                                        onSave={handleJobSave}
+                                        isEditing={true}
+                                        jobData={jobDataState}
+                                        isEmbedded={true}
+                                        onDirtyChange={setJobFormDirty}
+                                    />
+                                )}
                             </div>
                         )}
                         {mainView === 'events' && (

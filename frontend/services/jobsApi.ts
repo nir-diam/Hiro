@@ -80,6 +80,66 @@ export async function fetchAllJobs(): Promise<unknown[]> {
     });
 }
 
+export type JobsGridFacets = {
+    clients: string[];
+    recruiters: string[];
+    fields: string[];
+    roles: string[];
+    clientTypes: string[];
+    recruitingCoordinators: string[];
+    accountManagers: string[];
+};
+
+export type JobsGridStats = {
+    attentionNeeded: number;
+    totalWaiting: number;
+    momentumJobs: number;
+    avgDays: number;
+};
+
+export type JobsGridResponse = {
+    jobs: unknown[];
+    total: number;
+    page: number;
+    limit: number;
+    facets?: JobsGridFacets;
+    stats?: JobsGridStats;
+};
+
+/** Paginated jobs list with server-side search/filters (JobsView). */
+export async function fetchJobsGrid(
+    params: Record<string, string | number | boolean | undefined>,
+    tenant: boolean,
+): Promise<JobsGridResponse> {
+    const qs = new URLSearchParams();
+    qs.set('paginated', '1');
+    for (const [key, value] of Object.entries(params)) {
+        if (value == null || value === '') continue;
+        qs.set(key, String(value));
+    }
+    const path = tenant ? '/api/jobs/for-list' : '/api/jobs';
+    const url = `${apiBase()}${path}?${qs.toString()}`;
+    return fetchJsonDeduped(`GET ${path}?${qs.toString()}`, async () => {
+        const res = await fetch(url, {
+            headers: authHeaders(),
+            cache: 'no-store',
+        });
+        if (!res.ok) throw new Error(await parseErr(res));
+        const payload = await res.json();
+        if (Array.isArray(payload)) {
+            return { jobs: payload, total: payload.length, page: 1, limit: payload.length };
+        }
+        return {
+            jobs: Array.isArray(payload?.jobs) ? payload.jobs : [],
+            total: Number(payload?.total) || 0,
+            page: Number(payload?.page) || 1,
+            limit: Number(payload?.limit) || 50,
+            facets: payload?.facets,
+            stats: payload?.stats,
+        };
+    });
+}
+
 /** POST /api/jobs/log-smart-import-open — audit when staff opens AI smart-import modal on NewJobView */
 export async function logJobSmartImportModalOpen(body: {
     jobId?: string | null;

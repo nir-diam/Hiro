@@ -35,7 +35,13 @@ import {
 } from '../services/profileSuggestionValidation';
 import { buildCandidateFullName, syncCandidateNameFields } from '../utils/candidateName';
 import { buildCandidateChatContext } from '../utils/candidateChatContext';
-import { educationEntryToDisplayLine, normalizeDrivingLicensesForPrint, normalizeLanguagesForPrintRows, splitWorkExperienceForPrint } from '../utils/printableResumeFormatting';
+import {
+    educationEntryToDisplayLine,
+    formatCvPrintDate,
+    normalizeDrivingLicensesForPrint,
+    normalizeLanguagesForPrintRows,
+    splitWorkExperienceForPrint,
+} from '../utils/printableResumeFormatting';
 import CityEditableField from './CityEditableField';
 import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
 import CandidateProfileVideoModal from './CandidateProfileVideoModal';
@@ -487,6 +493,13 @@ const buildProfileDuplicatePayload = (
         delete clone[key];
     });
     clone.userId = userId;
+    const sourceId = String(source.id || source.backendId || '').trim();
+    const linkedPrimary = String(source.canonicalCandidateId || '').trim();
+    const primaryId = linkedPrimary && linkedPrimary !== sourceId ? linkedPrimary : sourceId;
+    delete clone.canonicalCandidateId;
+    delete clone.staffProfileCopy;
+    if (primaryId) clone.canonicalCandidateId = primaryId;
+    clone.staffProfileCopy = false;
     clone.profileName = profileName;
     clone.title = profileName;
     clone.workExperience = cloneProfileRows(clone.workExperience, true);
@@ -1073,13 +1086,6 @@ const EditableField: React.FC<{
     );
 };
 
-function formatCvPrintDate(d?: string | null): string {
-    if (d == null || !String(d).trim()) return '';
-    const s = String(d).trim();
-    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10).split('-').reverse().join('/');
-    return s;
-}
-
 export const PrintableResume: React.FC<{
     data: any;
     className?: string;
@@ -1096,6 +1102,10 @@ export const PrintableResume: React.FC<{
         explicitMilitary,
     );
     const compact = density === 'compact';
+    const keyFacts = (Array.isArray(data.keyFacts) ? data.keyFacts : [])
+        .map((f: unknown) => String(f ?? '').trim())
+        .filter(Boolean)
+        .slice(0, 3);
 
     const rootPad = compact ? 'p-3' : 'p-10';
     const headerBar = compact ? 'pb-1.5 mb-3' : 'pb-4 mb-6';
@@ -1259,13 +1269,21 @@ export const PrintableResume: React.FC<{
                 )}
             </div>
 
-            {/* Summary — always default typography */}
-            {data.professionalSummary && (
+            {keyFacts.length > 0 ? (
+                <section className="printable-resume-section mb-6">
+                    <h3 className={`printable-resume-section-title ${executiveSummaryHeadingCls}`}>עובדות מרכזיות</h3>
+                    <ul className={`${executiveSummaryBodyCls} list-disc pr-5 space-y-1`}>
+                        {keyFacts.map((fact: string, i: number) => (
+                            <li key={`kf-${i}`}>{fact}</li>
+                        ))}
+                    </ul>
+                </section>
+            ) : data.professionalSummary ? (
                 <section className="printable-resume-section mb-6">
                     <h3 className={`printable-resume-section-title ${executiveSummaryHeadingCls}`}>תמצית </h3>
                     <p className={`printable-resume-entry-desc ${executiveSummaryBodyCls}`}>{data.professionalSummary}</p>
                 </section>
-            )}
+            ) : null}
 
             {/* Experience */}
             {civilianWorkExperience.length > 0 &&
@@ -1576,6 +1594,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const [activeView, setActiveView] = useState('profile');
     const [isSwitching, setIsSwitching] = useState(false);
     const [isDeletingProfileId, setIsDeletingProfileId] = useState<string | null>(null);
+    const [isAddProfileOpen, setIsAddProfileOpen] = useState(false);
+    const [newProfileName, setNewProfileName] = useState('');
+    const [addProfileError, setAddProfileError] = useState<string | null>(null);
+    const [isCreatingProfile, setIsCreatingProfile] = useState(false);
     const [isSidebarOpenMobile, setIsSidebarOpenMobile] = useState(false);
     const [isResumePreviewOpen, setIsResumePreviewOpen] = useState(false);
     const [isCvViewerOpen, setIsCvViewerOpen] = useState(false);
@@ -1592,6 +1614,32 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     // --- State for Pending Tasks (Digital Screening) ---
     const [pendingTasks, setPendingTasks] = useState<PendingDigitalScreeningTask[]>([]);
     const [externalScreeningTaskId, setExternalScreeningTaskId] = useState<string | null>(null);
+    const [formData, setFormData] = useState<any>(() => cloneEmptyCandidateForm());
+    const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
+    const [joinCandidatePool, setJoinCandidatePool] = useState(false);
+    const [matchedJobs, setMatchedJobs] = useState<JobMatchResult[]>([]);
+    const [matchedJobsLoading, setMatchedJobsLoading] = useState(false);
+    const [matchedJobsError, setMatchedJobsError] = useState<string | null>(null);
+    const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
+    const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
+    const [applySuccessJobId, setApplySuccessJobId] = useState<string | null>(null);
+    const [applyError, setApplyError] = useState<{ jobId: string; message: string } | null>(null);
+    const [isChatOpen, setIsChatOpen] = useState(false);
+    const [chatMessages, setChatMessages] = useState<Message[]>([]);
+    const [chatSession, setChatSession] = useState<Chat | null>(null);
+    const [isChatLoading, setIsChatLoading] = useState(false);
+    const [chatError, setChatError] = useState<string | null>(null);
+    const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+    const [generateSummaryError, setGenerateSummaryError] = useState<string | null>(null);
+    const [jobSearchTerm, setJobSearchTerm] = useState('');
+    const [jobFilters, setJobFilters] = useState<JobSearchFilterState>(EMPTY_JOB_SEARCH_FILTERS);
+    const [favoriteJobIds, setFavoriteJobIds] = useState<Set<string>>(new Set());
+    const [applicationsRefreshToken, setApplicationsRefreshToken] = useState(0);
+    const [expandedSections, setExpandedSections] = useState<Set<SmartTagType>>(new Set());
+    const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
+    const [tagSelectorCategory, setTagSelectorCategory] = useState<TagCategory>('role');
+    const [localTagDetails, setLocalTagDetails] = useState<CandidateTagDetail[]>([]);
+    const [approvedTagsCatalog, setApprovedTagsCatalog] = useState<ApprovedTagRecord[]>([]);
 
     const filterVisibleProfiles = (items: any[]) => items.filter((item) => !item.isDeleted);
 
@@ -1623,24 +1671,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         [navigableProfiles, activeProfileId],
     );
 
-    // Data for forms (synced with active profile)
-    const [formData, setFormData] = useState<any>(() => cloneEmptyCandidateForm());
-    
-    // UI State for Header Interactions
-    const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
-    const [joinCandidatePool, setJoinCandidatePool] = useState(false);
-    const [matchedJobs, setMatchedJobs] = useState<JobMatchResult[]>([]);
-    const [matchedJobsLoading, setMatchedJobsLoading] = useState(false);
-    const [matchedJobsError, setMatchedJobsError] = useState<string | null>(null);
-    const [appliedJobIds, setAppliedJobIds] = useState<Set<string>>(new Set());
-    const [applyingJobId, setApplyingJobId] = useState<string | null>(null);
-    const [applySuccessJobId, setApplySuccessJobId] = useState<string | null>(null);
-    const [applyError, setApplyError] = useState<{ jobId: string; message: string } | null>(null);
-    const [expandedSections, setExpandedSections] = useState<Set<SmartTagType>>(new Set());
-    const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
-    const [tagSelectorCategory, setTagSelectorCategory] = useState<TagCategory>('role');
-    const [localTagDetails, setLocalTagDetails] = useState<CandidateTagDetail[]>([]);
-    const [approvedTagsCatalog, setApprovedTagsCatalog] = useState<ApprovedTagRecord[]>([]);
     const ROW_CATEGORY_MAP: Record<string, TagCategory> = {
         roles: 'role',
         qualifications: 'role',
@@ -1935,21 +1965,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         });
     }, []);
 
-    // AI Chat State
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [chatMessages, setChatMessages] = useState<Message[]>([]);
-    const [chatSession, setChatSession] = useState<Chat | null>(null);
-    const [isChatLoading, setIsChatLoading] = useState(false);
-    const [chatError, setChatError] = useState<string | null>(null);
-    const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
-    const [generateSummaryError, setGenerateSummaryError] = useState<string | null>(null);
-
-    // --- Job Search & Favorites State ---
-    const [jobSearchTerm, setJobSearchTerm] = useState('');
-    const [jobFilters, setJobFilters] = useState<JobSearchFilterState>(EMPTY_JOB_SEARCH_FILTERS);
-    const [favoriteJobIds, setFavoriteJobIds] = useState<Set<string>>(new Set());
-    const [applicationsRefreshToken, setApplicationsRefreshToken] = useState(0);
-
     useEffect(() => {
         setJoinCandidatePool(Boolean(formData.consentToJobOffers));
     }, [formData.consentToJobOffers, formData.id]);
@@ -1997,39 +2012,70 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         );
     }, [matchedJobs]);
 
-    const handleApplyToJob = useCallback(async (jobId: string) => {
-        if (!candidateId || appliedJobIds.has(jobId) || applyingJobId === jobId) return;
-        setApplyingJobId(jobId);
-        setApplyError(null);
-        setApplySuccessJobId(null);
-        try {
-            await assignCandidateToJob(String(candidateId), jobId, {
-                source: 'candidate_portal',
-                status: 'חדש',
-            });
-            setAppliedJobIds((prev) => new Set(prev).add(jobId));
-            setMatchedJobs((prev) =>
-                prev.map((job) =>
-                    job.id === jobId ? { ...job, matchType: 'application' as const } : job,
-                ),
-            );
-            setApplySuccessJobId(jobId);
-            setApplicationsRefreshToken((token) => token + 1);
-            window.setTimeout(() => {
-                setApplySuccessJobId((current) => (current === jobId ? null : current));
-            }, 2500);
-        } catch (err: unknown) {
-            setApplyError({
-                jobId,
-                message: err instanceof Error ? err.message : 'הגשת המועמדות נכשלה',
-            });
-            window.setTimeout(() => {
-                setApplyError((current) => (current?.jobId === jobId ? null : current));
-            }, 5000);
-        } finally {
-            setApplyingJobId(null);
+    useEffect(() => {
+        if (!activeProfile) return;
+        setFormData(activeProfile);
+        setCandidateId(activeProfile.id || null);
+        if (activeProfile.id != null && String(activeProfileId) !== String(activeProfile.id)) {
+            setActiveProfileId(activeProfile.id);
         }
-    }, [candidateId, appliedJobIds, applyingJobId]);
+    }, [activeProfile, activeProfileId]);
+
+    useEffect(() => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setLoadError('לא מחובר/ת. התחבר/י כדי לראות את הפרופיל.');
+            navigate('/candidate-portal/login');
+            return;
+        }
+        if (initialPortalLoadFiredRef.current) return;
+        initialPortalLoadFiredRef.current = true;
+        void loadCandidateRef.current?.();
+    }, [navigate]);
+
+    useEffect(() => {
+        let portalUserId: string | null = null;
+        let portalEmail: string | null = formData.email || null;
+        try {
+            const raw =
+                localStorage.getItem('herodata')
+                || localStorage.getItem('herouser')
+                || localStorage.getItem('user');
+            if (raw) {
+                const parsed = JSON.parse(raw) as { id?: string; userId?: string; email?: string };
+                portalUserId = parsed.userId || parsed.id ? String(parsed.userId || parsed.id) : null;
+                portalEmail = parsed.email ? String(parsed.email) : portalEmail;
+            }
+        } catch {
+            // fall through to JWT below
+        }
+        if (!portalUserId) {
+            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+            if (token) {
+                try {
+                    const parts = token.split('.');
+                    const segment = parts[1];
+                    if (segment) {
+                        const base64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+                        const padded = base64 + '==='.slice((base64.length + 3) % 4);
+                        const decoded = JSON.parse(atob(padded)) as { sub?: string; email?: string };
+                        if (decoded.sub) portalUserId = String(decoded.sub);
+                        if (decoded.email) portalEmail = String(decoded.email);
+                    }
+                } catch {
+                    // ignore bad token
+                }
+            }
+        }
+        startCandidatePortalRecording({
+            candidateId: candidateId || formData.id?.toString() || null,
+            userId: portalUserId,
+            email: portalEmail,
+        });
+        return () => {
+            stopCandidatePortalRecording();
+        };
+    }, [candidateId, formData.id, formData.email]);
 
     const profileMatchContext = useMemo(
         () => profileMatchContextFromForm(formData),
@@ -2064,6 +2110,83 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         () => portalJobs.filter((job) => favoriteJobIds.has(job.id)),
         [portalJobs, favoriteJobIds],
     );
+
+    const profileCompleteness = useMemo(
+        () =>
+            computeCandidateProfileCompleteness({
+                firstName: formData.firstName,
+                lastName: formData.lastName,
+                fullName: formData.fullName,
+                title: formData.title,
+                professionalSummary: formData.professionalSummary,
+                phone: formData.phone,
+                email: formData.email,
+                profilePicture: formData.profilePicture,
+                cityDisplay: candidateCityDisplay(formData),
+                availability: formData.availability,
+                desiredRoles: formData.desiredRoles,
+                workExperience: formData.workExperience,
+            }),
+        [formData],
+    );
+
+    const showProfileCompletenessBanner = !completenessBannerDismissed;
+
+    const handleApplyToJob = async (jobId: string) => {
+        if (!candidateId || appliedJobIds.has(jobId)) return;
+        setApplyingJobId(jobId);
+        setApplyError(null);
+        setApplySuccessJobId(null);
+        try {
+            await assignCandidateToJob(String(candidateId), jobId, {
+                source: 'candidate_portal',
+                status: 'חדש',
+            });
+            setAppliedJobIds((prev) => new Set(prev).add(jobId));
+            setMatchedJobs((prev) =>
+                prev.map((job) =>
+                    job.id === jobId ? { ...job, matchType: 'application' as const } : job,
+                ),
+            );
+            setApplySuccessJobId(jobId);
+            setApplicationsRefreshToken((token) => token + 1);
+            window.setTimeout(() => {
+                setApplySuccessJobId((current) => (current === jobId ? null : current));
+            }, 2500);
+        } catch (err: unknown) {
+            setApplyError({
+                jobId,
+                message: err instanceof Error ? err.message : 'הגשת המועמדות נכשלה',
+            });
+            window.setTimeout(() => {
+                setApplyError((current) => (current?.jobId === jobId ? null : current));
+            }, 5000);
+        } finally {
+            setApplyingJobId((current) => (current === jobId ? null : current));
+        }
+    };
+
+    const handlePendingDigitalScreeningsChange = (tasks: PendingDigitalScreeningTask[]) => {
+        setPendingTasks(tasks);
+    };
+
+    const handleSwitchProfile = (id: string | number) => {
+        if (id === activeProfileId) return;
+        setIsSwitching(true);
+        window.setTimeout(() => {
+            setActiveProfileId(id);
+            setActiveView('profile');
+            setIsSwitching(false);
+        }, 800);
+    };
+
+    const moveProfile = (offset: number) => {
+        const idx = currentProfileIndex;
+        if (idx === -1) return;
+        const target = navigableProfiles[idx + offset];
+        if (!target?.id) return;
+        handleSwitchProfile(target.id);
+    };
 
     const renderPortalJobCard = (job: ReturnType<typeof mapJobMatchToPortalCard>) => (
         <JobCard
@@ -2462,73 +2585,41 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     };
 
 
-    // Sync formData when profile changes
-    useEffect(() => {
-        if (!activeProfile) return;
-        setFormData(activeProfile);
-        setCandidateId(activeProfile.id || null);
-        if (activeProfile.id != null && String(activeProfileId) !== String(activeProfile.id)) {
-            setActiveProfileId(activeProfile.id);
-        }
-    }, [activeProfile, activeProfileId]);
-
-    useEffect(() => {
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        if (!token) {
-            setLoadError('לא מחובר/ת. התחבר/י כדי לראות את הפרופיל.');
-            navigate('/candidate-portal/login');
-            return;
-        }
-        if (initialPortalLoadFiredRef.current) return;
-        initialPortalLoadFiredRef.current = true;
-        loadCandidate();
-    }, []);
-
-    useEffect(() => {
-        const user = getUser();
-        startCandidatePortalRecording({
-            candidateId: candidateId || formData.id?.toString() || null,
-            userId: user?.id ? String(user.id) : null,
-            email: user?.email ? String(user.email) : formData.email || null,
-        });
-        return () => {
-            stopCandidatePortalRecording();
-        };
-    }, [candidateId, formData.id, formData.email]);
-
-    // Handlers
-    const handleSwitchProfile = (id: string | number) => {
-        if (id === activeProfileId) return;
-        setIsSwitching(true);
-        setTimeout(() => {
-            setActiveProfileId(id);
-            setActiveView('profile'); 
-            setIsSwitching(false);
-        }, 800);
+    const openAddProfileDialog = () => {
+        setNewProfileName('');
+        setAddProfileError(null);
+        setIsAddProfileOpen(true);
     };
 
-    const moveProfile = useCallback((offset: number) => {
-        const idx = currentProfileIndex;
-        if (idx === -1) return;
-        const target = navigableProfiles[idx + offset];
-        if (!target?.id) return;
-        handleSwitchProfile(target.id);
-    }, [currentProfileIndex, navigableProfiles]);
+    const closeAddProfileDialog = () => {
+        if (isCreatingProfile) return;
+        setIsAddProfileOpen(false);
+        setAddProfileError(null);
+    };
 
     const handleAddProfile = async () => {
-        const name = prompt("הכנס שם לפרופיל החדש (למשל: 'משרות ניהול'):");
-        if (!name?.trim()) return;
-        const profileName = name.trim();
+        const profileName = newProfileName.trim();
+        if (!profileName) {
+            setAddProfileError('יש להזין שם לפרופיל החדש.');
+            return;
+        }
         const user = getUser();
         const userId = user?.userId || user?.id;
         if (!userId) {
-            alert('צריך להיות מחובר/ת כדי ליצור פרופיל נוסף.');
+            setAddProfileError('צריך להיות מחובר/ת כדי ליצור פרופיל נוסף.');
             return;
         }
 
         const source = (activeProfile ?? formData) as Record<string, unknown>;
-        const shouldDuplicate = profiles.length > 0 || Boolean(source?.id);
+        const sourceId = String(source?.id || source?.backendId || '').trim();
+        const shouldDuplicate = profiles.length > 0 || Boolean(sourceId);
+        if (saveTimeoutRef.current) {
+            clearTimeout(saveTimeoutRef.current);
+            saveTimeoutRef.current = null;
+        }
 
+        setIsCreatingProfile(true);
+        setAddProfileError(null);
         try {
             const base = apiBase || '';
             const payload = shouldDuplicate
@@ -2552,7 +2643,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 throw new Error(body?.message || 'יצירת פרופיל נכשלה.');
             }
             const created = await res.json();
-            const newId = created.id;
+            const newId = created.id != null ? String(created.id) : '';
+            if (!newId || (sourceId && newId === sourceId) || created._identityReused) {
+                throw new Error('הפרופיל הקיים לא שוכפל. נסה שוב.');
+            }
 
             if (shouldDuplicate && newId) {
                 const tagEntries = buildTagEntriesFromSource(source);
@@ -2577,15 +2671,22 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             normalized.profileName = profileName;
             normalized.title = profileName;
 
-            setProfiles((prev) => [...prev, normalized]);
+            setProfiles((prev) => {
+                const withoutNew = prev.filter((p) => String(p.id) !== newId);
+                return [...withoutNew, normalized];
+            });
             setCandidateId(normalized.id);
             setLocalTagDetails([]);
             setFormData(normalized);
+            setIsAddProfileOpen(false);
+            setNewProfileName('');
             handleSwitchProfile(normalized.id);
         } catch (err: unknown) {
             console.error('Failed to create profile', err);
             const message = err instanceof Error ? err.message : 'שגיאה ביצירת פרופיל.';
-            alert(message);
+            setAddProfileError(message);
+        } finally {
+            setIsCreatingProfile(false);
         }
     };
 
@@ -2945,11 +3046,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }
     };
 
-    const handlePendingDigitalScreeningsChange = useCallback((tasks: PendingDigitalScreeningTask[]) => {
-        setPendingTasks(tasks);
-    }, []);
-
-
     // --- PENDING TASKS SECTION (New) ---
 
     const getAvailabilityMeta = (availability?: string | null) => {
@@ -3250,27 +3346,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             </div>
         );
     };
-
-    const profileCompleteness = useMemo(
-        () =>
-            computeCandidateProfileCompleteness({
-                firstName: formData.firstName,
-                lastName: formData.lastName,
-                fullName: formData.fullName,
-                title: formData.title,
-                professionalSummary: formData.professionalSummary,
-                phone: formData.phone,
-                email: formData.email,
-                profilePicture: formData.profilePicture,
-                cityDisplay: candidateCityDisplay(formData),
-                availability: formData.availability,
-                desiredRoles: formData.desiredRoles,
-                workExperience: formData.workExperience,
-            }),
-        [formData],
-    );
-
-    const showProfileCompletenessBanner = !completenessBannerDismissed;
 
     const handleDismissCompletenessBanner = () => {
         setCompletenessBannerDismissed(true);
@@ -3595,7 +3670,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 activeProfileId={activeProfileId}
                 profiles={portalSwitcherProfiles}
                 onSwitchProfile={handleSwitchProfile}
-                onAddProfile={handleAddProfile}
+                onAddProfile={openAddProfileDialog}
                 isOpenMobile={isSidebarOpenMobile}
                 setIsOpenMobile={setIsSidebarOpenMobile}
                 favoriteCount={favoriteJobIds.size}
@@ -3684,6 +3759,76 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 isSaving={uploadState.inProgress && uploadState.type === 'profile-video'}
             />
             
+            {isAddProfileOpen ? (
+                <div
+                    className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4 backdrop-blur-[2px]"
+                    onClick={closeAddProfileDialog}
+                >
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="add-profile-title"
+                        className="w-full max-w-md rounded-2xl border border-border-default bg-bg-card p-6 shadow-xl"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="mb-4 flex items-start justify-between gap-3">
+                            <div>
+                                <h3 id="add-profile-title" className="text-lg font-bold text-text-default">יצירת פרופיל חדש</h3>
+                                <p className="mt-1 text-sm text-text-muted">
+                                    ייווצר עותק של הפרופיל הנוכחי עם השם החדש. הפרופיל הקיים לא ישתנה.
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                onClick={closeAddProfileDialog}
+                                className="rounded-lg p-1.5 text-text-muted hover:bg-bg-hover hover:text-text-default"
+                                aria-label="סגור"
+                            >
+                                <XMarkIcon className="h-5 w-5" />
+                            </button>
+                        </div>
+                        <label className="mb-1.5 block text-sm font-semibold text-text-muted" htmlFor="new-profile-name">
+                            שם הפרופיל
+                        </label>
+                        <input
+                            id="new-profile-name"
+                            autoFocus
+                            value={newProfileName}
+                            onChange={(e) => setNewProfileName(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    void handleAddProfile();
+                                }
+                            }}
+                            placeholder="למשל: משרות ניהול"
+                            className="w-full rounded-lg border border-border-default bg-bg-input px-3 py-2.5 text-sm text-text-default focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500"
+                        />
+                        {addProfileError ? (
+                            <p className="mt-2 text-sm font-medium text-red-600">{addProfileError}</p>
+                        ) : null}
+                        <div className="mt-5 flex items-center justify-end gap-2">
+                            <button
+                                type="button"
+                                onClick={closeAddProfileDialog}
+                                disabled={isCreatingProfile}
+                                className="rounded-lg border border-border-default bg-white px-4 py-2 text-sm font-bold text-text-default hover:bg-bg-hover disabled:opacity-50"
+                            >
+                                ביטול
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => void handleAddProfile()}
+                                disabled={isCreatingProfile || !newProfileName.trim()}
+                                className="rounded-lg bg-primary-600 px-4 py-2 text-sm font-bold text-white hover:bg-primary-700 disabled:opacity-50"
+                            >
+                                {isCreatingProfile ? 'יוצר פרופיל…' : 'יצירת פרופיל'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
+
              <HiroAIChat
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}

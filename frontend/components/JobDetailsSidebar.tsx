@@ -100,7 +100,7 @@ const JobDetailsSidebar: React.FC<JobDetailsSidebarProps> = ({ job, onCandidateC
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         const headers: HeadersInit = {};
         if (token) headers.Authorization = `Bearer ${token}`;
-        const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}/candidates`, { headers });
+        const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}/candidates?lite=1`, { headers });
         if (!res.ok) throw new Error('Failed to load candidates');
         const payload = await res.json();
         if (!active) return;

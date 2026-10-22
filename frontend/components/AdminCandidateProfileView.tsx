@@ -5,8 +5,13 @@ import {
     AvatarIcon, ArrowLeftIcon, PhoneIcon, MapPinIcon, EnvelopeIcon, 
     BriefcaseIcon, UserIcon, ClockIcon, DocumentTextIcon, 
     TrashIcon, NoSymbolIcon, PencilIcon, CheckCircleIcon,
-    InformationCircleIcon, XMarkIcon, MagnifyingGlassIcon,
+    InformationCircleIcon, XMarkIcon, MagnifyingGlassIcon, ExclamationTriangleIcon,
 } from './Icons';
+import {
+    COORDINATOR_DATE_REVIEW_TOOLTIP,
+    formatExperienceDateRange,
+    workExperienceNeedsDateReview,
+} from '../utils/workExperienceDateWarnings';
 import ResumeViewer from './ResumeViewer';
 import ActivityLogModal from './ActivityLogModal'; // Reuse existing logs logic
 
@@ -876,10 +881,27 @@ const AdminCandidateProfileView: React.FC = () => {
                                                                         <span className="text-[10px] text-emerald-600 font-semibold">✓ מקושר למאגר</span>
                                                                     )}
                                                                 </td>
-                                                                <td className="p-3 align-top text-primary-600 text-sm">{we.title || we.role || 'תפקיד לא צוין'}</td>
+                                                                <td className="p-3 align-top text-primary-600 text-sm">
+                                                                    <div className="flex items-start gap-1.5">
+                                                                        <span>{we.title || we.role || 'תפקיד לא צוין'}</span>
+                                                                        {workExperienceNeedsDateReview(
+                                                                            we,
+                                                                            Array.isArray(candidate.workExperience)
+                                                                                ? candidate.workExperience
+                                                                                : [],
+                                                                        ) ? (
+                                                                            <span
+                                                                                title={COORDINATOR_DATE_REVIEW_TOOLTIP}
+                                                                                className="inline-flex shrink-0"
+                                                                                aria-label={COORDINATOR_DATE_REVIEW_TOOLTIP}
+                                                                            >
+                                                                                <ExclamationTriangleIcon className="w-4 h-4 text-amber-500" />
+                                                                            </span>
+                                                                        ) : null}
+                                                                    </div>
+                                                                </td>
                                                                 <td className="p-3 align-top text-text-muted text-xs whitespace-nowrap">
-                                                                    {we.startDate ? new Date(we.startDate).toLocaleDateString('he-IL') : ''}
-                                                                    {we.endDate ? ` – ${we.endDate === 'Present' ? 'כיום' : new Date(we.endDate).toLocaleDateString('he-IL')}` : ''}
+                                                                    {formatExperienceDateRange(we.startDate, we.endDate)}
                                                                 </td>
                                                                 <td className="p-3 align-top">
                                                                     <button type="button" onClick={() => openExpEdit(idx)}

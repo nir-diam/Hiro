@@ -25,7 +25,7 @@ export const mockExistingJob = {
     gender: 'זכר' as 'זכר' | 'נקבה' | 'לא משנה',
     mobility: true,
     licenseType: 'C1',
-    postingCode: String(Math.floor(100000 + Math.random() * 900000)),
+    postingCode: '640478',
     validityDays: 60,
     recruitingCoordinator: 'חלי',
     accountManager: 'חלי',

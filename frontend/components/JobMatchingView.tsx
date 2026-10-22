@@ -1,14 +1,14 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import {
-  MagnifyingGlassIcon, ChevronDownIcon, TargetIcon, PlusIcon,
+  MagnifyingGlassIcon, ChevronDownIcon, ChevronUpIcon, TargetIcon, PlusIcon,
   CheckCircleIcon, Squares2X2Icon, TableCellsIcon, SparklesIcon,
   XMarkIcon, ArrowPathIcon, FlagIcon, NoSymbolIcon, FunnelIcon,
 } from './Icons';
-import BulkAddToFilterModal from './BulkAddToFilterModal';
+import BulkAddToFilterModal, { type BulkJobPickerOption } from './BulkAddToFilterModal';
 import ScreeningCollisionWarningModal, { type ScreeningWarningAgg } from './ScreeningCollisionWarningModal';
 import {
-  fetchScreeningPrecheckForJob,
-  linkCandidateToJobFilter,
+  fetchScreeningPrecheckForJobs,
+  linkCandidatesToJobFilters,
   type JobFilterSaveOptions,
 } from '../utils/candidateJobFilterApi';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
@@ -19,13 +19,21 @@ import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDi
 import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
 import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
 import {
-  fetchJobMatches, assignCandidateToJob, fetchCandidate, fetchClientOptions, fetchCityOptions,
+  fetchJobMatches, fetchJobMatchesPage, assignCandidateToJob, fetchCandidate, fetchClientOptions, fetchCityOptions,
   ignoreJobMatch, fetchJobMatchIgnores, clearJobMatchIgnore,
   type JobMatchResult, type JobMatchIgnoreItem,
 } from '../utils/candidateJobMatchingApi';
 import { buildJobTagMatchCategories, type JobTagMatchInput } from '../utils/jobTagMatchCategories';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { authHeaders } from '../utils/authHeaders';
+import { useLanguage } from '../context/LanguageContext';
+import ScanSettingsPanel, {
+  DEFAULT_AFFINITY_LEVEL,
+  DEFAULT_SCAN_BATCH_SIZE,
+  DEFAULT_SCAN_THRESHOLD,
+  type AffinityLevel,
+  toScanHardFilters,
+} from './ScanSettingsPanel';
 import {
   mapApiRecordToJobDetailsDrawerJob,
   type JobDetailsDrawerJob,
@@ -45,6 +53,15 @@ function jobToTagInput(job: JobMatchResult): JobTagMatchInput {
     languages: job.languages as JobTagMatchInput['languages'],
     requirements,
   };
+}
+
+function jobVectorPct(job: JobMatchResult): number | null {
+  return vectorLayerPctFromBreakdown(job.scoreBreakdown);
+}
+
+function jobDistanceKm(job: JobMatchResult): number | null {
+  const raw = job.scoreBreakdown?.geoDistance;
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : null;
 }
 
 function salaryLabel(job: JobMatchResult): string {
@@ -74,21 +91,29 @@ interface JobMatchingViewProps {
 }
 
 const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName, candidateId }) => {
+  const { t } = useLanguage();
   // ── data ──
   const [jobs, setJobs] = useState<JobMatchResult[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [matchCursor, setMatchCursor] = useState({ nextOffset: 0, hasMore: false, total: 0 });
+  const matchesInFlightRef = useRef(false);
+  const nextOffsetRef = useRef(0);
+  const [batchSize, setBatchSize] = useState(DEFAULT_SCAN_BATCH_SIZE);
+  const [threshold, setThreshold] = useState(DEFAULT_SCAN_THRESHOLD);
+  const [vectorSimilarity, setVectorSimilarity] = useState(true);
+  const [activeFilters, setActiveFilters] = useState<Set<string>>(() => new Set());
+  const [affinityLevel, setAffinityLevel] = useState<AffinityLevel>(DEFAULT_AFFINITY_LEVEL);
   const [error, setError] = useState<string | null>(null);
   const [clientOptions, setClientOptions] = useState<string[]>([]);
   const [cityOptions, setCityOptions] = useState<string[]>([]);
-
-  // Prevents double-fetch when parent re-renders and candidateId prop transitions
-  // from a temporary value (e.g. formData.id) to the settled backendId.
-  const loadedForIdRef = useRef<string | null>(null);
 
   // ── ui ──
   const [searchTerm, setSearchTerm] = useState('');
   const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(true);
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('table');
+  const [sortKey, setSortKey] = useState<'title' | 'match' | 'vector' | 'distance' | 'status' | 'city' | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [expandedJobId, setExpandedJobId] = useState<string | null>(null);
   const [activeMatchPopup, setActiveMatchPopup] = useState<{ id: string; x: number; y: number } | null>(null);
   const [candidateRecord, setCandidateRecord] = useState<Record<string, unknown> | null>(null);
@@ -126,8 +151,28 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const [bulkFilterOpen, setBulkFilterOpen] = useState(false);
   const [screeningCollisionOpen, setScreeningCollisionOpen] = useState(false);
   const [screeningCollisionAgg, setScreeningCollisionAgg] = useState<ScreeningWarningAgg[]>([]);
-  const pendingFilterRef = useRef<{ jobId: string; options?: JobFilterSaveOptions } | null>(null);
+  const pendingFilterRef = useRef<{ jobIds: string[]; options?: JobFilterSaveOptions } | null>(null);
   const apiBase = import.meta.env.VITE_API_BASE || '';
+
+  const bulkFilterJobOptions = useMemo((): BulkJobPickerOption[] => {
+    return jobs.map((j) => ({
+      id: j.id,
+      title: j.title,
+      subtitle: j.client,
+      status: j.status,
+      city: j.city,
+    }));
+  }, [jobs]);
+
+  const bulkFilterMatchScoresByJobId = useMemo(() => {
+    const m: Record<string, number> = {};
+    for (const j of jobs) {
+      if (j.id && typeof j.matchScore === 'number' && !Number.isNaN(j.matchScore)) {
+        m[j.id] = j.matchScore;
+      }
+    }
+    return m;
+  }, [jobs]);
 
   const [drawerJob, setDrawerJob] = useState<JobDetailsDrawerJob | null>(null);
   const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
@@ -184,6 +229,8 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   // ── filters ──
   const [advancedFilters, setAdvancedFilters] = useState({
     score: 0,
+    vectorMin: 0,
+    maxDistanceKm: null as number | null,
     jobType: 'הכל',
     status: 'הכל',
     client: 'הכל',
@@ -192,39 +239,72 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
 
   // ─── load ──────────────────────────────────────────────────────────────────
 
-  const loadJobsCore = useCallback(async () => {
-    if (!candidateId) return;
+  const loadJobsCore = useCallback(async (append = false) => {
+    if (!candidateId || matchesInFlightRef.current) return;
+    matchesInFlightRef.current = true;
     setLoading(true);
     setError(null);
+    setHasSearched(true);
+    const offset = append ? nextOffsetRef.current : 0;
     try {
-      const rows = await fetchJobMatches(candidateId, { limit: 50 });
-      setJobs(rows);
-      const linked = new Set<string>(
-        rows.filter((j) => j.matchType === 'application' && j.jobCandidateId).map((j) => j.id),
-      );
-      setAssignedJobs(linked);
+      const page = await fetchJobMatchesPage(candidateId, {
+        limit: batchSize,
+        offset,
+        minScore: threshold,
+        useVector: vectorSimilarity,
+        hardFilters: toScanHardFilters(activeFilters),
+        affinityLevel,
+      });
+      nextOffsetRef.current = page.nextOffset;
+      setMatchCursor({ nextOffset: page.nextOffset, hasMore: page.hasMore, total: page.total });
+      setJobs((prev) => {
+        if (!append) return page.rows;
+        const seen = new Set(prev.map((job) => job.id));
+        return [...prev, ...page.rows.filter((job) => !seen.has(job.id))];
+      });
+      if (!append) {
+        const linked = new Set<string>(
+          page.rows.filter((j) => j.matchType === 'application' && j.jobCandidateId).map((j) => j.id),
+        );
+        setAssignedJobs(linked);
+      } else {
+        setAssignedJobs((prev) => {
+          const next = new Set(prev);
+          page.rows.forEach((j) => {
+            if (j.matchType === 'application' && j.jobCandidateId) next.add(j.id);
+          });
+          return next;
+        });
+      }
     } catch (e) {
       setError((e as Error).message || 'שגיאה בטעינת ההתאמות');
     } finally {
+      matchesInFlightRef.current = false;
       setLoading(false);
     }
-  }, [candidateId]);
+  }, [candidateId, batchSize, threshold, vectorSimilarity, activeFilters, affinityLevel]);
 
-  // Auto-load on mount — guarded so a prop transition (temp id → real backendId) doesn't double-fetch.
-  const loadJobs = useCallback(async () => {
-    if (!candidateId) return;
-    if (loadedForIdRef.current === candidateId) return;
-    loadedForIdRef.current = candidateId;
-    await loadJobsCore();
-  }, [candidateId, loadJobsCore]);
-
-  // Manual refresh — always re-fetches regardless of the guard.
   const refreshJobs = useCallback(() => {
-    loadedForIdRef.current = null;
-    loadJobsCore();
+    void loadJobsCore();
   }, [loadJobsCore]);
 
-  useEffect(() => { loadJobs(); }, [loadJobs]);
+  useEffect(() => {
+    setJobs([]);
+    setHasSearched(false);
+    setError(null);
+    setMatchCursor({ nextOffset: 0, hasMore: false, total: 0 });
+    nextOffsetRef.current = 0;
+  }, [candidateId]);
+
+  const toggleFilter = (key: string) => {
+    if (key === 'affinity') return;
+    setActiveFilters((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
 
   const refreshIgnoreList = useCallback(async () => {
     if (!candidateId) {
@@ -320,38 +400,47 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   };
 
   const runAddToFilter = useCallback(
-    async (jobId: string, options?: JobFilterSaveOptions) => {
-      if (!candidateId || !apiBase) {
+    async (jobIds: string[], options?: JobFilterSaveOptions) => {
+      const cid = String(candidateId || '').trim();
+      const jids = jobIds.map((id) => String(id).trim()).filter(Boolean);
+      if (!cid || !apiBase || jids.length === 0) {
         setBulkFilterOpen(false);
         return;
       }
-      const ok = await linkCandidateToJobFilter(apiBase, candidateId, jobId, options);
+      const { ok, fail } = await linkCandidatesToJobFilters(apiBase, [cid], jids, options);
       setBulkFilterOpen(false);
-      if (ok) {
-        setFeedback('המועמד נוסף לסינון המשרה');
+      if (fail === 0) {
+        setFeedback(
+          jids.length > 1 ? `נוסף לסינון ב-${jids.length} משרות` : 'המועמד נוסף לסינון המשרה',
+        );
         setTimeout(() => setFeedback(null), 4000);
-      } else {
+      } else if (ok === 0) {
         setAssignError('הוספה לסינון נכשלה');
         setTimeout(() => setAssignError(null), 4000);
+      } else {
+        setFeedback(`נוסף לסינון: ${ok} מתוך ${jids.length} משרות`);
+        setTimeout(() => setFeedback(null), 4000);
       }
     },
     [apiBase, candidateId],
   );
 
   const handleAddToFilterSave = useCallback(
-    async (jobId: string, options?: JobFilterSaveOptions) => {
-      if (!candidateId || !apiBase) {
+    async (jobIds: string[], options?: JobFilterSaveOptions) => {
+      const cid = String(candidateId || '').trim();
+      const jids = jobIds.map((id) => String(id).trim()).filter(Boolean);
+      if (!cid || !apiBase || jids.length === 0) {
         setBulkFilterOpen(false);
         return;
       }
-      const precheck = await fetchScreeningPrecheckForJob(apiBase, candidateId, jobId);
-      if (precheck) {
-        pendingFilterRef.current = { jobId, options };
-        setScreeningCollisionAgg([precheck]);
+      const agg = await fetchScreeningPrecheckForJobs(apiBase, [cid], jids);
+      if (agg.length > 0) {
+        pendingFilterRef.current = { jobIds: jids, options };
+        setScreeningCollisionAgg(agg);
         setScreeningCollisionOpen(true);
         return;
       }
-      await runAddToFilter(jobId, options);
+      await runAddToFilter(jids, options);
     },
     [apiBase, candidateId, runAddToFilter],
   );
@@ -402,7 +491,13 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     setRecalculatingId(jobId);
     try {
       // Re-fetch only this job's score by reloading all (backend is fast with cache)
-      const rows = await fetchJobMatches(candidateId, { limit: 50 });
+      const rows = await fetchJobMatches(candidateId, {
+        limit: batchSize,
+        minScore: threshold,
+        useVector: vectorSimilarity,
+        hardFilters: toScanHardFilters(activeFilters),
+        affinityLevel,
+      });
       setJobs(rows);
     } catch {
       // silently ignore
@@ -430,17 +525,32 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const handleFieldSelected = (selectedField: SelectedJobField) => {
     setIsJobFieldSelectorOpen(false);
     // Just reload to pick up any new jobs or re-run matching
-    loadJobs();
     console.info('[JobMatchingView] field selected:', selectedField.role);
   };
 
   const handleAdvancedFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const { name, value } = e.target;
-    setAdvancedFilters((prev) => ({ ...prev, [name]: name === 'score' ? Number(value) : value }));
+    setAdvancedFilters((prev) => {
+      if (name === 'score' || name === 'vectorMin') return { ...prev, [name]: Number(value) };
+      if (name === 'maxDistanceKm') {
+        if (value.trim() === '') return { ...prev, maxDistanceKm: null };
+        const n = Number(value);
+        return { ...prev, maxDistanceKm: Number.isFinite(n) && n >= 0 ? n : prev.maxDistanceKm };
+      }
+      return { ...prev, [name]: value };
+    });
   };
 
   const handleResetAdvancedFilters = () => {
-    setAdvancedFilters({ score: 0, jobType: 'הכל', status: 'הכל', client: 'הכל', city: 'הכל' });
+    setAdvancedFilters({
+      score: 0,
+      vectorMin: 0,
+      maxDistanceKm: null,
+      jobType: 'הכל',
+      status: 'הכל',
+      client: 'הכל',
+      city: 'הכל',
+    });
   };
 
   // ─── filtering (local) ─────────────────────────────────────────────────────
@@ -449,11 +559,55 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     return jobs
       .filter((j) => !searchTerm || j.title.toLowerCase().includes(searchTerm.toLowerCase()) || j.client.toLowerCase().includes(searchTerm.toLowerCase()))
       .filter((j) => j.matchScore >= advancedFilters.score)
+      .filter((j) => {
+        if (advancedFilters.vectorMin <= 0) return true;
+        const vector = jobVectorPct(j);
+        return vector != null && vector >= advancedFilters.vectorMin;
+      })
+      .filter((j) => {
+        if (advancedFilters.maxDistanceKm == null) return true;
+        const km = jobDistanceKm(j);
+        return km != null && km <= advancedFilters.maxDistanceKm;
+      })
       .filter((j) => advancedFilters.jobType === 'הכל' || j.jobType.includes(advancedFilters.jobType))
       .filter((j) => advancedFilters.status === 'הכל' || j.status === advancedFilters.status)
       .filter((j) => advancedFilters.client === 'הכל' || j.client === advancedFilters.client)
       .filter((j) => advancedFilters.city === 'הכל' || j.city === advancedFilters.city);
   }, [jobs, searchTerm, advancedFilters]);
+
+  const sortedJobs = useMemo(() => {
+    if (!sortKey) return filteredJobs;
+    const dir = sortDir === 'asc' ? 1 : -1;
+    const numeric = sortKey === 'match' || sortKey === 'vector' || sortKey === 'distance';
+    return [...filteredJobs].sort((a, b) => {
+      let cmp = 0;
+      if (numeric) {
+        const valueOf = (job: JobMatchResult) =>
+          sortKey === 'match' ? job.matchScore : sortKey === 'vector' ? jobVectorPct(job) : jobDistanceKm(job);
+        const av = valueOf(a);
+        const bv = valueOf(b);
+        if (av == null && bv == null) cmp = 0;
+        else if (av == null) return 1;
+        else if (bv == null) return -1;
+        else cmp = av - bv;
+      } else {
+        const av = sortKey === 'title' ? a.title : sortKey === 'status' ? a.status : a.city;
+        const bv = sortKey === 'title' ? b.title : sortKey === 'status' ? b.status : b.city;
+        cmp = String(av || '').localeCompare(String(bv || ''), 'he');
+      }
+      if (cmp !== 0) return cmp * dir;
+      return a.title.localeCompare(b.title, 'he');
+    });
+  }, [filteredJobs, sortKey, sortDir]);
+
+  const toggleMatchSort = (key: 'title' | 'match' | 'vector' | 'distance' | 'status' | 'city') => {
+    if (sortKey === key) {
+      setSortDir((dir) => (dir === 'asc' ? 'desc' : 'asc'));
+      return;
+    }
+    setSortKey(key);
+    setSortDir(key === 'distance' || key === 'title' || key === 'status' || key === 'city' ? 'asc' : 'desc');
+  };
 
   const passedCount = filteredJobs.filter((j) => j.requirementsMet).length;
 
@@ -702,6 +856,8 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const JobRow: React.FC<{ job: JobMatchResult }> = ({ job }) => {
     const isExpanded = expandedJobId === job.id;
     const toggleExpand = () => setExpandedJobId(isExpanded ? null : job.id);
+    const vectorPct = jobVectorPct(job);
+    const distanceKm = jobDistanceKm(job);
     return (
       <>
         <tr onClick={toggleExpand} className="bg-bg-card hover:bg-bg-hover transition-colors cursor-pointer">
@@ -747,6 +903,12 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               </button>
             </div>
           </td>
+          <td className="p-4 text-sm font-semibold text-text-default">
+            {vectorPct != null ? `${vectorPct}%` : '—'}
+          </td>
+          <td className="p-4 text-sm text-text-default">
+            {distanceKm != null ? `${Math.round(distanceKm)} ק״מ` : '—'}
+          </td>
           <td className="p-4">
             <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${job.status === 'פתוחה' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
               {job.status}
@@ -769,7 +931,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         </tr>
         {isExpanded && (
           <tr className="bg-bg-subtle/50">
-            <td colSpan={5}><JobMatchDetails job={job} /></td>
+            <td colSpan={7}><JobMatchDetails job={job} /></td>
           </tr>
         )}
       </>
@@ -806,7 +968,8 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         </div>
       )}
 
-      <main className="flex-1 overflow-y-auto space-y-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 flex-1 min-h-0">
+      <main className="lg:col-span-8 flex-1 overflow-y-auto space-y-4 min-h-0">
         {/* Controls bar */}
         <div className="flex items-center justify-between bg-bg-card p-3 rounded-lg border border-border-default">
           <div className="flex items-center gap-2">
@@ -929,9 +1092,27 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-x-4 gap-y-2">
                 <div className="lg:col-span-1">
                   <label className="block text-xs font-semibold text-text-muted mb-1">
-                    ציון מינימלי: <span className="text-primary-600 font-bold">{advancedFilters.score}%</span>
+                    ציון התאמה מינימלי: <span className="text-primary-600 font-bold">{advancedFilters.score}%</span>
                   </label>
                   <input type="range" min="0" max="100" name="score" value={advancedFilters.score} onChange={handleAdvancedFilterChange} className="w-full accent-primary-500" />
+                </div>
+                <div className="lg:col-span-1">
+                  <label className="block text-xs font-semibold text-text-muted mb-1">
+                    התאמה וקטורית מינימלית: <span className="text-primary-600 font-bold">{advancedFilters.vectorMin}%</span>
+                  </label>
+                  <input type="range" min="0" max="100" name="vectorMin" value={advancedFilters.vectorMin} onChange={handleAdvancedFilterChange} className="w-full accent-primary-500" />
+                </div>
+                <div className="lg:col-span-1">
+                  <label className="block text-xs font-semibold text-text-muted mb-1">מרחק מקסימלי (ק״מ)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    name="maxDistanceKm"
+                    value={advancedFilters.maxDistanceKm ?? ''}
+                    onChange={handleAdvancedFilterChange}
+                    placeholder="ללא הגבלה"
+                    className="w-full p-2 border border-border-default rounded-lg text-sm bg-bg-input focus:ring-primary-500"
+                  />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1">סוג משרה</label>
@@ -1004,22 +1185,45 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         {!loading && !error && filteredJobs.length > 0 && (
           viewMode === 'grid' ? (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {filteredJobs.map((job) => <JobCard key={job.id} job={job} />)}
+              {sortedJobs.map((job) => <JobCard key={job.id} job={job} />)}
             </div>
           ) : (
             <div className="bg-bg-card rounded-lg border border-border-default">
               <table className="w-full text-sm text-right">
                 <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
                   <tr>
-                    <th className="p-4 text-right">משרה</th>
-                    <th className="p-4 text-right">התאמה</th>
-                    <th className="p-4 text-right">סטטוס</th>
-                    <th className="p-4 text-right">מיקום</th>
+                    {([
+                      ['title', 'משרה'],
+                      ['match', 'ציון התאמה'],
+                      ['vector', 'התאמה וקטורית'],
+                      ['distance', 'מרחק מהיעד'],
+                      ['status', 'סטטוס'],
+                      ['city', 'מיקום'],
+                    ] as const).map(([key, label]) => {
+                      const active = sortKey === key;
+                      return (
+                        <th key={key} className="p-4 text-right">
+                          <button
+                            type="button"
+                            onClick={() => toggleMatchSort(key)}
+                            className={`inline-flex items-center gap-1 uppercase ${active ? 'text-primary-700' : 'hover:text-text-default'}`}
+                            aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                          >
+                            <span>{label}</span>
+                            {active && sortDir === 'asc' ? (
+                              <ChevronUpIcon className="w-3.5 h-3.5" />
+                            ) : (
+                              <ChevronDownIcon className={`w-3.5 h-3.5 ${active ? '' : 'opacity-40'}`} />
+                            )}
+                          </button>
+                        </th>
+                      );
+                    })}
                     <th className="p-4 text-right"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
-                  {filteredJobs.map((job) => <JobRow key={job.id} job={job} />)}
+                  {sortedJobs.map((job) => <JobRow key={job.id} job={job} />)}
                 </tbody>
               </table>
             </div>
@@ -1027,14 +1231,47 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         )}
 
         {/* Empty state */}
-        {!loading && !error && filteredJobs.length === 0 && (
+        {!loading && !error && !hasSearched && (
+          <div className="text-center py-16 flex flex-col items-center">
+            <TargetIcon className="w-16 h-16 text-text-subtle mb-4" />
+            <h3 className="text-xl font-bold text-text-default">ההתאמה לא רצה עדיין</h3>
+            <p className="mt-2 text-text-muted">כוונן את הגדרות הסריקה ולחץ «חפש משרות».</p>
+          </div>
+        )}
+        {!loading && !error && hasSearched && filteredJobs.length === 0 && (
           <div className="text-center py-16 flex flex-col items-center">
             <TargetIcon className="w-16 h-16 text-text-subtle mb-4" />
             <h3 className="text-xl font-bold text-text-default">לא נמצאו משרות מתאימות</h3>
             <p className="mt-2 text-text-muted">נסה להרחיב את החיפוש או לשנות את הקריטריונים.</p>
           </div>
         )}
+        {hasSearched && matchCursor.hasMore && (
+          <div className="flex justify-center pt-2">
+      
+          </div>
+        )}
       </main>
+
+      <aside className="lg:col-span-4 bg-bg-card border-2 border-border-default rounded-[2rem] p-6 shadow-xl shadow-primary-900/5 space-y-6 h-fit sticky top-0">
+        <ScanSettingsPanel
+          batchSize={batchSize}
+          onBatchSizeChange={setBatchSize}
+          threshold={threshold}
+          onThresholdChange={setThreshold}
+          vectorSimilarity={vectorSimilarity}
+          onVectorSimilarityChange={setVectorSimilarity}
+          activeFilters={activeFilters}
+          onToggleFilter={toggleFilter}
+          affinityLevel={affinityLevel}
+          onAffinityLevelChange={setAffinityLevel}
+          loading={loading}
+          batchCountLabel={t('job.matching.batch_display', { count: batchSize })}
+          searchLabel={t('job.matching.search')}
+          onSearch={() => void loadJobsCore()}
+          searchDisabled={!candidateId}
+        />
+      </aside>
+      </div>
 
       {/* Modals */}
       <JobFieldSelector
@@ -1076,7 +1313,10 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         onClose={() => setBulkFilterOpen(false)}
         onSave={handleAddToFilterSave}
         selectedCount={1}
+        jobs={bulkFilterJobOptions}
+        matchScoresByJobId={bulkFilterMatchScoresByJobId}
         candidateBackendIds={candidateId ? [candidateId] : []}
+        candidateDisplayName={candidateName}
       />
       <ScreeningCollisionWarningModal
         isOpen={screeningCollisionOpen}
@@ -1089,7 +1329,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           const p = pendingFilterRef.current;
           pendingFilterRef.current = null;
           setScreeningCollisionOpen(false);
-          if (p) void runAddToFilter(p.jobId, p.options);
+          if (p) void runAddToFilter(p.jobIds, p.options);
         }}
       />
 

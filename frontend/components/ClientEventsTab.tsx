@@ -51,6 +51,7 @@ interface ClientEventsTabProps {
     clientName: string;
     /** When set, list/create events for this organization only (tenant org profile). */
     organizationId?: string;
+    onDirtyChange?: (dirty: boolean) => void;
 }
 
 const eventStatusStyles: { [key in EventStatus]: { bg: string; text: string; } } = {
@@ -98,7 +99,7 @@ const normalizeEvent = (row: any): Event => ({
     history: Array.isArray(row.history) ? row.history : [],
 });
 
-const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName, organizationId }) => {
+const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName, organizationId, onDirtyChange }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [events, setEvents] = useState<Event[]>([]);
     const [entityAuditItems, setEntityAuditItems] = useState<AuditLogEntry[]>([]);
@@ -113,6 +114,11 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName,
     });
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [isModalOpen, setIsModalOpen] = useState(false);
+
+    useEffect(() => {
+        onDirtyChange?.(isModalOpen);
+        return () => onDirtyChange?.(false);
+    }, [isModalOpen, onDirtyChange]);
     const [editingEvent, setEditingEvent] = useState<Event | null>(null);
     const [openMenuId, setOpenMenuId] = useState<string | null>(null);
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null);

@@ -313,6 +313,58 @@ interface EmailUploadRecord {
     subject: string;
     body: string;
     createdAt: string;
+    fileKey?: string | null;
+}
+
+function emailUploadRichness(row: EmailUploadRecord): number {
+    let score = 0;
+    if (String(row.subject || '').trim()) score += 4;
+    if (String(row.from || '').trim()) score += 2;
+    if (String(row.to || '').trim()) score += 1;
+    if (String(row.body || '').trim()) score += 8;
+    return score;
+}
+
+/** A retried ingest creates a newer row for the same file with empty subject and body. */
+function dedupeEmailUploads(records: EmailUploadRecord[]): EmailUploadRecord[] {
+    const byFile = new Map<string, EmailUploadRecord>();
+    const withoutFileKey: EmailUploadRecord[] = [];
+    for (const row of records) {
+        const fileKey = String(row.fileKey || '').trim();
+        if (!fileKey) {
+            withoutFileKey.push(row);
+            continue;
+        }
+        const current = byFile.get(fileKey);
+        if (!current) {
+            byFile.set(fileKey, row);
+            continue;
+        }
+        const nextScore = emailUploadRichness(row);
+        const currentScore = emailUploadRichness(current);
+        if (nextScore > currentScore || (nextScore === currentScore && Number(row.id) < Number(current.id))) {
+            byFile.set(fileKey, row);
+        }
+    }
+    return [...withoutFileKey, ...byFile.values()].sort((a, b) => {
+        const aTime = Date.parse(a.createdAt || '') || 0;
+        const bTime = Date.parse(b.createdAt || '') || 0;
+        return bTime - aTime;
+    });
+}
+
+function filenameFromContentDisposition(header: string | null): string {
+    if (!header) return 'attachment';
+    const star = header.match(/filename\*=UTF-8''([^;]+)/i);
+    if (star?.[1]) {
+        try {
+            return decodeURIComponent(star[1]);
+        } catch {
+            return star[1];
+        }
+    }
+    const plain = header.match(/filename="([^"]+)"/i);
+    return plain?.[1] || 'attachment';
 }
 
 const ResumeViewer: React.FC<ResumeViewerProps> = ({
@@ -339,7 +391,10 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const [uploading, setUploading] = useState(false);
   const [parsedPdfDownloading, setParsedPdfDownloading] = useState(false);
   const filesPdfExporterRef = useRef<CvFilesPdfExporter | null>(null);
-  const [latestEmail, setLatestEmail] = useState<EmailUploadRecord | null>(null);
+  const [candidateEmails, setCandidateEmails] = useState<EmailUploadRecord[]>([]);
+  const [selectedEmailId, setSelectedEmailId] = useState<number | null>(null);
+  const [downloadingAttachment, setDownloadingAttachment] = useState(false);
+  const [attachmentError, setAttachmentError] = useState('');
   const [drivingLicensePicklist, setDrivingLicensePicklist] = useState<PicklistValueRow[]>(
       DRIVING_LICENSE_FALLBACK,
   );
@@ -496,7 +551,8 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
 
   const fetchLatestEmail = useCallback(async () => {
     if (!candidateIdentifier) {
-      setLatestEmail(null);
+      setCandidateEmails([]);
+      setSelectedEmailId(null);
       return;
     }
     try {
@@ -505,11 +561,16 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
       });
       if (!res.ok) throw new Error('Failed to load email');
       const payload = await res.json();
-      const records = Array.isArray(payload) ? payload : [];
-      setLatestEmail(records[0] || null);
+      const records = dedupeEmailUploads(Array.isArray(payload) ? payload : []);
+      setCandidateEmails(records);
+      setSelectedEmailId((current) => {
+        if (current != null && records.some((row) => Number(row.id) === Number(current))) return current;
+        return records[0]?.id ?? null;
+      });
     } catch (err) {
       console.error('Failed to load email upload', err);
-      setLatestEmail(null);
+      setCandidateEmails([]);
+      setSelectedEmailId(null);
     }
   }, [apiBase, candidateIdentifier]);
 
@@ -716,6 +777,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
     }
   };
 
+    const latestEmail = candidateEmails.find((row) => Number(row.id) === Number(selectedEmailId)) || candidateEmails[0] || null;
     const emailFrom = latestEmail ? parseEmailAddress(latestEmail.from) : null;
     const emailTo = latestEmail ? parseEmailAddress(latestEmail.to) : null;
     const emailSubject = latestEmail?.subject || 'ללא נושא';
@@ -724,6 +786,37 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
     const hasEmailContent = Boolean(emailBody.trim());
     const plainEmailBody = stripHtml(emailBody);
     const isHtmlContent = hasEmailContent && /<[^>]+>/i.test(emailBody);
+    const isFullHtmlDocument = isHtmlContent && /<!doctype html|<html[\s>]/i.test(emailBody);
+
+    const handleDownloadEmailAttachment = async () => {
+        if (!latestEmail?.id) return;
+        setDownloadingAttachment(true);
+        setAttachmentError('');
+        try {
+            const res = await fetch(`${apiBase}/api/email-uploads/${latestEmail.id}/resume`, {
+                headers: { ...getAuthHeaders() },
+            });
+            if (!res.ok) {
+                setAttachmentError('אין קובץ מצורף במייל');
+                return;
+            }
+            const blob = await res.blob();
+            const filename = filenameFromContentDisposition(res.headers.get('Content-Disposition'));
+            const objectUrl = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = objectUrl;
+            anchor.download = filename;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            URL.revokeObjectURL(objectUrl);
+        } catch (err) {
+            console.error('Failed to download email attachment', err);
+            setAttachmentError('הורדת הקובץ נכשלה');
+        } finally {
+            setDownloadingAttachment(false);
+        }
+    };
 
 
   return (
@@ -752,7 +845,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                   <div className="flex justify-between items-center p-3 border-b border-border-default bg-bg-subtle/10">
                          <div className="text-sm text-text-muted font-medium flex items-center gap-2">
                             <EnvelopeIcon className="w-4 h-4"/>
-                            {t('resume.email_incoming')} ({latestEmail ? 1 : 0})
+                            {t('resume.email_incoming')} ({candidateEmails.length})
                          </div>
                       <button 
                         onClick={handleToggleEmailView}
@@ -894,6 +987,31 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                       </div>
                   ) : (
                       <div className="h-full flex flex-col">
+                          {candidateEmails.length > 1 && (
+                              <div className="flex gap-2 overflow-x-auto px-4 py-2 border-b border-border-default bg-bg-subtle/20">
+                                  {candidateEmails.map((email) => {
+                                      const isSelected = Number(email.id) === Number(latestEmail?.id);
+                                      return (
+                                          <button
+                                              key={email.id}
+                                              type="button"
+                                              onClick={() => {
+                                                  setSelectedEmailId(email.id);
+                                                  setAttachmentError('');
+                                              }}
+                                              className={`shrink-0 max-w-[240px] truncate text-xs font-semibold px-3 py-1.5 rounded-md border ${
+                                                  isSelected
+                                                      ? 'bg-primary-50 text-primary-700 border-primary-200'
+                                                      : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
+                                              }`}
+                                              title={email.subject || 'ללא נושא'}
+                                          >
+                                              {email.subject || 'ללא נושא'}
+                                          </button>
+                                      );
+                                  })}
+                              </div>
+                          )}
                           <div className="px-6 py-4 bg-bg-subtle/10 border-b border-border-default">
                               {latestEmail ? (
                                 <>
@@ -918,6 +1036,25 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                                               <span className="text-text-subtle text-xs">&lt;{emailTo.email}&gt;</span>
                                           )}
                                       </div>
+                                      {latestEmail.fileKey ? (
+                                          <>
+                                              <span className="font-bold text-text-muted justify-self-end">מצורף:</span>
+                                              <div className="flex items-center gap-2">
+                                                  <button
+                                                      type="button"
+                                                      onClick={() => { void handleDownloadEmailAttachment(); }}
+                                                      disabled={downloadingAttachment}
+                                                      className="inline-flex items-center gap-1.5 text-xs font-bold text-primary-700 bg-primary-50 border border-primary-200 px-2.5 py-1 rounded-md hover:bg-primary-100 disabled:opacity-50"
+                                                  >
+                                                      <PaperClipIcon className="w-3.5 h-3.5" />
+                                                      {downloadingAttachment ? 'מוריד...' : 'הורדת קובץ מצורף'}
+                                                  </button>
+                                                  {attachmentError ? (
+                                                      <span className="text-xs text-red-600">{attachmentError}</span>
+                                                  ) : null}
+                                              </div>
+                                          </>
+                                      ) : null}
                                   </div>
                                 </>
                               ) : (
@@ -925,10 +1062,17 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                               )}
                           </div>
 
-                          <div className="p-8 bg-white flex-1 overflow-y-auto">
+                          <div className={`bg-white flex-1 overflow-y-auto ${isFullHtmlDocument && emailViewMode === 'formatted' ? 'p-0' : 'p-8'}`}>
                               {latestEmail && hasEmailContent ? (
                                   emailViewMode === 'formatted' ? (
-                                      isHtmlContent ? (
+                                      isFullHtmlDocument ? (
+                                          <iframe
+                                              title={emailSubject}
+                                              sandbox=""
+                                              srcDoc={emailBody}
+                                              className="w-full h-full min-h-[480px] border-0 bg-white"
+                                          />
+                                      ) : isHtmlContent ? (
                                           <div
                                             className="prose prose-sm max-w-3xl mx-auto"
                                             dangerouslySetInnerHTML={{ __html: emailBody }}
@@ -977,6 +1121,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
               ? printablePayload.workExperience
               : finalResumeData.workExperience || finalResumeData.experience
           }
+          tagDetails={candidateTagDetails}
           candidateName={printablePayload.fullName || finalResumeData.name}
           candidateTitle={printablePayload.title || finalResumeData.title}
           candidateSummary={

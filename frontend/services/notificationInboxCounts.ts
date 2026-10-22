@@ -56,10 +56,16 @@ function rowSentByViewer(row: Record<string, unknown>, userId?: string | null): 
     return String(row.senderUserId) === String(userId);
 }
 
+export type NotificationInboxViewer = {
+    email?: string | null;
+    name?: string | null;
+    id?: string | null;
+};
+
 /** Inbox row visible to viewer — same rule as NotificationCenter `inboxNotifications`. */
-function rowInInboxForViewer(
+export function rowInInboxForViewer(
     row: Record<string, unknown>,
-    viewer?: { email?: string | null; name?: string | null; id?: string | null },
+    viewer?: NotificationInboxViewer,
 ): boolean {
     return (
         rowRecipientMatchesViewer(row, viewer?.email, viewer?.name) ||

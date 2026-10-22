@@ -155,12 +155,19 @@ export async function submitOrgProfileUpdate(
     return res.json();
 }
 
+export type OrgProfileUpdatesListResult = {
+    data: OrgProfileUpdateDto[];
+    total: number;
+    page: number;
+    totalPages: number;
+};
+
 export async function fetchOrgProfileUpdates(params: {
     status?: string;
     page?: number;
     limit?: number;
     search?: string;
-}): Promise<{ data: OrgProfileUpdateDto[]; total: number; page: number; totalPages: number }> {
+}): Promise<OrgProfileUpdatesListResult> {
     const q = new URLSearchParams();
     if (params.status) q.set('status', params.status);
     if (params.page) q.set('page', String(params.page));
@@ -169,6 +176,38 @@ export async function fetchOrgProfileUpdates(params: {
     const res = await fetch(`${apiBase()}/api/organizations/profile-updates?${q}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();
+}
+
+function reviewedAtMs(row: OrgProfileUpdateDto): number {
+    const raw = row.reviewedAt || row.updatedAt || row.createdAt;
+    const t = raw ? Date.parse(raw) : NaN;
+    return Number.isFinite(t) ? t : 0;
+}
+
+/** Approved + rejected; works even when the API has no combined `status=handled` filter. */
+export async function fetchOrgProfileUpdatesHandled(params: {
+    limit?: number;
+    search?: string;
+} = {}): Promise<OrgProfileUpdatesListResult> {
+    const limit = params.limit ?? 100;
+    const search = params.search;
+    const [approved, rejected] = await Promise.all([
+        fetchOrgProfileUpdates({ status: 'approved', limit, search }),
+        fetchOrgProfileUpdates({ status: 'rejected', limit, search }),
+    ]);
+    const data = [...approved.data, ...rejected.data].sort((a, b) => reviewedAtMs(b) - reviewedAtMs(a));
+    const total = approved.total + rejected.total;
+    return {
+        data,
+        total,
+        page: 1,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+    };
+}
+
+export async function countOrgProfileUpdatesHandled(search?: string): Promise<number> {
+    const res = await fetchOrgProfileUpdatesHandled({ limit: 1, search });
+    return res.total;
 }
 
 export async function fetchOrgProfileUpdatesPendingCount(): Promise<number> {

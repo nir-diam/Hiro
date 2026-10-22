@@ -13,23 +13,27 @@ import {
     ExclamationTriangleIcon,
     XMarkIcon,
     PencilIcon,
+    ClipboardDocumentIcon,
+    CheckIcon,
     PhoneIcon,
     ClockIcon,
     ArrowPathIcon,
     DocumentTextIcon,
     FunnelIcon,
+    PlusIcon,
 } from './Icons';
 import BulkAddToFilterModal from './BulkAddToFilterModal';
 import ScreeningCollisionWarningModal, { type ScreeningWarningAgg } from './ScreeningCollisionWarningModal';
 import {
-    fetchScreeningPrecheckForJob,
-    linkCandidateToJobFilter,
+    fetchScreeningPrecheckForJobs,
+    linkCandidatesToJobFilters,
     type JobFilterSaveOptions,
 } from '../utils/candidateJobFilterApi';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import ResumeViewer from './ResumeViewer';
 import { InternalOpinionEditorModal, OpinionQuillEditor, copyRichHtmlToClipboard } from './InternalOpinionEditorModal';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 import { buildParsedScreeningCvHtmlForPdf, renderScreeningCvHtmlToPdfBase64 } from '../utils/screeningCvPdfExport';
 import type { LocationItem } from './LocationSelector';
 import {
@@ -50,6 +54,8 @@ import {
     useMatchScorePopupDismiss,
 } from './MatchScorePopup';
 import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
+import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferralEvents';
+import { fetchRecruitmentStatuses } from '../services/recruitmentStatusesApi';
 
 export { buildResumeDataFromCandidate };
 export type { ScreeningJobSkillRow, ScreeningJobLanguageRow };
@@ -62,6 +68,7 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 interface ScreeningPoolScoreBreakdown {
   geo?: number;
   geoDistance?: number | null;
+  geoMaxKm?: number | null;
   geoMissing?: boolean;
 }
 
@@ -237,6 +244,14 @@ interface SendModalContact {
   name: string;
   role: string;
   email?: string;
+  isCustom?: boolean;
+}
+
+function newCustomSendContactId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `custom:${crypto.randomUUID()}`;
+  }
+  return `custom:${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function screeningMetricLabelHe(code: string): string {
@@ -624,7 +639,8 @@ function buildScreeningCardMetricCells(
   const geoKm =
     typeof rawGeoKm === 'number' && Number.isFinite(rawGeoKm) ? Math.round(rawGeoKm) : null;
   const geoMissing = Boolean(bd?.geoMissing);
-  const geoScoreNum = typeof bd?.geo === 'number' && Number.isFinite(bd.geo) ? bd.geo : null;
+  const rawMaxKm = bd?.geoMaxKm;
+  const geoMaxKm = typeof rawMaxKm === 'number' && Number.isFinite(rawMaxKm) ? rawMaxKm : null;
 
   let distanceVal: string;
   let distanceTone: ScreeningCardMetricTone = 'muted';
@@ -633,10 +649,10 @@ function buildScreeningCardMetricCells(
     distanceTone = 'muted';
   } else if (geoKm != null) {
     distanceVal = t('job.sonar.distance_km', { km: geoKm });
-    if (geoScoreNum != null) {
-      distanceTone = geoScoreNum >= 72 ? 'good' : geoScoreNum < 55 ? 'bad' : 'muted';
+    if (geoMaxKm != null) {
+      distanceTone = geoKm <= geoMaxKm ? 'good' : 'bad';
     } else {
-      distanceTone = geoKm <= 25 ? 'good' : geoKm > 60 ? 'bad' : 'muted';
+      distanceTone = 'muted';
     }
   } else {
     distanceVal = t('job.sonar.distance_na');
@@ -1182,10 +1198,10 @@ function decodeHtmlEntities(text: string): string {
   return el.value;
 }
 
-/** Render job description HTML (handles plain text, HTML, or entity-escaped HTML). */
-function jobDescriptionMarkup(content: string): { __html: string } {
+/** Same HTML normalization as on-screen job / notes rendering (line breaks, etc.). */
+function normalizeJobRichTextHtml(content: string): string {
   let html = String(content || '').trim();
-  if (!html) return { __html: '' };
+  if (!html) return '';
 
   if (!/<[a-z][\s\S]*>/i.test(html) && /&lt;|&gt;|&amp;lt;|&amp;gt;/.test(html)) {
     html = decodeHtmlEntities(html);
@@ -1196,18 +1212,15 @@ function jobDescriptionMarkup(content: string): { __html: string } {
     html = html.replace(/^(.+):/gm, '<strong>$1:</strong>');
   }
 
-  return { __html: html };
+  return html;
 }
 
-const REJECTION_REASONS = [
-  'חוסר ניסיון רלוונטי',
-  'ציפיות שכר גבוהות',
-  'חוסר התאמה טכנולוגית',
-  'חוסר התאמה אישיותית',
-  'מרחק גיאוגרפי',
-  'מועמד משך עניין',
-  'אחר',
-] as const;
+/** Render job description HTML (handles plain text, HTML, or entity-escaped HTML). */
+function jobDescriptionMarkup(content: string): { __html: string } {
+  return { __html: normalizeJobRichTextHtml(content) };
+}
+
+const REJECT_REASON_GROUPS = new Set(['נדחה', 'הקפאה/אחר']);
 
 const CandidateScreeningView: React.FC<{
   onBack: () => void;
@@ -1230,6 +1243,7 @@ const CandidateScreeningView: React.FC<{
   };
 }> = ({ onBack, candidateId, candidate }) => {
     const { t } = useLanguage();
+    const { user } = useAuth();
     const [jobs, setJobs] = useState<ScreeningJob[]>([]);
     const [selectedJobs, setSelectedJobs] = useState<(number | string)[]>([]);
     const [expandedJobId, setExpandedJobId] = useState<number | string | null>(null);
@@ -1242,7 +1256,9 @@ const CandidateScreeningView: React.FC<{
     const [opinionEditSaving, setOpinionEditSaving] = useState(false);
     const [opinionEditRegenerating, setOpinionEditRegenerating] = useState(false);
     const [rejectModalOpen, setRejectModalOpen] = useState(false);
-    const [rejectReason, setRejectReason] = useState<string>(REJECTION_REASONS[0]);
+    const [rejectReason, setRejectReason] = useState('');
+    const [rejectReasons, setRejectReasons] = useState<string[]>([]);
+    const [rejectReasonsLoading, setRejectReasonsLoading] = useState(false);
     const [rejectNotes, setRejectNotes] = useState('');
     const [rejectSubmitting, setRejectSubmitting] = useState(false);
     const [sendCvModalOpen, setSendCvModalOpen] = useState(false);
@@ -1252,6 +1268,16 @@ const CandidateScreeningView: React.FC<{
     >({});
     const [sendModalContactsLoading, setSendModalContactsLoading] = useState(false);
     const [selectedContactsByJob, setSelectedContactsByJob] = useState<Record<string, Record<string, boolean>>>({});
+    const [customSendContactsByJob, setCustomSendContactsByJob] = useState<
+      Record<string, SendModalContact[]>
+    >({});
+    const [sendContactAddForJobId, setSendContactAddForJobId] = useState<string | null>(null);
+    const [sendContactAddDraft, setSendContactAddDraft] = useState({
+      name: '',
+      email: '',
+      role: '',
+    });
+    const [sendContactAddError, setSendContactAddError] = useState('');
     const [sendCvSubmitting, setSendCvSubmitting] = useState(false);
     const [sendAttachOriginalCv, setSendAttachOriginalCv] = useState(true);
     const [sendAttachSystemPdf, setSendAttachSystemPdf] = useState(false);
@@ -1271,6 +1297,7 @@ const CandidateScreeningView: React.FC<{
     const [candidateInternalNotesDraft, setCandidateInternalNotesDraft] = useState('');
     const [candidateInternalNotesSaving, setCandidateInternalNotesSaving] = useState(false);
     const [editingJobInternalNotesId, setEditingJobInternalNotesId] = useState<number | string | null>(null);
+    const [copiedJobInternalNotesId, setCopiedJobInternalNotesId] = useState<string | null>(null);
     const [jobInternalNotesDraft, setJobInternalNotesDraft] = useState('');
     const [jobInternalNotesSavingId, setJobInternalNotesSavingId] = useState<number | string | null>(null);
     const internalNotesTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1279,7 +1306,7 @@ const CandidateScreeningView: React.FC<{
     const [bulkFilterOpen, setBulkFilterOpen] = useState(false);
     const [screeningCollisionOpen, setScreeningCollisionOpen] = useState(false);
     const [screeningCollisionAgg, setScreeningCollisionAgg] = useState<ScreeningWarningAgg[]>([]);
-    const pendingFilterRef = useRef<{ jobId: string; options?: JobFilterSaveOptions } | null>(null);
+    const pendingFilterRef = useRef<{ jobIds: string[]; options?: JobFilterSaveOptions } | null>(null);
     const [poolReloadToken, setPoolReloadToken] = useState(0);
     const candidateResumeData = useMemo(
       () => buildResumeDataFromCandidate(candidate as any, candidateId),
@@ -1372,8 +1399,35 @@ const CandidateScreeningView: React.FC<{
     }, [expandedJobId, editingJobInternalNotesId]);
 
     const openJobInternalNotesEditor = useCallback((job: ScreeningJob) => {
-      setJobInternalNotesDraft(stripWorkingHoursFromJobNotes(job.internalNotes));
+      setJobInternalNotesDraft(normalizeJobRichTextHtml(stripWorkingHoursFromJobNotes(job.internalNotes)));
       setEditingJobInternalNotesId(job.id);
+    }, []);
+
+    const copyJobInternalNotes = useCallback(async (job: ScreeningJob) => {
+      const raw = stripWorkingHoursFromJobNotes(job.internalNotes);
+      const html = normalizeJobRichTextHtml(raw);
+      if (!html) return;
+      try {
+        await copyRichHtmlToClipboard(html);
+        setCopiedJobInternalNotesId(String(job.id));
+        window.setTimeout(() => setCopiedJobInternalNotesId(null), 2000);
+      } catch {
+        try {
+          const plain =
+            typeof document !== 'undefined'
+              ? (() => {
+                  const d = document.createElement('div');
+                  d.innerHTML = html;
+                  return (d.innerText || d.textContent || '').trim();
+                })()
+              : stripHtmlToText(html);
+          await navigator.clipboard.writeText(plain);
+          setCopiedJobInternalNotesId(String(job.id));
+          window.setTimeout(() => setCopiedJobInternalNotesId(null), 2000);
+        } catch {
+          alert('העתקה ללוח נכשלה.');
+        }
+      }
     }, []);
 
     const cancelJobInternalNotesEdit = useCallback((job: ScreeningJob) => {
@@ -1500,6 +1554,44 @@ const CandidateScreeningView: React.FC<{
       setActiveMatchScorePopup(null);
       setSelectedJobForTags(null);
     }, [candidateId]);
+
+    useEffect(() => {
+      const clientId = user?.clientId;
+      if (!clientId) {
+        setRejectReasons([]);
+        setRejectReason('');
+        return;
+      }
+      let cancelled = false;
+      setRejectReasonsLoading(true);
+      void fetchRecruitmentStatuses(clientId)
+        .then((rows) => {
+          if (cancelled) return;
+          const names: string[] = [];
+          const seen = new Set<string>();
+          for (const row of rows) {
+            if (row.isActive === false) continue;
+            if (!REJECT_REASON_GROUPS.has(row.group)) continue;
+            const name = String(row.name || '').trim();
+            if (!name || seen.has(name)) continue;
+            seen.add(name);
+            names.push(name);
+          }
+          setRejectReasons(names);
+          setRejectReason((prev) => (prev && names.includes(prev) ? prev : names[0] || ''));
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setRejectReasons([]);
+          setRejectReason('');
+        })
+        .finally(() => {
+          if (!cancelled) setRejectReasonsLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [user?.clientId]);
 
     useMatchScorePopupDismiss(Boolean(activeMatchScorePopup), () => setActiveMatchScorePopup(null));
 
@@ -1814,36 +1906,46 @@ const CandidateScreeningView: React.FC<{
     };
 
     const runAddToFilter = useCallback(
-      async (jobId: string, options?: JobFilterSaveOptions) => {
-        if (!candidateId || !apiBase) {
+      async (jobIds: string[], options?: JobFilterSaveOptions) => {
+        const cid = String(candidateId || '').trim();
+        const jids = jobIds.map((id) => String(id).trim()).filter(Boolean);
+        if (!cid || !apiBase || jids.length === 0) {
           setBulkFilterOpen(false);
           return;
         }
-        const ok = await linkCandidateToJobFilter(apiBase, candidateId, jobId, options);
+        const { ok, fail } = await linkCandidatesToJobFilters(apiBase, [cid], jids, options);
         setBulkFilterOpen(false);
-        if (ok) {
+        if (fail === 0) {
           setPoolReloadToken((n) => n + 1);
-        } else {
+          if (jids.length > 1) {
+            alert(`נוסף לסינון ב-${jids.length} משרות`);
+          }
+        } else if (ok === 0) {
           alert('הוספה לסינון נכשלה');
+        } else {
+          alert(`נוסף לסינון: ${ok} מתוך ${jids.length} משרות (${fail} נכשלו)`);
+          setPoolReloadToken((n) => n + 1);
         }
       },
       [candidateId, apiBase],
     );
 
     const handleAddToFilterSave = useCallback(
-      async (jobId: string, options?: JobFilterSaveOptions) => {
-        if (!candidateId || !apiBase) {
+      async (jobIds: string[], options?: JobFilterSaveOptions) => {
+        const cid = String(candidateId || '').trim();
+        const jids = jobIds.map((id) => String(id).trim()).filter(Boolean);
+        if (!cid || !apiBase || jids.length === 0) {
           setBulkFilterOpen(false);
           return;
         }
-        const precheck = await fetchScreeningPrecheckForJob(apiBase, candidateId, jobId);
-        if (precheck) {
-          pendingFilterRef.current = { jobId, options };
-          setScreeningCollisionAgg([precheck]);
+        const agg = await fetchScreeningPrecheckForJobs(apiBase, [cid], jids);
+        if (agg.length > 0) {
+          pendingFilterRef.current = { jobIds: jids, options };
+          setScreeningCollisionAgg(agg);
           setScreeningCollisionOpen(true);
           return;
         }
-        await runAddToFilter(jobId, options);
+        await runAddToFilter(jids, options);
       },
       [candidateId, apiBase, runAddToFilter],
     );
@@ -1851,19 +1953,18 @@ const CandidateScreeningView: React.FC<{
     const closeRejectModal = useCallback(() => {
       setRejectModalOpen(false);
       setRejectNotes('');
-      setRejectReason(REJECTION_REASONS[0]);
       setRejectSubmitting(false);
     }, []);
 
     const openRejectModal = useCallback(() => {
       if (selectedJobs.length === 0) return;
-      setRejectReason(REJECTION_REASONS[0]);
+      setRejectReason((prev) => (prev && rejectReasons.includes(prev) ? prev : rejectReasons[0] || ''));
       setRejectNotes('');
       setRejectModalOpen(true);
-    }, [selectedJobs]);
+    }, [selectedJobs, rejectReasons]);
 
     const handleConfirmReject = useCallback(async () => {
-      if (selectedJobs.length === 0) return;
+      if (selectedJobs.length === 0 || !rejectReason) return;
       const jobIds = [...selectedJobs];
 
       const applyLocalReject = () => {
@@ -1936,12 +2037,13 @@ const CandidateScreeningView: React.FC<{
     const getSendModalContacts = useCallback(
       (job: ScreeningJob): SendModalContact[] => {
         const jid = String(job.id);
-        if (Object.prototype.hasOwnProperty.call(sendModalContactsByJob, jid)) {
-          return sendModalContactsByJob[jid];
-        }
-        return contactsListFromScreeningJob(job);
+        const base = Object.prototype.hasOwnProperty.call(sendModalContactsByJob, jid)
+          ? sendModalContactsByJob[jid]
+          : contactsListFromScreeningJob(job);
+        const custom = customSendContactsByJob[jid] || [];
+        return custom.length > 0 ? [...base, ...custom] : base;
       },
-      [sendModalContactsByJob],
+      [sendModalContactsByJob, customSendContactsByJob],
     );
 
     useEffect(() => {
@@ -2000,6 +2102,10 @@ const CandidateScreeningView: React.FC<{
       setSendModalContactsByJob({});
       setSendModalContactsLoading(false);
       setSelectedContactsByJob({});
+      setCustomSendContactsByJob({});
+      setSendContactAddForJobId(null);
+      setSendContactAddDraft({ name: '', email: '', role: '' });
+      setSendContactAddError('');
       setSendCvSubmitting(false);
       setSendAttachOriginalCv(true);
       setSendAttachSystemPdf(false);
@@ -2023,6 +2129,58 @@ const CandidateScreeningView: React.FC<{
         },
       }));
     }, []);
+
+    const openSendContactAddForm = useCallback((jobId: string) => {
+      setSendContactAddForJobId(jobId);
+      setSendContactAddDraft({ name: '', email: '', role: '' });
+      setSendContactAddError('');
+    }, []);
+
+    const cancelSendContactAddForm = useCallback(() => {
+      setSendContactAddForJobId(null);
+      setSendContactAddDraft({ name: '', email: '', role: '' });
+      setSendContactAddError('');
+    }, []);
+
+    const removeCustomSendContact = useCallback((jobId: string, contactId: string) => {
+      setCustomSendContactsByJob((prev) => ({
+        ...prev,
+        [jobId]: (prev[jobId] || []).filter((c) => c.id !== contactId),
+      }));
+      setSelectedContactsByJob((prev) => {
+        const row = { ...(prev[jobId] || {}) };
+        delete row[contactId];
+        return { ...prev, [jobId]: row };
+      });
+    }, []);
+
+    const commitSendContactAdd = useCallback(
+      (jobId: string) => {
+        const name = sendContactAddDraft.name.trim();
+        const email = sendContactAddDraft.email.trim();
+        const role = sendContactAddDraft.role.trim() || 'איש קשר (ידני)';
+        if (!name) {
+          setSendContactAddError('נא למלא שם');
+          return;
+        }
+        if (!EMAIL_RE.test(email)) {
+          setSendContactAddError('נא למלא כתובת מייל תקינה');
+          return;
+        }
+        const id = newCustomSendContactId();
+        const contact: SendModalContact = { id, name, email, role, isCustom: true };
+        setCustomSendContactsByJob((prev) => ({
+          ...prev,
+          [jobId]: [...(prev[jobId] || []), contact],
+        }));
+        setSelectedContactsByJob((prev) => ({
+          ...prev,
+          [jobId]: { ...(prev[jobId] || {}), [id]: true },
+        }));
+        cancelSendContactAddForm();
+      },
+      [sendContactAddDraft, cancelSendContactAddForm],
+    );
 
     const handleConfirmSendCv = useCallback(async () => {
       const jobIds = sendModalJobIds;
@@ -2150,6 +2308,12 @@ const CandidateScreeningView: React.FC<{
 
         const n = typeof data?.count === 'number' ? data.count : payload.reduce((a, p) => a + p.contacts.length, 0);
         alert(n > 0 ? `נשלחו ${n} מיילים בהצלחה.` : 'לא נשלחו מיילים.');
+        const uniqueJobIds = Array.from(new Set(payload.map((p) => String(p.jobId || '').trim()).filter(Boolean)));
+        if (uniqueJobIds.length === 0) {
+            dispatchScreeningCvReferralsUpdated();
+        } else {
+            uniqueJobIds.forEach((jid: string) => dispatchScreeningCvReferralsUpdated({ jobId: jid }));
+        }
         setSelectedJobs((prev) => prev.filter((jid) => !jobIds.includes(jid)));
         closeSendCvModal();
       } finally {
@@ -2297,7 +2461,26 @@ const CandidateScreeningView: React.FC<{
                           <div className="group relative rounded-lg border border-amber-200 bg-amber-50/90 p-3 shadow-sm">
                             <div className="flex items-start justify-between gap-2 mb-1.5">
                               <p className="text-xs font-bold text-amber-900">הערות פנימיות — מועמד</p>
-                              {!isEditingCandidateInternalNotes ? (
+                              {isEditingCandidateInternalNotes ? (
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={cancelCandidateInternalNotesEdit}
+                                    disabled={candidateInternalNotesSaving}
+                                    className="text-xs font-bold px-2 py-0.5 rounded-md text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                                  >
+                                    ביטול
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => void saveCandidateInternalNotes()}
+                                    disabled={candidateInternalNotesSaving}
+                                    className="text-xs font-bold px-2 py-0.5 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
+                                  >
+                                    {candidateInternalNotesSaving ? 'שומר...' : 'שמור'}
+                                  </button>
+                                </div>
+                              ) : (
                                 <button
                                   type="button"
                                   onClick={openCandidateInternalNotesEditor}
@@ -2307,10 +2490,9 @@ const CandidateScreeningView: React.FC<{
                                 >
                                   <PencilIcon className="w-4 h-4" />
                                 </button>
-                              ) : null}
+                              )}
                             </div>
                             {isEditingCandidateInternalNotes ? (
-                              <div className="space-y-2">
                                 <textarea
                                   ref={internalNotesTextareaRef}
                                   value={candidateInternalNotesDraft}
@@ -2321,29 +2503,10 @@ const CandidateScreeningView: React.FC<{
                                       cancelCandidateInternalNotesEdit();
                                     }
                                   }}
-                                  rows={4}
-                                  className="w-full text-sm text-amber-950 bg-white border border-amber-300 rounded-lg p-2 resize-y min-h-[80px] focus:ring-2 focus:ring-amber-400 focus:border-amber-400 outline-none"
+                                  rows={Math.max(1, candidateInternalNotesDraft.split('\n').length)}
+                                  className="w-full text-sm text-amber-950 whitespace-pre-wrap leading-relaxed bg-transparent border-0 p-0 m-0 rounded-none shadow-none resize-none outline-none focus:ring-0 focus:border-transparent appearance-none block font-[inherit] overflow-hidden"
                                   disabled={candidateInternalNotesSaving}
                                 />
-                                <div className="flex items-center gap-2 justify-end">
-                                  <button
-                                    type="button"
-                                    onClick={cancelCandidateInternalNotesEdit}
-                                    disabled={candidateInternalNotesSaving}
-                                    className="text-xs font-bold px-2.5 py-1 rounded-md text-amber-800 hover:bg-amber-100 disabled:opacity-50"
-                                  >
-                                    ביטול
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => void saveCandidateInternalNotes()}
-                                    disabled={candidateInternalNotesSaving}
-                                    className="text-xs font-bold px-2.5 py-1 rounded-md bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-50"
-                                  >
-                                    {candidateInternalNotesSaving ? 'שומר...' : 'שמור'}
-                                  </button>
-                                </div>
-                              </div>
                             ) : candidateInternalNotes ? (
                               <p className="text-sm text-amber-950 whitespace-pre-wrap leading-relaxed">{candidateInternalNotes}</p>
                             ) : (
@@ -2567,28 +2730,69 @@ const CandidateScreeningView: React.FC<{
                                                             <div className="flex items-start justify-between gap-2 mb-1.5">
                                                                 <h6 className="font-bold text-amber-900 text-xs uppercase">הערות פנימיות — משרה</h6>
                                                                 {!isEditingJobNotes ? (
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => openJobInternalNotesEditor(job)}
-                                                                        className="p-1 rounded-md text-amber-800 hover:text-amber-950 hover:bg-amber-100/80 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity shrink-0"
-                                                                        title="ערוך הערות"
-                                                                        aria-label="ערוך הערות פנימיות למשרה"
-                                                                    >
-                                                                        <PencilIcon className="w-4 h-4" />
-                                                                    </button>
+                                                                    <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => void copyJobInternalNotes(job)}
+                                                                            disabled={!jobInternalNotes}
+                                                                            className="p-1 rounded-md text-amber-800 hover:text-amber-950 hover:bg-amber-100/80 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent shrink-0"
+                                                                            title={
+                                                                                copiedJobInternalNotesId === String(job.id)
+                                                                                    ? 'הועתק'
+                                                                                    : 'העתק הערות'
+                                                                            }
+                                                                            aria-label="העתק הערות פנימיות למשרה"
+                                                                        >
+                                                                            {copiedJobInternalNotesId === String(job.id) ? (
+                                                                                <CheckIcon className="w-4 h-4 text-green-700" />
+                                                                            ) : (
+                                                                                <ClipboardDocumentIcon className="w-4 h-4" />
+                                                                            )}
+                                                                        </button>
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={() => openJobInternalNotesEditor(job)}
+                                                                            className="p-1 rounded-md text-amber-800 hover:text-amber-950 hover:bg-amber-100/80 shrink-0"
+                                                                            title="ערוך הערות"
+                                                                            aria-label="ערוך הערות פנימיות למשרה"
+                                                                        >
+                                                                            <PencilIcon className="w-4 h-4" />
+                                                                        </button>
+                                                                    </div>
                                                                 ) : null}
                                                             </div>
                                                             {isEditingJobNotes ? (
                                                                 <div className="space-y-2">
-                                                                    <OpinionQuillEditor
-                                                                        jobId={String(job.id)}
-                                                                        value={jobInternalNotesDraft}
-                                                                        onChange={setJobInternalNotesDraft}
-                                                                        placeholder="דגשים לצוות הגיוס..."
-                                                                        minHeight="120px"
-                                                                        rtl
-                                                                        className="rounded-lg border border-amber-300 bg-white overflow-hidden"
-                                                                    />
+                                                                    <div
+                                                                        className={[
+                                                                            '[&_.ql-toolbar]:hidden',
+                                                                            '[&_.ql-container.ql-snow]:border-0',
+                                                                            '[&_.ql-container]:bg-transparent',
+                                                                            '[&_.ql-editor]:p-0',
+                                                                            '[&_.ql-editor]:text-amber-950',
+                                                                            '[&_.ql-editor]:leading-relaxed',
+                                                                            '[&_.ql-editor]:text-sm',
+                                                                            '[&_.ql-editor]:text-right',
+                                                                            '[&_.ql-editor]:prose [&_.ql-editor]:prose-sm [&_.ql-editor]:max-w-none',
+                                                                            '[&_.ql-editor>p]:mb-2',
+                                                                            '[&_.ql-editor>ul]:list-disc [&_.ql-editor>ul]:pr-5',
+                                                                            '[&_.ql-editor>ol]:list-decimal [&_.ql-editor>ol]:pr-5',
+                                                                            '[&_.ql-editor.ql-blank::before]:text-amber-800/70',
+                                                                            '[&_.ql-editor.ql-blank::before]:not-italic',
+                                                                            '[&_.ql-editor.ql-blank::before]:right-0',
+                                                                            '[&_.ql-editor.ql-blank::before]:left-auto',
+                                                                        ].join(' ')}
+                                                                    >
+                                                                        <OpinionQuillEditor
+                                                                            jobId={`${job.id}-internal-notes`}
+                                                                            value={jobInternalNotesDraft}
+                                                                            onChange={setJobInternalNotesDraft}
+                                                                            placeholder="דגשים לצוות הגיוס..."
+                                                                            showToolbar={false}
+                                                                            minHeight="4.5rem"
+                                                                            rtl
+                                                                        />
+                                                                    </div>
                                                                     <div className="flex items-center gap-2 justify-end">
                                                                         <button
                                                                             type="button"
@@ -2734,6 +2938,8 @@ const CandidateScreeningView: React.FC<{
                 onSave={handleAddToFilterSave}
                 selectedCount={1}
                 candidateBackendIds={candidateId ? [candidateId] : []}
+                candidateDisplayName={candidate?.fullName?.trim() || undefined}
+                currentUserRecruiter={user?.name?.trim() || undefined}
             />
             <ScreeningCollisionWarningModal
                 isOpen={screeningCollisionOpen}
@@ -2746,7 +2952,7 @@ const CandidateScreeningView: React.FC<{
                     const p = pendingFilterRef.current;
                     pendingFilterRef.current = null;
                     setScreeningCollisionOpen(false);
-                    if (p) void runAddToFilter(p.jobId, p.options);
+                    if (p) void runAddToFilter(p.jobIds, p.options);
                 }}
             />
 
@@ -2815,14 +3021,20 @@ const CandidateScreeningView: React.FC<{
                           id="reject-reason"
                           value={rejectReason}
                           onChange={(e) => setRejectReason(e.target.value)}
-                          disabled={rejectSubmitting}
+                          disabled={rejectSubmitting || rejectReasonsLoading || rejectReasons.length === 0}
                           className="w-full bg-bg-input border border-border-default rounded-lg p-3 text-sm focus:ring-primary-500 focus:border-primary-500"
                         >
-                          {REJECTION_REASONS.map((r) => (
-                            <option key={r} value={r}>
-                              {r}
-                            </option>
-                          ))}
+                          {rejectReasonsLoading && rejectReasons.length === 0 ? (
+                            <option value="">טוען סטטוסים...</option>
+                          ) : rejectReasons.length === 0 ? (
+                            <option value="">אין סטטוסי שלילה</option>
+                          ) : (
+                            rejectReasons.map((r) => (
+                              <option key={r} value={r}>
+                                {r}
+                              </option>
+                            ))
+                          )}
                         </select>
                       </div>
                       <div>
@@ -2852,7 +3064,7 @@ const CandidateScreeningView: React.FC<{
                       <button
                         type="button"
                         onClick={() => void handleConfirmReject()}
-                        disabled={rejectSubmitting}
+                        disabled={rejectSubmitting || !rejectReason}
                         className="px-8 py-2.5 font-bold text-white bg-red-600 hover:bg-red-700 rounded-xl shadow-lg shadow-red-200 transition-all transform active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         {rejectSubmitting ? 'שומר...' : 'שלול מועמד'}
@@ -2949,60 +3161,147 @@ const CandidateScreeningView: React.FC<{
                                   <p className="text-sm text-text-muted pt-3 border-t border-border-default/50">
                                     טוען אנשי קשר...
                                   </p>
-                                ) : contacts.length > 0 ? (
-                                  <div className="pt-3 border-t border-border-default/50">
-                                    <p className="text-[10px] font-bold text-text-muted uppercase mb-2 tracking-wide">
-                                      אנשי קשר לקבלת קו&quot;ח (מהמשרה):
+                                ) : (
+                                  <div className="pt-3 border-t border-border-default/50 space-y-3">
+                                    <p className="text-[10px] font-bold text-text-muted uppercase tracking-wide">
+                                      אנשי קשר לקבלת קו&quot;ח:
                                     </p>
-                                    <div className="flex flex-wrap gap-2">
+                                    {contacts.length === 0 ? (
+                                      <p className="text-xs text-text-muted">
+                                        לא מוגדרים אנשי קשר למשרה — ניתן להוסיף ידנית.
+                                      </p>
+                                    ) : null}
+                                    <div className="flex flex-wrap gap-2 items-center">
                                       {contacts.map((c) => {
                                         const selected = !!selectedContactsByJob[jid]?.[c.id];
                                         const hasMail = EMAIL_RE.test(String(c.email || '').trim());
                                         return (
-                                          <button
-                                            key={c.id}
-                                            type="button"
-                                            onClick={() => toggleSendContact(jid, c.id)}
-                                            disabled={sendCvSubmitting}
-                                            className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all text-xs font-medium disabled:opacity-50 ${
-                                              selected
-                                                ? 'bg-primary-50 border-primary-200 text-primary-700 shadow-sm'
-                                                : 'bg-bg-card border-border-default text-text-muted hover:border-primary-200'
-                                            } ${selected && !hasMail ? 'ring-1 ring-red-200' : ''}`}
-                                          >
-                                            <div
-                                              className="rounded-full flex items-center justify-center bg-primary-100 shrink-0"
-                                              style={{ width: 24, height: 24 }}
+                                          <div key={c.id} className="relative flex items-center">
+                                            <button
+                                              type="button"
+                                              onClick={() => toggleSendContact(jid, c.id)}
+                                              disabled={sendCvSubmitting}
+                                              className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all text-xs font-medium disabled:opacity-50 ${
+                                                selected
+                                                  ? 'bg-primary-50 border-primary-200 text-primary-700 shadow-sm'
+                                                  : 'bg-bg-card border-border-default text-text-muted hover:border-primary-200'
+                                              } ${selected && !hasMail ? 'ring-1 ring-red-200' : ''} ${c.isCustom ? 'pl-2' : ''}`}
                                             >
-                                              <span className="text-primary-600" style={{ fontSize: 10 }}>
-                                                {getInitials(c.name || '?')}
-                                              </span>
-                                            </div>
-                                            <div className="text-right">
-                                              <p className="leading-none">{c.name}</p>
-                                              {c.role ? (
-                                                <p className="text-[9px] mt-0.5 text-primary-400">{c.role}</p>
+                                              <div
+                                                className="rounded-full flex items-center justify-center bg-primary-100 shrink-0"
+                                                style={{ width: 24, height: 24 }}
+                                              >
+                                                <span className="text-primary-600" style={{ fontSize: 10 }}>
+                                                  {getInitials(c.name || '?')}
+                                                </span>
+                                              </div>
+                                              <div className="text-right">
+                                                <p className="leading-none">{c.name}</p>
+                                                {c.role ? (
+                                                  <p className="text-[9px] mt-0.5 text-primary-400">{c.role}</p>
+                                                ) : null}
+                                                {hasMail ? (
+                                                  <p className="text-[9px] mt-0.5 text-text-subtle truncate max-w-[140px]">
+                                                    {c.email}
+                                                  </p>
+                                                ) : (
+                                                  <p className="text-[9px] mt-0.5 text-red-500">חסר מייל במשרה</p>
+                                                )}
+                                              </div>
+                                              {selected ? (
+                                                <CheckCircleIcon className="w-3.5 h-3.5 text-primary-500 ml-0.5 shrink-0" />
                                               ) : null}
-                                              {hasMail ? (
-                                                <p className="text-[9px] mt-0.5 text-text-subtle truncate max-w-[140px]">
-                                                  {c.email}
-                                                </p>
-                                              ) : (
-                                                <p className="text-[9px] mt-0.5 text-red-500">חסר מייל במשרה</p>
-                                              )}
-                                            </div>
-                                            {selected ? (
-                                              <CheckCircleIcon className="w-3.5 h-3.5 text-primary-500 ml-0.5 shrink-0" />
+                                            </button>
+                                            {c.isCustom ? (
+                                              <button
+                                                type="button"
+                                                onClick={() => removeCustomSendContact(jid, c.id)}
+                                                disabled={sendCvSubmitting}
+                                                className="absolute -top-1 -left-1 w-4 h-4 rounded-full bg-bg-card border border-border-default text-text-muted hover:text-red-600 hover:border-red-200 flex items-center justify-center disabled:opacity-50"
+                                                aria-label={`הסר ${c.name}`}
+                                                title="הסר איש קשר"
+                                              >
+                                                <XMarkIcon className="w-2.5 h-2.5" />
+                                              </button>
                                             ) : null}
-                                          </button>
+                                          </div>
                                         );
                                       })}
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          sendContactAddForJobId === jid
+                                            ? cancelSendContactAddForm()
+                                            : openSendContactAddForm(jid)
+                                        }
+                                        disabled={sendCvSubmitting}
+                                        className="flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full border border-dashed border-primary-300 text-primary-600 hover:bg-primary-50 text-xs font-bold transition-colors disabled:opacity-50 min-h-[36px]"
+                                        title="הוסף איש קשר"
+                                      >
+                                        <PlusIcon className="w-4 h-4" />
+                                        <span>הוסף</span>
+                                      </button>
                                     </div>
+                                    {sendContactAddForJobId === jid ? (
+                                      <div className="p-3 rounded-xl border border-primary-200 bg-bg-card space-y-2">
+                                        <p className="text-xs font-bold text-text-default">איש קשר חדש</p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                          <input
+                                            type="text"
+                                            placeholder="שם מלא *"
+                                            value={sendContactAddDraft.name}
+                                            onChange={(e) =>
+                                              setSendContactAddDraft((d) => ({ ...d, name: e.target.value }))
+                                            }
+                                            disabled={sendCvSubmitting}
+                                            className="w-full bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+                                          />
+                                          <input
+                                            type="email"
+                                            placeholder="מייל *"
+                                            dir="ltr"
+                                            value={sendContactAddDraft.email}
+                                            onChange={(e) =>
+                                              setSendContactAddDraft((d) => ({ ...d, email: e.target.value }))
+                                            }
+                                            disabled={sendCvSubmitting}
+                                            className="w-full bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500 text-left"
+                                          />
+                                          <input
+                                            type="text"
+                                            placeholder="תפקיד (אופציונלי)"
+                                            value={sendContactAddDraft.role}
+                                            onChange={(e) =>
+                                              setSendContactAddDraft((d) => ({ ...d, role: e.target.value }))
+                                            }
+                                            disabled={sendCvSubmitting}
+                                            className="w-full sm:col-span-2 bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm focus:ring-primary-500 focus:border-primary-500"
+                                          />
+                                        </div>
+                                        {sendContactAddError ? (
+                                          <p className="text-xs text-red-600">{sendContactAddError}</p>
+                                        ) : null}
+                                        <div className="flex justify-end gap-2 pt-1">
+                                          <button
+                                            type="button"
+                                            onClick={cancelSendContactAddForm}
+                                            disabled={sendCvSubmitting}
+                                            className="px-3 py-1.5 text-xs font-bold text-text-muted hover:bg-bg-hover rounded-lg disabled:opacity-50"
+                                          >
+                                            ביטול
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => commitSendContactAdd(jid)}
+                                            disabled={sendCvSubmitting}
+                                            className="px-4 py-1.5 text-xs font-bold text-white bg-primary-600 hover:bg-primary-700 rounded-lg disabled:opacity-50"
+                                          >
+                                            הוסף לאנשי הקשר
+                                          </button>
+                                        </div>
+                                      </div>
+                                    ) : null}
                                   </div>
-                                ) : (
-                                  <p className="text-sm text-text-muted pt-3 border-t border-border-default/50">
-                                    לא מוגדרים אנשי קשר למשרה
-                                  </p>
                                 )}
                               </div>
                             );
@@ -3067,8 +3366,15 @@ const CandidateScreeningView: React.FC<{
                       <button
                         type="button"
                         onClick={() => void handleConfirmSendCv()}
-                        disabled={sendCvSubmitting}
+                        disabled={sendCvSubmitting || sendCvSendDisabled}
                         className="px-8 py-2.5 font-bold text-white bg-primary-600 hover:bg-primary-700 rounded-xl shadow-lg shadow-primary-200 transition-all transform active:scale-95 flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                        title={
+                          sendCvBlockedNoJobContacts
+                            ? 'הוסיפו לפחות איש קשר אחד למשרה'
+                            : sendCvBlockedMissingRecipientEmail
+                              ? 'לאנשי קשר שנבחרו חסר מייל תקין'
+                              : undefined
+                        }
                       >
                         <span>{sendCvSubmitting ? 'שולח...' : 'אשר ושלח'}</span>
                         <PaperAirplaneIcon className="w-5 h-5" />

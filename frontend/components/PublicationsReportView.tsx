@@ -26,6 +26,20 @@ interface JobPublication {
   unpublishedAt: string | null;
 }
 
+/** Views → referrals rate; if views untracked (0), fall back to referrals / job candidates. */
+const publicationConversionPercent = (
+  referrals: number,
+  views: number,
+  candidatesCount = 0,
+): number => {
+  const ref = Math.max(0, referrals);
+  const v = Math.max(0, views);
+  if (v > 0) return (ref / v) * 100;
+  const cand = Math.max(0, candidatesCount);
+  if (ref > 0 && cand > 0) return Math.min(100, (ref / cand) * 100);
+  return 0;
+};
+
 const allColumns = [
   { id: 'jobTitle', header: 'שם משרה', width: '17%' },
   { id: 'company', header: 'חברה', width: '12%' },
@@ -65,8 +79,11 @@ const exportPublicationsCsv = (rows: JobPublication[]) => {
         'תאריך יצירה',
     ];
     const lines = rows.map((job) => {
-        const rate =
-            job.views > 0 ? ((job.referralsCount / job.views) * 100).toFixed(1) : '0';
+        const rate = publicationConversionPercent(
+            job.referralsCount,
+            job.views,
+            job.candidatesCount,
+        ).toFixed(1);
         return [
             job.jobTitle,
             job.company,
@@ -111,8 +128,12 @@ const StatCard: React.FC<{ title: string; value: string | number; subValue?: str
     </div>
 );
 
-const ConversionBar: React.FC<{ referrals: number; views: number }> = ({ referrals, views }) => {
-    const rate = views > 0 ? (referrals / views) * 100 : 0;
+const ConversionBar: React.FC<{ referrals: number; views: number; candidatesCount?: number }> = ({
+    referrals,
+    views,
+    candidatesCount = 0,
+}) => {
+    const rate = publicationConversionPercent(referrals, views, candidatesCount);
     let colorClass = "bg-red-500";
     if (rate > 4) colorClass = "bg-green-500";
     else if (rate > 1.5) colorClass = "bg-yellow-500";
@@ -160,7 +181,7 @@ const JobPublicationCard: React.FC<{ job: JobPublication; onNavigate: (jobId: st
              <div className="flex flex-col items-center justify-center p-1 w-full">
                 <span className="text-xs text-text-muted mb-1">המרה</span>
                 <div className="w-full px-1">
-                     <ConversionBar referrals={job.referralsCount} views={job.views} />
+                     <ConversionBar referrals={job.referralsCount} views={job.views} candidatesCount={job.candidatesCount} />
                 </div>
              </div>
         </div>
@@ -475,8 +496,8 @@ const PublicationsReportView: React.FC = () => {
                 let aVal: unknown = (a as Record<string, unknown>)[sortConfig.key];
                 let bVal: unknown = (b as Record<string, unknown>)[sortConfig.key];
                 if (sortConfig.key === 'conversion') {
-                    aVal = (a.referralsCount || 0) / (a.views || 1);
-                    bVal = (b.referralsCount || 0) / (b.views || 1);
+                    aVal = publicationConversionPercent(a.referralsCount, a.views, a.candidatesCount);
+                    bVal = publicationConversionPercent(b.referralsCount, b.views, b.candidatesCount);
                 }
                 if ((aVal ?? '') < (bVal ?? '')) return sortConfig.direction === 'asc' ? -1 : 1;
                 if ((aVal ?? '') > (bVal ?? '')) return sortConfig.direction === 'asc' ? 1 : -1;
@@ -497,7 +518,12 @@ const PublicationsReportView: React.FC = () => {
             }
         }
         const totalCandidates = [...candidatesByJob.values()].reduce((acc, n) => acc + n, 0);
-        const avgConversion = totalViews > 0 ? ((totalReferrals / totalViews) * 100).toFixed(1) : '0';
+        const avgConversion =
+            totalViews > 0
+                ? ((totalReferrals / totalViews) * 100).toFixed(1)
+                : totalCandidates > 0
+                  ? ((totalReferrals / totalCandidates) * 100).toFixed(1)
+                  : '0';
         const activeJobs = processedData.length;
         return { totalViews, totalCandidates, totalReferrals, avgConversion, activeJobs };
     }, [processedData]);
@@ -562,7 +588,13 @@ const PublicationsReportView: React.FC = () => {
             case 'referralsCount':
                 return <span className="font-bold text-text-default text-base">{job.referralsCount}</span>;
             case 'conversion':
-                return <ConversionBar referrals={job.referralsCount} views={job.views} />;
+                return (
+                    <ConversionBar
+                        referrals={job.referralsCount}
+                        views={job.views}
+                        candidatesCount={job.candidatesCount}
+                    />
+                );
             default:
                 return String((job as unknown as Record<string, unknown>)[columnId] ?? '');
         }
@@ -612,7 +644,7 @@ const PublicationsReportView: React.FC = () => {
                  <StatCard 
                     title="יחס המרה ממוצע" 
                     value={`${stats.avgConversion}%`} 
-                    subValue="מצפייה להגשה"
+                    subValue={stats.totalViews > 0 ? 'מצפייה להגשה' : 'ממועמדים (ללא חשיפות)'}
                     icon={<ArrowPathIcon className="w-6 h-6 text-green-600"/>} 
                     color="bg-green-100"
                 />

@@ -4,6 +4,114 @@ export function isRichHtmlContent(raw: string): boolean {
     return /<\s*[a-z][^>]*>/i.test(raw.trim());
 }
 
+function escapeHtmlText(s: string): string {
+    return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+/**
+ * When an HTML placeholder is empty, `\n\n\n\n` + `\n\n\n\n` around it becomes one gap
+ * (same as the template textarea shows — not double the blank lines).
+ */
+/** Empty HTML placeholders often leave `\n\n\n\n` on both sides — merge to a single gap. */
+export function collapseAdjacentBlankBlocks(text: string): string {
+    let s = String(text || '');
+    let prev = '';
+    while (prev !== s) {
+        prev = s;
+        s = s.replace(/(?:\n{4}){2,}/g, '\n\n\n\n');
+    }
+    return s;
+}
+
+function htmlBlockIsEmpty(block: string): boolean {
+    const plain = block
+        .replace(/<br\s*\/?>/gi, ' ')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;|\u00a0/g, ' ')
+        .trim();
+    return !plain;
+}
+
+const HTML_BLOCK_RE =
+    /(<table[\s\S]*?<\/table>|<p[\s\S]*?<\/p>|<div[\s\S]*?<\/div>|<ul[\s\S]*?<\/ul>|<ol[\s\S]*?<\/ol>)/gi;
+
+/** Template blank lines around `{job_description}` should not become empty lines on both sides of the HTML block. */
+function normalizeGapsAroundNonemptyHtmlBlocks(raw: string): string {
+    return String(raw || '').replace(
+        /(\n{2,})\s*(<table[\s\S]*?<\/table>|<p[\s\S]*?<\/p>|<div[\s\S]*?<\/div>|<ul[\s\S]*?<\/ul>|<ol[\s\S]*?<\/ol>)\s*(\n{2,})/gi,
+        (_, a, block, b) => {
+            if (htmlBlockIsEmpty(block)) return `${a}${block}${b}`;
+            return `\n\n${block}\n\n`;
+        },
+    );
+}
+
+/** Placeholders like `{job_description}` sometimes expand to empty `<p><br></p>` — drop them. */
+export function stripInsignificantHtmlBlocks(raw: string): string {
+    let s = String(raw || '');
+    HTML_BLOCK_RE.lastIndex = 0;
+    s = s.replace(HTML_BLOCK_RE, (block) => (htmlBlockIsEmpty(block) ? '' : block));
+    s = collapseAdjacentBlankBlocks(s);
+    s = normalizeGapsAroundNonemptyHtmlBlocks(s);
+    return collapseAdjacentBlankBlocks(s);
+}
+
+function normalizeTemplateNewlines(raw: string): string {
+    return String(raw || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+/**
+ * Plain template body → email HTML.
+ * `\n\n` = new paragraph; each extra `\n` beyond that = one visible blank line (`<p><br></p>`).
+ */
+export function plainTextToEmailHtml(raw: string): string {
+    const normalized = collapseAdjacentBlankBlocks(normalizeTemplateNewlines(raw));
+    if (!normalized.trim()) return '';
+
+    const pieces = normalized.split(/(\n{2,})/);
+    const out: string[] = [];
+    for (const piece of pieces) {
+        if (!piece) continue;
+        if (/^\n{2,}$/.test(piece)) {
+            const extraBlankLines = piece.length - 2;
+            for (let i = 0; i < extraBlankLines; i += 1) out.push('<p><br></p>');
+            continue;
+        }
+        const inner = escapeHtmlText(piece).replace(/\n/g, '<br />');
+        out.push(`<p>${inner || '<br>'}</p>`);
+    }
+    return out.join('');
+}
+
+/**
+ * Mostly plain templates with HTML placeholders (e.g. `{job_description}`) — convert only
+ * text runs between block elements so newlines are not counted twice around tags.
+ */
+export function mixedTextAndHtmlToEmailEditorHtml(raw: string): string {
+    const normalized = stripInsignificantHtmlBlocks(normalizeTemplateNewlines(raw));
+    if (!normalized.trim()) return '';
+    if (!isRichHtmlContent(normalized)) return plainTextToEmailHtml(normalized);
+
+    const out: string[] = [];
+    let last = 0;
+    let match: RegExpExecArray | null;
+    HTML_BLOCK_RE.lastIndex = 0;
+    while ((match = HTML_BLOCK_RE.exec(normalized)) !== null) {
+        if (match.index > last) {
+            out.push(plainTextToEmailHtml(normalized.slice(last, match.index)));
+        }
+        out.push(match[0]);
+        last = match.index + match[0].length;
+    }
+    if (last < normalized.length) {
+        out.push(plainTextToEmailHtml(normalized.slice(last)));
+    }
+    return out.length ? out.join('') : plainTextToEmailHtml(normalized);
+}
+
 /** Rich editor HTML → plain text for search, export, and tag highlighting. */
 export function htmlToPlainText(raw: string): string {
     if (!raw) return '';

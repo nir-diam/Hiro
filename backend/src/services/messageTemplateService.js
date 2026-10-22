@@ -2,6 +2,7 @@ const { Op } = require('sequelize');
 const MessageTemplate = require('../models/MessageTemplate');
 const Client = require('../models/Client');
 const Job = require('../models/Job');
+const JobPublication = require('../models/JobPublication');
 const emailService = require('./emailService');
 const jobCandidateService = require('./jobCandidateService');
 const { buildLandingUrl } = require('./jobPublicationService');
@@ -579,6 +580,52 @@ function formatLinkedJobsSummary(rows) {
   return lines.join('\n');
 }
 
+function textContent(value) {
+  return String(value ?? '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function firstNonEmptyText(...values) {
+  for (const value of values) {
+    if (textContent(value)) return String(value).trim();
+  }
+  return '';
+}
+
+function detailedPublishContent(publication) {
+  const layouts =
+    publication && publication.landingLayouts && typeof publication.landingLayouts === 'object'
+      ? publication.landingLayouts
+      : null;
+  const detailed = layouts && layouts.detailed && typeof layouts.detailed === 'object' ? layouts.detailed : null;
+  return detailed;
+}
+
+/** Public posting copy. Internal title/description are used only when no public copy exists. */
+function resolvePublicJobTitle(job, publication) {
+  const detailed = detailedPublishContent(publication);
+  return firstNonEmptyText(
+    job && job.publicJobTitle,
+    detailed && detailed.publicJobTitle,
+    publication && publication.publicJobTitle,
+    job && job.title,
+  );
+}
+
+function resolvePublicJobDescription(job, publication) {
+  const detailed = detailedPublishContent(publication);
+  return firstNonEmptyText(
+    job && job.PublicDescription,
+    job && job.publicDescription,
+    detailed && detailed.publicJobDescription,
+    publication && publication.publicJobDescription,
+    job && job.description,
+  );
+}
+
 function formatRequirements(job) {
   if (!job || typeof job !== 'object') return '';
   const req = job.requirements;
@@ -688,6 +735,16 @@ async function buildNamedPlaceholdersFromCandidate(cand, ctx = {}) {
     'VITE_THANK_YOU_PAGE_URL',
   );
 
+  let jobPublication = null;
+  if (primaryJob && primaryJob.id) {
+    try {
+      const pubRow = await JobPublication.findOne({ where: { jobId: primaryJob.id } });
+      jobPublication = pubRow ? pubRow.get({ plain: true }) : null;
+    } catch (e) {
+      console.warn('[message-templates] job publication load failed:', e?.message || e);
+    }
+  }
+
   const clientLabel = primaryJob ? String(primaryJob.client || '').trim() : '';
   const contact = primaryJob ? firstContactFromJob(primaryJob) : null;
 
@@ -720,10 +777,8 @@ async function buildNamedPlaceholdersFromCandidate(cand, ctx = {}) {
     contact_name: contact ? contact.name : '',
     contact_phone: contact ? contact.phone : '',
     contact_email: contact ? contact.email : '',
-    job_title: primaryJob ? String(primaryJob.title || '').trim() : '',
-    job_description: primaryJob
-      ? String(primaryJob.description ?? primaryJob.PublicDescription ?? '').trim()
-      : '',
+    job_title: resolvePublicJobTitle(primaryJob, jobPublication),
+    job_description: resolvePublicJobDescription(primaryJob, jobPublication),
     job_requirements: primaryJob ? formatRequirements(primaryJob) : '',
     recruiter_name: pickRecruiterDisplay(primaryJob),
     recruiter_email: '',
@@ -1027,11 +1082,18 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
       jobId: jobIdOpt,
       inboxTo: options.inboxTo,
     });
+    if (!clientId) {
+      console.log('[message-templates] welcome skipped: client unresolved for job/inbox', {
+        candidateId: id,
+        jobId: jobIdOpt,
+      });
+      return;
+    }
     const enabled = await clientUsageSettingService.getAutoThanksEmailForClient(clientId);
     if (!enabled) {
-      console.log('[message-templates] welcome skipped: autoThanksEmail disabled or client unresolved', {
+      console.log('[message-templates] welcome skipped: autoThanksEmail disabled for client', {
         candidateId: id,
-        clientId: clientId || null,
+        clientId,
         jobId: jobIdOpt,
       });
       return;

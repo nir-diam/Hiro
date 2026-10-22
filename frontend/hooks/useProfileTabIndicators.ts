@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import { CLIENT_JOURNAL_UPDATED_EVENT } from '../utils/clientJournalEvents';
 import { fetchProposals, PROPOSALS_UPDATED_EVENT } from '../services/proposalsApi';
@@ -7,9 +8,10 @@ import {
     rawEventMatchesContactScope,
 } from '../utils/contactEventScope';
 import {
-    countPendingInboxRowsForScope,
+    countIncomingMessagesForScope,
     type InboxTaskScope,
 } from '../utils/inboxLinkedTasks';
+import type { NotificationInboxViewer } from '../services/notificationInboxCounts';
 import { fetchNotificationMessageRows } from '../services/notificationMessagesApi';
 import { NOTIFICATION_MESSAGES_REFRESH_EVENT } from '../services/notificationInboxCounts';
 
@@ -104,8 +106,9 @@ export async function loadOrganizationTabIndicators(input: {
     clientId: string;
     organizationId?: string | null;
     organizationTmpId?: string | null;
+    viewer?: NotificationInboxViewer;
 }): Promise<OrganizationTabIndicators> {
-    const { clientId, organizationId, organizationTmpId } = input;
+    const { clientId, organizationId, organizationTmpId, viewer } = input;
     const base = apiBase();
     if (!base || !clientId) return emptyOrgIndicators();
 
@@ -125,8 +128,7 @@ export async function loadOrganizationTabIndicators(input: {
     if (organizationId) eventsParams.set('organizationId', organizationId);
     if (organizationTmpId) eventsParams.set('organizationTmpId', organizationTmpId);
 
-    const [tasksRes, contactsRes, eventsRes, docsRes, jobsRes, inboxRes] = await Promise.allSettled([
-        fetchJson(`${base}/api/clients/${encodeURIComponent(clientId)}/tasks${orgQs}`),
+    const [contactsRes, eventsRes, docsRes, jobsRes, inboxRes] = await Promise.allSettled([
         fetchJson(`${base}/api/clients/${encodeURIComponent(clientId)}/contacts${orgQs}`),
         fetchJson(
             `${base}/api/clients/${encodeURIComponent(clientId)}/events?${eventsParams.toString()}`,
@@ -137,9 +139,6 @@ export async function loadOrganizationTabIndicators(input: {
     ]);
 
     let tasks = 0;
-    if (tasksRes.status === 'fulfilled') {
-        tasks = asList(tasksRes.value).filter((row) => String(row.status || '') === 'pending').length;
-    }
     if (inboxRes.status === 'fulfilled') {
         const jobIds = new Set<string>();
         if (jobsRes.status === 'fulfilled') {
@@ -153,7 +152,11 @@ export async function loadOrganizationTabIndicators(input: {
             organizationTmpId: organizationTmpId || undefined,
             organizationJobIds: jobIds.size ? jobIds : undefined,
         };
-        tasks += countPendingInboxRowsForScope(inboxRes.value as Record<string, unknown>[], scope);
+        tasks = countIncomingMessagesForScope(
+            inboxRes.value as Record<string, unknown>[],
+            scope,
+            viewer,
+        );
     }
 
     let contacts = 0;
@@ -191,22 +194,22 @@ export async function loadContactTabIndicators(input: {
     contactName?: string | null;
     organizationId?: string | null;
     organizationTmpId?: string | null;
+    viewer?: NotificationInboxViewer;
 }): Promise<ContactTabIndicators> {
-    const { clientId, contactId, contactName, organizationId, organizationTmpId } = input;
+    const { clientId, contactId, contactName, organizationId, organizationTmpId, viewer } = input;
     const base = apiBase();
     if (!base || !clientId || !contactId) return emptyContactIndicators();
 
-    const orgQs = orgQuery(organizationId, organizationTmpId);
     const scopedName = String(contactName || '').trim();
 
     const contactEventsParams = new URLSearchParams();
     contactEventsParams.set('summary', '1');
     contactEventsParams.set('limit', '1200');
+    contactEventsParams.set('contactId', contactId);
     if (organizationId) contactEventsParams.set('organizationId', organizationId);
     if (organizationTmpId) contactEventsParams.set('organizationTmpId', organizationTmpId);
 
-    const [tasksRes, eventsRes, jobsRes, proposalsRes, inboxRes] = await Promise.allSettled([
-        fetchJson(`${base}/api/clients/${encodeURIComponent(clientId)}/tasks${orgQs}`),
+    const [eventsRes, jobsRes, proposalsRes, inboxRes] = await Promise.allSettled([
         fetchJson(
             `${base}/api/clients/${encodeURIComponent(clientId)}/events?${contactEventsParams.toString()}`,
         ),
@@ -218,21 +221,16 @@ export async function loadContactTabIndicators(input: {
     ]);
 
     let tasks = 0;
-    if (tasksRes.status === 'fulfilled') {
-        tasks = asList(tasksRes.value)
-            .filter((row) => String(row.status || '') === 'pending')
-            .filter((row) => {
-                if (!scopedName) return true;
-                return String(row.assignee || '').trim().toLowerCase() === scopedName.toLowerCase();
-            })
-            .length;
-    }
     if (inboxRes.status === 'fulfilled') {
         const scope: InboxTaskScope = {
             contactId,
             contactName: scopedName || undefined,
         };
-        tasks += countPendingInboxRowsForScope(inboxRes.value as Record<string, unknown>[], scope);
+        tasks = countIncomingMessagesForScope(
+            inboxRes.value as Record<string, unknown>[],
+            scope,
+            viewer,
+        );
     }
 
     let events = 0;
@@ -265,6 +263,7 @@ export function useOrganizationProfileTabIndicators(input: {
     reloadWhen?: unknown;
 }): OrganizationTabIndicators {
     const { clientId, organizationId, organizationTmpId, enabled = true, reloadWhen } = input;
+    const { user } = useAuth();
     const [indicators, setIndicators] = useState<OrganizationTabIndicators>(emptyOrgIndicators);
 
     const refresh = useCallback(async () => {
@@ -277,12 +276,13 @@ export function useOrganizationProfileTabIndicators(input: {
                 clientId,
                 organizationId,
                 organizationTmpId,
+                viewer: { email: user?.email, name: user?.name, id: user?.id },
             });
             setIndicators(next);
         } catch {
             setIndicators(emptyOrgIndicators());
         }
-    }, [clientId, organizationId, organizationTmpId, enabled]);
+    }, [clientId, organizationId, organizationTmpId, enabled, user?.email, user?.name, user?.id]);
 
     useEffect(() => {
         void refresh();
@@ -322,6 +322,7 @@ export function useContactProfileTabIndicators(input: {
         enabled = true,
         reloadWhen,
     } = input;
+    const { user } = useAuth();
     const [indicators, setIndicators] = useState<ContactTabIndicators>(emptyContactIndicators);
 
     const refresh = useCallback(async () => {
@@ -336,12 +337,23 @@ export function useContactProfileTabIndicators(input: {
                 contactName,
                 organizationId,
                 organizationTmpId,
+                viewer: { email: user?.email, name: user?.name, id: user?.id },
             });
             setIndicators(next);
         } catch {
             setIndicators(emptyContactIndicators());
         }
-    }, [clientId, contactId, contactName, organizationId, organizationTmpId, enabled]);
+    }, [
+        clientId,
+        contactId,
+        contactName,
+        organizationId,
+        organizationTmpId,
+        enabled,
+        user?.email,
+        user?.name,
+        user?.id,
+    ]);
 
     useEffect(() => {
         void refresh();

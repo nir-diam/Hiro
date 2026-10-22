@@ -11,6 +11,7 @@ const candidateTagService = require('../services/candidateTagService');
 const tagEmbeddingService = require('../services/tagEmbeddingService');
 const tagCorrectionAgentService = require('../services/tagCorrectionAgentService');
 const tagAiDecisionResolveService = require('../services/tagAiDecisionResolveService');
+const tagSelectorSuggestService = require('../services/tagSelectorSuggestService');
 const User = require('../models/User');
 const TagAiDecision = require('../models/TagAiDecision');
 
@@ -596,6 +597,47 @@ const listPending = async (req, res) => {
   }
 };
 
+/** Remove or reassign every system_tags row still pointing at a catalog tag (before tag delete). */
+const clearSystemTagLinksForCatalogTag = async (tagId, { action, targetTag } = {}) => {
+  if (!tagId) return;
+  const rows = await SystemTag.findAll({ where: { tag_id: tagId } });
+  if (!rows.length) return;
+
+  const targetActive =
+    targetTag &&
+    targetTag.status &&
+    String(targetTag.status).toLowerCase() === 'active';
+  const targetPlain = targetTag?.toJSON
+    ? targetTag.toJSON()
+    : targetTag?.get
+      ? targetTag.get({ plain: true })
+      : targetTag;
+  const targetType = targetPlain?.type;
+
+  for (const row of rows) {
+    if (action === 'link' && targetTag) {
+      const typ = row.type || SYSTEM_TAG_TYPE_CANDIDATE;
+      const alreadyHas = await SystemTag.findOne({
+        where: { entity_id: row.entity_id, tag_id: targetTag.id, type: typ },
+      });
+      if (alreadyHas) {
+        await row.destroy();
+        if (typ === SYSTEM_TAG_TYPE_JOB && targetActive && !alreadyHas.is_active) {
+          await alreadyHas.update({ is_active: true });
+        }
+      } else {
+        await row.update({
+          tag_id: targetTag.id,
+          is_active: typ === SYSTEM_TAG_TYPE_JOB ? targetActive : true,
+          ...(typ === SYSTEM_TAG_TYPE_JOB && targetType ? { raw_type: targetType } : {}),
+        });
+      }
+    } else {
+      await row.destroy();
+    }
+  }
+};
+
 const resolvePendingTags = async ({ ids = [], action, targetTagId, aliasPriority = 3, bypassStatusCheck = false } = {}) => {
   if (!Array.isArray(ids) || !ids.length) {
     const err = new Error('No tag IDs provided');
@@ -761,6 +803,7 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId, aliasPriority
       }
 
       if (action !== 'create') {
+        await clearSystemTagLinksForCatalogTag(entry.id, { action, targetTag });
         await TagHistory.destroy({ where: { tag_id: entry.id } });
         await entry.destroy();
       }
@@ -1065,6 +1108,16 @@ const blacklistTags = async (req, res) => {
   }
 };
 
+const suggestForSelector = async (req, res) => {
+  try {
+    const result = await tagSelectorSuggestService.suggestTagsForSelector(req.body || {});
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.suggestForSelector]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load tag suggestions' });
+  }
+};
+
 module.exports = {
   list,
   get,
@@ -1072,6 +1125,7 @@ module.exports = {
   update,
   remove,
   enrich,
+  suggestForSelector,
   listPending,
   resolvePending,
   listTagCandidates,

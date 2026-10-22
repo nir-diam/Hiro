@@ -69,11 +69,17 @@ async function loadTaxonomyIndex() {
   }
 
   const categories = await JobCategory.findAll({
+    attributes: { exclude: ['embedding'] },
     order: [['name', 'ASC']],
     include: [{
       model: JobCluster,
       as: 'clusters',
-      include: [{ model: JobRole, as: 'roles' }],
+      attributes: { exclude: ['embedding'] },
+      include: [{
+        model: JobRole,
+        as: 'roles',
+        attributes: { exclude: ['embedding'] },
+      }],
     }],
   });
 
@@ -205,6 +211,91 @@ function resolveJobTaxonomy(job, index = taxonomyCache) {
   return { jobId, categoryId: null, clusterId: null, roleId: null };
 }
 
+function jobFieldPathEntries(job) {
+  const fields = Array.isArray(job?.jobFields) ? job.jobFields : [];
+  const out = [];
+  const seen = new Set();
+  for (const f of fields) {
+    if (!f || typeof f !== 'object') continue;
+    const field = f.category || f.field || null;
+    const role = f.role || f.value || null;
+    const key = `${norm(field)}|${norm(role)}`;
+    if (!field && !role) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ field, role });
+  }
+  const primaryKey = `${norm(job?.field)}|${norm(job?.role)}`;
+  if ((job?.field || job?.role) && !seen.has(primaryKey)) {
+    out.unshift({ field: job.field, role: job.role });
+  }
+  if (!out.length && (job?.field || job?.role)) {
+    out.push({ field: job.field, role: job.role });
+  }
+  return out;
+}
+
+/**
+ * All selected job taxonomy paths (jobFields[]), not only the mirrored first field/role.
+ * @returns {Array<{ jobId: string|null, categoryId: string|null, clusterId: string|null, roleId: string|null }>}
+ */
+function resolveAllJobTaxonomies(job, index = taxonomyCache) {
+  const jobId = job?.id != null ? String(job.id) : null;
+  const paths = jobFieldPathEntries(job);
+  if (!paths.length) {
+    const one = resolveJobTaxonomy(job, index);
+    return one.categoryId || one.clusterId || one.roleId ? [one] : [];
+  }
+  const out = [];
+  const seen = new Set();
+  for (const path of paths) {
+    const tax = resolveJobTaxonomy({ id: jobId, field: path.field, role: path.role }, index);
+    const key = `${tax.categoryId || ''}|${tax.clusterId || ''}|${tax.roleId || ''}`;
+    if (!tax.categoryId && !tax.clusterId && !tax.roleId) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tax);
+  }
+  return out;
+}
+
+function isRoleRawType(rawType) {
+  return String(rawType || '').trim().toLowerCase() === 'role';
+}
+
+/**
+ * Map the candidate's role tags / title onto taxonomy IDs (same index as jobs).
+ */
+function taxonomiesFromCandidateProfile(candidate, index = taxonomyCache) {
+  if (!index || !candidate) return [];
+  const names = [];
+  const details = Array.isArray(candidate.tagDetails) ? candidate.tagDetails : [];
+  for (const d of details) {
+    if (!d || typeof d !== 'object') continue;
+    if (!isRoleRawType(d.rawType || d.raw_type)) continue;
+    names.push(d.displayNameHe, d.displayNameEn, d.tagKey, d.name);
+  }
+  if (candidate.title) names.push(candidate.title);
+  if (candidate.role) names.push(candidate.role);
+
+  const out = [];
+  const seen = new Set();
+  for (const name of names) {
+    const row = findRoleInIndex(index, name, null);
+    if (!row) continue;
+    const key = `${row.categoryId}|${row.clusterId}|${row.roleId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      jobId: null,
+      categoryId: row.categoryId,
+      clusterId: row.clusterId,
+      roleId: row.roleId,
+    });
+  }
+  return out;
+}
+
 /**
  * Taxonomy IDs stored on field_interest JobCandidate.workflowMeta (no real job row).
  */
@@ -288,6 +379,8 @@ module.exports = {
   loadTaxonomyIndex,
   invalidateTaxonomyCache,
   resolveJobTaxonomy,
+  resolveAllJobTaxonomies,
+  taxonomiesFromCandidateProfile,
   taxonomyFromWorkflowMeta,
   buildLinkedJobsForIntent,
   findOpenJobsForFieldSelection,

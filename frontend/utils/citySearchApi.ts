@@ -161,6 +161,33 @@ export type LocationItemLike = {
     radius?: number;
 };
 
+/** Expand region/radius/city items into a deduped city name list (for job.location persistence). */
+export function expandLocationItemsToCityNames(
+    items: LocationItemLike[],
+    groups: LocationGroup[],
+): string[] {
+    if (!items.length) return [];
+    const groupByRegion = new Map(groups.map((g) => [g.region, g.cities]));
+    const names = new Set<string>();
+    for (const loc of items) {
+        const value = String(loc.value || '').trim();
+        if (!value) continue;
+        if (loc.type === 'city') {
+            names.add(value);
+        } else if (loc.type === 'region') {
+            const cities = groupByRegion.get(value);
+            if (cities?.length) {
+                for (const c of cities) names.add(c);
+            } else {
+                names.add(value);
+            }
+        } else if (loc.type === 'radius') {
+            names.add(value);
+        }
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b, 'he'));
+}
+
 /** Collapse full-region city lists into a single region item (keeps adv payloads small). */
 export function compressLocationItems(
     items: LocationItemLike[],

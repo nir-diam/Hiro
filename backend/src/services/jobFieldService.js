@@ -138,7 +138,14 @@ const searchRoles = async (clusterId, q) => {
 
 const createCategory = async (name) => {
   const row = await JobCategory.create({ name });
+  try {
+    const { buildStableSlug } = require('../utils/publicJobSlug');
+    await row.update({ publicSlug: buildStableSlug(name, row.id), slugLocked: true });
+  } catch (err) {
+    console.warn('[jobField] category slug skipped', err?.message || err);
+  }
   jobFieldEmbeddingService.scheduleCategoryEmbedding(row);
+  try { require('./publicJobsWebhookService').scheduleTaxonomyUpdated(); } catch { /* ignore */ }
   return row;
 };
 const updateCategory = async (id, name) => {
@@ -147,6 +154,7 @@ const updateCategory = async (id, name) => {
   row.name = name;
   await row.save();
   jobFieldEmbeddingService.scheduleCategoryEmbedding(row);
+  try { require('./publicJobsWebhookService').scheduleTaxonomyUpdated(); } catch { /* ignore */ }
   return row;
 };
 const deleteCategory = async (id) => {
@@ -156,7 +164,14 @@ const deleteCategory = async (id) => {
 
 const createCluster = async ({ categoryId, name }) => {
   const row = await JobCluster.create({ categoryId, name });
+  try {
+    const { buildStableSlug } = require('../utils/publicJobSlug');
+    await row.update({ publicSlug: buildStableSlug(name, row.id), slugLocked: true });
+  } catch (err) {
+    console.warn('[jobField] cluster slug skipped', err?.message || err);
+  }
   jobFieldEmbeddingService.scheduleClusterEmbedding(row);
+  try { require('./publicJobsWebhookService').scheduleTaxonomyUpdated(); } catch { /* ignore */ }
   return row;
 };
 const updateCluster = async (id, name) => {
@@ -165,6 +180,7 @@ const updateCluster = async (id, name) => {
   row.name = name;
   await row.save();
   jobFieldEmbeddingService.scheduleClusterEmbedding(row);
+  try { require('./publicJobsWebhookService').scheduleTaxonomyUpdated(); } catch { /* ignore */ }
   return row;
 };
 const deleteCluster = async (id) => {

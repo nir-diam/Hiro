@@ -1,5 +1,5 @@
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
     PlusIcon,
     PencilIcon,
@@ -286,6 +286,8 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
     const [loadError, setLoadError] = useState<string | null>(null);
     const [activeScreeningApp, setActiveScreeningApp] = useState<ApplicationRecord | null>(null);
     const [isSubmittingScreening, setIsSubmittingScreening] = useState(false);
+    const onPendingDigitalScreeningsChangeRef = useRef(onPendingDigitalScreeningsChange);
+    onPendingDigitalScreeningsChangeRef.current = onPendingDigitalScreeningsChange;
 
     const profileIdsKey = useMemo(() => {
         const ids = new Set<string>();
@@ -465,8 +467,8 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
     }, [applications, getDigitalQuestionsForApp, isAppDigitalScreeningPending]);
 
     useEffect(() => {
-        onPendingDigitalScreeningsChange?.(pendingDigitalTasks);
-    }, [pendingDigitalTasks, onPendingDigitalScreeningsChange]);
+        onPendingDigitalScreeningsChangeRef.current?.(pendingDigitalTasks);
+    }, [pendingDigitalTasks]);
 
     useEffect(() => {
         if (!externalScreeningTaskId) return;
@@ -476,6 +478,17 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
             onExternalScreeningTaskHandled?.();
         }
     }, [externalScreeningTaskId, applications, isAppDigitalScreeningPending, onExternalScreeningTaskHandled]);
+
+    const filteredApps = useMemo(() => {
+        const term = searchTerm.trim().toLowerCase();
+        if (!term) return applications;
+        return applications.filter((app) => {
+            const company = app.company?.toLowerCase() || '';
+            const role = app.role?.toLowerCase() || '';
+            const jobTitle = app.job?.title?.toLowerCase() || '';
+            return company.includes(term) || role.includes(term) || jobTitle.includes(term);
+        });
+    }, [applications, searchTerm]);
 
     const openScreeningWizard = (app: ApplicationRecord) => {
         if (!isAppDigitalScreeningPending(app)) return;
@@ -688,17 +701,6 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
             setLoadError(err instanceof Error ? err.message : 'מחיקה נכשלה');
         }
     };
-
-    const filteredApps = useMemo(() => {
-        const term = searchTerm.trim().toLowerCase();
-        if (!term) return applications;
-        return applications.filter((app) => {
-            const company = app.company?.toLowerCase() || '';
-            const role = app.role?.toLowerCase() || '';
-            const jobTitle = app.job?.title?.toLowerCase() || '';
-            return company.includes(term) || role.includes(term) || jobTitle.includes(term);
-        });
-    }, [applications, searchTerm]);
 
     const openNewModal = () => {
         if (!candidateId) {

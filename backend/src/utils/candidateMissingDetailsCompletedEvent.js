@@ -6,7 +6,10 @@ const clientService = require('../services/clientService');
 const JobCandidate = require('../models/JobCandidate');
 const ClientContact = require('../models/ClientContact');
 const jobCandidateProcessJournalService = require('../services/jobCandidateProcessJournalService');
-const { resolveClientIdsForCandidateJournal } = require('../services/pipelineOutcomeService');
+const resolveClientIdsForCandidateJournal = async (...args) => {
+  const { resolveClientIdsForCandidateJournal: resolve } = require('../services/pipelineOutcomeService');
+  return resolve(...args);
+};
 
 const trim = (v) => (v != null && v !== undefined ? String(v).trim() : '');
 
@@ -201,7 +204,7 @@ const recordMissingDetailsClientJournal = async (
 
   const clients = [];
   for (const clientId of clientIds) {
-    const client = await clientService.getById(clientId);
+    const client = await clientService.getById(clientId, { include: ['events'] });
     const prevEvents = Array.isArray(client?.events) ? client.events : [];
     if (hasClientMissingDetailsEvent(prevEvents, cid)) {
       clients.push({ clientId, recorded: false, reason: 'already_recorded' });

@@ -20,7 +20,9 @@ export const eventBelongsToContact = (
   if (linked?.type === 'איש קשר' && String(linked.id || '') === String(contactId)) return true;
   const name = String(contactName || '').trim();
   const eventName = String(event.contactName || linked?.name || '').trim();
-  if (name && eventName && (eventName === name || eventName.includes(name) || name.includes(eventName))) {
+  const eventHasOtherId = eventContactId && eventContactId !== String(contactId);
+  if (eventHasOtherId) return false;
+  if (name && eventName && eventName === name) {
     return true;
   }
   return false;

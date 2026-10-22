@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { 
     PlusIcon, MagnifyingGlassIcon, Cog6ToothIcon, AvatarIcon, ChevronDownIcon, ArrowPathIcon,
@@ -13,6 +14,7 @@ import { SavedSearch, useSavedSearches } from '../context/SavedSearchesContext';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import CandidateCard from './CandidateCard';
 import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
+import CvReviewBadge from './CvReviewBadge';
 import CandidateRow from './CandidateRow';
 import DevAnnotation from './DevAnnotation';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
@@ -21,6 +23,11 @@ import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import TagSelectorModal, { type TagOption } from './TagSelectorModal';
 import BulkAddToFilterModal from './BulkAddToFilterModal';
 import ScreeningCollisionWarningModal, { type ScreeningWarningAgg } from './ScreeningCollisionWarningModal';
+import {
+    fetchScreeningPrecheckForJobs,
+    linkCandidatesToJobFilters,
+    type JobFilterSaveOptions,
+} from '../utils/candidateJobFilterApi';
 import BulkReferModal, { type BulkReferSuccessSummary } from './BulkReferModal';
 import BulkChangeStatusModal from './BulkChangeStatusModal';
 import BulkAddToSavedSearchModal from './BulkAddToSavedSearchModal';
@@ -380,10 +387,28 @@ type CandidateStageColorColumn = {
     stageIds: Set<string>;
 };
 
+function columnFromStages(group: CandidatePipelineStage[], key: string): CandidateStageColorColumn {
+    const primary = group[0];
+    return {
+        key,
+        color: primary.color,
+        stages: group,
+        primary,
+        title: group.map((s) => s.name).filter(Boolean).join(' · '),
+        stageIds: new Set(group.map((s) => s.id)),
+    };
+}
+
 function groupCandidateStagesByColor(stages: CandidatePipelineStage[]): CandidateStageColorColumn[] {
+    const sorted = [...(stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const colors = new Set(sorted.map((s) => s.color || 'default'));
+    // A process whose stages were all left on the default color (e.g. גיוס) is still one column per stage.
+    // Shared colors group together only when the process actually uses more than one color.
+    if (colors.size <= 1) {
+        return sorted.map((stage) => columnFromStages([stage], stage.id));
+    }
     const order: string[] = [];
     const map = new Map<string, CandidatePipelineStage[]>();
-    const sorted = [...(stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     for (const s of sorted) {
         const key = s.color || 'default';
         if (!map.has(key)) {
@@ -392,18 +417,7 @@ function groupCandidateStagesByColor(stages: CandidatePipelineStage[]): Candidat
         }
         map.get(key)!.push(s);
     }
-    return order.map((key) => {
-        const group = map.get(key)!;
-        const primary = group[0];
-        return {
-            key,
-            color: primary.color,
-            stages: group,
-            primary,
-            title: group.map((s) => s.name).filter(Boolean).join(' · '),
-            stageIds: new Set(group.map((s) => s.id)),
-        };
-    });
+    return order.map((key) => columnFromStages(map.get(key)!, key));
 }
 
 function pipelineDtoToStages(p: PipelineDto | undefined): CandidatePipelineStage[] {
@@ -1998,6 +2012,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [searchTerm]);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const settingsRef = useRef<HTMLDivElement>(null);
+    const settingsButtonRef = useRef<HTMLButtonElement>(null);
+    const settingsMenuRef = useRef<HTMLDivElement>(null);
+    const [settingsMenuStyle, setSettingsMenuStyle] = useState<React.CSSProperties | null>(null);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
 
     const globalPoolDefaultCols = useMemo(
@@ -2172,9 +2189,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [bulkFilterOpen, setBulkFilterOpen] = useState(false);
     const [screeningCollisionOpen, setScreeningCollisionOpen] = useState(false);
     const [screeningCollisionAgg, setScreeningCollisionAgg] = useState<ScreeningWarningAgg[]>([]);
-    const pendingBulkFilterRef = useRef<{ jobId: string; options?: { notes?: string; filterPosition?: string } } | null>(
-        null,
-    );
+    const pendingBulkFilterRef = useRef<{ jobIds: string[]; options?: JobFilterSaveOptions } | null>(null);
     const [bulkSavedSearchOpen, setBulkSavedSearchOpen] = useState(false);
     const [changeSourceOpen, setChangeSourceOpen] = useState(false);
     const [bulkAddEventOpen, setBulkAddEventOpen] = useState(false);
@@ -3295,6 +3310,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             .map(c => getCandidateRouteId(c));
     }, [candidates, selectedIds, getCandidateRouteId]);
 
+    const bulkFilterCandidateDisplayName = useMemo(() => {
+        if (selectedIds.size !== 1) return undefined;
+        const c = candidates.find((row) => selectedIds.has(row.id));
+        const name = c?.name != null ? String(c.name).trim() : '';
+        return name || undefined;
+    }, [candidates, selectedIds]);
+
+    const bulkFilterRecruiterName = useMemo(() => {
+        const name = user?.name != null ? String(user.name).trim() : '';
+        return name || undefined;
+    }, [user?.name]);
+
     const openBulkRefer = useCallback(() => {
         setIsBulkActionsMobileOpen(false);
         setBulkReferOpen(true);
@@ -3304,6 +3331,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setIsBulkActionsMobileOpen(false);
         setBulkStatusOpen(true);
     }, []);
+
+    const candidateToRecipientOption = useCallback((c: Candidate) => ({
+        id: getCandidateRouteId(c),
+        name: c.name || '',
+        email: c.email || '',
+        phone: c.phone || '',
+        subtitle: c.title || '',
+    }), [getCandidateRouteId]);
 
     const openBulkSendSms = useCallback(() => {
         const list = candidates.filter((c) => selectedIds.has(c.id) && c.distributionSms !== false);
@@ -3317,6 +3352,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             list.length === 1
                 ? list[0].name
                 : t('candidates.bulk_message_recipients', { count: list.length });
+        const options = list.map(candidateToRecipientOption);
+        const withPhone = options.filter((o) => String(o.phone || '').replace(/\D/g, '').length >= 9).map((o) => o.id);
         openMessageModal({
             mode: 'sms',
             recipientType: 'candidate',
@@ -3324,8 +3361,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             candidatePhone: phones.join('; '),
             candidateEmail: list.length === 1 ? list[0].email || null : null,
             candidateId: list.length === 1 ? getCandidateRouteId(list[0]) : null,
+            recipientOptions: options,
+            initialRecipientIds: withPhone.length ? withPhone : options.map((o) => o.id),
         });
-    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
+    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, candidateToRecipientOption, t]);
 
     const openBulkSendEmail = useCallback(() => {
         const list = candidates.filter((c) => selectedIds.has(c.id) && c.distributionEmail !== false);
@@ -3342,6 +3381,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             .map((c) => String(c.email || '').trim())
             .filter(Boolean)
             .join(', ');
+        const options = list.map(candidateToRecipientOption);
+        const withEmail = options.filter((o) => String(o.email || '').includes('@')).map((o) => o.id);
         openMessageModal({
             mode: 'email',
             recipientType: 'candidate',
@@ -3349,8 +3390,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             candidatePhone: list.map((c) => String(c.phone || '').trim()).filter(Boolean).join('; '),
             candidateEmail: emailField,
             candidateId: list.length === 1 ? getCandidateRouteId(list[0]) : null,
+            recipientOptions: options,
+            initialRecipientIds: withEmail.length ? withEmail : options.map((o) => o.id),
         });
-    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
+    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, candidateToRecipientOption, t]);
 
     const openBulkSendWhatsapp = useCallback(() => {
         const list = candidates.filter((c) => selectedIds.has(c.id) && c.distributionWhatsapp !== false);
@@ -3364,6 +3407,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             list.length === 1
                 ? list[0].name
                 : t('candidates.bulk_message_recipients', { count: list.length });
+        const options = list.map(candidateToRecipientOption);
+        const withPhone = options.filter((o) => String(o.phone || '').replace(/\D/g, '').length >= 9).map((o) => o.id);
         openMessageModal({
             mode: 'whatsapp',
             recipientType: 'candidate',
@@ -3371,8 +3416,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             candidatePhone: phones.join('; '),
             candidateEmail: list.length === 1 ? list[0].email || null : null,
             candidateId: list.length === 1 ? getCandidateRouteId(list[0]) : null,
+            recipientOptions: options,
+            initialRecipientIds: withPhone.length ? withPhone : options.map((o) => o.id),
         });
-    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
+    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, candidateToRecipientOption, t]);
 
     const openBulkFilter = useCallback(() => {
         setIsBulkActionsMobileOpen(false);
@@ -3496,48 +3543,30 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     );
 
     const runBulkFilterPosts = useCallback(
-        async (jobId: string, options?: { notes?: string; filterPosition?: string }) => {
+        async (jobIds: string[], options?: JobFilterSaveOptions) => {
             const ids = bulkSelectedBackendIds.map((id) => String(id).trim()).filter(Boolean);
-            if (!apiBase || ids.length === 0 || !jobId.trim()) {
+            const jids = jobIds.map((id) => String(id).trim()).filter(Boolean);
+            if (!apiBase || ids.length === 0 || jids.length === 0) {
                 setBulkFilterOpen(false);
                 return;
             }
-            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-            const headers: Record<string, string> = {
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-            };
-            if (token) headers.Authorization = `Bearer ${token}`;
-            const body = {
-                jobId: jobId.trim(),
-                filterNotes: options?.notes?.trim() || '',
-                filterPosition: options?.filterPosition?.trim() || '',
-            };
-            let ok = 0;
-            let fail = 0;
-            await Promise.all(
-                ids.map(async (cid) => {
-                    try {
-                        const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(cid)}/linked-jobs`, {
-                            method: 'POST',
-                            headers,
-                            body: JSON.stringify(body),
-                        });
-                        if (res.ok) ok += 1;
-                        else fail += 1;
-                    } catch {
-                        fail += 1;
-                    }
-                }),
-            );
+            const { ok, fail } = await linkCandidatesToJobFilters(apiBase, ids, jids, options);
             setBulkFilterOpen(false);
-            const total = ids.length;
-            if (fail === 0) {
+            const totalPairs = ids.length * jids.length;
+            if (jids.length > 1) {
+                if (fail === 0) {
+                    setFeedbackMessage(`נוסף לסינון: ${ok} שיוכים (${jids.length} משרות)`);
+                } else if (ok === 0) {
+                    setFeedbackMessage(`הוספה לסינון נכשלה (${fail} שיוכים)`);
+                } else {
+                    setFeedbackMessage(`נוסף לסינון: ${ok} מתוך ${totalPairs} שיוכים (${fail} נכשלו)`);
+                }
+            } else if (fail === 0) {
                 setFeedbackMessage(t('candidates.bulk_filter_recorded', { count: ok }));
             } else if (ok === 0) {
-                setFeedbackMessage(t('candidates.bulk_filter_failed', { count: total }));
+                setFeedbackMessage(t('candidates.bulk_filter_failed', { count: ids.length }));
             } else {
-                setFeedbackMessage(t('candidates.bulk_filter_partial', { ok, total, fail }));
+                setFeedbackMessage(t('candidates.bulk_filter_partial', { ok, total: ids.length, fail }));
             }
             setSelectedIds(new Set());
         },
@@ -3545,40 +3574,21 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     );
 
     const handleBulkFilterSave = useCallback(
-        async (jobId: string, options?: { notes?: string; filterPosition?: string }) => {
+        async (jobIds: string[], options?: JobFilterSaveOptions) => {
             const ids = bulkSelectedBackendIds.map((id) => String(id).trim()).filter(Boolean);
-            if (!apiBase || ids.length === 0 || !jobId.trim()) {
+            const jids = jobIds.map((id) => String(id).trim()).filter(Boolean);
+            if (!apiBase || ids.length === 0 || jids.length === 0) {
                 setBulkFilterOpen(false);
                 return;
             }
-            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-            const headers: Record<string, string> = {
-                Accept: 'application/json',
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            };
-            const agg: ScreeningWarningAgg[] = [];
-            for (const cid of ids) {
-                try {
-                    const res = await fetch(
-                        `${apiBase}/api/candidates/${encodeURIComponent(cid)}/screening-precheck?jobId=${encodeURIComponent(jobId.trim())}`,
-                        { headers, cache: 'no-store' },
-                    );
-                    if (!res.ok) continue;
-                    const j = (await res.json()) as { warnings?: ScreeningWarningAgg['warnings'] };
-                    if (Array.isArray(j.warnings) && j.warnings.length) {
-                        agg.push({ candidateId: cid, warnings: j.warnings });
-                    }
-                } catch {
-                    /* skip precheck failure — proceed without warning for this id */
-                }
-            }
+            const agg = await fetchScreeningPrecheckForJobs(apiBase, ids, jids);
             if (agg.length > 0) {
-                pendingBulkFilterRef.current = { jobId, options };
+                pendingBulkFilterRef.current = { jobIds: jids, options };
                 setScreeningCollisionAgg(agg);
                 setScreeningCollisionOpen(true);
                 return;
             }
-            await runBulkFilterPosts(jobId, options);
+            await runBulkFilterPosts(jids, options);
         },
         [apiBase, bulkSelectedBackendIds, runBulkFilterPosts],
     );
@@ -4021,11 +4031,43 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setLanguageFilters(prev => prev.filter(f => f.language !== languageToRemove));
     };
     
+    const placeSettingsMenu = useCallback(() => {
+        const button = settingsButtonRef.current;
+        if (!button) return;
+        const rect = button.getBoundingClientRect();
+        const width = 224;
+        let left = rect.right - width;
+        if (left < 8) left = rect.left;
+        if (left + width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - width - 8);
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const top = spaceBelow < 280 && rect.top > 280 ? Math.max(8, rect.top - 8) : rect.bottom + 8;
+        setSettingsMenuStyle({
+            position: 'fixed',
+            top,
+            left,
+            width,
+            zIndex: 80,
+            transform: spaceBelow < 280 && rect.top > 280 ? 'translateY(-100%)' : undefined,
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!isSettingsOpen) return;
+        placeSettingsMenu();
+        const reposition = () => placeSettingsMenu();
+        window.addEventListener('resize', reposition);
+        window.addEventListener('scroll', reposition, true);
+        return () => {
+            window.removeEventListener('resize', reposition);
+            window.removeEventListener('scroll', reposition, true);
+        };
+    }, [isSettingsOpen, placeSettingsMenu]);
+
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
-          if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
-            setIsSettingsOpen(false);
-          }
+          const target = event.target as Node;
+          if (settingsRef.current?.contains(target) || settingsMenuRef.current?.contains(target)) return;
+          setIsSettingsOpen(false);
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -4083,6 +4125,32 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const paginatedCandidates = useMemo(() => {
         return processedCandidates;
     }, [processedCandidates]);
+
+    const candidatesTableHorizontalScrollKey = useMemo(
+        () =>
+            [
+                debouncedSearchTerm,
+                page,
+                pageSize,
+                sortConfig?.key ?? '',
+                sortConfig?.direction ?? '',
+                totalCandidates,
+                paginatedCandidates.length,
+                paginatedCandidates[0]?.id ?? '',
+                selectionMode ? 1 : 0,
+                columns.map((c) => c.id).join(','),
+            ].join('\u0001'),
+        [
+            debouncedSearchTerm,
+            page,
+            pageSize,
+            sortConfig,
+            totalCandidates,
+            paginatedCandidates,
+            selectionMode,
+            columns,
+        ],
+    );
 
     const activeCandidatePipeline = useMemo(
         () => candidatePipelines.find((p) => p.id === activeCandidatePipelineId),
@@ -5272,6 +5340,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                      className="font-bold text-text-default hover:text-primary-600 cursor-pointer transition-colors text-base inline-flex items-center gap-1.5"
                                  >
                                      {candidate.name}
+                                     <CvReviewBadge internalTags={candidate.internalTags} />
                                      <CandidateApprovedByCandidateBadge
                                          approved={Boolean(candidate.consentToJobOffers || candidate.approveByCandidate)}
                                          className="w-4 h-4"
@@ -5961,6 +6030,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             pinHeader
                             className="min-w-0"
                             scrollClassName={ADMIN_TABLE_SCROLL_CLASS}
+                            horizontalScrollResetKey={candidatesTableHorizontalScrollKey}
                         >
                             <table className={`w-full text-sm text-right min-w-[800px] ${STICKY_TABLE_CLASS}`} dir="rtl">
                             <thead className="text-xs text-text-muted uppercase">
@@ -6004,20 +6074,41 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     ))}
                                     <th scope="col" className={stickyTableHeaderCellClass('px-2 py-3 sticky end-0 w-16 z-40')}>
                                         <div className="relative" ref={settingsRef}>
-                                            <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
-                                            {isSettingsOpen && (
-                                            <div className="absolute top-full end-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
-                                                <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
-                                                <div className="space-y-2">
-                                                {allColumns.map(column => (
-                                                    <label key={column.id} className="flex items-center gap-2 text-sm font-normal text-text-default capitalize cursor-pointer">
-                                                    <input type="checkbox" checked={columns.some(c => c.id === column.id)} onChange={() => handleColumnToggle(column.id)} className="w-4 h-4 text-primary-600" />
-                                                    {column.header}
-                                                    </label>
-                                                ))}
-                                                </div>
-                                            </div>
-                                            )}
+                                            <button
+                                                ref={settingsButtonRef}
+                                                type="button"
+                                                onMouseDown={(e) => e.stopPropagation()}
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    placeSettingsMenu();
+                                                    setIsSettingsOpen((open) => !open);
+                                                }}
+                                                title={t('candidates.customize_columns')}
+                                                className="p-2 hover:bg-bg-hover rounded-full"
+                                            >
+                                                <Cog6ToothIcon className="w-5 h-5"/>
+                                            </button>
+                                            {isSettingsOpen && settingsMenuStyle
+                                                ? createPortal(
+                                                    <div
+                                                        ref={settingsMenuRef}
+                                                        style={settingsMenuStyle}
+                                                        className="bg-bg-card rounded-lg shadow-xl border border-border-default p-4 max-h-[70vh] overflow-y-auto"
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                    >
+                                                        <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
+                                                        <div className="space-y-2">
+                                                            {allColumns.map(column => (
+                                                                <label key={column.id} className="flex items-center gap-2 text-sm font-normal text-text-default capitalize cursor-pointer">
+                                                                    <input type="checkbox" checked={columns.some(c => c.id === column.id)} onChange={() => handleColumnToggle(column.id)} className="w-4 h-4 text-primary-600" />
+                                                                    {column.header}
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    </div>,
+                                                    document.body,
+                                                )
+                                                : null}
                                         </div>
                                     </th>
                                 </tr>
@@ -6276,6 +6367,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                                             <div className="min-w-0">
                                                                 <h4 className="font-bold text-sm text-text-default truncate inline-flex items-center gap-1.5 max-w-full">
                                                                     <span className="truncate">{candidate.name}</span>
+                                                                    <CvReviewBadge internalTags={candidate.internalTags} />
                                                                     <CandidateApprovedByCandidateBadge
                                                                         approved={Boolean(candidate.consentToJobOffers || candidate.approveByCandidate)}
                                                                         className="w-3.5 h-3.5"
@@ -6547,7 +6639,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     const p = pendingBulkFilterRef.current;
                     pendingBulkFilterRef.current = null;
                     setScreeningCollisionOpen(false);
-                    if (p) void runBulkFilterPosts(p.jobId, p.options);
+                    if (p) void runBulkFilterPosts(p.jobIds, p.options);
                 }}
             />
             <BulkAddToFilterModal
@@ -6557,6 +6649,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 selectedCount={selectedIds.size}
                 jobs={bulkJobPickerOptions}
                 candidateBackendIds={bulkSelectedBackendIds}
+                candidateDisplayName={bulkFilterCandidateDisplayName}
+                currentUserRecruiter={bulkFilterRecruiterName}
             />
             <BulkAddToSavedSearchModal
                 isOpen={bulkSavedSearchOpen}

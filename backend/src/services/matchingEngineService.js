@@ -343,7 +343,24 @@ async function resolveEngineConfigForJob(jobPlain, options = {}) {
   let merged = globalCfg;
   let presetRow = null;
   try {
-    presetRow = await findMatchingPresetRowForJob(jobPlain, options);
+    const jobPresetRaw = jobPlain?.matchingEnginePresetId;
+    const jobPresetId =
+      jobPresetRaw != null && jobPresetRaw !== '' && Number.isFinite(Number(jobPresetRaw))
+        ? Number(jobPresetRaw)
+        : null;
+    if (jobPresetId != null) {
+      presetRow = await MatchingEngineConfig.findOne({
+        where: { id: jobPresetId, type: 'preset' },
+      });
+      if (!presetRow) {
+        console.warn(
+          `[matchingEngineService] job matchingEnginePresetId=${jobPresetId} not found; falling back to client preset`,
+        );
+      }
+    }
+    if (!presetRow) {
+      presetRow = await findMatchingPresetRowForJob(jobPlain, options);
+    }
     if (presetRow?.config && typeof presetRow.config === 'object' && Object.keys(presetRow.config).length) {
       merged = mergeEngineConfig(globalCfg, presetRow.config);
     }

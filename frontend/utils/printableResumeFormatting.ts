@@ -95,6 +95,8 @@ const MILITARY_EXPERIENCE_RE =
 export function isMilitaryExperienceEntry(exp: unknown): boolean {
     if (!exp || typeof exp !== 'object') return false;
     const row = exp as Record<string, unknown>;
+    if (row.isMilitaryService === true) return true;
+    if (row.isMilitaryService === false) return false;
     if (row.isMilitary === true || row.type === 'military' || row.category === 'military') {
         return true;
     }
@@ -102,6 +104,21 @@ export function isMilitaryExperienceEntry(exp: unknown): boolean {
         .filter((v) => v != null && String(v).trim())
         .join(' ');
     return MILITARY_EXPERIENCE_RE.test(blob);
+}
+
+const CV_PRINT_PRESENT_RE = /^(present|היום|נוכחי|current|עכשיו)$/i;
+
+/** Dates on printable CV — `present` / Present → כיום. */
+export function formatCvPrintDate(d?: string | null): string {
+    if (d == null || !String(d).trim()) return '';
+    const s = String(d).trim();
+    if (CV_PRINT_PRESENT_RE.test(s)) return 'כיום';
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10).split('-').reverse().join('/');
+    if (/^\d{4}-\d{2}$/.test(s)) {
+        const [y, m] = s.split('-');
+        return `${m}/${y}`;
+    }
+    return s;
 }
 
 export function splitWorkExperienceForPrint(

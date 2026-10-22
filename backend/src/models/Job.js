@@ -73,6 +73,7 @@ const Job = sequelize.define(
     associatedCandidates: DataTypes.INTEGER,
     waitingForScreening: DataTypes.INTEGER,
     activeProcess: DataTypes.INTEGER,
+    referralsCount: DataTypes.VIRTUAL,
     openDate: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
     recruiter: DataTypes.STRING,
     location: DataTypes.TEXT,
@@ -85,11 +86,21 @@ const Job = sequelize.define(
       type: DataTypes.ENUM('standard', 'high_volume', 'executive', 'disabled'),
       defaultValue: 'standard',
     },
+    /** Overrides client_usage_settings.matching_engine_preset_id for scoring this job. */
+    matchingEnginePresetId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      field: 'matching_engine_preset_id',
+    },
     internalNotes: DataTypes.TEXT,
     /** Short editable notes in jobs list grid (not internal job form notes). */
     listNotes: DataTypes.TEXT,
     /** Edit history for listNotes: [{ id, at, userId, userName, previousText, newText, action }]. */
     listNotesHistory: { type: DataTypes.JSONB, defaultValue: [] },
+    /** Last staff user who opened the job edit screen (GET /api/jobs/:id with auth). */
+    lastOpenedByUserId: { type: DataTypes.UUID, allowNull: true },
+    lastOpenedByName: { type: DataTypes.TEXT, allowNull: true },
+    lastOpenedAt: { type: DataTypes.DATE, allowNull: true },
     uniqueEmail: DataTypes.STRING,
     contacts: { type: DataTypes.JSONB, defaultValue: [] },
     cvForwardSettings: {

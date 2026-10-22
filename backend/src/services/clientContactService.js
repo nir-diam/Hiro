@@ -353,15 +353,17 @@ const listJobsForContact = async (clientId, contactId) => {
 
   const contact = await ClientContact.findOne({
     where: { id: contactPk, clientId: cid },
-    attributes: ['id'],
+    attributes: ['id', 'organizationId'],
     raw: true,
   });
   if (!contact) return null;
 
+  const contactOrgId = contact.organizationId != null ? String(contact.organizationId).trim() : '';
   const escapedContactId = sequelize.escape(contactPk);
   const rows = await Job.findAll({
     where: {
       clientId: cid,
+      ...(contactOrgId ? { organizationId: contactOrgId } : {}),
       [Op.and]: [
         sequelize.literal(`
           EXISTS (

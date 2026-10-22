@@ -57,3 +57,44 @@ export async function fetchScreeningPrecheckForJob(
   }
   return null;
 }
+
+/** Aggregate screening precheck warnings for many candidate × job pairs. */
+export async function fetchScreeningPrecheckForJobs(
+  apiBase: string,
+  candidateIds: string[],
+  jobIds: string[],
+): Promise<ScreeningWarningAgg[]> {
+  const cids = candidateIds.map((id) => String(id || '').trim()).filter(Boolean);
+  const jids = jobIds.map((id) => String(id || '').trim()).filter(Boolean);
+  if (!apiBase || cids.length === 0 || jids.length === 0) return [];
+  const agg: ScreeningWarningAgg[] = [];
+  for (const cid of cids) {
+    for (const jid of jids) {
+      const row = await fetchScreeningPrecheckForJob(apiBase, cid, jid);
+      if (row) agg.push(row);
+    }
+  }
+  return agg;
+}
+
+/** Link many candidates to many jobs (cartesian product). Returns success/fail pair counts. */
+export async function linkCandidatesToJobFilters(
+  apiBase: string,
+  candidateIds: string[],
+  jobIds: string[],
+  options?: JobFilterSaveOptions,
+): Promise<{ ok: number; fail: number }> {
+  const cids = candidateIds.map((id) => String(id || '').trim()).filter(Boolean);
+  const jids = jobIds.map((id) => String(id || '').trim()).filter(Boolean);
+  if (!apiBase || cids.length === 0 || jids.length === 0) return { ok: 0, fail: 0 };
+  let ok = 0;
+  let fail = 0;
+  for (const cid of cids) {
+    for (const jid of jids) {
+      const success = await linkCandidateToJobFilter(apiBase, cid, jid, options);
+      if (success) ok += 1;
+      else fail += 1;
+    }
+  }
+  return { ok, fail };
+}

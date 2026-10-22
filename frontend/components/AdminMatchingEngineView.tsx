@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { 
     SparklesIcon, 
     TagIcon, 
@@ -18,7 +19,9 @@ import {
     FolderIcon,
     XCircleIcon,
     TrashIcon,
-    PlusIcon
+    PlusIcon,
+    PencilIcon,
+    ClipboardDocumentIcon,
 } from './Icons';
 
 interface WeightSetting {
@@ -103,7 +106,28 @@ function normalizePenaltyPoliciesFromCfg(cfg: Record<string, unknown> | undefine
     return out;
 }
 
-const AdminMatchingEngineView: React.FC = () => {
+export type AdminMatchingEngineViewProps = {
+    /** When set, load/save presets via `/api/clients/:id/matching-engine-configs` (Company Settings). */
+    tenantClientId?: string | null;
+};
+
+const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenantClientId = null }) => {
+    const [searchParams] = useSearchParams();
+    const presetIdFromUrl = useMemo(() => {
+        const raw = String(searchParams.get('presetId') || '').trim();
+        const n = Number(raw);
+        return Number.isFinite(n) && n > 0 ? n : null;
+    }, [searchParams]);
+
+    const isTenantMode = Boolean(String(tenantClientId || '').trim());
+    const apiPresetsBase = useMemo(
+        () =>
+            isTenantMode
+                ? `${API_BASE}/api/clients/${encodeURIComponent(String(tenantClientId))}/matching-engine-configs`
+                : API_PRESETS,
+        [isTenantMode, tenantClientId],
+    );
+
     const [isLoading, setIsLoading] = useState(true);
 
     // Main Algorithm Weights
@@ -378,86 +402,99 @@ const AdminMatchingEngineView: React.FC = () => {
     // ── load saved config + presets + clients on mount ───────────────────────
     useEffect(() => {
         (async () => {
-            try {
-                const res = await fetch(API_CONFIG, { headers: buildHeaders() });
-                if (!res.ok) return;
-                const cfg = await res.json();
+            if (!isTenantMode) {
+                try {
+                    const res = await fetch(API_CONFIG, { headers: buildHeaders() });
+                    if (!res.ok) return;
+                    const cfg = await res.json();
 
-                if (cfg.mainWeights)
-                    setMainWeights(prev => prev.map(w => ({ ...w, value: cfg.mainWeights[w.id] ?? w.value })));
-                if (cfg.intentWeights)
-                    setIntentWeights(prev => prev.map(w => ({ ...w, value: cfg.intentWeights[w.id] ?? w.value })));
-                if (cfg.tagWeights)
-                    setTagWeights(prev => prev.map(w => ({ ...w, value: cfg.tagWeights[w.id] ?? w.value })));
-                if (cfg.sourceWeights)
-                    setSourceWeights(prev => prev.map(w => ({ ...w, value: cfg.sourceWeights[w.id] ?? w.value })));
-                if (cfg.geoRegions)
-                    setGeoRegions(prev => prev.map(r => cfg.geoRegions[r.id]
-                        ? { ...r, grace: cfg.geoRegions[r.id].grace, penaltyPerKm: cfg.geoRegions[r.id].penaltyPerKm }
-                        : r
-                    ));
-                if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(cfg.missingGeoScore);
-                if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(cfg.missingSalaryScore);
-                if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold);
-                if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty);
-                if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty);
-                if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
-                if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled);
-                setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg as Record<string, unknown>));
-            } catch {
-                // silent — fall back to defaults
+                    if (cfg.mainWeights)
+                        setMainWeights(prev => prev.map(w => ({ ...w, value: cfg.mainWeights[w.id] ?? w.value })));
+                    if (cfg.intentWeights)
+                        setIntentWeights(prev => prev.map(w => ({ ...w, value: cfg.intentWeights[w.id] ?? w.value })));
+                    if (cfg.tagWeights)
+                        setTagWeights(prev => prev.map(w => ({ ...w, value: cfg.tagWeights[w.id] ?? w.value })));
+                    if (cfg.sourceWeights)
+                        setSourceWeights(prev => prev.map(w => ({ ...w, value: cfg.sourceWeights[w.id] ?? w.value })));
+                    if (cfg.geoRegions)
+                        setGeoRegions(prev => prev.map(r => cfg.geoRegions[r.id]
+                            ? { ...r, grace: cfg.geoRegions[r.id].grace, penaltyPerKm: cfg.geoRegions[r.id].penaltyPerKm }
+                            : r
+                        ));
+                    if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(cfg.missingGeoScore);
+                    if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(cfg.missingSalaryScore);
+                    if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold);
+                    if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty);
+                    if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty);
+                    if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
+                    if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled);
+                    setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg as Record<string, unknown>));
+                } catch {
+                    // silent — fall back to defaults
+                }
             }
 
             // load presets from DB — auto-apply the first one
             try {
-                const pr = await fetch(API_PRESETS, { headers: buildHeaders() });
+                const pr = await fetch(apiPresetsBase, { headers: buildHeaders() });
                 if (pr.ok) {
                     const presets: DbPreset[] = await pr.json();
                     setDbPresets(presets);
                     if (presets.length > 0) {
-                        const first = presets[0];
-                        setActivePresetId(first.id);
-                        // Apply the preset's stored config immediately (overrides the global defaults)
-                        const cfg = first.config as Record<string, unknown>;
-                        const mw = cfg.mainWeights   as Record<string, number> | undefined;
-                        const tw = cfg.tagWeights    as Record<string, number> | undefined;
+                        const urlId = presetIdFromUrl;
+                        const initial =
+                            (urlId != null ? presets.find((p) => p.id === urlId) : undefined) || presets[0];
+                        setActivePresetId(initial.id);
+                        const cfg = initial.config as Record<string, unknown>;
+                        const mw = cfg.mainWeights as Record<string, number> | undefined;
+                        const tw = cfg.tagWeights as Record<string, number> | undefined;
                         const iw = cfg.intentWeights as Record<string, number> | undefined;
                         const sw = cfg.sourceWeights as Record<string, number> | undefined;
-                        const gr = cfg.geoRegions    as Record<string, { grace: number; penaltyPerKm: number }> | undefined;
-                        if (mw) setMainWeights(prev   => prev.map(w => ({ ...w, value: mw[w.id] ?? w.value })));
-                        if (tw) setTagWeights(prev    => prev.map(w => ({ ...w, value: tw[w.id] ?? w.value })));
-                        if (iw) setIntentWeights(prev => prev.map(w => ({ ...w, value: iw[w.id] ?? w.value })));
-                        if (sw) setSourceWeights(prev => prev.map(w => ({ ...w, value: sw[w.id] ?? w.value })));
-                        if (gr) setGeoRegions(prev    => prev.map(r => gr[r.id] ? { ...r, ...gr[r.id] } : r));
-                        if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(cfg.missingGeoScore as number);
-                        if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(cfg.missingSalaryScore as number);
-                        if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold as number);
-                        if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty as number);
-                        if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty as number);
-                        if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
-                        if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled as boolean);
+                        const gr = cfg.geoRegions as
+                            | Record<string, { grace: number; penaltyPerKm: number }>
+                            | undefined;
+                        if (mw) setMainWeights((prev) => prev.map((w) => ({ ...w, value: mw[w.id] ?? w.value })));
+                        if (tw) setTagWeights((prev) => prev.map((w) => ({ ...w, value: tw[w.id] ?? w.value })));
+                        if (iw) setIntentWeights((prev) => prev.map((w) => ({ ...w, value: iw[w.id] ?? w.value })));
+                        if (sw) setSourceWeights((prev) => prev.map((w) => ({ ...w, value: sw[w.id] ?? w.value })));
+                        if (gr) setGeoRegions((prev) => prev.map((r) => (gr[r.id] ? { ...r, ...gr[r.id] } : r)));
+                        if (cfg.missingGeoScore !== undefined) setMissingGeoScore(cfg.missingGeoScore as number);
+                        if (cfg.missingSalaryScore !== undefined) {
+                            setMissingSalaryScore(cfg.missingSalaryScore as number);
+                        }
+                        if (cfg.salaryDiffThreshold !== undefined) {
+                            setSalaryDiffThreshold(cfg.salaryDiffThreshold as number);
+                        }
+                        if (cfg.salaryPenalty !== undefined) setSalaryPenalty(cfg.salaryPenalty as number);
+                        if (cfg.ageGapPenalty !== undefined) setAgeGapPenalty(cfg.ageGapPenalty as number);
+                        if (cfg.missingAgeScore !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
+                        if (cfg.isExperienceEnabled !== undefined) {
+                            setIsExperienceEnabled(cfg.isExperienceEnabled as boolean);
+                        }
                         setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg));
                     }
                 }
             } catch { /* silent */ }
 
-            // load clients for the multiselect
-            try {
-                const cl = await fetch(API_CLIENTS, { headers: buildHeaders() });
-                if (cl.ok) {
-                    const data = await cl.json();
-                    const list = Array.isArray(data) ? data : (data.data ?? []);
-                    setClients(list.map((c: Record<string, unknown>) => ({
-                        id:          String(c.id ?? ''),
-                        name:        String(c.name ?? ''),
-                        displayName: c.displayName ? String(c.displayName) : undefined,
-                    })));
-                }
-            } catch { /* silent */ }
+            if (!isTenantMode) {
+                // load clients for the multiselect
+                try {
+                    const cl = await fetch(API_CLIENTS, { headers: buildHeaders() });
+                    if (cl.ok) {
+                        const data = await cl.json();
+                        const list = Array.isArray(data) ? data : (data.data ?? []);
+                        setClients(list.map((c: Record<string, unknown>) => ({
+                            id:          String(c.id ?? ''),
+                            name:        String(c.name ?? ''),
+                            displayName: c.displayName ? String(c.displayName) : undefined,
+                        })));
+                    }
+                } catch { /* silent */ }
+            }
 
             setIsLoading(false);
         })();
-    }, []);
+    }, [presetIdFromUrl, isTenantMode, apiPresetsBase]);
 
     const handleMainWeightChange = (id: string, newValue: number) => {
         setMainWeights(prev => prev.map(w => w.id === id ? { ...w, value: newValue } : w));
@@ -484,25 +521,26 @@ const AdminMatchingEngineView: React.FC = () => {
         try {
             const payload = buildPayload();
 
-            // Always save global config
-            const res = await fetch(API_CONFIG, {
-                method: 'PUT',
-                headers: buildHeaders(true),
-                body: JSON.stringify(payload),
-            });
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            if (!isTenantMode) {
+                const res = await fetch(API_CONFIG, {
+                    method: 'PUT',
+                    headers: buildHeaders(true),
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            }
 
-            // If a preset is active, also update it with the same payload
-            if (activePresetId) {
-                const presetRes = await fetch(`${API_PRESETS}/${activePresetId}`, {
+            if (!activePresetId) {
+                if (isTenantMode) throw new Error('No preset selected');
+            } else {
+                const presetRes = await fetch(`${apiPresetsBase}/${activePresetId}`, {
                     method: 'PUT',
                     headers: buildHeaders(true),
                     body: JSON.stringify({ config: payload }),
                 });
-                if (presetRes.ok) {
-                    const updated: DbPreset = await presetRes.json();
-                    setDbPresets(prev => prev.map(p => p.id === updated.id ? updated : p));
-                }
+                if (!presetRes.ok) throw new Error(`HTTP ${presetRes.status}`);
+                const updated: DbPreset = await presetRes.json();
+                setDbPresets(prev => prev.map(p => p.id === updated.id ? updated : p));
             }
 
             setShowSuccess(true);
@@ -523,6 +561,9 @@ const AdminMatchingEngineView: React.FC = () => {
     const [newPresetName, setNewPresetName] = useState('');
     const [newPresetDesc, setNewPresetDesc] = useState('');
     const [newPresetClientIds, setNewPresetClientIds] = useState<string[]>([]);
+    const [editingPreset, setEditingPreset] = useState<{ id: number; field: 'label' | 'description' } | null>(null);
+    const [editingPresetDraft, setEditingPresetDraft] = useState('');
+    const [isDuplicatingPreset, setIsDuplicatingPreset] = useState(false);
 
     // ── build payload for save ────────────────────────────────────────────────
     const buildPayload = useCallback(() => ({
@@ -573,17 +614,81 @@ const AdminMatchingEngineView: React.FC = () => {
 
     const deleteDbPreset = async (id: number, e: React.MouseEvent) => {
         e.stopPropagation();
+        if (isTenantMode) return;
         if (!window.confirm('האם אתה בטוח שברצונך למחוק תבנית זו?')) return;
         setDbPresets(prev => prev.filter(p => p.id !== id));
         if (activePresetId === id) setActivePresetId(null);
         await fetch(`${API_PRESETS}/${id}`, { method: 'DELETE', headers: buildHeaders() }).catch(() => {});
     };
 
+    const startPresetMetaEdit = (preset: DbPreset, field: 'label' | 'description', e: React.MouseEvent) => {
+        e.stopPropagation();
+        e.preventDefault();
+        applyDbPreset(preset.config);
+        setActivePresetId(preset.id);
+        setEditingPreset({ id: preset.id, field });
+        setEditingPresetDraft(field === 'label' ? preset.label : (preset.description || ''));
+    };
+
+    const commitPresetMetaEdit = async () => {
+        if (!editingPreset) return;
+        const { id, field } = editingPreset;
+        const preset = dbPresets.find((p) => p.id === id);
+        const value = editingPresetDraft.trim();
+        setEditingPreset(null);
+        if (!preset) return;
+        if (field === 'label' && !value) return;
+        const current = field === 'label' ? preset.label : (preset.description || '');
+        if (value === String(current).trim()) return;
+        try {
+            const res = await fetch(`${apiPresetsBase}/${id}`, {
+                method: 'PUT',
+                headers: buildHeaders(true),
+                body: JSON.stringify({ [field]: value }),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const updated: DbPreset = await res.json();
+            setDbPresets((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+        } catch {
+            alert('שגיאה בשמירת שם/תיאור התבנית');
+        }
+    };
+
+    const duplicateActivePreset = async () => {
+        const src = dbPresets.find((p) => p.id === activePresetId);
+        if (!src || isDuplicatingPreset) return;
+        setIsDuplicatingPreset(true);
+        try {
+            const body = {
+                label: `${src.label} (עותק)`,
+                description: src.description || '',
+                clientIds: isTenantMode
+                    ? [String(tenantClientId)]
+                    : (src.clientIds || []),
+                config: src.config || {},
+            };
+            const res = await fetch(apiPresetsBase, {
+                method: 'POST',
+                headers: buildHeaders(true),
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const created: DbPreset = await res.json();
+            setDbPresets((prev) => [...prev, created]);
+            setActivePresetId(created.id);
+            applyDbPreset(created.config);
+        } catch {
+            alert('שגיאה בשכפול התבנית');
+        } finally {
+            setIsDuplicatingPreset(false);
+        }
+    };
+
     const updateActivePreset = async () => {
         if (!activePresetId) return;
         const payload = buildPayload();
         try {
-            const res = await fetch(`${API_PRESETS}/${activePresetId}`, {
+            const res = await fetch(`${apiPresetsBase}/${activePresetId}`, {
                 method: 'PUT',
                 headers: { ...buildHeaders(), 'Content-Type': 'application/json' },
                 body: JSON.stringify({ config: payload }),
@@ -756,13 +861,28 @@ const AdminMatchingEngineView: React.FC = () => {
                         <SparklesIcon className="w-5 h-5 text-primary-500" />
                         <h3 className="text-lg font-bold text-text-default">תבניות שקלול (גישות)</h3>
                     </div>
-                    <button 
-                        onClick={handleSaveAsNewPresetClick} 
-                        className="text-sm font-bold text-primary-700 bg-primary-100/50 hover:bg-primary-100 px-4 py-2 rounded-lg transition-colors flex items-center gap-1.5"
-                    >
-                        <PlusIcon className="w-4 h-4" />
-                        שמור גישה נוכחית כחדשה
-                    </button>
+                    <div className="flex items-center gap-2">
+                        <button
+                            type="button"
+                            onClick={() => void duplicateActivePreset()}
+                            disabled={!activePresetId || isDuplicatingPreset}
+                            className="text-sm font-bold text-primary-700 bg-primary-100/50 hover:bg-primary-100 px-4 py-2 rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            {isDuplicatingPreset
+                                ? <ArrowPathIcon className="w-4 h-4 animate-spin" />
+                                : <ClipboardDocumentIcon className="w-4 h-4" />}
+                            שכפל תבנית
+                        </button>
+                        {!isTenantMode && (
+                            <button 
+                                onClick={handleSaveAsNewPresetClick} 
+                                className="text-sm font-bold text-primary-700 bg-primary-100/50 hover:bg-primary-100 px-4 py-2 rounded-lg transition-colors flex items-center gap-1.5"
+                            >
+                                <PlusIcon className="w-4 h-4" />
+                                שמור גישה נוכחית כחדשה
+                            </button>
+                        )}
+                    </div>
                 </div>
                 {dbPresets.length === 0 && (
                     <p className="text-sm text-text-muted italic py-2">אין גישות שמורות עדיין. שמור את ההגדרות הנוכחיות כגישה חדשה.</p>
@@ -770,11 +890,22 @@ const AdminMatchingEngineView: React.FC = () => {
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                     {dbPresets.map(preset => {
                         const isActive = activePresetId === preset.id;
+                        const editingLabel = editingPreset?.id === preset.id && editingPreset.field === 'label';
+                        const editingDesc = editingPreset?.id === preset.id && editingPreset.field === 'description';
                         return (
-                        <button
+                        <div
                             key={preset.id}
+                            role="button"
+                            tabIndex={0}
                             onClick={() => { applyDbPreset(preset.config); setActivePresetId(preset.id); }}
-                            className={`p-4 rounded-xl border transition-all text-right group relative flex flex-col items-start h-full
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                    e.preventDefault();
+                                    applyDbPreset(preset.config);
+                                    setActivePresetId(preset.id);
+                                }
+                            }}
+                            className={`p-4 rounded-xl border transition-all text-right group relative flex flex-col items-start h-full cursor-pointer
                                 ${isActive
                                     ? 'border-purple-500 ring-2 ring-purple-500 bg-purple-50 shadow-md shadow-purple-200'
                                     : 'border-purple-200 bg-purple-50/30 hover:bg-purple-50 hover:border-purple-500 hover:ring-1 hover:ring-purple-500'
@@ -785,22 +916,91 @@ const AdminMatchingEngineView: React.FC = () => {
                                     פעיל
                                 </span>
                             )}
-                            <div className="absolute top-3 left-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                                <div
-                                    onClick={(e) => deleteDbPreset(preset.id, e)}
-                                    className="p-1.5 bg-white/80 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded border border-transparent hover:border-red-200 transition-colors"
-                                    title="מחק גישה"
+                            <div className="absolute top-3 left-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                                <button
+                                    type="button"
+                                    onClick={(e) => startPresetMetaEdit(preset, 'label', e)}
+                                    className="p-1.5 bg-white/80 hover:bg-primary-50 text-slate-400 hover:text-primary-700 rounded border border-transparent hover:border-primary-200 transition-colors"
+                                    title="ערוך שם ותיאור"
                                 >
-                                    <TrashIcon className="w-4 h-4" />
-                                </div>
+                                    <PencilIcon className="w-4 h-4" />
+                                </button>
+                                {!isTenantMode && (
+                                    <button
+                                        type="button"
+                                        onClick={(e) => deleteDbPreset(preset.id, e)}
+                                        className="p-1.5 bg-white/80 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded border border-transparent hover:border-red-200 transition-colors"
+                                        title="מחק גישה"
+                                    >
+                                        <TrashIcon className="w-4 h-4" />
+                                    </button>
+                                )}
                             </div>
                             <div className="flex items-center gap-2 mb-2 pr-8 w-full">
                                 <div className={`p-2 bg-white rounded-lg shadow-sm transition-colors shrink-0 ${isActive ? 'text-purple-600' : 'group-hover:text-purple-600 text-purple-400'}`}>
                                     <TagIcon className="w-5 h-5" />
                                 </div>
-                                <h3 className="font-bold text-text-default truncate">{preset.label}</h3>
+                                {editingLabel ? (
+                                    <input
+                                        autoFocus
+                                        type="text"
+                                        value={editingPresetDraft}
+                                        onClick={(e) => e.stopPropagation()}
+                                        onChange={(e) => setEditingPresetDraft(e.target.value)}
+                                        onBlur={() => void commitPresetMetaEdit()}
+                                        onKeyDown={(e) => {
+                                            e.stopPropagation();
+                                            if (e.key === 'Enter') {
+                                                e.preventDefault();
+                                                (e.target as HTMLInputElement).blur();
+                                            }
+                                            if (e.key === 'Escape') {
+                                                e.preventDefault();
+                                                setEditingPreset(null);
+                                            }
+                                        }}
+                                        className="w-full min-w-0 font-bold text-text-default bg-white border border-purple-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-purple-400"
+                                    />
+                                ) : (
+                                    <h3
+                                        className="font-bold text-text-default truncate hover:underline decoration-purple-300 underline-offset-2"
+                                        title="לחץ לעריכת השם"
+                                        onClick={(e) => startPresetMetaEdit(preset, 'label', e)}
+                                    >
+                                        {preset.label}
+                                    </h3>
+                                )}
                             </div>
-                            <p className="text-xs text-text-muted leading-relaxed mb-1 line-clamp-2">{preset.description || 'גישה מותאמת אישית'}</p>
+                            {editingDesc ? (
+                                <textarea
+                                    autoFocus
+                                    value={editingPresetDraft}
+                                    rows={2}
+                                    onClick={(e) => e.stopPropagation()}
+                                    onChange={(e) => setEditingPresetDraft(e.target.value)}
+                                    onBlur={() => void commitPresetMetaEdit()}
+                                    onKeyDown={(e) => {
+                                        e.stopPropagation();
+                                        if (e.key === 'Enter' && !e.shiftKey) {
+                                            e.preventDefault();
+                                            (e.target as HTMLTextAreaElement).blur();
+                                        }
+                                        if (e.key === 'Escape') {
+                                            e.preventDefault();
+                                            setEditingPreset(null);
+                                        }
+                                    }}
+                                    className="w-full text-xs text-text-muted bg-white border border-purple-300 rounded-md px-2 py-1 mb-1 outline-none focus:ring-2 focus:ring-purple-400 resize-none"
+                                />
+                            ) : (
+                                <p
+                                    className="text-xs text-text-muted leading-relaxed mb-1 line-clamp-2 hover:underline decoration-purple-300 underline-offset-2 w-full"
+                                    title="לחץ לעריכת התיאור"
+                                    onClick={(e) => startPresetMetaEdit(preset, 'description', e)}
+                                >
+                                    {preset.description || 'גישה מותאמת אישית'}
+                                </p>
+                            )}
                             {/* Mini weight preview */}
                             {(() => {
                                 const mw = preset.config?.mainWeights as Record<string, number> | undefined;
@@ -825,7 +1025,7 @@ const AdminMatchingEngineView: React.FC = () => {
                                     </div>
                                 );
                             })()}
-                            {preset.clientIds && preset.clientIds.length > 0 && (
+                            {!isTenantMode && preset.clientIds && preset.clientIds.length > 0 && (
                                 <div className="flex flex-wrap gap-1 mt-auto">
                                     {preset.clientIds.map(cid => {
                                         const client = clients.find(c => c.id === cid);
@@ -837,7 +1037,7 @@ const AdminMatchingEngineView: React.FC = () => {
                                     })}
                                 </div>
                             )}
-                        </button>
+                        </div>
                     );})}
                 </div>
             </div>
@@ -1365,7 +1565,8 @@ const AdminMatchingEngineView: React.FC = () => {
                     </div>
                 </div>
 
-            {/* Simulator Section */}
+            {/* Simulator Section — admin only (uses admin simulate API) */}
+            {!isTenantMode && (
             <div className="mt-8 bg-white rounded-2xl border border-border-default overflow-hidden shadow-sm">
                 <div className="p-6 border-b border-border-subtle bg-bg-subtle flex items-center justify-between">
                     <div className="flex items-center gap-3">
@@ -1810,6 +2011,7 @@ const AdminMatchingEngineView: React.FC = () => {
                     </div>
                 </div>
             </div>
+            )}
 
             {/* Formula preview — live values */}
             <div className="mt-8 bg-white rounded-2xl border border-border-default p-6 shadow-sm">

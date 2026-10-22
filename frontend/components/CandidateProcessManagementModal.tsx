@@ -3,7 +3,7 @@ import { XMarkIcon, ClockIcon } from './Icons';
 import ClientsEventsJournalTab from './ClientsEventsJournalTab';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
 import JobDetailsDrawer from './JobDetailsDrawer';
-import ClientDetailsDrawer from './ClientDetailsDrawer';
+import OrganizationPreviewDrawer from './OrganizationPreviewDrawer';
 import { useAuth } from '../context/AuthContext';
 import {
   type CandidateJobLink,
@@ -11,13 +11,10 @@ import {
 } from '../utils/candidateLinkedJobs';
 import {
   buildCandidateDrawerStub,
-  buildClientDrawerStub,
   buildJobDrawerStub,
-  hydrateClientForDrawer,
   hydrateJobForDrawer,
   type JobDrawerJob,
 } from '../utils/processEntityDrawers';
-import type { Client } from './ClientsListView';
 import type { Candidate } from './CandidatesListView';
 
 export type ProcessModalJob = CandidateJobLink;
@@ -56,10 +53,9 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
   const [clientIdLoading, setClientIdLoading] = useState(false);
 
   const [candidateDrawer, setCandidateDrawer] = useState<Candidate | null>(null);
-  const [clientDrawer, setClientDrawer] = useState<Client | null>(null);
   const [jobDrawer, setJobDrawer] = useState<JobDrawerJob | null>(null);
   const [isCandidateDrawerOpen, setIsCandidateDrawerOpen] = useState(false);
-  const [isClientDrawerOpen, setIsClientDrawerOpen] = useState(false);
+  const [isOrgDrawerOpen, setIsOrgDrawerOpen] = useState(false);
   const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
 
   useEffect(() => {
@@ -76,153 +72,39 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
     }
 
     const tenantClientId = user?.clientId ? String(user.clientId).trim() : '';
-    const jobCompany =
-      localJob.company && localJob.company !== '—' ? String(localJob.company).trim() : '';
-
-    const resolveOrganizationForTenant = async (): Promise<{ id: string; name: string } | null> => {
-      if (!tenantClientId || !jobCompany || !apiBase) return null;
-      try {
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        const res = await fetch(
-          `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations`,
-          {
-            headers: {
-              Accept: 'application/json',
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-            cache: 'no-store',
-          },
-        );
-        if (!res.ok) return null;
-        const rows = await res.json();
-        const list = Array.isArray(rows) ? rows : rows?.data ?? [];
-        const companyN = jobCompany.toLowerCase();
-        for (const raw of list) {
-          const org = (raw.organization && typeof raw.organization === 'object')
-            ? raw.organization
-            : raw;
-          const orgId = raw.organizationId ? String(raw.organizationId) : '';
-          const orgName = String(org?.name || raw.name || '').trim();
-          if (!orgId || !orgName) continue;
-          const orgNameN = orgName.toLowerCase();
-          if (
-            orgNameN === companyN
-            || orgNameN.includes(companyN)
-            || companyN.includes(orgNameN)
-          ) {
-            return { id: orgId, name: orgName };
-          }
-        }
-      } catch {
-        /* ignore */
-      }
-      return null;
-    };
-
-    const applyResolvedOrganization = (match: { id: string; name: string } | null) => {
-      if (!match) return;
-      setResolvedOrganizationId(match.id);
-      setResolvedOrganizationName(match.name);
-    };
-
     const direct =
       (clientIdProp && String(clientIdProp).trim()) ||
       (localJob.clientId && String(localJob.clientId).trim()) ||
       (job.clientId && String(job.clientId).trim()) ||
-      '';
+      tenantClientId;
+    const orgId = String(localJob.organizationId || '').trim();
+    const orgName = localJob.company && localJob.company !== '—' ? localJob.company : '';
 
-    if (direct) {
-      setResolvedClientId(direct);
-      setClientIdLoading(false);
-      if (tenantClientId && direct === tenantClientId && jobCompany) {
-        void resolveOrganizationForTenant().then(applyResolvedOrganization);
-      }
-      return;
-    }
+    setResolvedClientId(direct);
+    setResolvedOrganizationId(orgId);
+    setResolvedOrganizationName(orgName);
+    setClientIdLoading(false);
+  }, [
+    isOpen,
+    clientIdProp,
+    user?.clientId,
+    localJob.clientId,
+    localJob.organizationId,
+    localJob.company,
+    job.clientId,
+  ]);
 
-    if (!localJob.linkId) {
-      if (tenantClientId && jobCompany) {
-        setClientIdLoading(true);
-        void resolveOrganizationForTenant()
-          .then((match) => {
-            applyResolvedOrganization(match);
-            if (tenantClientId) setResolvedClientId(tenantClientId);
-          })
-          .finally(() => setClientIdLoading(false));
-      } else {
-        setResolvedClientId('');
-        setClientIdLoading(false);
-      }
-      return;
-    }
+  const knownClientId = String(
+    clientIdProp || localJob.clientId || job.clientId || user?.clientId || '',
+  ).trim();
+  const clientId = resolvedClientId || knownClientId;
+  const organizationId =
+    resolvedOrganizationId || String(localJob.organizationId || '').trim();
+  const companyFromJob = localJob.company && localJob.company !== '—' ? localJob.company : '';
+  const organizationLabel = resolvedOrganizationName || companyFromJob || null;
 
-    let cancelled = false;
-    setClientIdLoading(true);
-    void (async () => {
-      try {
-        const journal = await fetchJobLinkProcessJournal(localJob.linkId);
-        if (cancelled) return;
-
-        let resolved = journal.clientId ? String(journal.clientId).trim() : '';
-
-        if (!resolved && journal.jobId && apiBase) {
-          try {
-            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-            const jobRes = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(String(journal.jobId))}`, {
-              headers: {
-                Accept: 'application/json',
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-              },
-              cache: 'no-store',
-            });
-            if (jobRes.ok) {
-              const jobRow = (await jobRes.json()) as { clientId?: string | null; client_id?: string | null };
-              resolved =
-                (jobRow.clientId != null && String(jobRow.clientId).trim()) ||
-                (jobRow.client_id != null && String(jobRow.client_id).trim()) ||
-                '';
-            }
-          } catch {
-            /* keep journal-only resolution */
-          }
-        }
-
-        if (!resolved && tenantClientId) {
-          resolved = tenantClientId;
-        }
-
-        let orgMatch: { id: string; name: string } | null = null;
-        if (tenantClientId && resolved === tenantClientId && jobCompany) {
-          orgMatch = await resolveOrganizationForTenant();
-        }
-
-        setResolvedClientId(resolved);
-        applyResolvedOrganization(orgMatch);
-        if (resolved) {
-          setLocalJob((prev) => (prev.clientId ? prev : { ...prev, clientId: resolved }));
-        }
-      } catch {
-        if (!cancelled) {
-          setResolvedClientId(tenantClientId || '');
-          setResolvedOrganizationId('');
-          setResolvedOrganizationName('');
-        }
-      } finally {
-        if (!cancelled) setClientIdLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [isOpen, clientIdProp, user?.clientId, localJob.linkId, localJob.clientId, localJob.company, job.clientId, apiBase]);
-
-  const clientId = resolvedClientId;
-  const organizationId = resolvedOrganizationId;
-  const jobCompanyLabel =
-    (localJob.company && localJob.company !== '—' ? localJob.company : null)
-    || resolvedOrganizationName
-    || null;
+  const defaultActionPipelineIdForJournal = candidatePipelineId ?? null;
+  const defaultProcessStageIdForJournal = pipelineStageId ?? null;
 
   const clientOptions = useMemo(
     () =>
@@ -230,12 +112,12 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
         ? [
             {
               id: clientId,
-              name: jobCompanyLabel || 'לקוח',
-              ...(organizationId ? { organizationId } : {}),
+              name: organizationLabel || 'לקוח',
+              ...(organizationId && organizationLabel ? { organizationId } : {}),
             },
           ]
         : [],
-    [clientId, jobCompanyLabel, organizationId],
+    [clientId, organizationLabel, organizationId],
   );
 
   const openCandidateDrawer = useCallback(() => {
@@ -243,14 +125,10 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
     setIsCandidateDrawerOpen(true);
   }, [candidateId, candidateName]);
 
-  const openClientDrawer = useCallback(async () => {
-    if (!clientId) return;
-    const name = localJob.company && localJob.company !== '—' ? localJob.company : 'לקוח';
-    setClientDrawer(buildClientDrawerStub(clientId, name));
-    setIsClientDrawerOpen(true);
-    const hydrated = await hydrateClientForDrawer(apiBase, clientId);
-    if (hydrated) setClientDrawer(hydrated);
-  }, [apiBase, clientId, localJob.company]);
+  const openOrganizationDrawer = useCallback(() => {
+    if (!organizationId || !organizationLabel) return;
+    setIsOrgDrawerOpen(true);
+  }, [organizationId, organizationLabel]);
 
   const openJobDrawer = useCallback(async () => {
     const jobId = String(localJob.jobId || '').trim();
@@ -317,7 +195,7 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
 
   if (!isOpen) return null;
 
-  const companyLabel = localJob.company && localJob.company !== '—' ? localJob.company : null;
+  const companyLabel = organizationLabel;
   const jobTitleLabel = localJob.jobTitle && localJob.jobTitle !== '—' ? localJob.jobTitle : null;
 
   return (
@@ -360,17 +238,17 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
               {companyLabel ? (
                 <>
                   {jobTitleLabel ? <span>·</span> : null}
-                  {clientId ? (
+                  {organizationId && organizationLabel ? (
                     <button
                       type="button"
-                      onClick={() => void openClientDrawer()}
+                      onClick={openOrganizationDrawer}
                       className="hover:text-primary-700 hover:underline transition-colors"
-                      title="פתח דראוור לקוח"
+                      title="פתח דראוור חברה"
                     >
-                      {companyLabel}
+                      {organizationLabel}
                     </button>
                   ) : (
-                    <span>{companyLabel}</span>
+                    <span>{organizationLabel}</span>
                   )}
                 </>
               ) : null}
@@ -399,9 +277,9 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
               clientOptions={clientOptions}
               defaultClientId={clientId || null}
               defaultOrganizationId={organizationId || null}
-              defaultOrganizationName={jobCompanyLabel}
+              defaultOrganizationName={organizationLabel}
               scopeOrganizationId={organizationId || null}
-              scopeOrganizationName={jobCompanyLabel}
+              scopeOrganizationName={organizationLabel}
               scopeCandidateId={candidateId}
               scopeContactName={candidateName}
               scopeJobId={localJob.jobId}
@@ -409,8 +287,8 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
               scopeJobTitle={localJob.jobTitle}
               scopeJobCompany={localJob.company}
               embeddedInModal
-              defaultActionPipelineId={candidatePipelineId}
-              defaultProcessStageId={pipelineStageId}
+              defaultActionPipelineId={defaultActionPipelineIdForJournal}
+              defaultProcessStageId={defaultProcessStageIdForJournal}
               autoSelectFirstEvent
               onEventsChanged={() => void syncJobFromJournal()}
             />
@@ -430,10 +308,15 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
         onToggleFavorite={() => {}}
         overlayZIndexClass="z-[80]"
       />
-      <ClientDetailsDrawer
-        client={clientDrawer}
-        isOpen={isClientDrawerOpen && Boolean(clientDrawer)}
-        onClose={() => setIsClientDrawerOpen(false)}
+      <OrganizationPreviewDrawer
+        target={
+          organizationId && organizationLabel
+            ? { organizationId, name: organizationLabel }
+            : null
+        }
+        isOpen={isOrgDrawerOpen && Boolean(organizationId && organizationLabel)}
+        onClose={() => setIsOrgDrawerOpen(false)}
+        tenantClientId={user?.clientId ? String(user.clientId) : null}
         overlayZIndexClass="z-[80]"
       />
       <JobDetailsDrawer

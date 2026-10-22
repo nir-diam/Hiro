@@ -9,6 +9,7 @@ const {
   resolveSubFieldFromPicklist,
   persistEnrichmentResults,
   verifyOrganizationWebsite,
+  applyWebsiteVerificationGate,
   searchAllFieldsWithGemini,
   fetchSearchContext,
   getWebsiteCandidates,
@@ -687,14 +688,20 @@ const enrich = async (req, res) => {
             });
             console.log(`[orgVerify] "${companyName}" → is_match=${verification.isMatch} | ${verification.reason}`);
 
-            if (!verification.isMatch) {
-              item.website    = null;
-              item.linkedinUrl = null;
-              item.phone      = null;
-              item.email      = null;
-              item.dataConfidence = 'אין התאמה';
+            if (verification.uncertain || verification.isMatch == null) {
+              console.log(`[orgVerify] "${companyName}" – verification skipped (${verification.reason}). Kept stored contacts.`);
+            } else if (!verification.isMatch) {
+              const existing = companies.find((org) => org.id === companyId);
+              applyWebsiteVerificationGate(item, existing, verification, detectedWebsite);
+              const stored = existing?.get ? existing.get({ plain: true }) : existing || {};
+              if (stored.website && String(stored.website).trim() !== detectedWebsite) {
+                item.website = stored.website;
+              }
+              for (const field of ['linkedinUrl', 'phone', 'email']) {
+                if (String(stored[field] || '').trim()) item[field] = stored[field];
+              }
               logo = '';
-              console.warn(`[orgVerify] "${companyName}" – mismatch. Nullified web/contact fields.`);
+              console.log(`[orgVerify] "${companyName}" – rejected ${detectedWebsite}. Stored phone/email kept. ${verification.reason}`);
             } else {
               item.dataConfidence = 'לביקורת';
             }

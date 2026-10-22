@@ -1,6 +1,7 @@
 import { buildCandidateFullName } from './candidateName';
 import {
     educationEntryToDisplayLine,
+    formatCvPrintDate,
     normalizeDrivingLicensesForPrint,
     normalizeLanguagesForPrintRows,
     splitWorkExperienceForPrint,
@@ -104,13 +105,6 @@ function pdfTextRightBounded(
         return;
     }
     pdf.text(text, leftX + maxW, y, { align: 'right', R2L: false } as never);
-}
-
-function formatCvPrintDate(d?: string | null): string {
-    if (d == null || !String(d).trim()) return '';
-    const s = String(d).trim();
-    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10).split('-').reverse().join('/');
-    return s;
 }
 
 function tagDetailLabel(tag: unknown): string {
@@ -493,6 +487,10 @@ export async function downloadPrintableResumeAsPdf(
     const email = String(row.email || '').trim();
     const location = String(row.location || '').trim();
     const summary = stripResumeHtml(String(row.professionalSummary || ''));
+    const keyFacts = (Array.isArray(row.keyFacts) ? row.keyFacts : [])
+        .map((f) => String(f ?? '').trim())
+        .filter(Boolean)
+        .slice(0, 3);
 
     const workRaw = normalizeExperienceList(
         (Array.isArray(row.workExperience) ? row.workExperience : []) as unknown[],
@@ -549,7 +547,13 @@ export async function downloadPrintableResumeAsPdf(
     drawHiroFooterLine(pdf, w.rightX, w.y);
     w.y += LINE_H * 1.1;
 
-    if (summary) {
+    if (keyFacts.length) {
+        w.sectionTitle('עובדות מרכזיות');
+        keyFacts.forEach((fact) => {
+            w.bodyLines(`• ${fact}`, { gapAfter: LINE_H * 0.15 });
+        });
+        w.y += LINE_H * 0.35;
+    } else if (summary) {
         w.sectionTitle('תמצית ');
         w.bodyLines(summary);
     }

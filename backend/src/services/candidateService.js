@@ -19,6 +19,10 @@ const cityService = require('./cityService');
 const { syncCandidateTagDetailsFromPayload } = require('./candidateTagService');
 const { normalizeOriginalTextHistory } = require('../utils/parsedTextHistory');
 const {
+  normalizeWorkExperience,
+  ensureRoleTagCoverage,
+} = require('../utils/workExperienceNormalize');
+const {
   stripCvDocumentTitleFromPersonName,
   nameLooksLikeJobHeadline,
   sanitizePersonNameFields,
@@ -1006,6 +1010,7 @@ const mapCandidateWithTags = (candidate, options = {}) => {
 
   ensureCompanyExperiencesOnPayload(payload);
   enrichGridCompanyFields(payload);
+  maybeRepairWorkExperienceRoleTagsOnRead(payload, options);
 
   if (options.stripListHeavyJson) {
     delete payload.workExperience;
@@ -2478,6 +2483,7 @@ const getById = async (id, opts = {}) => {
     try {
       const cached = await redis.get(CANDIDATE_KEY(id));
       if (cached) {
+        maybeRepairWorkExperienceRoleTagsOnRead(cached);
         const rows = [cached];
         await enrichMappedRowsWithOrgData(rows);
         await attachCandidatePipelineInfo(rows);
@@ -2827,6 +2833,33 @@ const identityHasPortalAccount = async (identity = {}) => {
   return Boolean(existing?.userId);
 };
 
+/** Every persist path gets per-job roleTag (from AI or job title) for ניסיון ↔ תגית linking. */
+const applyWorkExperienceRoleTagsOnPersist = (workExperience) => {
+  if (!Array.isArray(workExperience) || !workExperience.length) return workExperience;
+  const normalized = normalizeWorkExperience(workExperience);
+  return ensureRoleTagCoverage([], normalized).workExperience;
+};
+
+const workExperienceNeedsRoleTagRepair = (workExperience) =>
+  Array.isArray(workExperience) &&
+  workExperience.some(
+    (row) => row && typeof row === 'object' && !String(row.roleTag || '').trim(),
+  );
+
+/** Backfill roleTag on read for rows saved before post-process ran; persist in background. */
+const maybeRepairWorkExperienceRoleTagsOnRead = (payload, options = {}) => {
+  if (options.stripListHeavyJson || !payload || typeof payload !== 'object') return;
+  const wx = payload.workExperience;
+  if (!workExperienceNeedsRoleTagRepair(wx)) return;
+  const repaired = applyWorkExperienceRoleTagsOnPersist(wx);
+  payload.workExperience = repaired;
+  if (options.skipRoleTagRepairPersist || !payload.id) return;
+  const cid = String(payload.id);
+  setImmediate(() => {
+    update(cid, { workExperience: repaired }, { skipCanonicalSync: true }).catch(() => {});
+  });
+};
+
 const prepareCreatePayload = async (payload) => {
   const cleanPayload = { ...payload };
   if ('embedding' in cleanPayload) {
@@ -2854,6 +2887,10 @@ const prepareCreatePayload = async (payload) => {
   if (cleanPayload.email) {
     const norm = normalizeEmail(cleanPayload.email);
     if (norm) cleanPayload.email = norm;
+  }
+
+  if (Array.isArray(cleanPayload.workExperience) && cleanPayload.workExperience.length) {
+    cleanPayload.workExperience = applyWorkExperienceRoleTagsOnPersist(cleanPayload.workExperience);
   }
 
   cleanPayload.companyExperiences = buildCompanyExperiences(
@@ -3363,6 +3400,10 @@ const update = async (id, payload, options = {}) => {
   }
 
   normalizePreferredWorkingHoursInPayload(cleanPayload);
+
+  if (Array.isArray(cleanPayload.workExperience) && cleanPayload.workExperience.length) {
+    cleanPayload.workExperience = applyWorkExperienceRoleTagsOnPersist(cleanPayload.workExperience);
+  }
 
   // Re-derive companyExperiences whenever workExperience changes (or always, cheaply)
   const wxForUpdate = 'workExperience' in cleanPayload

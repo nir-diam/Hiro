@@ -20,8 +20,10 @@ function parseJobHeroBrandSource(raw: unknown): JobHeroBrandDefaultPolicy {
 export type ClientBranding = {
   logoUrl: string | null;
   primaryColor: string | null;
-  /** Default brand source for Nano Banana job images (`clients.metadata`). */
+  /** Default brand source for Nano Banana job images and confidential employers on the public jobs site. */
   jobHeroBrandSource?: JobHeroBrandDefaultPolicy;
+  /** When false, this organization's jobs stay off hiro.co.il even if a job is marked published. */
+  publishOnHiroBoard?: boolean;
 };
 
 const GOOGLE_FAVICON_MARKER = 'google.com/s2/favicons';
@@ -84,6 +86,7 @@ export async function fetchClientBranding(clientId: string): Promise<ClientBrand
     logoUrl: trimLogo(data.logoUrl),
     primaryColor: trimLogo(data.primaryColor) || '#1e293b',
     jobHeroBrandSource: parseJobHeroBrandSource(meta.jobHeroBrandSource),
+    publishOnHiroBoard: meta.publishOnHiroBoard !== false,
   };
 }
 
@@ -98,7 +101,12 @@ export async function saveClientBranding(
       logoUrl: branding.logoUrl ?? undefined,
       primaryColor: branding.primaryColor ?? undefined,
       ...(branding.jobHeroBrandSource
-        ? { metadata: { jobHeroBrandSource: branding.jobHeroBrandSource } }
+        ? {
+            metadata: {
+              jobHeroBrandSource: branding.jobHeroBrandSource,
+              publishOnHiroBoard: branding.publishOnHiroBoard !== false,
+            },
+          }
         : {}),
     }),
   });
@@ -112,6 +120,7 @@ export async function saveClientBranding(
     logoUrl: trimLogo(data.logoUrl),
     primaryColor: trimLogo(data.primaryColor) || '#1e293b',
     jobHeroBrandSource: parseJobHeroBrandSource(meta.jobHeroBrandSource),
+    publishOnHiroBoard: meta.publishOnHiroBoard !== false,
   };
 }
 

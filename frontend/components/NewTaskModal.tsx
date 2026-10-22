@@ -18,7 +18,6 @@ import {
 } from './Icons';
 import { formatAttachmentSize } from '../services/clientAttachmentsApi';
 import type { SendNotificationEmailAttachment } from '../services/emailSendApi';
-import { applyClientLogoToEmailAttachments } from '../utils/emailAttachmentLogoStamp';
 import type { Candidate } from './CandidatesListView';
 import { deriveLocalCandidateId } from '../utils/candidateId';
 import { EMPTY_LINKED_LABEL } from '../utils/taskLinkedContext';
@@ -540,12 +539,120 @@ async function buildTaskAttachments(files: File[]): Promise<SendNotificationEmai
     return out;
 }
 
+/** A whitespace token that contains a Hebrew letter counts as a Hebrew word. */
+function containsHebrewWord(text: string): boolean {
+    return String(text || '')
+        .split(/\s+/)
+        .some((word) => /[\u0590-\u05FF]/.test(word));
+}
+
+function escapeEmailHtml(text: string): string {
+    return String(text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+/**
+ * English-only body aligns left. One Hebrew word aligns the message right.
+ * Direction follows the text the user wrote; an empty draft uses the full body.
+ */
+function emailHtmlForTask(fullText: string, userText: string): string {
+    const sample = userText.trim() ? userText : fullText;
+    const dir = containsHebrewWord(sample) ? 'rtl' : 'ltr';
+    const align = dir === 'rtl' ? 'right' : 'left';
+    const body = escapeEmailHtml(fullText).replace(/\r\n/g, '\n').split('\n').join('<br/>');
+    return (
+        `<table cellpadding="0" cellspacing="0" border="0" width="100%" dir="${dir}" style="width:100%;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.55;color:#222;">` +
+        `<tr><td align="${align}" dir="${dir}" style="text-align:${align};direction:${dir};white-space:pre-wrap;">${body}</td></tr></table>`
+    );
+}
+
 function buildEmailBodyWithLinkedContext(messageText: string, plainLines: { label: string; value: string }[]): string {
     const main = (messageText || '').trim();
     if (!plainLines.length) return main;
     const block = plainLines.map((l) => `${l.label} ${l.value}`.trim()).join('\n');
     const appendix = `---\nמידע מקושר מהמערכת:\n${block}`;
     return main ? `${main}\n\n${appendix}` : appendix;
+}
+
+function mimeToPasteExt(type: string): string {
+    const t = String(type || '').toLowerCase();
+    if (t.includes('png')) return 'png';
+    if (t.includes('jpeg') || t.includes('jpg')) return 'jpg';
+    if (t.includes('gif')) return 'gif';
+    if (t.includes('webp')) return 'webp';
+    if (t.includes('pdf')) return 'pdf';
+    if (t.includes('word') || t.includes('msword')) return 'doc';
+    if (t.includes('officedocument.wordprocessing')) return 'docx';
+    return 'bin';
+}
+
+function namePastedFile(file: File): File {
+    const generic = !file.name || file.name === 'blob' || /^image\.(png|jpe?g|gif|webp)$/i.test(file.name);
+    if (!generic) return file;
+    const type = file.type || 'application/octet-stream';
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    return new File([file], `הדבקה-${stamp}.${mimeToPasteExt(type)}`, {
+        type,
+        lastModified: file.lastModified || 0,
+    });
+}
+
+function filesFromClipboardData(dt: DataTransfer | null | undefined): File[] {
+    if (!dt) return [];
+    // The same image is exposed on both `files` and `items` on the first paste, with different timestamps.
+    const list: File[] = [];
+    if (dt.files?.length) {
+        for (let i = 0; i < dt.files.length; i += 1) {
+            const file = dt.files.item(i);
+            if (file) list.push(file);
+        }
+    } else if (dt.items?.length) {
+        for (let i = 0; i < dt.items.length; i += 1) {
+            const item = dt.items[i];
+            if (item.kind !== 'file') continue;
+            const file = item.getAsFile();
+            if (file) list.push(file);
+        }
+    }
+    const seen = new Set<string>();
+    const out: File[] = [];
+    for (const file of list) {
+        const key = `${file.size}:${file.type || ''}:${file.name || ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(file);
+    }
+    return out;
+}
+
+async function filesFromClipboardApi(): Promise<File[]> {
+    const clipboard = navigator.clipboard as Clipboard & { read?: () => Promise<ClipboardItem[]> };
+    if (typeof clipboard?.read !== 'function') return [];
+    try {
+        const items = await clipboard.read();
+        const files: File[] = [];
+        for (const item of items) {
+            for (const type of item.types) {
+                if (type.startsWith('text/')) continue;
+                const blob = await item.getType(type);
+                if (!blob) continue;
+                if (blob instanceof File) {
+                    files.push(blob);
+                    continue;
+                }
+                files.push(
+                    new File([blob], `הדבקה-${Date.now()}.${mimeToPasteExt(blob.type || type)}`, {
+                        type: blob.type || type,
+                    }),
+                );
+            }
+        }
+        return files;
+    } catch {
+        return [];
+    }
 }
 
 const NewTaskModal: React.FC<NewTaskModalProps> = ({
@@ -618,8 +725,49 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     const closeButtonRef = useRef<HTMLButtonElement>(null);
     const [assigneeDropdownOpen, setAssigneeDropdownOpen] = useState(false);
     const [attachmentFiles, setAttachmentFiles] = useState<File[]>([]);
+    const [attachmentDropActive, setAttachmentDropActive] = useState(false);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const attachmentFileInputRef = useRef<HTMLInputElement>(null);
+    const attachmentDragDepthRef = useRef(0);
+
+    const mergeAttachmentFiles = useCallback((picked: File[]) => {
+        if (!picked.length) return;
+        setAttachmentFiles((prev) => {
+            const seen = new Set(prev.map((f) => `${f.name}:${f.size}:${f.type}`));
+            const next = [...prev];
+            for (const file of picked) {
+                const key = `${file.name}:${file.size}:${file.type}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                next.push(file);
+            }
+            return next;
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const attachPastedFiles = (files: File[]) => {
+            const named = files.map(namePastedFile);
+            if (!named.length) return false;
+            mergeAttachmentFiles(named);
+            return true;
+        };
+        const onPaste = (event: ClipboardEvent) => {
+            const syncFiles = filesFromClipboardData(event.clipboardData);
+            if (syncFiles.length) {
+                event.preventDefault();
+                event.stopPropagation();
+                attachPastedFiles(syncFiles);
+                return;
+            }
+            void filesFromClipboardApi().then((asyncFiles) => {
+                if (asyncFiles.length) attachPastedFiles(asyncFiles);
+            });
+        };
+        document.addEventListener('paste', onPaste, true);
+        return () => document.removeEventListener('paste', onPaste, true);
+    }, [isOpen, mergeAttachmentFiles]);
     const previouslyFocusedElement = useRef<HTMLElement | null>(null);
     const titleId = useId();
     const contentId = useId();
@@ -1461,18 +1609,46 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
             const file = fileList.item(i);
             if (file) picked.push(file);
         }
-        setAttachmentFiles((prev) => {
-            const seen = new Set(prev.map((f) => `${f.name}:${f.size}:${f.lastModified}`));
-            const next = [...prev];
-            for (const file of picked) {
-                const key = `${file.name}:${file.size}:${file.lastModified}`;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                next.push(file);
-            }
-            return next;
-        });
+        mergeAttachmentFiles(picked);
         e.target.value = '';
+    };
+
+    const filesFromDataTransfer = (dt: DataTransfer | null | undefined): File[] =>
+        filesFromClipboardData(dt);
+
+    const handleAttachmentDragEnter = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        attachmentDragDepthRef.current += 1;
+        if (e.dataTransfer.types.includes('Files')) {
+            setAttachmentDropActive(true);
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    };
+
+    const handleAttachmentDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.dataTransfer.types.includes('Files')) {
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    };
+
+    const handleAttachmentDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        attachmentDragDepthRef.current = Math.max(0, attachmentDragDepthRef.current - 1);
+        if (attachmentDragDepthRef.current === 0) {
+            setAttachmentDropActive(false);
+        }
+    };
+
+    const handleAttachmentDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        attachmentDragDepthRef.current = 0;
+        setAttachmentDropActive(false);
+        mergeAttachmentFiles(filesFromDataTransfer(e.dataTransfer));
     };
 
     const removeAttachmentFile = (index: number) => {
@@ -1547,7 +1723,6 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
         if (attachmentFiles.length) {
             try {
                 emailAttachments = await buildTaskAttachments(attachmentFiles);
-                emailAttachments = await applyClientLogoToEmailAttachments(emailAttachments);
             } catch (attachErr: unknown) {
                 alert(
                     attachErr instanceof Error ? attachErr.message : 'הכנת הקבצים המצורפים נכשלה',
@@ -1609,6 +1784,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         to,
                         subject,
                         text: fullMessageText,
+                        html: emailHtmlForTask(fullMessageText, formData.messageText),
                         isTask: isTaskMode,
                         messageType: isTaskMode ? 'task' : 'message',
                         assignee: to[0] || '',
@@ -1778,7 +1954,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                             className={
                                                                 editingCategoryId === cat.id
                                                                     ? 'rounded-lg border border-primary-200 bg-primary-50/40 p-2.5 space-y-2'
-                                                                    : 'flex items-start gap-1.5 group/cat'
+                                                                    : 'flex items-start gap-1.5'
                                                             }
                                                         >
                                                             {editingCategoryId === cat.id ? (
@@ -1847,8 +2023,9 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                                                             startEditCategory(cat);
                                                                         }}
                                                                         disabled={categorySaving || Boolean(editingCategoryId)}
-                                                                        className="p-1.5 rounded-lg text-text-muted hover:text-primary-600 hover:bg-primary-50 shrink-0 disabled:opacity-50 opacity-70 group-hover/cat:opacity-100 focus-visible:opacity-100 transition-opacity mt-0.5"
+                                                                        className="p-1.5 rounded-lg text-text-muted hover:text-primary-600 hover:bg-primary-50 shrink-0 disabled:opacity-50 opacity-0 hover:opacity-100 focus-visible:opacity-100 transition-opacity mt-0.5"
                                                                         title="ערוך קטגוריה"
+                                                                        aria-label="ערוך קטגוריה"
                                                                     >
                                                                         <PencilIcon className="w-4 h-4" />
                                                                     </button>
@@ -2062,7 +2239,17 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                             </div>
 
                             {/* Content column (RTL end) */}
-                            <div className="flex flex-col min-h-0 order-1 lg:order-2">
+                            <div
+                                className={`flex flex-col min-h-0 order-1 lg:order-2 rounded-xl transition-colors ${
+                                    attachmentDropActive
+                                        ? 'ring-2 ring-primary-500 ring-offset-2 ring-offset-bg-card bg-primary-50/40'
+                                        : ''
+                                }`}
+                                onDragEnter={handleAttachmentDragEnter}
+                                onDragOver={handleAttachmentDragOver}
+                                onDragLeave={handleAttachmentDragLeave}
+                                onDrop={handleAttachmentDrop}
+                            >
                                 <label htmlFor={contentId} className={labelClass}>תוכן הפעילות</label>
                                 <textarea
                                     id={contentId}
@@ -2070,7 +2257,16 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                     value={formData.messageText}
                                     onChange={handleChange as any}
                                     rows={8}
-                                    className="w-full min-h-[180px] bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3 transition-all shadow-sm resize-y leading-relaxed"
+                                    dir={
+                                        !formData.messageText.trim() || containsHebrewWord(formData.messageText)
+                                            ? 'rtl'
+                                            : 'ltr'
+                                    }
+                                    className={`w-full min-h-[180px] bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3 transition-all shadow-sm resize-y leading-relaxed ${
+                                        formData.messageText.trim() && !containsHebrewWord(formData.messageText)
+                                            ? 'text-left'
+                                            : 'text-right'
+                                    }`}
                                     placeholder="כתוב כאן את תוכן ההודעה או המשימה..."
                                 />
                                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -2092,7 +2288,11 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                         צרף קובץ
                                     </button>
                                     {attachmentFiles.length === 0 ? (
-                                        <span className="text-[11px] text-text-muted">PDF, Word, תמונות…</span>
+                                        <span className="text-[11px] text-text-muted">
+                                            {attachmentDropActive
+                                                ? 'שחרר כדי לצרף את הקבצים'
+                                                : 'גרור, הדבק (Ctrl+V), או PDF / Word / תמונות…'}
+                                        </span>
                                     ) : (
                                         attachmentFiles.map((file, index) => (
                                             <span

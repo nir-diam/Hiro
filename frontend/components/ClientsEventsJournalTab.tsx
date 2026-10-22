@@ -14,7 +14,6 @@ import {
   PencilIcon,
   CheckIcon,
   UserIcon,
-  UserGroupIcon,
   ArrowPathIcon,
   BriefcaseIcon,
   MagnifyingGlassIcon,
@@ -62,6 +61,55 @@ import {
   type EnrichedPipeline,
   type SystemEventCatalogGroup,
 } from '../utils/processManagementCatalog';
+
+const JOURNAL_INITIAL_LOAD_LIMIT = 20;
+const JOURNAL_FILTERED_LOAD_LIMIT = 300;
+
+type JournalServerFilterSnapshot = {
+  entitySearchQuery: string;
+  selectedStatuses: string[];
+  selectedActiveStates: string[];
+  selectedCompanies: string[];
+  selectedHandlingCoordinators: string[];
+  selectedEditors: string[];
+  selectedPipelineIds: string[];
+  selectedStageOutcomeKeys: string[];
+  dateFrom: string;
+  dateTo: string;
+  assignToSelf: boolean;
+  loadLimit: number;
+};
+
+const appendServerJournalListQuery = (
+  qs: URLSearchParams,
+  snap: JournalServerFilterSnapshot,
+  opts: { contactId?: string; candidateId?: string },
+) => {
+  qs.set('summary', '1');
+  qs.set('journalFilter', '1');
+  qs.set('limit', String(snap.loadLimit));
+  const q = snap.entitySearchQuery.trim();
+  if (q) qs.set('q', q);
+  if (opts.contactId) qs.set('contactId', opts.contactId);
+  if (opts.candidateId) qs.set('candidateId', opts.candidateId);
+  if (snap.selectedStatuses.length) qs.set('statuses', snap.selectedStatuses.join(','));
+  if (snap.selectedActiveStates.length) qs.set('activeStates', snap.selectedActiveStates.join(','));
+  if (snap.selectedCompanies.length) qs.set('companies', snap.selectedCompanies.join(','));
+  if (snap.selectedHandlingCoordinators.length) {
+    qs.set('coordinators', snap.selectedHandlingCoordinators.join(','));
+  }
+  if (snap.selectedEditors.length) qs.set('editors', snap.selectedEditors.join(','));
+  if (snap.selectedPipelineIds.length) qs.set('pipelineIds', snap.selectedPipelineIds.join(','));
+  const stageIds = new Set<string>();
+  for (const key of snap.selectedStageOutcomeKeys) {
+    const parsed = parseStageOutcomeKey(key);
+    if (parsed?.stageId) stageIds.add(parsed.stageId);
+  }
+  if (stageIds.size) qs.set('stageIds', [...stageIds].join(','));
+  if (snap.dateFrom) qs.set('dueFrom', snap.dateFrom);
+  if (snap.dateTo) qs.set('dueTo', snap.dateTo);
+  if (snap.assignToSelf) qs.set('assignToSelf', '1');
+};
 import { applyOutcomeDueDate, outcomeActionSubtitle, summarizeAutomationResults } from '../utils/processOutcomeSla';
 import { dueDateTimeAfterSla, normalizeSlaUnit } from '../utils/slaDuration';
 import { approvePipelineAutomations, executePipelineOutcome } from '../services/pipelineOutcomesApi';
@@ -100,6 +148,17 @@ import {
   type JobDrawerJob,
 } from '../utils/processEntityDrawers';
 import { contactFromApi, primaryEmail, primaryPhone } from '../utils/contactFormModel';
+
+/** Coalesce duplicate embedded-modal journal loads (e.g. Strict Mode or clientId settling). */
+const embeddedModalJournalInflight = new Map<string, Promise<void>>();
+
+function embeddedModalJournalLoadKey(
+  scopeJobLinkId: string,
+  scopeJobId?: string | null,
+  scopeCandidateId?: string | null,
+): string {
+  return `${scopeJobLinkId}|${scopeJobId ?? ''}|${scopeCandidateId ?? ''}`;
+}
 
 export type JournalEvent = {
   id: string;
@@ -276,7 +335,7 @@ const parseEventLinkedContacts = (event: JournalEvent): EventLinkedContact[] => 
         const row = entry as Record<string, unknown>;
         const id = String(row.id || '').trim();
         const name = String(row.name || '').trim();
-        if (!id || !name) return null;
+        if (!id) return null;
         return { id, name };
       })
       .filter(Boolean) as EventLinkedContact[];
@@ -328,17 +387,23 @@ const buildEventContactLinkPatch = (
     String(event.clientName || '').trim() ||
     String(event.contactName || '').trim();
 
+  const orgId = organizationRef?.organizationId
+    ? String(organizationRef.organizationId).trim()
+    : '';
+
   const primary = selectedContacts[0];
   if (primary) {
     return {
       linkedTo: { type: 'איש קשר', id: primary.id, name: primary.name },
       metadata: nextMeta,
+      ...(orgId ? { organizationId: orgId } : {}),
     };
   }
 
   return {
     linkedTo: orgLabel ? { type: 'לקוח', name: orgLabel } : null,
     metadata: nextMeta,
+    ...(orgId ? { organizationId: orgId } : {}),
   };
 };
 
@@ -426,11 +491,7 @@ const resolveContactIdForDrawer = (
   }
   const scopedName = String(scopeContactName || '').trim();
   const eventName = String(event.contactName || '').trim();
-  if (
-    scopedName
-    && eventName
-    && (eventName.includes(scopedName) || scopedName.includes(eventName))
-  ) {
+  if (scopedName && eventName && eventName === scopedName) {
     return String(scopeContactId);
   }
   return null;
@@ -466,10 +527,34 @@ const resolveCandidateIdForDrawer = (
   return null;
 };
 
+const GENERIC_JOB_TITLE = 'משרה';
+
+const organizationChipOrNull = (
+  chip: { organizationId?: string | null; name?: string | null } | null | undefined,
+  clientName: string,
+): { organizationId: string; name: string } | null => {
+  const organizationId = String(chip?.organizationId || '').trim();
+  const name = String(chip?.name || '').trim();
+  const tenantName = String(clientName || '').trim();
+  if (!organizationId || !name) return null;
+  if (tenantName && sameJournalLabel(name, tenantName)) return null;
+  return { organizationId, name };
+};
+
+const sameJournalLabel = (a: string, b: string): boolean =>
+  a.trim().toLowerCase() === b.trim().toLowerCase();
+
 const normalizeJobTitle = (title: string | null | undefined): string | null => {
   const t = String(title || '').trim();
-  if (!t || t === '—') return null;
+  if (!t || t === '—' || t === GENERIC_JOB_TITLE) return null;
   return t;
+};
+
+type JournalJobChip = {
+  title: string;
+  organizationId: string;
+  organizationName: string;
+  settled: boolean;
 };
 
 const pickJobLinkForEvent = (
@@ -525,6 +610,13 @@ const buildEventJournalSearchHaystack = (
       : '';
   if (metaJobCompany) parts.push(metaJobCompany);
 
+  if (event.title) parts.push(event.title);
+  if (event.description) parts.push(event.description);
+  if (event.stage) parts.push(event.stage);
+  if (event.process) parts.push(event.process);
+  const metaCandidateName = String(meta.candidateName || meta.contactName || '').trim();
+  if (metaCandidateName) parts.push(metaCandidateName);
+
   const candidateId = resolveCandidateIdForDrawer(event, scopeCandidateId);
   if (candidateId) {
     const links = candidateJobLinksById[candidateId] || [];
@@ -536,6 +628,13 @@ const buildEventJournalSearchHaystack = (
   return parts.join(' ').toLowerCase();
 };
 
+const normalizeJournalSearchText = (value: string): string =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\u05be\-–—]/g, ' ')
+    .replace(/\s+/g, ' ');
+
 const eventMatchesJournalSearch = (
   event: JournalEvent,
   query: string,
@@ -543,14 +642,20 @@ const eventMatchesJournalSearch = (
   candidateJobLinksById: Record<string, CandidateJobLink[]>,
   scopeCandidateId?: string | null,
 ): boolean => {
-  const q = query.trim().toLowerCase();
+  const q = normalizeJournalSearchText(query);
   if (!q) return true;
-  return buildEventJournalSearchHaystack(
-    event,
-    companyLabel,
-    candidateJobLinksById,
-    scopeCandidateId,
-  ).includes(q);
+  const haystack = normalizeJournalSearchText(
+    buildEventJournalSearchHaystack(
+      event,
+      companyLabel,
+      candidateJobLinksById,
+      scopeCandidateId,
+    ),
+  );
+  if (haystack.includes(q)) return true;
+  const tokens = q.split(' ').filter((t) => t.length > 0);
+  if (tokens.length > 1) return tokens.every((token) => haystack.includes(token));
+  return false;
 };
 
 const GENERIC_STAGE_NAME_FRAGMENTS = ['שלב חדש', 'new stage', 'new step'];
@@ -655,11 +760,56 @@ const resolveActionPipelineContext = (
   clientPipelines: PipelineDto[],
   candidatePipelines: PipelineDto[],
   preferredStageId?: string | null,
+  options?: { preferCandidatePipelines?: boolean },
 ): ActionPipelineContext | null => {
+  const preferCandidate = options?.preferCandidatePipelines === true;
+  const jobLinkScoped = Boolean(
+    event.metadata?.jobCandidateId && String(event.metadata.jobCandidateId).trim(),
+  );
+  const candidateFirst = preferCandidate || jobLinkScoped;
+
   const build = (pipeline: PipelineDto, pipelineKind: 'client' | 'candidate'): ActionPipelineContext | null => {
     const stage = matchStageForEvent(event, pipeline, preferredStageId);
     if (!stage) return null;
     return { pipeline, pipelineKind, stage };
+  };
+
+  const tryClientThenCandidate = () => {
+    const clientMatch = matchPipelineForEvent(event, clientPipelines);
+    if (clientMatch) {
+      const ctx = build(clientMatch, 'client');
+      if (ctx) return ctx;
+    }
+    const candidateMatch = matchPipelineForEvent(event, candidatePipelines);
+    if (candidateMatch) {
+      const ctx = build(candidateMatch, 'candidate');
+      if (ctx) return ctx;
+    }
+    if (clientPipelines[0]) {
+      const ctx = build(clientPipelines[0], 'client');
+      if (ctx) return ctx;
+    }
+    if (candidatePipelines[0]) return build(candidatePipelines[0], 'candidate');
+    return null;
+  };
+
+  const tryCandidateThenClient = () => {
+    const candidateMatch = matchPipelineForEvent(event, candidatePipelines);
+    if (candidateMatch) {
+      const ctx = build(candidateMatch, 'candidate');
+      if (ctx) return ctx;
+    }
+    const clientMatch = matchPipelineForEvent(event, clientPipelines);
+    if (clientMatch) {
+      const ctx = build(clientMatch, 'client');
+      if (ctx) return ctx;
+    }
+    if (candidatePipelines[0]) {
+      const ctx = build(candidatePipelines[0], 'candidate');
+      if (ctx) return ctx;
+    }
+    if (clientPipelines[0]) return build(clientPipelines[0], 'client');
+    return null;
   };
 
   if (actionPipelineId) {
@@ -676,15 +826,7 @@ const resolveActionPipelineContext = (
     if (byCandidate) return build(byCandidate, 'candidate');
   }
 
-  const clientMatch = matchPipelineForEvent(event, clientPipelines);
-  if (clientMatch) return build(clientMatch, 'client');
-
-  const candidateMatch = matchPipelineForEvent(event, candidatePipelines);
-  if (candidateMatch) return build(candidateMatch, 'candidate');
-
-  if (clientPipelines[0]) return build(clientPipelines[0], 'client');
-  if (candidatePipelines[0]) return build(candidatePipelines[0], 'candidate');
-  return null;
+  return candidateFirst ? tryCandidateThenClient() : tryClientThenCandidate();
 };
 
 const resolveStageChangeFromMoveTarget = (
@@ -1054,6 +1196,21 @@ const parseJournalEventDateValue = (raw: string | null | undefined): number | nu
   return Number.isFinite(ts) ? ts : null;
 };
 
+/** Job-link journal due dates must be ISO YYYY-MM-DD — never slice arbitrary date strings. */
+const normalizeJournalEventDueDate = (raw: unknown): string | null => {
+  const value = String(raw ?? '').trim();
+  if (!value) return null;
+  const iso = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+  const ts = parseJournalEventDateValue(value);
+  if (ts == null) return null;
+  const d = new Date(ts);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
 /** Sort key prefers due date (shown on cards), then creation date. */
 const journalEventSortTimestamp = (event: JournalEvent): number | null => {
   const dueTs = parseJournalEventDateValue(event.dueDate);
@@ -1328,7 +1485,22 @@ const normalizeRow = (raw: Record<string, unknown>): JournalEvent => {
     date: String(raw.date || ''),
     creator: String(raw.creator || raw.coordinator || ''),
     coordinator: raw.coordinator != null ? String(raw.coordinator) : null,
-    dueDate: raw.dueDate ? String(raw.dueDate).slice(0, 10) : raw.date ? String(raw.date).slice(0, 10) : null,
+    dueDate: (() => {
+      const fromDue = normalizeJournalEventDueDate(raw.dueDate);
+      if (fromDue) return fromDue;
+      const meta =
+        raw.metadata && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata)
+          ? (raw.metadata as Record<string, unknown>)
+          : null;
+      if (meta?.jobCandidateId) return null;
+      const ts = parseJournalEventDateValue(String(raw.date || ''));
+      if (ts == null) return null;
+      const d = new Date(ts);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, '0');
+      const day = String(d.getDate()).padStart(2, '0');
+      return `${y}-${m}-${day}`;
+    })(),
     status: String(raw.status || 'עתידי'),
     isActive: raw.isActive !== false,
     contactId: raw.contactId
@@ -1360,6 +1532,20 @@ const normalizeRow = (raw: Record<string, unknown>): JournalEvent => {
         : undefined,
     updates: resolveStatusUpdates(raw),
   };
+};
+
+/** Drop bootstrap «חדש» row when a real recruitment stage entry exists on the same job link. */
+const collapseStaleGenericJobLinkJournalEvents = (events: JournalEvent[]): JournalEvent[] => {
+  if (events.length <= 1) return events;
+  const isGenericNew = (event: JournalEvent) => {
+    const t = String(event.title || event.status || '').trim();
+    return t === 'חדש' || t.toLowerCase() === 'new';
+  };
+  const hasSubstantive = events.some((e) => !isGenericNew(e));
+  if (!hasSubstantive) return events;
+  return events.filter(
+    (e) => !(isGenericNew(e) && String(e.id).startsWith('initial-')),
+  );
 };
 
 const mapProcessJournalToEvents = (
@@ -1395,11 +1581,100 @@ const mapProcessJournalToEvents = (
         jobId: journal.jobId,
         jobCandidateId: journal.jobCandidateId,
         candidateId: journal.candidateId,
+        journalEntry: true,
       },
       updates: entry.updates,
     }),
     );
 };
+
+const MAX_PROCESS_JOURNAL_ENRICH_CANDIDATES = 24;
+
+const collectCandidateIdsForProcessJournalEnrichment = (
+  allEvents: JournalEvent[],
+  searchQuery: string,
+  scopeCandidateId: string | null | undefined,
+  candidateJobLinksById: Record<string, CandidateJobLink[]>,
+): string[] => {
+  const ids = new Set<string>();
+  const scoped = String(scopeCandidateId || '').trim();
+  if (scoped) ids.add(scoped);
+
+  const q = normalizeJournalSearchText(searchQuery);
+  if (q.length < 2 && !scoped) return [...ids];
+
+  for (const event of allEvents) {
+    const cid = resolveCandidateIdFromEvent(event);
+    if (!cid) continue;
+    if (scoped && cid === scoped) {
+      ids.add(cid);
+      continue;
+    }
+    if (q.length < 2) continue;
+    const nameHay = normalizeJournalSearchText(event.contactName || '');
+    const matchesSearch =
+      nameHay.includes(q)
+      || eventMatchesJournalSearch(event, searchQuery, '', candidateJobLinksById, scopeCandidateId);
+    if (matchesSearch) ids.add(cid);
+  }
+  return [...ids].slice(0, MAX_PROCESS_JOURNAL_ENRICH_CANDIDATES);
+};
+
+async function fetchSupplementalProcessJournalEvents(
+  candidateIds: string[],
+  contextEvents: JournalEvent[],
+  fallbackClientId: string,
+  candidateJobLinksById: Record<string, CandidateJobLink[]>,
+): Promise<JournalEvent[]> {
+  const contactNameByCandidate = new Map<string, string>();
+  for (const event of contextEvents) {
+    const cid = resolveCandidateIdFromEvent(event);
+    if (!cid || contactNameByCandidate.has(cid)) continue;
+    const name = String(event.contactName || '').trim();
+    if (name) contactNameByCandidate.set(cid, name);
+  }
+
+  const supplemental: JournalEvent[] = [];
+  for (const candidateId of candidateIds) {
+    let links = candidateJobLinksById[candidateId];
+    if (!links?.length) {
+      try {
+        links = await fetchCandidateLinkedJobs(candidateId);
+      } catch {
+        links = [];
+      }
+    }
+    const contactName = contactNameByCandidate.get(candidateId) || '';
+    for (const link of links) {
+      try {
+        const journal = await fetchJobLinkProcessJournal(link.linkId);
+        const scopedClientId = String(
+          journal.clientId || link.clientId || fallbackClientId || '',
+        ).trim();
+        const company =
+          link.company && link.company !== '—' ? link.company : scopedClientId ? 'לקוח' : '—';
+        supplemental.push(
+          ...mapProcessJournalToEvents(
+            journal,
+            candidateId,
+            contactName,
+            company,
+            scopedClientId,
+          ),
+        );
+      } catch {
+        // skip failed job link
+      }
+    }
+  }
+  return supplemental;
+}
+
+const processJournalSupplementIdsKey = (rows: JournalEvent[]): string =>
+  rows
+    .map((row) => row.id)
+    .sort()
+    .join('\0');
 
 const eventMatchesContact = (
   event: JournalEvent,
@@ -1419,27 +1694,66 @@ const eventMatchesContact = (
     ? scopeContactEmails.map((e) => String(e || '').trim()).filter((e) => e.includes('@'))
     : [];
 
+  const linked = parseEventLinkedContacts(event);
+  const eventContactId = String(event.contactId || '').trim();
+  const scopedName = String(contactName || '').trim();
+  const eventName = String(event.contactName || '').trim();
+
   if (contactId && isOutboundClientMessageEvent(event)) {
     if (outboundEventLooksLikeEmail(event) && contactEmails.length > 0) {
       const toField = extractOutboundRecipientTo(event);
       if (recipientMatchesContactEmails(toField, contactEmails)) return true;
       return false;
     }
-    const linked = parseEventLinkedContacts(event);
     if (linked.some((c) => String(c.id) === String(contactId))) return true;
-    if (event.contactId && String(event.contactId) === String(contactId)) return true;
+    if (eventContactId && eventContactId === String(contactId)) return true;
     return false;
   }
 
   if (contactId) {
-    const linked = parseEventLinkedContacts(event);
     if (linked.some((c) => String(c.id) === String(contactId))) return true;
+    if (eventContactId && eventContactId === String(contactId)) return true;
+    if (eventContactId && eventContactId !== String(contactId)) return false;
+    if (linked.length > 0) return false;
+    // Legacy rows with no contact id: exact full name only (never first-name substring).
+    if (scopedName && eventName && eventName === scopedName) return true;
+    return false;
   }
-  if (contactId && event.contactId && String(event.contactId) === String(contactId)) return true;
-  if (contactName && event.contactName && String(event.contactName).includes(contactName)) return true;
-  if (contactName) {
-    const blob = `${event.title || ''} ${event.description || ''} ${event.creator || ''}`;
-    if (blob.includes(contactName)) return true;
+
+  if (scopedName && eventName && eventName === scopedName) return true;
+  return false;
+};
+
+const parentEventIdOf = (event: JournalEvent): string | null => {
+  const raw = event.metadata?.parentEventId;
+  const id = raw != null ? String(raw).trim() : '';
+  return id || null;
+};
+
+/** Automation follow-up processes inherit the parent event's contact even when contactId was not copied. */
+const eventMatchesContactWithAncestors = (
+  event: JournalEvent,
+  allEvents: JournalEvent[],
+  contactId?: string | null,
+  contactName?: string | null,
+  candidateId?: string | null,
+  scopeContactEmails?: string[] | null,
+): boolean => {
+  if (eventMatchesContact(event, contactId, contactName, candidateId, scopeContactEmails)) {
+    return true;
+  }
+  if (!contactId && !contactName && !candidateId) return true;
+  const byId = new Map(allEvents.map((row) => [row.id, row]));
+  const seen = new Set<string>([event.id]);
+  let parentId = parentEventIdOf(event);
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = byId.get(parentId);
+    if (!parent) break;
+    if (eventMatchesContact(parent, contactId, contactName, candidateId, scopeContactEmails)) {
+      return true;
+    }
+    parentId = parentEventIdOf(parent);
   }
   return false;
 };
@@ -1479,6 +1793,7 @@ const eventMatchesOrganizationScope = (
   scopeOrganizationId?: string | null,
   scopeOrganizationTmpId?: string | null,
   scopeOrganizationName?: string | null,
+  contactById?: Map<string, ContactLookupRow>,
 ): boolean => {
   const orgId = String(scopeOrganizationId || '').trim();
   const tmpId = String(scopeOrganizationTmpId || '').trim();
@@ -1486,6 +1801,11 @@ const eventMatchesOrganizationScope = (
 
   const eventOrgId = String(event.organizationId || '').trim();
   const eventTmpId = String(event.organizationTmpId || '').trim();
+
+  if (orgId) {
+    const contactOrgId = resolveContactOrganizationIdForEvent(event, contactById);
+    if (contactOrgId && contactOrgId === orgId) return true;
+  }
 
   if (tmpId) {
     if (eventTmpId) return eventTmpId === tmpId;
@@ -1496,9 +1816,21 @@ const eventMatchesOrganizationScope = (
   return eventMatchesOrganization(event, orgId, scopeOrganizationName);
 };
 
+const orgOptionNames = (
+  organizationOptions: Array<{ name?: string | null }>,
+): Set<string> => {
+  const set = new Set<string>();
+  for (const opt of organizationOptions) {
+    const name = String(opt.name || '').trim();
+    if (name) set.add(name);
+  }
+  return set;
+};
+
 const resolveEventCompanyLabel = (
   event: JournalEvent,
   orgNameById: Map<string, string>,
+  organizationOptions: Array<{ id: string; name: string; organizationId?: string | null }>,
   preferOrganization: boolean,
 ): string => {
   const orgId = String(event.organizationId || '').trim();
@@ -1506,41 +1838,93 @@ const resolveEventCompanyLabel = (
     const fromId = orgNameById.get(orgId);
     if (fromId) return fromId;
   }
+  const knownOrgNames = orgOptionNames(organizationOptions);
   if (preferOrganization && event.linkedToType === 'לקוח' && event.contactName) {
-    return event.contactName;
+    const linkedClientLabel = String(event.contactName).trim();
+    if (linkedClientLabel && knownOrgNames.has(linkedClientLabel)) {
+      return linkedClientLabel;
+    }
   }
-  const clientName = String(event.clientName || '').trim();
-  if (clientName) return clientName;
-  return String(event.contactName || '').trim();
+  const metaOrgName = String(
+    (event.metadata && event.metadata.organizationName) || '',
+  ).trim();
+  const tenantName = String(event.clientName || '').trim();
+  if (metaOrgName && (!tenantName || !sameJournalLabel(metaOrgName, tenantName) || orgId)) {
+    return metaOrgName;
+  }
+  return '';
+};
+
+/** Prefer organization on linked client contacts (e.g. Eden → קונמרט-יוניקו) over stale event.organizationId. */
+const resolveContactOrganizationIdForEvent = (
+  event: JournalEvent,
+  contactById?: Map<string, ContactLookupRow>,
+): string => {
+  if (!contactById?.size) return '';
+  for (const linked of parseEventLinkedContacts(event)) {
+    const orgId = String(contactById.get(linked.id)?.organizationId || '').trim();
+    if (orgId) return orgId;
+  }
+  const directContactId = String(event.contactId || '').trim();
+  if (directContactId) {
+    const orgId = String(contactById.get(directContactId)?.organizationId || '').trim();
+    if (orgId) return orgId;
+  }
+  return '';
 };
 
 const resolveEventOrganizationRef = (
   event: JournalEvent,
   orgNameById: Map<string, string>,
   organizationOptions: Array<{ id: string; name: string; organizationId?: string | null }>,
+  contactById?: Map<string, ContactLookupRow>,
 ): { organizationId: string; name: string } | null => {
-  const orgId = String(event.organizationId || '').trim();
-  const clientName = String(event.clientName || '').trim();
+  const contactOrgId = resolveContactOrganizationIdForEvent(event, contactById);
+  const eventOrgId = String(event.organizationId || '').trim();
+  const orgId = contactOrgId || eventOrgId;
+  const tenantName = String(event.clientName || '').trim();
+  const metaOrgName = String(
+    (event.metadata && event.metadata.organizationName) || '',
+  ).trim();
   const preferOrganization = organizationOptions.length > 0;
-  const label = resolveEventCompanyLabel(event, orgNameById, preferOrganization).trim();
+  const label = resolveEventCompanyLabel(
+    event,
+    orgNameById,
+    organizationOptions,
+    preferOrganization,
+  ).trim();
+
+  const resolveNameForOrgId = (id: string): string => {
+    const fromMap = orgNameById.get(id);
+    if (fromMap) return fromMap;
+    const fromOption = organizationOptions.find((opt) => String(opt.organizationId || '') === id);
+    if (fromOption?.name) return String(fromOption.name).trim();
+    if (metaOrgName) return metaOrgName;
+    if (label && (!tenantName || !sameJournalLabel(label, tenantName))) return label;
+    return '';
+  };
+
   if (orgId) {
-    const name = orgNameById.get(orgId) || clientName || label;
-    if (name) {
-      return { organizationId: orgId, name };
-    }
+    const name = resolveNameForOrgId(orgId);
+    const chip = organizationChipOrNull({ organizationId: orgId, name }, tenantName);
+    if (chip) return chip;
   }
-  const needle = (clientName || label).toLowerCase();
-  if (!needle) return null;
+
+  const needle = label.toLowerCase();
+  if (!needle || (tenantName && sameJournalLabel(label, tenantName))) return null;
   const match = organizationOptions.find((opt) => {
     if (!opt.organizationId) return false;
     const name = String(opt.name || '').trim().toLowerCase();
     return name === needle || name.includes(needle) || needle.includes(name);
   });
   if (!match?.organizationId) return null;
-  return {
-    organizationId: String(match.organizationId),
-    name: String(match.name || clientName || label).trim(),
-  };
+  return organizationChipOrNull(
+    {
+      organizationId: String(match.organizationId),
+      name: String(match.name || label).trim(),
+    },
+    tenantName,
+  );
 };
 
 const pickBestProcessEvent = (rows: JournalEvent[]): JournalEvent | null => {
@@ -1561,7 +1945,17 @@ const scopeEventsForProcessLookup = (
   scopeOrganizationTmpId?: string | null,
 ): JournalEvent[] =>
   events.filter((event) => {
-    if (!eventMatchesContact(event, scopeContactId, scopeContactName, scopeCandidateId)) return false;
+    if (
+      !eventMatchesContactWithAncestors(
+        event,
+        events,
+        scopeContactId,
+        scopeContactName,
+        scopeCandidateId,
+      )
+    ) {
+      return false;
+    }
     if (
       (scopeOrganizationId || scopeOrganizationTmpId)
       && !eventMatchesOrganizationScope(
@@ -1696,6 +2090,21 @@ const summarizeDuplicateProcessEvent = (event: JournalEvent): DuplicateProcessSu
       })
     : '—',
 });
+
+const eventLinkedToJob = (
+  event: JournalEvent,
+  jobLinkId?: string | null,
+  jobId?: string | null,
+  candidateId?: string | null,
+): boolean => {
+  const meta = event.metadata || {};
+  const link = String(meta.jobCandidateId || '').trim();
+  if (jobLinkId && link && link === String(jobLinkId)) return true;
+  const eventJob = String(meta.jobId || '').trim();
+  if (!jobId || !eventJob || eventJob !== String(jobId)) return false;
+  const eventCandidate = String(meta.candidateId || event.contactId || '').trim();
+  return !candidateId || !eventCandidate || eventCandidate === String(candidateId);
+};
 
 const eventMatchesJobScope = (
   event: JournalEvent,
@@ -1849,6 +2258,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const selfCoordinatorName = resolveJournalActorName(user);
   const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
   const [events, setEvents] = useState<JournalEvent[]>([]);
+  /** Job-link process journal rows merged into full (non-modal) journal when searching by candidate. */
+  const [processJournalSupplement, setProcessJournalSupplement] = useState<JournalEvent[]>([]);
+  const [eventsLoadSeq, setEventsLoadSeq] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
@@ -2195,15 +2607,22 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     () => new Set(restoredJournalFilters?.selectedStageOutcomeKeys ?? []),
   );
   const [actionPipelineId, setActionPipelineId] = useState<string | null>(null);
+  const profileScopedJournal =
+    !crossClientJournal
+    && Boolean(scopeContactId || scopeOrganizationId || scopeOrganizationTmpId);
+  const initialSelectedStatuses: readonly string[] = profileScopedJournal
+    ? []
+    : DEFAULT_JOURNAL_SELECTED_STATUSES;
+  const initialActiveStates: readonly string[] = profileScopedJournal ? [] : ['פעיל'];
   const [selectedStatuses, setSelectedStatuses] = useState<Set<string>>(() => {
     if (restoredJournalFilters) {
       return new Set(restoredJournalFilters.selectedStatuses);
     }
-    return new Set(DEFAULT_JOURNAL_SELECTED_STATUSES);
+    return new Set(initialSelectedStatuses);
   });
   const [selectedActiveStates, setSelectedActiveStates] = useState<Set<string>>(() => {
     const restored = restoredJournalFilters?.selectedActiveStates ?? [];
-    return new Set(restored.length > 0 ? restored : ['פעיל']);
+    return new Set(restored.length > 0 ? restored : initialActiveStates);
   });
   const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(
     () => new Set(restoredJournalFilters?.selectedCompanies ?? []),
@@ -2225,6 +2644,69 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [entitySearchQuery, setEntitySearchQuery] = useState(
     restoredJournalFilters?.entitySearchQuery ?? '',
   );
+
+  const serverJournalListMode = !embeddedInModal && !hideFilters;
+
+  const journalServerFilterSnapshot = useMemo((): JournalServerFilterSnapshot => {
+    const defaultStatusSet = new Set(initialSelectedStatuses);
+    const isDefaultStatus =
+      selectedStatuses.size === defaultStatusSet.size
+      && [...defaultStatusSet].every((status) => selectedStatuses.has(status));
+    const defaultActiveSet = new Set(initialActiveStates);
+    const isDefaultActive =
+      selectedActiveStates.size === defaultActiveSet.size
+      && [...defaultActiveSet].every((state) => selectedActiveStates.has(state));
+    const hasEditorDateRanges = Object.values(editorDateRanges).some(
+      (range) => Boolean(range?.dateFrom || range?.dateTo),
+    );
+    const q = entitySearchQuery.trim();
+    const usesExpandedLoad =
+      Boolean(q)
+      || !isDefaultStatus
+      || !isDefaultActive
+      || selectedCompanies.size > 0
+      || selectedHandlingCoordinators.size > 0
+      || selectedEditors.size > 0
+      || selectedPipelineIds.size > 0
+      || selectedStageOutcomeKeys.size > 0
+      || selectedSystemEventIds.size > 0
+      || Boolean(dateFrom || dateTo)
+      || hasEditorDateRanges;
+
+    return {
+      entitySearchQuery,
+      selectedStatuses: [...selectedStatuses].sort(),
+      selectedActiveStates: [...selectedActiveStates].sort(),
+      selectedCompanies: [...selectedCompanies].sort(),
+      selectedHandlingCoordinators: [...selectedHandlingCoordinators].sort(),
+      selectedEditors: [...selectedEditors].sort(),
+      selectedPipelineIds: [...selectedPipelineIds].sort(),
+      selectedStageOutcomeKeys: [...selectedStageOutcomeKeys].sort(),
+      dateFrom,
+      dateTo,
+      assignToSelf: !canSelectOtherCoordinators && !scopeContactId && !scopeCandidateId,
+      loadLimit: usesExpandedLoad ? JOURNAL_FILTERED_LOAD_LIMIT : JOURNAL_INITIAL_LOAD_LIMIT,
+    };
+  }, [
+    entitySearchQuery,
+    selectedStatuses,
+    selectedActiveStates,
+    selectedCompanies,
+    selectedHandlingCoordinators,
+    selectedEditors,
+    selectedPipelineIds,
+    selectedStageOutcomeKeys,
+    selectedSystemEventIds,
+    editorDateRanges,
+    dateFrom,
+    dateTo,
+    initialSelectedStatuses,
+    initialActiveStates,
+    canSelectOtherCoordinators,
+    scopeContactId,
+    scopeCandidateId,
+  ]);
+
   const [rescheduleHighlights, setRescheduleHighlights] = useState<
     Record<string, { label: string }>
   >({});
@@ -2334,8 +2816,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [editLinkedContactIds, setEditLinkedContactIds] = useState<string[]>([]);
   const [editContactOptions, setEditContactOptions] = useState<Array<{ id: string; name: string }>>([]);
   const [editContactsLoading, setEditContactsLoading] = useState(false);
-  const [contactLinkEditEventId, setContactLinkEditEventId] = useState<string | null>(null);
-  const [isSavingContactLinks, setIsSavingContactLinks] = useState(false);
   const [editingStatusUpdateKey, setEditingStatusUpdateKey] = useState<string | null>(null);
   const [statusUpdateEditDraft, setStatusUpdateEditDraft] = useState<{ title: string; comment: string }>({
     title: '',
@@ -2391,6 +2871,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [isOrgDrawerOpen, setIsOrgDrawerOpen] = useState(false);
   const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
   const [candidateJobLinksById, setCandidateJobLinksById] = useState<Record<string, CandidateJobLink[]>>({});
+  const [jobChipById, setJobChipById] = useState<Record<string, JournalJobChip>>({});
+  const jobChipByIdRef = useRef(jobChipById);
+  jobChipByIdRef.current = jobChipById;
+  const jobChipLoadingRef = useRef<Set<string>>(new Set());
+  const jobChipFetchedIdsRef = useRef<Set<string>>(new Set());
+  const orgNameByIdRef = useRef<Map<string, string>>(new Map());
   const [contactLookupRows, setContactLookupRows] = useState<ContactLookupRow[]>([]);
   const [staffUserRows, setStaffUserRows] = useState<
     Array<{ id: string; name?: string | null; email?: string | null }>
@@ -2491,8 +2977,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     ],
   );
 
-  /** Prefetch linked jobs only for modal scope or the currently selected event. */
+  /** Prefetch linked jobs only when the journal does not already know the job. */
   useEffect(() => {
+    if (embeddedInModal && scopeJobId) return;
     if (scopeCandidateId) {
       void loadCandidateJobLinks(scopeCandidateId);
       return;
@@ -2505,20 +2992,87 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     const candidateId = resolveCandidateIdFromEvent(event);
     if (!candidateId) return;
     void loadCandidateJobLinks(candidateId);
-  }, [scopeCandidateId, expandedEventId, events, loadCandidateJobLinks]);
+  }, [embeddedInModal, scopeJobId, scopeCandidateId, expandedEventId, events, loadCandidateJobLinks]);
+
+  const eventsRef = useRef(events);
+  eventsRef.current = events;
+  const candidateJobLinksByIdRef = useRef(candidateJobLinksById);
+  candidateJobLinksByIdRef.current = candidateJobLinksById;
+  const processJournalEnrichRunRef = useRef(0);
+  const lastProcessJournalEnrichKeyRef = useRef('');
 
   useEffect(() => {
-    const q = entitySearchQuery.trim();
-    if (!q) return;
-    const ids = new Set<string>();
-    for (const event of events) {
-      const cid = resolveCandidateIdForDrawer(event, scopeCandidateId);
-      if (cid) ids.add(cid);
-    }
-    for (const cid of ids) {
+    const candidateIds = collectCandidateIdsForProcessJournalEnrichment(
+      eventsRef.current,
+      entitySearchQuery,
+      scopeCandidateId,
+      candidateJobLinksByIdRef.current,
+    );
+    for (const cid of candidateIds) {
       void loadCandidateJobLinks(cid);
     }
-  }, [entitySearchQuery, events, scopeCandidateId, loadCandidateJobLinks]);
+  }, [entitySearchQuery, eventsLoadSeq, scopeCandidateId, loadCandidateJobLinks]);
+
+  useEffect(() => {
+    if (embeddedInModal) {
+      lastProcessJournalEnrichKeyRef.current = '';
+      setProcessJournalSupplement((prev) => (prev.length ? [] : prev));
+      return;
+    }
+    const fallbackClientId = String(defaultClientId || clientOptions[0]?.id || '').trim();
+    const candidateIds = collectCandidateIdsForProcessJournalEnrichment(
+      eventsRef.current,
+      entitySearchQuery,
+      scopeCandidateId,
+      candidateJobLinksByIdRef.current,
+    );
+    const enrichKey = [
+      eventsLoadSeq,
+      scopeCandidateId ?? '',
+      normalizeJournalSearchText(entitySearchQuery),
+      candidateIds.join(','),
+      fallbackClientId,
+    ].join('|');
+
+    if (!candidateIds.length) {
+      lastProcessJournalEnrichKeyRef.current = '';
+      setProcessJournalSupplement((prev) => (prev.length ? [] : prev));
+      return;
+    }
+
+    if (enrichKey === lastProcessJournalEnrichKeyRef.current) return;
+
+    const runId = ++processJournalEnrichRunRef.current;
+    void (async () => {
+      const supplemental = await fetchSupplementalProcessJournalEvents(
+        candidateIds,
+        eventsRef.current,
+        fallbackClientId,
+        candidateJobLinksByIdRef.current,
+      );
+      if (runId !== processJournalEnrichRunRef.current) return;
+      lastProcessJournalEnrichKeyRef.current = enrichKey;
+      const nextKey = processJournalSupplementIdsKey(supplemental);
+      setProcessJournalSupplement((prev) =>
+        processJournalSupplementIdsKey(prev) === nextKey ? prev : supplemental,
+      );
+    })();
+  }, [
+    embeddedInModal,
+    entitySearchQuery,
+    scopeCandidateId,
+    eventsLoadSeq,
+    defaultClientId,
+  ]);
+
+  const allJournalEvents = useMemo(() => {
+    if (embeddedInModal) return events;
+    if (!processJournalSupplement.length) return events;
+    const seen = new Set(events.map((event) => event.id));
+    const extra = processJournalSupplement.filter((event) => !seen.has(event.id));
+    if (!extra.length) return events;
+    return collapseStaleGenericJobLinkJournalEvents([...events, ...extra]);
+  }, [embeddedInModal, events, processJournalSupplement]);
 
   useEffect(() => {
     fetchedCandidateLinksRef.current = new Set();
@@ -2532,6 +3086,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   );
 
   useEffect(() => {
+    if (embeddedInModal) return;
     if (!apiBase) return;
     let active = true;
     const url = crossClientJournal
@@ -2574,9 +3129,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     return () => {
       active = false;
     };
-  }, [apiBase, crossClientJournal, contactsLookupClientId]);
+  }, [embeddedInModal, apiBase, crossClientJournal, contactsLookupClientId]);
 
   useEffect(() => {
+    if (embeddedInModal && !editingDescriptionId) return;
     let active = true;
     const clientId = crossClientJournal ? undefined : contactsLookupClientId || undefined;
     void fetchStaffUsers(clientId)
@@ -2617,7 +3173,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     return () => {
       active = false;
     };
-  }, [crossClientJournal, contactsLookupClientId, user?.name]);
+  }, [embeddedInModal, editingDescriptionId, crossClientJournal, contactsLookupClientId, user?.name]);
 
   const contactLookups = useMemo(
     () => buildContactIdLookups(contactLookupRows),
@@ -2705,30 +3261,99 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     }
     try {
       if (embeddedInModal && scopeJobLinkId) {
-        const journal = await fetchJobLinkProcessJournal(scopeJobLinkId);
-        const scopedClientId = defaultClientId || clientOptions[0]?.id || journal.clientId || '';
-        setEvents(
-          mapProcessJournalToEvents(
+        const inflightKey = embeddedModalJournalLoadKey(
+          scopeJobLinkId,
+          scopeJobId,
+          scopeCandidateId,
+        );
+        if (!opts?.silent) {
+          const existing = embeddedModalJournalInflight.get(inflightKey);
+          if (existing) {
+            await existing;
+            return;
+          }
+        }
+
+        const runEmbeddedLoad = async () => {
+          const journal = await fetchJobLinkProcessJournal(scopeJobLinkId);
+          const scopedClientId = String(
+            defaultClientId || clientOptions[0]?.id || journal.clientId || '',
+          ).trim();
+          const journalEvents = mapProcessJournalToEvents(
             journal,
             scopeCandidateId,
             scopeContactName,
             scopeJobCompany,
-            scopedClientId ? String(scopedClientId) : '',
-          ),
-        );
-        const resolvedCreateClientId = String(journal.clientId || scopedClientId || '').trim();
-        if (resolvedCreateClientId) setCreateClientId(resolvedCreateClientId);
+            scopedClientId,
+          );
+          let linkedClientEvents: JournalEvent[] = [];
+          if (scopedClientId) {
+            const qs = new URLSearchParams({ summary: '1', limit: '1200' });
+            const res = await fetch(
+              `${apiBase}/api/clients/${encodeURIComponent(scopedClientId)}/events?${qs.toString()}`,
+              {
+                credentials: 'include',
+                headers: authHeaders(),
+                cache: 'no-store',
+              },
+            );
+            if (res.ok) {
+              const rows = await res.json();
+              const clientName =
+                scopeJobCompany && scopeJobCompany !== '—'
+                  ? scopeJobCompany
+                  : clientOptions.find((c) => c.id === scopedClientId)?.name
+                    || 'לקוח';
+              linkedClientEvents = mapEventsResponse(rows, scopedClientId, clientName).filter((event) =>
+                eventLinkedToJob(event, scopeJobLinkId, scopeJobId, scopeCandidateId),
+              );
+            }
+          }
+          const seen = new Set(linkedClientEvents.map((event) => event.id));
+          setEvents(
+            collapseStaleGenericJobLinkJournalEvents([
+              ...linkedClientEvents,
+              ...journalEvents.filter((event) => !seen.has(event.id)),
+            ]),
+          );
+          const resolvedCreateClientId = String(journal.clientId || scopedClientId || '').trim();
+          if (resolvedCreateClientId) setCreateClientId(resolvedCreateClientId);
+        };
+
+        if (opts?.silent) {
+          await runEmbeddedLoad();
+        } else {
+          const inflight = runEmbeddedLoad();
+          embeddedModalJournalInflight.set(inflightKey, inflight);
+          try {
+            await inflight;
+          } finally {
+            if (embeddedModalJournalInflight.get(inflightKey) === inflight) {
+              embeddedModalJournalInflight.delete(inflightKey);
+            }
+          }
+        }
         return;
       }
 
       const scopedClientId = String(defaultClientId || clientOptions[0]?.id || '').trim();
       const scopedOrganizationId = String(scopeOrganizationId || '').trim();
       const scopedOrganizationTmpId = String(scopeOrganizationTmpId || '').trim();
+      const scopedToPerson = Boolean(scopeContactId || scopeCandidateId);
 
       if (scopedClientId && !crossClientJournal) {
-        const qs = new URLSearchParams({ summary: '1', limit: '1200' });
-        if (scopedOrganizationId) qs.set('organizationId', scopedOrganizationId);
-        if (scopedOrganizationTmpId) qs.set('organizationTmpId', scopedOrganizationTmpId);
+        const qs = new URLSearchParams();
+        if (serverJournalListMode) {
+          appendServerJournalListQuery(qs, journalServerFilterSnapshot, {
+            contactId: scopeContactId || undefined,
+            candidateId: scopeCandidateId || undefined,
+          });
+        } else {
+          qs.set('summary', '1');
+          qs.set('limit', '1200');
+        }
+        if (scopedOrganizationId && !scopedToPerson) qs.set('organizationId', scopedOrganizationId);
+        if (scopedOrganizationTmpId && !scopedToPerson) qs.set('organizationTmpId', scopedOrganizationTmpId);
         const res = await fetch(
           `${apiBase}/api/clients/${encodeURIComponent(scopedClientId)}/events?${qs.toString()}`,
           {
@@ -2744,14 +3369,25 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           || clientOptions.find((c) => c.id === scopedClientId)?.name
           || scopeContactName
           || 'לקוח';
+        setProcessJournalSupplement([]);
         setEvents(mapEventsResponse(rows, scopedClientId, clientName));
+        setEventsLoadSeq((n) => n + 1);
         return;
       }
 
-      const allQs = new URLSearchParams({ summary: '1', limit: '800' });
+      const allQs = new URLSearchParams();
+      if (serverJournalListMode) {
+        appendServerJournalListQuery(allQs, journalServerFilterSnapshot, {
+          contactId: scopeContactId || undefined,
+          candidateId: scopeCandidateId || undefined,
+        });
+      } else {
+        allQs.set('summary', '1');
+        allQs.set('limit', '800');
+      }
       if (scopedClientId) allQs.set('clientId', scopedClientId);
-      if (scopedOrganizationId) allQs.set('organizationId', scopedOrganizationId);
-      if (scopedOrganizationTmpId) allQs.set('organizationTmpId', scopedOrganizationTmpId);
+      if (scopedOrganizationId && !scopedToPerson) allQs.set('organizationId', scopedOrganizationId);
+      if (scopedOrganizationTmpId && !scopedToPerson) allQs.set('organizationTmpId', scopedOrganizationTmpId);
       const res = await fetch(`${apiBase}/api/clients/all-events?${allQs.toString()}`, {
         credentials: 'include',
         headers: authHeaders(),
@@ -2759,11 +3395,14 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       });
       if (!res.ok) throw new Error('טעינת אירועים נכשלה');
       const rows = await res.json();
+      setProcessJournalSupplement([]);
       setEvents(mapEventsResponse(rows));
+      setEventsLoadSeq((n) => n + 1);
     } catch (e) {
       if (!opts?.silent) {
         setError((e as Error)?.message || 'שגיאה בטעינת אירועים');
         setEvents([]);
+        setProcessJournalSupplement([]);
       }
     } finally {
       if (!opts?.silent) setLoading(false);
@@ -2776,16 +3415,40 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     scopeOrganizationName,
     clientOptionsSignature,
     scopeContactName,
+    scopeContactId,
+    scopeCandidateId,
     embeddedInModal,
     scopeJobLinkId,
+    scopeJobId,
     scopeJobCompany,
-    scopeCandidateId,
     crossClientJournal,
+    serverJournalListMode,
+    journalServerFilterSnapshot,
+    hideFilters,
   ]);
 
+  const loadRef = useRef(load);
+  loadRef.current = load;
+  const embeddedInitialLoadKeyRef = useRef<string | null>(null);
+
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (embeddedInModal) return;
+    if (serverJournalListMode) {
+      const timer = window.setTimeout(() => {
+        void loadRef.current();
+      }, 350);
+      return () => window.clearTimeout(timer);
+    }
+    void loadRef.current();
+  }, [embeddedInModal, serverJournalListMode, journalServerFilterSnapshot, load]);
+
+  useEffect(() => {
+    if (!embeddedInModal || !scopeJobLinkId) return;
+    const key = embeddedModalJournalLoadKey(scopeJobLinkId, scopeJobId, scopeCandidateId);
+    if (embeddedInitialLoadKeyRef.current === key) return;
+    embeddedInitialLoadKeyRef.current = key;
+    void loadRef.current();
+  }, [embeddedInModal, apiBase, scopeJobLinkId, scopeJobId, scopeCandidateId]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -2813,6 +3476,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   }, [events]);
 
   const catalogClientIdsKey = useMemo(() => {
+    if (embeddedInModal) {
+      return String(defaultClientId || settingsClientId || '').trim();
+    }
     const ids = new Set<string>();
     if (settingsClientId) ids.add(String(settingsClientId));
     if (defaultClientId) ids.add(String(defaultClientId));
@@ -2825,7 +3491,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       if (id) ids.add(id);
     }
     return [...ids].sort().join('|');
-  }, [settingsClientId, defaultClientId, createClientId, clientOptionsSignature, eventClientIdsKey]);
+  }, [embeddedInModal, settingsClientId, defaultClientId, createClientId, clientOptionsSignature, eventClientIdsKey]);
 
   useEffect(() => {
     if (!catalogClientIdsKey) return;
@@ -2834,13 +3500,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     let cancelled = false;
     setCatalogLoading(true);
     void Promise.all([
-      Promise.all(
-        catalogClientIds.map((cid) =>
-          fetchPipelines(cid)
-            .then((rows) => ({ cid, rows: Array.isArray(rows) ? rows : [] }))
-            .catch(() => ({ cid, rows: [] as PipelineDto[] })),
-        ),
-      ),
+      embeddedInModal
+        ? Promise.resolve([] as { cid: string; rows: PipelineDto[] }[])
+        : Promise.all(
+            catalogClientIds.map((cid) =>
+              fetchPipelines(cid)
+                .then((rows) => ({ cid, rows: Array.isArray(rows) ? rows : [] }))
+                .catch(() => ({ cid, rows: [] as PipelineDto[] })),
+            ),
+          ),
       Promise.all(
         catalogClientIds.map((cid) =>
           fetchCandidatePipelines(cid)
@@ -2848,11 +3516,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             .catch(() => ({ cid, rows: [] as PipelineDto[] })),
         ),
       ),
-      apiBase
-        ? fetchSystemEvents(apiBase, typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
+      embeddedInModal || !apiBase
+        ? Promise.resolve(SYSTEM_EVENT_GROUPS_FALLBACK)
+        : fetchSystemEvents(apiBase, typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
             .then((rows) => buildSystemEventGroupsFromApiRows(rows))
-            .catch(() => SYSTEM_EVENT_GROUPS_FALLBACK)
-        : Promise.resolve(SYSTEM_EVENT_GROUPS_FALLBACK),
+            .catch(() => SYSTEM_EVENT_GROUPS_FALLBACK),
     ])
       .then(([clientRows, candidateRows, sysGroups]) => {
         if (cancelled) return;
@@ -2875,9 +3543,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     return () => {
       cancelled = true;
     };
-  }, [catalogClientIdsKey, apiBase]);
+  }, [catalogClientIdsKey, apiBase, embeddedInModal]);
 
   useEffect(() => {
+    if (embeddedInModal && !automationInfoView) return;
     if (!settingsClientId) {
       setMessageTemplates([]);
       return;
@@ -2893,7 +3562,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     return () => {
       cancelled = true;
     };
-  }, [settingsClientId]);
+  }, [settingsClientId, embeddedInModal, automationInfoView]);
 
   const clientPipelinesCatalog = useMemo((): EnrichedPipeline[] => {
     const out: EnrichedPipeline[] = [];
@@ -2949,8 +3618,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   }, []);
 
   const selectedEvent = useMemo(
-    () => events.find((e) => e.id === expandedEventId) || null,
-    [events, expandedEventId],
+    () => allJournalEvents.find((e) => e.id === expandedEventId) || null,
+    [allJournalEvents, expandedEventId],
   );
 
   const prevExpandedEventIdRef = useRef<string | null>(null);
@@ -2965,6 +3634,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   // Load pipeline stages for the selected event's client (same source as PipelineSettingsView)
   useEffect(() => {
+    if (embeddedInModal) return;
     if (!selectedEvent?.clientId) return;
     const cid = selectedEvent.clientId;
     let cancelled = false;
@@ -2982,13 +3652,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     return () => {
       cancelled = true;
     };
-  }, [selectedEvent?.clientId, expandedEventId]);
+  }, [embeddedInModal, selectedEvent?.clientId, expandedEventId]);
 
   useEffect(() => {
     if (!editingDescriptionId) return;
-    const event = events.find((e) => e.id === editingDescriptionId);
+    const event = allJournalEvents.find((e) => e.id === editingDescriptionId);
     if (event?.isActive === false) setEditingDescriptionId(null);
-  }, [events, editingDescriptionId]);
+  }, [allJournalEvents, editingDescriptionId]);
 
   const selectedClientPipelines = useMemo(
     () => (selectedEvent?.clientId ? pipelinesByClient[selectedEvent.clientId] || [] : []),
@@ -3033,7 +3703,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       scopeJobLinkId,
       defaultProcessStageId,
     });
-    const ctx = resolveActionPipelineContext(selectedEvent, null, clientP, candP, preferredStageId);
+    const preferCandidatePipelines = embeddedInModal && Boolean(scopeJobLinkId);
+    const ctx = resolveActionPipelineContext(
+      selectedEvent,
+      null,
+      clientP,
+      candP,
+      preferredStageId,
+      { preferCandidatePipelines },
+    );
     if (ctx) {
       applyActionPipeline(ctx.pipeline.id);
     }
@@ -3050,6 +3728,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     defaultActionPipelineId,
     scopeJobLinkId,
     defaultProcessStageId,
+    embeddedInModal,
   ]);
 
   const preferredStageIdForActions = useMemo(
@@ -3060,6 +3739,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     [selectedEvent, scopeJobLinkId, defaultProcessStageId],
   );
 
+  const preferCandidatePipelinesForActions = embeddedInModal && Boolean(scopeJobLinkId);
+
   const actionPipelineContext = useMemo((): ActionPipelineContext | null => {
     if (!selectedEvent) return null;
     return resolveActionPipelineContext(
@@ -3068,6 +3749,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       selectedClientPipelines,
       selectedCandidatePipelines,
       preferredStageIdForActions,
+      { preferCandidatePipelines: preferCandidatePipelinesForActions },
     );
   }, [
     selectedEvent,
@@ -3075,6 +3757,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     selectedClientPipelines,
     selectedCandidatePipelines,
     preferredStageIdForActions,
+    preferCandidatePipelinesForActions,
   ]);
 
   useEffect(() => {
@@ -3118,18 +3801,180 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     }
     return map;
   }, [organizationOptions]);
+  orgNameByIdRef.current = orgNameById;
+
+  useEffect(() => {
+    if (!embeddedInModal || !scopeJobId) return;
+    const id = String(scopeJobId);
+    const title = normalizeJobTitle(scopeJobTitle) || '';
+    const organizationId = String(scopeOrganizationId || '').trim();
+    const organizationName = String(
+      (scopeOrganizationName && scopeOrganizationName !== '—' ? scopeOrganizationName : '')
+      || (scopeJobCompany && scopeJobCompany !== '—' ? scopeJobCompany : '')
+      || '',
+    ).trim();
+    if (!title && !organizationName && !organizationId) return;
+    setJobChipById((prev) => {
+      const existing = prev[id];
+      if (existing?.settled && (existing.title || existing.organizationName)) return prev;
+      return {
+        ...prev,
+        [id]: {
+          title: title || existing?.title || '',
+          organizationId: organizationId || existing?.organizationId || '',
+          organizationName: organizationName || existing?.organizationName || '',
+          settled: true,
+        },
+      };
+    });
+  }, [
+    embeddedInModal,
+    scopeJobId,
+    scopeJobTitle,
+    scopeOrganizationId,
+    scopeOrganizationName,
+    scopeJobCompany,
+  ]);
+
+  const processJournalSupplementRef = useRef(processJournalSupplement);
+  processJournalSupplementRef.current = processJournalSupplement;
+  const processJournalSupplementKey = useMemo(
+    () => processJournalSupplementIdsKey(processJournalSupplement),
+    [processJournalSupplement],
+  );
+
+  useEffect(() => {
+    if (!apiBase) return;
+    const missing = new Set<string>();
+    const eventRows: JournalEvent[] = [...eventsRef.current];
+    const seenEventRowIds = new Set(eventRows.map((row) => row.id));
+    for (const row of processJournalSupplementRef.current) {
+      if (!seenEventRowIds.has(row.id)) eventRows.push(row);
+    }
+    for (const event of eventRows) {
+      const id = String(event.metadata?.jobId || '').trim();
+      if (!id) continue;
+      if (embeddedInModal && scopeJobId && id === String(scopeJobId)) continue;
+      if (jobChipFetchedIdsRef.current.has(id)) continue;
+      const cached = jobChipByIdRef.current[id];
+      if (cached?.settled) {
+        jobChipFetchedIdsRef.current.add(id);
+        continue;
+      }
+      if (jobChipLoadingRef.current.has(id)) continue;
+      missing.add(id);
+    }
+    if (!missing.size) return;
+    const queue = [...missing];
+    const loadOne = async (id: string) => {
+      if (jobChipFetchedIdsRef.current.has(id) || jobChipLoadingRef.current.has(id)) return;
+      jobChipLoadingRef.current.add(id);
+      const empty: JournalJobChip = { title: '', organizationId: '', organizationName: '', settled: true };
+      try {
+        const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(id)}`, {
+          credentials: 'include',
+          headers: authHeaders(),
+          cache: 'no-store',
+        });
+        if (!res.ok) {
+          setJobChipById((prev) => ({ ...prev, [id]: empty }));
+          return;
+        }
+        const json = await res.json();
+        const job = (json?.job ?? json?.data ?? json) as Record<string, unknown>;
+        const nestedOrg = job?.organization && typeof job.organization === 'object'
+          ? job.organization as Record<string, unknown>
+          : null;
+        const title =
+          normalizeJobTitle(job?.title as string | undefined)
+          || normalizeJobTitle(job?.publicJobTitle as string | undefined)
+          || '';
+        const organizationId = String(
+          job?.organizationId || job?.organization_id || nestedOrg?.id || '',
+        ).trim();
+        let organizationName = organizationId
+          ? String(orgNameByIdRef.current.get(organizationId) || nestedOrg?.name || '').trim()
+          : '';
+        if (!organizationName && organizationId) {
+          try {
+            const orgRes = await fetch(`${apiBase}/api/organizations/${encodeURIComponent(organizationId)}`, {
+              credentials: 'include',
+              headers: authHeaders(),
+              cache: 'no-store',
+            });
+            if (orgRes.ok) {
+              const orgJson = await orgRes.json();
+              const orgRecord = orgJson && typeof orgJson === 'object'
+                ? orgJson as Record<string, unknown>
+                : {};
+              const nested = orgRecord.data && typeof orgRecord.data === 'object'
+                ? orgRecord.data as Record<string, unknown>
+                : null;
+              const org = nested?.name ? nested : orgRecord;
+              organizationName = String(org?.name || '').trim();
+            }
+          } catch {
+            organizationName = '';
+          }
+        }
+        setJobChipById((prev) => ({
+          ...prev,
+          [id]: { title, organizationId, organizationName, settled: true },
+        }));
+      } catch {
+        setJobChipById((prev) => ({ ...prev, [id]: empty }));
+      } finally {
+        jobChipFetchedIdsRef.current.add(id);
+        jobChipLoadingRef.current.delete(id);
+      }
+    };
+    const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+      while (queue.length) {
+        const id = queue.shift();
+        if (!id) break;
+        await loadOne(id);
+      }
+    });
+    void Promise.all(workers);
+  }, [apiBase, embeddedInModal, scopeJobId, eventsLoadSeq, processJournalSupplementKey]);
 
   const preferOrganizationLabels = organizationOptions.length > 0;
 
   const resolveCompanyLabel = useCallback(
-    (event: JournalEvent) => resolveEventCompanyLabel(event, orgNameById, preferOrganizationLabels),
-    [orgNameById, preferOrganizationLabels],
+    (event: JournalEvent) =>
+      resolveEventCompanyLabel(event, orgNameById, organizationOptions, preferOrganizationLabels),
+    [orgNameById, organizationOptions, preferOrganizationLabels],
   );
 
   const selectedEventOrganizationRef = useMemo(() => {
     if (!selectedEvent) return null;
-    return resolveEventOrganizationRef(selectedEvent, orgNameById, organizationOptions);
-  }, [selectedEvent, orgNameById, organizationOptions]);
+    const fromEvent = resolveEventOrganizationRef(
+      selectedEvent,
+      orgNameById,
+      organizationOptions,
+      contactById,
+    );
+    const jobId = String(selectedEvent.metadata?.jobId || '').trim();
+    const cached = jobId ? jobChipById[jobId] : undefined;
+    const tenantName = String(selectedEvent.clientName || '').trim();
+    const jobChip = organizationChipOrNull(
+      {
+        organizationId: cached?.organizationId,
+        name: cached?.organizationName,
+      },
+      tenantName,
+    );
+    if (jobChip) return jobChip;
+    const employerChip = organizationChipOrNull(
+      {
+        organizationId: selectedEvent.organizationId,
+        name: String(selectedEvent.metadata?.organizationName || ''),
+      },
+      tenantName,
+    );
+    if (employerChip) return employerChip;
+    return organizationChipOrNull(fromEvent, tenantName);
+  }, [selectedEvent, orgNameById, organizationOptions, contactById, jobChipById]);
 
   const { registerNewTaskLinkedOverride } = useNewTaskLinkedContext();
 
@@ -3143,6 +3988,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       selectedEvent,
       orgNameById,
       organizationOptions,
+      contactById,
     );
     const candidateId = resolveCandidateIdForDrawer(selectedEvent, scopeCandidateId);
     const contactId = resolveContactIdForDrawer(
@@ -3194,6 +4040,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     scopeContactName,
     scopeOrganizationId,
     contactLookups,
+    contactById,
     resolveEventJobMeta,
     registerNewTaskLinkedOverride,
   ]);
@@ -3302,8 +4149,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const statusOptions = ['עתידי', 'להיום', 'באיחור', 'הושלם', 'בוטל'];
   const activeStateOptions = ['פעיל', 'לא פעיל'];
   const defaultSelectedStatuses = useMemo(
-    () => new Set<string>(DEFAULT_JOURNAL_SELECTED_STATUSES),
-    [],
+    () => new Set<string>(initialSelectedStatuses),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [profileScopedJournal],
   );
   const isDefaultStatusFilter = useCallback(
     (statuses: Set<string>) =>
@@ -3311,7 +4159,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       [...defaultSelectedStatuses].every((status) => statuses.has(status)),
     [defaultSelectedStatuses],
   );
-  const defaultActiveStates = useMemo(() => new Set(['פעיל']), []);
+  const defaultActiveStates = useMemo(
+    () => new Set<string>(initialActiveStates),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [profileScopedJournal],
+  );
   const isDefaultActiveStateFilter = useCallback(
     (states: Set<string>) =>
       states.size === defaultActiveStates.size &&
@@ -3328,8 +4180,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const eventPassesFilters = useCallback(
     (event: JournalEvent) => {
       if (
-        !eventMatchesContact(
+        !eventMatchesContactWithAncestors(
           event,
+          events,
           scopeContactId,
           scopeContactName,
           scopeCandidateId,
@@ -3347,11 +4200,17 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           scopeOrganizationId,
           scopeOrganizationTmpId,
           scopeOrganizationName,
+          contactById,
         )
       ) {
         return false;
       }
-      if (!canSelectOtherCoordinators) {
+      if (
+        !serverJournalListMode
+        && !canSelectOtherCoordinators
+        && !scopeContactId
+        && !scopeCandidateId
+      ) {
         if (
           !eventAssignedToCoordinator(event, selfCoordinatorName, {
             selfCoordinatorName,
@@ -3362,53 +4221,73 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         }
       }
       if (!embeddedInModal && !hideFilters) {
-        const matchesSelectedSystemEvent =
-          selectedSystemEventIds.size > 0 &&
-          eventMatchesSystemEventFilters(
-            event,
-            selectedSystemEventIds,
-            systemEventGroups,
-            systemEventPipelineMatches,
-            allPipelinesCatalog,
-          );
-        if (
-          !matchesSelectedSystemEvent &&
-          !eventMatchesPipelineFilters(
-            event,
-            selectedPipelineIds,
-            allPipelinesCatalog,
-            selectedStageOutcomeKeys,
-          )
-        ) {
-          return false;
+        if (serverJournalListMode) {
+          if (selectedSystemEventIds.size > 0) {
+            const matchesSelectedSystemEvent = eventMatchesSystemEventFilters(
+              event,
+              selectedSystemEventIds,
+              systemEventGroups,
+              systemEventPipelineMatches,
+              allPipelinesCatalog,
+            );
+            if (!matchesSelectedSystemEvent) return false;
+          }
+          if (
+            selectedEditors.size > 0
+            && !eventMatchesEditorFilters(event, selectedEditors, editorDateRanges)
+          ) {
+            return false;
+          }
+        } else {
+          const matchesSelectedSystemEvent =
+            selectedSystemEventIds.size > 0 &&
+            eventMatchesSystemEventFilters(
+              event,
+              selectedSystemEventIds,
+              systemEventGroups,
+              systemEventPipelineMatches,
+              allPipelinesCatalog,
+            );
+          if (
+            !matchesSelectedSystemEvent &&
+            !eventMatchesPipelineFilters(
+              event,
+              selectedPipelineIds,
+              allPipelinesCatalog,
+              selectedStageOutcomeKeys,
+            )
+          ) {
+            return false;
+          }
+          if (selectedStatuses.size > 0 && event.isActive !== false) {
+            const dynamicStatus = getDynamicStatus(event.status, event.dueDate).label;
+            if (!selectedStatuses.has(dynamicStatus)) return false;
+          }
+          if (selectedActiveStates.size > 0) {
+            const activeLabel = event.isActive !== false ? 'פעיל' : 'לא פעיל';
+            if (!selectedActiveStates.has(activeLabel)) return false;
+          }
+          if (selectedCompanies.size > 0 && !selectedCompanies.has(resolveCompanyLabel(event))) return false;
+          if (
+            canSelectOtherCoordinators
+            && selectedHandlingCoordinators.size > 0
+            && !eventMatchesHandlingCoordinatorFilter(
+              event,
+              selectedHandlingCoordinators,
+              selfCoordinatorName,
+            )
+          ) {
+            return false;
+          }
+          if (!eventMatchesEditorFilters(event, selectedEditors, editorDateRanges)) return false;
+          if (selectedSystemEventIds.size > 0 && !matchesSelectedSystemEvent) return false;
+          if (dateFrom && new Date(event.date) < new Date(dateFrom)) return false;
+          if (dateTo && new Date(event.date) > new Date(`${dateTo}T23:59:59`)) return false;
         }
-        if (selectedStatuses.size > 0) {
-          const dynamicStatus = getDynamicStatus(event.status, event.dueDate).label;
-          if (!selectedStatuses.has(dynamicStatus)) return false;
-        }
-        if (selectedActiveStates.size > 0) {
-          const activeLabel = event.isActive !== false ? 'פעיל' : 'לא פעיל';
-          if (!selectedActiveStates.has(activeLabel)) return false;
-        }
-        if (selectedCompanies.size > 0 && !selectedCompanies.has(resolveCompanyLabel(event))) return false;
-        if (
-          canSelectOtherCoordinators
-          && selectedHandlingCoordinators.size > 0
-          && !eventMatchesHandlingCoordinatorFilter(
-            event,
-            selectedHandlingCoordinators,
-            selfCoordinatorName,
-          )
-        ) {
-          return false;
-        }
-        if (!eventMatchesEditorFilters(event, selectedEditors, editorDateRanges)) return false;
-        if (selectedSystemEventIds.size > 0 && !matchesSelectedSystemEvent) return false;
-        if (dateFrom && new Date(event.date) < new Date(dateFrom)) return false;
-        if (dateTo && new Date(event.date) > new Date(`${dateTo}T23:59:59`)) return false;
       }
       if (
         !embeddedInModal
+        && !serverJournalListMode
         && !eventMatchesJournalSearch(
           event,
           entitySearchQuery,
@@ -3422,6 +4301,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       return true;
     },
     [
+      events,
       scopeContactId,
       scopeContactName,
       scopeContactEmails,
@@ -3429,8 +4309,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       scopeOrganizationId,
       scopeOrganizationTmpId,
       scopeOrganizationName,
+      contactById,
       embeddedInModal,
       hideFilters,
+      serverJournalListMode,
       selectedPipelineIds,
       allPipelinesCatalog,
       selectedStageOutcomeKeys,
@@ -3454,14 +4336,14 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   );
 
   const filteredEvents = useMemo(() => {
-    const scoped = events.filter(eventPassesFilters);
+    const scoped = allJournalEvents.filter(eventPassesFilters);
     if (!scopeJobId && !scopeJobLinkId && !scopeJobTitle && !scopeJobCompany) return scoped;
     const jobScoped = scoped.filter((event) =>
       eventMatchesJobScope(event, scopeJobId, scopeJobLinkId, scopeJobTitle, scopeJobCompany),
     );
     return jobScoped.length > 0 ? jobScoped : scoped;
   }, [
-    events,
+    allJournalEvents,
     eventPassesFilters,
     scopeJobId,
     scopeJobLinkId,
@@ -3473,11 +4355,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     const visibleIds = new Set(filteredEvents.map((event) => journalEventKey(event)));
     const exitingExtras = [...exitingEventIds]
       .filter((key) => !visibleIds.has(key))
-      .map((key) => events.find((event) => journalEventKey(event) === key))
+      .map((key) => allJournalEvents.find((event) => journalEventKey(event) === key))
       .filter((event): event is JournalEvent => Boolean(event));
     const merged = [...filteredEvents, ...exitingExtras];
     return merged.sort((a, b) => compareJournalEventsByDate(a, b, dateSortOrder));
-  }, [filteredEvents, exitingEventIds, events, dateSortOrder]);
+  }, [filteredEvents, exitingEventIds, allJournalEvents, dateSortOrder]);
 
   const lastAutoSelectedPipelineRef = useRef<string | null>(null);
 
@@ -3630,7 +4512,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     event: JournalEvent,
     patch: Record<string, unknown>,
   ): Promise<{ ok: true; row: JournalEvent } | { ok: false }> => {
-    if (embeddedInModal && scopeJobLinkId) {
+    const isProcessJournalCard =
+      event.metadata?.journalEntry === true || String(event.id).startsWith('initial-');
+    if (embeddedInModal && scopeJobLinkId && isProcessJournalCard) {
       try {
         const refreshed = await patchJobLinkProcessJournalEntry(scopeJobLinkId, event.id, {
           title: patch.title != null ? String(patch.title) : undefined,
@@ -3745,7 +4629,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   };
 
   const commitPendingOutcome = async (draft: PendingOutcomeDraft): Promise<boolean> => {
-    const sourceEvent = events.find((e) => journalEventKey(e) === draft.eventKey);
+    const sourceEvent = allJournalEvents.find((e) => journalEventKey(e) === draft.eventKey);
     if (!sourceEvent) {
       alert('לא נמצא האירוע לשמירה');
       return false;
@@ -3922,7 +4806,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const resolvePendingOutcomeDraftForCommit = (): PendingOutcomeDraft | null => {
     if (!pendingOutcomeDraft) return null;
-    const sourceEvent = events.find((e) => journalEventKey(e) === pendingOutcomeDraft.eventKey);
+    const sourceEvent = allJournalEvents.find((e) => journalEventKey(e) === pendingOutcomeDraft.eventKey);
     return mergePendingOutcomeWithInlineEdit(
       pendingOutcomeDraft,
       sourceEvent,
@@ -4044,118 +4928,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     [editContactOptions, editLinkedContactIds],
   );
 
-  const cancelContactLinkEdit = () => {
-    setContactLinkEditEventId(null);
-    setEditLinkedContactIds([]);
-    setEditContactOptions([]);
-  };
-
-  const saveEventLinkedContacts = async (event: JournalEvent): Promise<boolean> => {
-    if (
-      !canEditEventLinkedContacts(event, {
-        embeddedInModal,
-        scopeJobLinkId,
-        scopeCandidateId,
-      })
-    ) {
-      return false;
-    }
-    if (isSavingContactLinks || isSavingDescription) return false;
-
-    setIsSavingContactLinks(true);
-    try {
-      const actor = resolveJournalActorName(user);
-      const selectedLinkedContacts = buildSelectedLinkedContactsForSave(event);
-      const orgRef = resolveEventOrganizationRef(event, orgNameById, organizationOptions);
-      const contactPatch = buildEventContactLinkPatch(selectedLinkedContacts, event, orgRef);
-      const prevLinked = parseEventLinkedContacts(event);
-      const prevKey = prevLinked
-        .map((c) => c.id)
-        .sort()
-        .join('|');
-      const nextKey = selectedLinkedContacts
-        .map((c) => c.id)
-        .sort()
-        .join('|');
-
-      let nextUpdates = [...(event.updates || [])];
-      if (prevKey !== nextKey) {
-        const label = formatLinkedContactsActivityLabel(selectedLinkedContacts);
-        const activity = {
-          id: `u-${Date.now()}-contacts`,
-          title: label
-            ? `עודכנו אנשי קשר: ${label}`
-            : 'הוסרו אנשי קשר מהאירוע',
-          date: new Date().toISOString(),
-          creator: actor,
-        };
-        nextUpdates = sortStatusUpdatesByDateDesc([activity, ...nextUpdates]);
-      }
-
-      const history = nextUpdates.map((u) => ({
-        user: u.creator,
-        timestamp: u.date,
-        summary: u.title,
-        ...(u.comment ? { comment: u.comment } : {}),
-      }));
-
-      const patch: Record<string, unknown> = {
-        ...contactPatch,
-        ...(prevKey !== nextKey ? { updates: nextUpdates, history } : {}),
-      };
-
-      const primaryLinkedContact = selectedLinkedContacts[0];
-      setEvents((prev) =>
-        prev.map((e) =>
-          e.id === event.id && e.clientId === event.clientId
-            ? {
-                ...e,
-                contactId: primaryLinkedContact?.id || null,
-                contactName: primaryLinkedContact?.name || null,
-                linkedToType: primaryLinkedContact ? 'איש קשר' : 'לקוח',
-                updates: prevKey !== nextKey ? nextUpdates : e.updates,
-                metadata:
-                  contactPatch.metadata && typeof contactPatch.metadata === 'object'
-                    ? (contactPatch.metadata as Record<string, unknown>)
-                    : e.metadata,
-              }
-            : e,
-        ),
-      );
-
-      const result = await persistEventPatch(event, patch);
-      if (!result.ok) {
-        alert('שמירת אנשי קשר נכשלה');
-        await load({ silent: true });
-        return false;
-      }
-      setEvents((prev) =>
-        prev.map((e) =>
-          e.id === event.id && e.clientId === event.clientId ? result.row : e,
-        ),
-      );
-      onEventsChanged?.();
-      return true;
-    } finally {
-      setIsSavingContactLinks(false);
-    }
-  };
-
-  const beginContactLinkEdit = (event: JournalEvent) => {
-    if (event.isActive === false) return;
-    const mergedEvent = mergeEventWithPendingOutcome(
-      event,
-      pendingOutcomeDraft,
-      resolveJournalActorName(user),
-    );
-    if (editingDescriptionId === event.id) {
-      return;
-    }
-    setContactLinkEditEventId(event.id);
-    setEditLinkedContactIds(resolveInitialLinkedContactIds(mergedEvent, contactLookups));
-    void loadEditContactOptions(event);
-  };
-
   const resetEventEditDraft = () => {
     setEditingDescriptionId(null);
     setEditTitleValue('');
@@ -4163,14 +4935,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setEditStatusUpdates([]);
     setEditLinkedContactIds([]);
     setEditContactOptions([]);
-    setContactLinkEditEventId(null);
     setEditingStatusUpdateKey(null);
     setStatusUpdateEditDraft({ title: '', comment: '' });
   };
 
   const handleEditDescription = (event: JournalEvent) => {
     if (event.isActive === false) return;
-    setContactLinkEditEventId(null);
     const mergedEvent = mergeEventWithPendingOutcome(
       event,
       pendingOutcomeDraft,
@@ -4450,7 +5220,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     let selectedLinkedContacts: EventLinkedContact[] = [];
     if (allowContactEdit) {
       selectedLinkedContacts = buildSelectedLinkedContactsForSave(event);
-      const orgRef = resolveEventOrganizationRef(event, orgNameById, organizationOptions);
+      const orgRef = resolveEventOrganizationRef(
+        event,
+        orgNameById,
+        organizationOptions,
+        contactById,
+      );
       contactPatch = buildEventContactLinkPatch(selectedLinkedContacts, event, orgRef);
       const prevLinked = parseEventLinkedContacts(event);
       const prevKey = prevLinked
@@ -5035,8 +5810,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setSelectedPipelineIds(new Set());
     setSelectedSystemEventIds(new Set());
     setSelectedStageOutcomeKeys(new Set());
-    setSelectedStatuses(new Set(DEFAULT_JOURNAL_SELECTED_STATUSES));
-    setSelectedActiveStates(new Set(['פעיל']));
+    setSelectedStatuses(new Set(defaultSelectedStatuses));
+    setSelectedActiveStates(new Set(defaultActiveStates));
     setSelectedCompanies(new Set());
     setSelectedEditors(new Set());
     setSelectedHandlingCoordinators(new Set());
@@ -5045,7 +5820,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setDateTo('');
     setEntitySearchQuery('');
     clearEventsJournalFilters(eventsJournalFilterStorageKey);
-  }, [eventsJournalFilterStorageKey]);
+  }, [eventsJournalFilterStorageKey, defaultSelectedStatuses, defaultActiveStates]);
 
   const removeFromSet = useCallback(
     (setter: React.Dispatch<React.SetStateAction<Set<string>>>, value: string) => {
@@ -5794,11 +6569,51 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                     scopeJobLinkId,
                     scopeCandidateId,
                   });
-                  const { jobId, jobTitle, jobCompany } = resolveEventJobMeta(event);
+                  const resolvedJob = resolveEventJobMeta(event);
+                  const cachedJob = resolvedJob.jobId ? jobChipById[resolvedJob.jobId] : undefined;
+                  const jobId = resolvedJob.jobId;
+                  const jobTitle =
+                    normalizeJobTitle(resolvedJob.jobTitle)
+                    || normalizeJobTitle(cachedJob?.title)
+                    || null;
                   const organizationRef = resolveEventOrganizationRef(
                     event,
                     orgNameById,
                     organizationOptions,
+                    contactById,
+                  );
+                  const hideCompanyBecauseOrganizationScope =
+                    Boolean(scopeOrganizationId || scopeOrganizationTmpId) && !scopeContactId;
+                  const scopedContactCompanyName = scopeContactId
+                    ? String(scopeOrganizationName || preferredOrganizationLabel || '').trim()
+                    : '';
+                  const tenantName = String(event.clientName || '').trim();
+                  const jobChip = organizationChipOrNull(
+                    {
+                      organizationId: cachedJob?.organizationId,
+                      name: cachedJob?.organizationName,
+                    },
+                    tenantName,
+                  );
+                  const employerChip = organizationChipOrNull(
+                    {
+                      organizationId: event.organizationId,
+                      name: String(event.metadata?.organizationName || ''),
+                    },
+                    tenantName,
+                  );
+                  const refChip = organizationChipOrNull(organizationRef, tenantName);
+                  const scopedChip = organizationChipOrNull(
+                    scopedContactCompanyName
+                      ? {
+                          organizationId: String(scopeOrganizationId || '').trim(),
+                          name: scopedContactCompanyName,
+                        }
+                      : null,
+                    tenantName,
+                  );
+                  const companyChip = jobChip || employerChip || (
+                    hideCompanyBecauseOrganizationScope ? null : refChip || scopedChip
                   );
                   return (
                     <motion.div
@@ -5880,27 +6695,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                               </h4>
                             )}
                             <div className="flex flex-wrap items-center gap-2 mt-2">
-                              {!scopeContactId && !scopeOrganizationId && organizationRef?.name ? (
-                                organizationRef.organizationId ? (
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      openOrganizationDrawer(organizationRef);
-                                    }}
-                                    className="text-[11px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-indigo-100 hover:underline transition-colors"
-                                    title="פתח דראוור ארגון"
-                                  >
-                                    <BuildingOffice2Icon className="w-3 h-3" />
-                                    {organizationRef.name}
-                                  </button>
-                                ) : (
-                                  <span className="text-[11px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
-                                    <BuildingOffice2Icon className="w-3 h-3" />
-                                    {organizationRef.name}
-                                  </span>
-                                )
-                              ) : null}
                               {linkedContactsForEvent.length > 0 && !candidateIdForDrawer
                                 ? linkedContactsForEvent.map((linkedContact) => (
                                     <button
@@ -5963,18 +6757,42 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                       </span>
                                     )
                                   : null}
-                              {jobId ? (
+                              {companyChip?.name ? (
+                                companyChip.organizationId ? (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openOrganizationDrawer({
+                                        organizationId: companyChip.organizationId,
+                                        name: companyChip.name,
+                                      });
+                                    }}
+                                    className="text-[11px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-indigo-100 hover:underline transition-colors"
+                                    title="פתח דראוור חברה"
+                                  >
+                                    <BuildingOffice2Icon className="w-3 h-3" />
+                                    {companyChip.name}
+                                  </button>
+                                ) : (
+                                  <span className="text-[11px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
+                                    <BuildingOffice2Icon className="w-3 h-3" />
+                                    {companyChip.name}
+                                  </span>
+                                )
+                              ) : null}
+                              {jobId && jobTitle ? (
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    void openJobDrawer(jobId, jobTitle || 'משרה', jobCompany);
+                                    void openJobDrawer(jobId, jobTitle, companyChip?.name || '');
                                   }}
                                   className="text-[11px] bg-purple-50 border border-purple-100 text-purple-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-purple-100 hover:underline transition-colors"
                                   title="פתח דראוור משרה"
                                 >
                                   <BriefcaseIcon className="w-3 h-3" />
-                                  {jobTitle || 'משרה'}
+                                  {jobTitle}
                                 </button>
                               ) : null}
                               {displayEvent.stage ? (
@@ -5982,99 +6800,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                   {displayEvent.stage}
                                 </span>
                               ) : null}
-                              {!isInactive &&
-                              allowLinkedContactEdit &&
-                              editingDescriptionId !== event.id &&
-                              contactLinkEditEventId !== event.id ? (
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    beginContactLinkEdit(event);
-                                  }}
-                                  className="text-[11px] font-bold text-primary-700 bg-primary-50 border border-primary-200 hover:bg-primary-100 px-2 py-0.5 rounded flex items-center gap-1 transition-colors"
-                                  title="שיוך אנשי קשר לאירוע"
-                                >
-                                  <UserGroupIcon className="w-3 h-3" />
-                                  {linkedContactsForEvent.length ? 'ערוך אנשי קשר' : 'הוסף אנשי קשר'}
-                                </button>
-                              ) : null}
                             </div>
-                            {contactLinkEditEventId === event.id &&
-                            editingDescriptionId !== event.id ? (
-                              <div
-                                className="mt-3 rounded-lg border border-primary-200 bg-primary-50/40 p-3 space-y-2"
-                                onClick={(e) => e.stopPropagation()}
-                              >
-                                <div>
-                                  <p className="text-xs font-bold text-text-default">שיוך אנשי קשר לאירוע</p>
-                                  {organizationRef?.name ? (
-                                    <p className="text-[11px] text-text-muted mt-0.5">
-                                      חברה:{' '}
-                                      <span className="font-semibold text-indigo-800">
-                                        {organizationRef.name}
-                                      </span>{' '}
-                                      (לא ניתן לשנות)
-                                    </p>
-                                  ) : null}
-                                  <p className="text-[11px] text-text-muted mt-1">
-                                    בחר איש קשר אחד או יותר מהרשימה, ואז לחץ «שמור אנשי קשר».
-                                  </p>
-                                </div>
-                                {editContactsLoading ? (
-                                  <p className="text-xs text-text-muted">טוען אנשי קשר...</p>
-                                ) : editContactOptions.length === 0 ? (
-                                  <p className="text-xs text-text-muted">
-                                    לא נמצאו אנשי קשר. הוסיפו אנשי קשר בפרופיל הלקוח/ארגון.
-                                  </p>
-                                ) : (
-                                  <FormMultiSelect
-                                    label="אנשי קשר"
-                                    options={editContactOptions.map((c) => ({
-                                      value: c.id,
-                                      label: c.name,
-                                    }))}
-                                    value={editLinkedContactIds}
-                                    onChange={setEditLinkedContactIds}
-                                    placeholder="בחר אנשי קשר..."
-                                    compact
-                                    searchable
-                                    searchPlaceholder="חיפוש איש קשר…"
-                                    className="[&_button]:border-primary-200 [&_button]:bg-white [&_button]:text-[13px] [&_button]:rounded-lg [&_button]:py-2.5"
-                                  />
-                                )}
-                                <div className="flex justify-end gap-2 pt-1">
-                                  <button
-                                    type="button"
-                                    onClick={cancelContactLinkEdit}
-                                    disabled={isSavingContactLinks}
-                                    className="px-3 py-1.5 text-sm font-semibold text-gray-500 hover:text-gray-700 bg-white border border-gray-200 rounded-lg transition-colors disabled:opacity-50"
-                                  >
-                                    ביטול
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      void saveEventLinkedContacts(event).then((ok) => {
-                                        if (ok) cancelContactLinkEdit();
-                                      });
-                                    }}
-                                    disabled={isSavingContactLinks || editContactsLoading}
-                                    className="px-3 py-1.5 text-sm font-semibold text-white bg-primary-600 hover:bg-primary-700 rounded-lg transition-colors flex items-center gap-1 disabled:opacity-50"
-                                  >
-                                    {isSavingContactLinks ? (
-                                      <>
-                                        <ArrowPathIcon className="w-4 h-4 animate-spin" /> שומר...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <CheckIcon className="w-4 h-4" /> שמור אנשי קשר
-                                      </>
-                                    )}
-                                  </button>
-                                </div>
-                              </div>
-                            ) : null}
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-1 shrink-0">

@@ -65,6 +65,8 @@ export type SonarScoreBreakdown = {
     geoScore?: number;
     geo?: number;
     geoDistance?: number | null;
+    /** Matching-template grace km for the job region ("מרחק לציון מלא"). */
+    geoMaxKm?: number | null;
     geoMissing?: boolean;
     intentScore?: number;
     intent?: number;
@@ -160,6 +162,25 @@ export function pickBreakdownScore(...vals: (number | undefined)[]): number | nu
     return null;
 }
 
+/**
+ * Final-score points lost to distance.
+ * The geo layer is already scored with the client's matching template:
+ * full score until that region's grace km, then penaltyPerKm off the layer.
+ * This converts that layer drop into the same point scale as age and salary penalties,
+ * using the template's geo weight. A template with geo weight 0 contributes nothing.
+ */
+export function geoPenaltyPoints(bd: SonarScoreBreakdown | null | undefined): number {
+    const score = pickBreakdownScore(bd?.geoScore, bd?.geo);
+    const geo = bd?.weightedContributions?.geo;
+    if (score == null || !geo || !(geo.weight > 0) || score >= 100) return 0;
+    const totalW = Object.values(bd?.weightedContributions || {}).reduce(
+        (sum, part) => sum + (Number(part?.weight) || 0),
+        0,
+    );
+    if (totalW <= 0) return 0;
+    return Math.max(0, Math.round(((100 - score) * geo.weight) / totalW));
+}
+
 /** Semantic / vector layer % from engine breakdown (not overall matchScore). */
 export function vectorLayerPctFromBreakdown(
     bd: SonarScoreBreakdown | null | undefined,
@@ -203,6 +224,8 @@ export function buildSonarFormulaMetrics(
         if (score == null) return;
         const contrib = wc?.[key];
         const w = contrib?.weight;
+        // Weight 0 means the template excludes this layer from the final score.
+        if (typeof w === 'number' && w <= 0) return;
         const pts = contrib?.points;
         const value =
             typeof w === 'number' && typeof pts === 'number'
@@ -323,7 +346,8 @@ export function buildSonarRequirementMetrics(
     const rawGeoKm = bd?.geoDistance;
     const geoKm = typeof rawGeoKm === 'number' && Number.isFinite(rawGeoKm) ? Math.round(rawGeoKm) : null;
     const geoMissing = Boolean(bd?.geoMissing);
-    const geoScoreNum = typeof bd?.geo === 'number' && Number.isFinite(bd.geo) ? bd.geo : null;
+    const rawMaxKm = bd?.geoMaxKm;
+    const geoMaxKm = typeof rawMaxKm === 'number' && Number.isFinite(rawMaxKm) ? rawMaxKm : null;
 
     let distanceVal: string;
     let distanceTone: SonarMetricTone = 'muted';
@@ -332,10 +356,10 @@ export function buildSonarRequirementMetrics(
         distanceTone = 'muted';
     } else if (geoKm != null) {
         distanceVal = t('job.sonar.distance_km', { km: geoKm });
-        if (geoScoreNum != null) {
-            distanceTone = geoScoreNum >= 72 ? 'good' : geoScoreNum < 55 ? 'bad' : 'muted';
+        if (geoMaxKm != null) {
+            distanceTone = geoKm <= geoMaxKm ? 'good' : 'bad';
         } else {
-            distanceTone = geoKm <= 25 ? 'good' : geoKm > 60 ? 'bad' : 'muted';
+            distanceTone = 'muted';
         }
     } else {
         distanceVal = t('job.sonar.distance_na');

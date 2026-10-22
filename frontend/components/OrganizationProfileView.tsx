@@ -53,9 +53,16 @@ const PROFILE_TABS = new Set<Tab>([
 
 interface OrganizationProfileViewProps {
     openMessageModal?: (config: MessageModalConfig) => void;
+    openSummaryDrawer?: (
+        candidate: import('./CandidatesListView').Candidate | number,
+        options?: import('../hooks/useUIState').SummaryDrawerOptions,
+    ) => void;
 }
 
-const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openMessageModal }) => {
+const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({
+    openMessageModal,
+    openSummaryDrawer,
+}) => {
     const { t } = useLanguage();
     const { user } = useAuth();
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
@@ -342,6 +349,7 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                         }
                         organizationTmpId={organizationTmpId || undefined}
                         organizationName={displayName}
+                        onOpenCandidateSummary={openSummaryDrawer}
                     />
                 ) : noClientMsg;
             case 'contacts':

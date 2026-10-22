@@ -7,7 +7,7 @@ const { optionalAuth } = require('../middleware/authMiddleware');
 const router = express.Router();
 
 router.get('/', jobController.list);
-router.get('/for-picker', jobController.listForPicker);
+router.get('/for-picker', authMiddleware, attachDbUser, jobController.listForPicker);
 router.get('/for-compose', authMiddleware, attachDbUser, jobController.listForCompose);
 router.get('/for-list', authMiddleware, attachDbUser, jobController.listForTenantGrid);
 router.get('/board-publications', authMiddleware, attachDbUser, jobController.listBoardPublications);
@@ -25,7 +25,8 @@ router.put('/:id/events/:eventId', authMiddleware, attachDbUser, jobEventControl
 router.delete('/:id/events/:eventId', authMiddleware, attachDbUser, jobEventController.remove);
 router.patch('/:id/board-sources', authMiddleware, attachDbUser, jobController.patchBoardSources);
 router.patch('/:id/list-notes', authMiddleware, attachDbUser, jobController.patchListNotes);
-router.get('/:id', jobController.get);
+router.post('/:id/record-staff-view', authMiddleware, attachDbUser, jobController.recordStaffView);
+router.get('/:id', optionalAuth, optionalAttachDbUser, jobController.get);
 router.post('/', optionalAuth, optionalAttachDbUser, jobController.create);
 router.post('/ai/analyze', jobController.analyzeDescription);
 router.put('/:id', jobController.update);

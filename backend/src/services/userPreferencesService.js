@@ -122,11 +122,34 @@ const getForUser = async (userId) => {
   return sanitizePreferences(user?.uiPreferences);
 };
 
+const isLockOrStatementTimeout = (err) => {
+  const code = err?.parent?.code || err?.original?.code;
+  // 57014 = statement_timeout (includes lock wait). 55P03 = lock_timeout.
+  return code === '57014' || code === '55P03';
+};
+
 const updateForUser = async (userId, patch) => {
   const current = await getForUser(userId);
   const next = deepMergePreferences(current, patch);
-  await User.update({ uiPreferences: next }, { where: { id: userId } });
-  return next;
+  const sequelize = User.sequelize;
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      // A primary-key update only sits this long while another session holds the row.
+      // Fail the lock quickly and retry, instead of occupying a pool connection for the global 20s timeout.
+      await sequelize.transaction(async (transaction) => {
+        await sequelize.query("SET LOCAL lock_timeout = '2500ms'", { transaction });
+        await sequelize.query("SET LOCAL statement_timeout = '8000ms'", { transaction });
+        await User.update({ uiPreferences: next }, { where: { id: userId }, transaction });
+      });
+      return next;
+    } catch (err) {
+      lastErr = err;
+      if (!isLockOrStatementTimeout(err) || attempt === 3) break;
+      await new Promise((resolve) => setTimeout(resolve, 400 * attempt));
+    }
+  }
+  throw lastErr;
 };
 
 module.exports = {

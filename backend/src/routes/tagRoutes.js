@@ -8,6 +8,7 @@ const router = express.Router();
 const tagWrite = [optionalAuth, optionalAttachDbUser];
 
 router.get('/', tagController.list);
+router.post('/selector-suggestions', optionalAuth, tagController.suggestForSelector);
 router.get('/pending', tagController.listPending);
 router.post('/pending/resolve', tagController.resolvePending);
 router.get('/corrections/agent-settings', tagController.getCorrectionAgentSettings);

@@ -5,6 +5,7 @@ export type LayoutMode = 'list' | 'cards' | 'board';
 export type ScreenPreferenceKey =
     | 'global_pool'
     | 'referrals_general'
+    | 'referrals_job_embed'
     | 'jobs_list'
     | 'clients_list'
     | 'clients_contacts'

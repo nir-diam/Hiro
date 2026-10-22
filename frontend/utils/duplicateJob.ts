@@ -9,6 +9,7 @@ const STRIP_JOB_KEYS = new Set([
   'associatedCandidates',
   'waitingForScreening',
   'activeProcess',
+  'referralsCount',
   'candidates',
   'createdAt',
   'updatedAt',
@@ -32,6 +33,7 @@ export function buildDuplicateJobSeed(job: Record<string, unknown>): Record<stri
   seed.associatedCandidates = 0;
   seed.waitingForScreening = 0;
   seed.activeProcess = 0;
+  seed.referralsCount = 0;
   return seed;
 }
 

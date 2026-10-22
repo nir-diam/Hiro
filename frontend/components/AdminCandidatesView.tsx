@@ -750,7 +750,9 @@ const AdminCandidatesView: React.FC = () => {
     const [isLoading, setIsLoading] = useState(false);
     const [isSearching, setIsSearching] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    
+    const semanticSearchAbortRef = useRef<AbortController | null>(null);
+    const semanticSearchSeqRef = useRef(0);
+
     // Sorting Config
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
 
@@ -1139,26 +1141,37 @@ const AdminCandidatesView: React.FC = () => {
         const q = term.trim();
         if (!apiBase) return;
         if (q.length < 3) {
+            semanticSearchAbortRef.current?.abort();
             setSearchResults([]);
             return;
         }
+        semanticSearchAbortRef.current?.abort();
+        const ac = new AbortController();
+        semanticSearchAbortRef.current = ac;
+        const seq = semanticSearchSeqRef.current + 1;
+        semanticSearchSeqRef.current = seq;
         setIsSearching(true);
         setError(null);
+        const semanticLimit = Math.min(pageSize, 50);
         try {
             const filters = buildFilters();
             const res = await fetch(`${apiBase}/api/candidates/search/semantic`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: q, filters, limit: pageSize }),
+                signal: ac.signal,
+                body: JSON.stringify({ query: q, filters, limit: semanticLimit }),
             });
+            if (seq !== semanticSearchSeqRef.current) return;
             if (!res.ok) throw new Error('Search failed');
             const data = await res.json();
             const list = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
             setSearchResults(list.map(mapCandidate));
         } catch (err: any) {
+            if (err?.name === 'AbortError') return;
+            if (seq !== semanticSearchSeqRef.current) return;
             setError(err.message || 'Search failed');
         } finally {
-            setIsSearching(false);
+            if (seq === semanticSearchSeqRef.current) setIsSearching(false);
         }
     }, [apiBase, buildFilters, mapCandidate, pageSize]);
 
@@ -1167,11 +1180,14 @@ const AdminCandidatesView: React.FC = () => {
             if (searchTerm.trim().length >= 3) {
                 void runAdvancedSearch(searchTerm);
             } else {
+                semanticSearchAbortRef.current?.abort();
                 setSearchResults([]);
             }
-        }, 400);
+        }, 550);
         return () => clearTimeout(handle);
     }, [searchTerm, runAdvancedSearch]);
+
+    useEffect(() => () => semanticSearchAbortRef.current?.abort(), []);
 
     // Filter Logic — when appliedAdvanced, list rows come from GET /api/candidates?adv= (server-side only).
     const filteredCandidates = useMemo(() => {

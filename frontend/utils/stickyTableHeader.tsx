@@ -26,7 +26,7 @@ export function stickyTableHeaderCellClass(
 
 /** Horizontal scroll only — rows grow naturally; page scrolls vertically. */
 export const ADMIN_TABLE_SCROLL_CLASS =
-    'overflow-x-auto overflow-y-visible min-w-0 w-full [scrollbar-width:thin]';
+    'overflow-x-auto overflow-y-visible min-w-0 w-full [scrollbar-width:thin] [overscroll-behavior-x:contain]';
 
 type AdminViewportShellProps = {
     children: React.ReactNode;

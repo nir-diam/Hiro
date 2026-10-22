@@ -403,7 +403,7 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
     setCandidatesError(null);
     try {
       const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobApiId)}/candidates`, {
+      const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobApiId)}/candidates?limit=20`, {
         headers: {
           Accept: 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),

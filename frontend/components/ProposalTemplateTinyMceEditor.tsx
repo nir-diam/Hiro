@@ -114,6 +114,8 @@ const ProposalTemplateTinyMceEditor = forwardRef<ProposalTemplateEditorHandle, P
                 promotion: false,
                 statusbar: true,
                 resize: true,
+                pad_empty_with_br: true,
+                remove_trailing_brs: false,
                 plugins: [
                     'advlist',
                     'autolink',
@@ -194,6 +196,10 @@ const ProposalTemplateTinyMceEditor = forwardRef<ProposalTemplateEditorHandle, P
                         display: list-item;
                         direction: rtl;
                         text-align: right;
+                    }
+                    p:empty,
+                    p:has(> br:only-child) {
+                        min-height: 1.6em;
                     }
                 `,
                 setup: (editor) => {

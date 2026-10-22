@@ -1,6 +1,10 @@
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Cog6ToothIcon, AvatarIcon, TableCellsIcon, Squares2X2Icon, BuildingOffice2Icon, MapPinIcon, CalendarIcon, BriefcaseIcon } from './Icons';
+import {
+  resolveRoleTagForJob,
+  type RoleTagDetailLike,
+} from '../utils/workExperienceRoleTag';
 
 type ExperienceInput = string | {
   id?: string | number;
@@ -18,6 +22,7 @@ type ExperienceInput = string | {
   companyField?: string;
   description?: string;
   location?: string;
+  roleTag?: string;
 };
 
 type ExperienceItem = {
@@ -28,6 +33,7 @@ type ExperienceItem = {
   yearsOfExperience: number;
   yearsAgo: number;
   tags: string[];
+  roleTag: string;
   type: string;
   size: string;
   description: string;
@@ -38,13 +44,14 @@ const allColumns = [
   { id: 'industry', header: 'תעשייה' },
   { id: 'yearsOfExperience', header: 'מס׳ שנים' },
   { id: 'yearsAgo', header: 'לפני כמה שנים' },
+  { id: 'roleTag', header: 'תפקיד (תגית)' },
   { id: 'tags', header: 'תגיות ניסיון' },
   { id: 'field', header: 'תחום עיסוק' },
   { id: 'type', header: 'סוג חברה' },
   { id: 'size', header: 'גודל' },
 ];
 
-const defaultVisibleColumns = ['company', 'industry', 'yearsOfExperience', 'yearsAgo', 'tags'];
+const defaultVisibleColumns = ['company', 'industry', 'yearsOfExperience', 'yearsAgo', 'roleTag', 'tags'];
 
 const ExperienceTag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <span className="bg-primary-50 text-primary-700 text-xs font-medium px-2 py-0.5 rounded-md border border-primary-100">
@@ -145,6 +152,7 @@ const IndustryExperienceTable: React.FC<{ experiences?: ExperienceInput[] }> = (
           yearsOfExperience: 1,
           yearsAgo: 0,
           tags: [],
+          roleTag: '',
           type: '',
           size: '',
           location: '',
@@ -162,6 +170,7 @@ const IndustryExperienceTable: React.FC<{ experiences?: ExperienceInput[] }> = (
         yearsOfExperience: years,
         yearsAgo: yearsAgo,
         tags: Array.isArray(exp.tags) ? exp.tags : [],
+        roleTag: String(exp.roleTag || exp.role_tag || '').trim(),
         type: exp.type || '',
         size: exp.size || '',
       description: exp.description || '',
@@ -222,11 +231,30 @@ const IndustryExperienceTable: React.FC<{ experiences?: ExperienceInput[] }> = (
                       <span className="font-semibold text-text-default">{item.company}</span>
                   </div>
               );
+          case 'roleTag':
+              return item.roleTag ? (
+                  <ExperienceTag>{item.roleTag}</ExperienceTag>
+              ) : (
+                  <span className="text-text-muted">—</span>
+              );
           case 'tags':
               return (
-                  <p className="text-sm leading-relaxed text-text-default max-w-[260px] whitespace-pre-line">
-                      {item.description || '—'}
-                  </p>
+                  <div className="flex flex-col gap-1 max-w-[260px]">
+                      {item.tags.length > 0 && (
+                          <div className="flex flex-wrap gap-1">
+                              {item.tags.map((tag) => (
+                                  <ExperienceTag key={tag}>{tag}</ExperienceTag>
+                              ))}
+                          </div>
+                      )}
+                      {item.description ? (
+                          <p className="text-sm leading-relaxed text-text-default whitespace-pre-line">
+                              {item.description}
+                          </p>
+                      ) : (
+                          !item.tags.length && <span className="text-text-muted">—</span>
+                      )}
+                  </div>
               );
           case 'yearsOfExperience':
               return <span className="font-bold text-primary-600">{item.yearsOfExperience}</span>;

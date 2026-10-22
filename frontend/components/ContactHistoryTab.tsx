@@ -30,6 +30,7 @@ const ContactHistoryTab: React.FC<ContactHistoryTabProps> = ({
     setError(null);
 
     const qs = new URLSearchParams({ summary: '1', limit: '200' });
+    qs.set('contactId', String(contactId));
     if (organizationId) qs.set('organizationId', String(organizationId));
 
     fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/events?${qs.toString()}`, {

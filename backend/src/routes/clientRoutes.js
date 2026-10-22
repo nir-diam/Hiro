@@ -112,6 +112,18 @@ router.get(
   attachDbUser,
   matchingEngineController.listPresetsForClient,
 );
+router.post(
+  '/:id/matching-engine-configs',
+  authMiddleware,
+  attachDbUser,
+  matchingEngineController.createPresetForClient,
+);
+router.put(
+  '/:id/matching-engine-configs/:presetId',
+  authMiddleware,
+  attachDbUser,
+  matchingEngineController.updatePresetForClient,
+);
 
 router.get(
   '/:id/recruitment-statuses',

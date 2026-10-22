@@ -282,6 +282,7 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
         setEventsLoading(true);
         setEventsError(null);
         const qs = new URLSearchParams({ summary: '1', limit: '200' });
+        qs.set('contactId', String(contactId));
         if (contact.organizationId) {
             qs.set('organizationId', String(contact.organizationId));
         }
@@ -505,6 +506,14 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({
                             <div>
                                 <label className="block text-xs font-bold text-text-muted mb-1 uppercase">תפקיד</label>
                                 <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">{displayContact.role || '—'}</div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-text-muted mb-1 uppercase">תאריך יצירה</label>
+                                <div className="text-sm font-medium text-text-default bg-bg-subtle/50 p-2.5 rounded-lg border border-border-default">
+                                    {displayContact.createdAt
+                                        ? new Date(displayContact.createdAt).toLocaleDateString('he-IL')
+                                        : '—'}
+                                </div>
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-text-muted mb-1 uppercase">קשר אחרון</label>

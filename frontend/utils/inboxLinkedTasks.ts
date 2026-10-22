@@ -1,5 +1,9 @@
 import { fetchNotificationMessageRows } from '../services/notificationMessagesApi';
-import { NOTIFICATION_MESSAGE_ID_REGEX } from '../services/notificationInboxCounts';
+import {
+    NOTIFICATION_MESSAGE_ID_REGEX,
+    rowInInboxForViewer,
+    type NotificationInboxViewer,
+} from '../services/notificationInboxCounts';
 import { authHeaders } from './authHeaders';
 import { parseLegacyLinkedAppendix, stripTaskLinkedAppendixFromBody } from './taskLinkedContext';
 import type { ClientTask } from '../components/ClientTasksTab';
@@ -187,6 +191,33 @@ export function countPendingInboxRowsForScope(
         if (Boolean(metadata.taskCompleted)) continue;
         const tp = taskPayloadFromRow(row);
         if (inboxNotificationMatchesScope(tp, scope)) count += 1;
+    }
+    return count;
+}
+
+/**
+ * Tab «נכנסות» for embedded NotificationCenter — scoped messages not marked handled.
+ * Matches `unreadMessagesCount` (not «הכל», not legacy client tasks).
+ */
+export function countIncomingMessagesForScope(
+    rows: Record<string, unknown>[],
+    scope: InboxTaskScope,
+    viewer?: NotificationInboxViewer,
+): number {
+    let count = 0;
+    for (const row of rows) {
+        if (!isActiveInboxRow(row)) continue;
+        const metadata =
+            row?.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+                ? (row.metadata as Record<string, unknown>)
+                : {};
+        if (Boolean(metadata.taskCompleted)) continue;
+        const isTask = Boolean(row?.isTask) || row?.messageType === 'task';
+        if (isTask) continue;
+        const tp = taskPayloadFromRow(row);
+        if (!inboxNotificationMatchesScope(tp, scope)) continue;
+        if (!rowInInboxForViewer(row, viewer)) continue;
+        count += 1;
     }
     return count;
 }

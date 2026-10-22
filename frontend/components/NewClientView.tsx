@@ -77,6 +77,20 @@ const resolvePostCreatePath = (
     return '/clients';
 };
 
+const navigateAfterCreate = (
+    navigate: ReturnType<typeof useNavigate>,
+    result: Record<string, unknown> | null | undefined,
+    linkedOrganizationId: string | null,
+    runBackgroundEnrichment: boolean,
+) => {
+    const path = resolvePostCreatePath(result, linkedOrganizationId);
+    const wentToOrg = path.startsWith('/organizations/');
+    if (runBackgroundEnrichment && !wentToOrg) {
+        throw new Error('Organization was not created. Stay on this form and try again.');
+    }
+    navigate(path, runBackgroundEnrichment && wentToOrg ? { state: { backgroundEnrichment: true } } : undefined);
+};
+
 const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     const { t } = useLanguage();
     const { user } = useAuth();
@@ -167,7 +181,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     };
 
     const isExistingOrgSelected = Boolean(linkedOrganizationId);
-    const runBackgroundEnrichment = !isExistingOrgSelected && isTenantStaff;
+    const runBackgroundEnrichment = !isExistingOrgSelected;
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -237,16 +251,10 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                     const body = await res.json().catch(() => ({}));
                     throw new Error(body?.message || 'Organization link failed');
                 }
-                const updated = await res.json();
-                onSave(updated);
-                const path = resolvePostCreatePath(updated, null);
-                const orgPipeline = updated?.orgPipeline as { background?: boolean; phase?: string } | null | undefined;
-                const enrichingInBackground = Boolean(
-                    runBackgroundEnrichment
-                    && (orgPipeline?.background || orgPipeline?.phase === 'enriching'),
-                );
-                navigate(path, enrichingInBackground ? { state: { backgroundEnrichment: true } } : undefined);
-                return;
+                    const updated = await res.json();
+                    onSave(updated);
+                    navigateAfterCreate(navigate, updated, null, runBackgroundEnrichment);
+                    return;
             }
 
             const res = await fetch(`${apiBase}/api/clients`, {
@@ -255,7 +263,6 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                 body: JSON.stringify({
                     ...payload,
                     displayName: clientName.trim(),
-                    ...(isPlatformAdmin ? { skipOrganizationLink: true } : {}),
                 }),
             });
             if (!res.ok) {
@@ -270,7 +277,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
             } else if (managerInvite?.ok === false) {
                 window.alert(managerInvite.error || t('client_form.manager_invite_failed'));
             }
-            navigate(resolvePostCreatePath(created, linkedOrganizationId));
+            navigateAfterCreate(navigate, created, linkedOrganizationId, runBackgroundEnrichment);
         } catch (e: any) {
             setError(e?.message || 'Create failed');
         } finally {

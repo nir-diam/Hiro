@@ -58,6 +58,9 @@ const Organization = sequelize.define(
     candidateCount: DataTypes.INTEGER,
     // Keep nullable; only set after a successful embedding generation.
     embedding: { type: DataTypes.JSONB, allowNull: true },
+    /** Stable public company slug. A rename does not change it once locked. */
+    publicSlug: { type: DataTypes.STRING(120), allowNull: true },
+    slugLocked: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   },
   {
     tableName: 'organizations',

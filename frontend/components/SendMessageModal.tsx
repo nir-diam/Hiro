@@ -76,6 +76,8 @@ type MessageMode = 'whatsapp' | 'sms' | 'email';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CUSTOM_EMAIL_ID_PREFIX = 'custom-email:';
+const CANDIDATE_UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function recipientInitial(name: string): string {
     const trimmed = String(name || '').trim();
@@ -214,7 +216,7 @@ function showComposeToast(message: string, variant: 'success' | 'error' = 'error
     const el = document.createElement('div');
     el.setAttribute('role', 'status');
     el.className = [
-        'fixed bottom-6 left-1/2 -translate-x-1/2 z-[9999] max-w-md px-4 py-3 rounded-xl shadow-lg',
+        'fixed bottom-6 left-1/2 -translate-x-1/2 z-[10200] max-w-md px-4 py-3 rounded-xl shadow-lg',
         'text-sm font-semibold text-center border',
         variant === 'success'
             ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
@@ -435,6 +437,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [recipientPickerOpen, setRecipientPickerOpen] = useState(false);
     const [recipientSearchQuery, setRecipientSearchQuery] = useState('');
     const [selectedRecipientIds, setSelectedRecipientIds] = useState<string[]>([]);
+    const [recipientEmailHydrationById, setRecipientEmailHydrationById] = useState<Record<string, string>>({});
     const [customRecipientEmails, setCustomRecipientEmails] = useState<string[]>([]);
     const [customEmailInputOpen, setCustomEmailInputOpen] = useState(false);
     const [customEmailDraft, setCustomEmailDraft] = useState('');
@@ -464,11 +467,28 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const hasRecipientPicker = Array.isArray(recipientOptions) && recipientOptions.length > 0;
 
+    const mergedRecipientOptions = useMemo(() => {
+        if (!recipientOptions?.length) return recipientOptions;
+        const selfId = String(candidateId || '').trim();
+        return recipientOptions.map((opt) => {
+            const fromHydrate = recipientEmailHydrationById[opt.id];
+            const fromSelf = selfId && String(opt.id) === selfId ? candidateEmail : undefined;
+            const email =
+                resolveRecipientEmail(fromHydrate || opt.email, opt.phone)
+                || resolveRecipientEmail(fromSelf);
+            if (!email) return opt;
+            if (String(opt.email || '').trim().toLowerCase() === email) return opt;
+            return { ...opt, email };
+        });
+    }, [recipientOptions, recipientEmailHydrationById, candidateId, candidateEmail]);
+
+    const pickerOptions = mergedRecipientOptions ?? recipientOptions;
+
     const selectedRecipients = useMemo(() => {
-        if (!hasRecipientPicker || !recipientOptions) return [];
-        const byId = new Map(recipientOptions.map((o) => [o.id, o]));
+        if (!hasRecipientPicker || !pickerOptions) return [];
+        const byId = new Map(pickerOptions.map((o) => [o.id, o]));
         return selectedRecipientIds.map((id) => byId.get(id)).filter(Boolean) as MessageRecipientOption[];
-    }, [hasRecipientPicker, recipientOptions, selectedRecipientIds]);
+    }, [hasRecipientPicker, pickerOptions, selectedRecipientIds]);
 
     const customEmailRecipients = useMemo((): MessageRecipientOption[] => {
         if (!customRecipientEmails.length) return [];
@@ -500,8 +520,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const crmRecipientsForLog = useMemo((): MessageRecipientOption[] => {
         let fromPicker: MessageRecipientOption[] = [];
-        if (hasRecipientPicker && selectedRecipientIds.length > 0 && recipientOptions) {
-            const byId = new Map(recipientOptions.map((o) => [o.id, o]));
+        if (hasRecipientPicker && selectedRecipientIds.length > 0 && pickerOptions) {
+            const byId = new Map(pickerOptions.map((o) => [o.id, o]));
             fromPicker = selectedRecipientIds.map((id) => byId.get(id)).filter(Boolean) as MessageRecipientOption[];
         } else if (linkedClientId || linkedContactId) {
             fromPicker = [{
@@ -517,7 +537,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     }, [
         hasRecipientPicker,
         selectedRecipientIds,
-        recipientOptions,
+        pickerOptions,
         linkedClientId,
         linkedContactId,
         linkedOrganizationId,
@@ -867,6 +887,42 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         [recipientType, candidateId, linkedContactId, recipientOptions],
     );
 
+    useEffect(() => {
+        if (!isOpen || mode !== 'email' || composeRecipientType !== 'candidate' || !recipientOptions?.length) {
+            return;
+        }
+        const missing = recipientOptions
+            .filter((o) => !resolveRecipientEmail(o.email, o.phone) && CANDIDATE_UUID_RE.test(String(o.id || '')))
+            .slice(0, 25);
+        if (!missing.length) return;
+        let cancelled = false;
+        const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+        void (async () => {
+            const found: Record<string, string> = {};
+            await Promise.all(
+                missing.map(async (opt) => {
+                    try {
+                        const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(opt.id)}`, {
+                            headers: authHeaders(true),
+                            credentials: 'include',
+                        });
+                        if (!res.ok) return;
+                        const row = await res.json();
+                        const email = resolveRecipientEmail(row?.email || row?.contactEmail, row?.phone);
+                        if (email) found[opt.id] = email;
+                    } catch {
+                        /* ignore per-recipient lookup failures */
+                    }
+                }),
+            );
+            if (cancelled || !Object.keys(found).length) return;
+            setRecipientEmailHydrationById((prev) => ({ ...prev, ...found }));
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, mode, composeRecipientType, recipientOptions]);
+
     const channelTemplates = useMemo(() => {
         const ch = config.channel;
         return filterMessageTemplatesForRecipient(templates, composeRecipientType).filter((t) =>
@@ -882,11 +938,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     }, [effectiveName, effectivePhone, effectiveEmail]);
 
     const filteredRecipientOptions = useMemo(() => {
-        if (!recipientOptions) return [];
+        if (!pickerOptions) return [];
         const q = recipientSearchQuery.trim().toLowerCase();
         const base = !q
-            ? recipientOptions
-            : recipientOptions.filter((o) => {
+            ? pickerOptions
+            : pickerOptions.filter((o) => {
                 const hay = `${o.name} ${o.subtitle || ''} ${o.email || ''} ${o.phone || ''}`.toLowerCase();
                 return hay.includes(q);
             });
@@ -895,7 +951,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             if (orgCmp !== 0) return orgCmp;
             return a.name.localeCompare(b.name, 'he');
         });
-    }, [recipientOptions, recipientSearchQuery]);
+    }, [pickerOptions, recipientSearchQuery]);
 
     const groupRecipientOptions = useCallback((options: MessageRecipientOption[]) => {
         const groups = new Map<string, MessageRecipientOption[]>();
@@ -978,6 +1034,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setBccInputOpen(false);
         setBccEmailDraft('');
         setBccEmailError(null);
+        setRecipientEmailHydrationById({});
         setSelectedRecipientIds(
             hasRecipientPicker && recipientOptions
                 ? defaultSelectedRecipientIds(recipientOptions, mode, initialRecipientIds)
@@ -1923,6 +1980,19 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                     {mode === 'email' ? 'חסר מייל' : 'חסר טלפון'}
                                 </span>
                             ) : null}
+                            {mode === 'email' && !hasEmail ? (
+                                <button
+                                    type="button"
+                                    className="text-[10px] font-bold text-primary-600 hover:underline shrink-0"
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        openCustomEmailInput();
+                                    }}
+                                >
+                                    + מייל לשליחה
+                                </button>
+                            ) : null}
                         </span>
                         {opt.subtitle ? (
                             <span className="block text-xs text-text-muted truncate mt-0.5">{opt.subtitle}</span>
@@ -2193,7 +2263,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     if (!isOpen) return null;
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-40 z-[70] flex items-center justify-center p-4" onClick={onClose}>
+        <div className="fixed inset-0 bg-black bg-opacity-40 z-[10100] flex items-center justify-center p-4" onClick={onClose}>
             <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden text-text-default" onClick={e => e.stopPropagation()} style={{ animation: 'modalFadeIn 0.2s ease-out' }}>
                 <form onSubmit={handleSubmit} className="flex flex-col h-full max-h-[92vh]">
                     <header className="flex items-center justify-between p-4 border-b border-border-default flex-shrink-0">
@@ -2265,8 +2335,17 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                                 </button>
                                                 <span className="truncate">
                                                     {r.name}
-                                                    {mode === 'email' && r.email ? (
-                                                        <span className="font-normal text-primary-700/80"> · {r.email}</span>
+                                                    {mode === 'email' ? (
+                                                        resolveRecipientEmail(r.email, r.phone)
+                                                            ? (
+                                                                <span className="font-normal text-primary-700/80">
+                                                                    {' '}
+                                                                    · {resolveRecipientEmail(r.email, r.phone)}
+                                                                </span>
+                                                            )
+                                                            : (
+                                                                <span className="font-normal text-amber-700"> · חסר מייל</span>
+                                                            )
                                                     ) : null}
                                                 </span>
                                             </span>
@@ -2531,11 +2610,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                             disabled
                                             className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5"
                                         />
-                                        {!resolveRecipientEmail(candidateEmail, candidatePhone) &&
-                                        customRecipientEmails.length === 0 &&
-                                        mode === 'email' ? (
+                                        {mode === 'email' && recipientEmailCount === 0 ? (
                                             <p className="text-xs text-amber-700">
-                                                אין מייל לנמען — לחץ «+ מייל» כדי להוסיף כתובת ידנית.
+                                                אין מייל לנמען — לחץ «+ מייל» כדי להוסיף כתובת ידנית לשליחה (לא נשמר בכרטיס).
+                                            </p>
+                                        ) : mode === 'email' && !hasRecipientPicker ? (
+                                            <p className="text-xs text-text-muted">
+                                                הנמענים נבחרו ברשימה. להוספת כתובת שלא שמורה בכרטיס — «+ מייל».
                                             </p>
                                         ) : null}
                                     </div>

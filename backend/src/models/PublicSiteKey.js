@@ -33,6 +33,18 @@ const PublicSiteKey = sequelize.define(
     /** e.g. ["hiro","humand"] — which frontends may use this key (informational). */
     siteLabels: { type: DataTypes.JSONB, defaultValue: [], field: 'site_labels' },
     revokedAt: { type: DataTypes.DATE, allowNull: true, field: 'revoked_at' },
+    siteId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      field: 'site_id',
+    },
+    lastUsedAt: { type: DataTypes.DATE, allowNull: true, field: 'last_used_at' },
+    requestCount: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
+      field: 'request_count',
+    },
   },
   {
     tableName: 'public_site_keys',

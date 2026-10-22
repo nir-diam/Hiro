@@ -18,6 +18,7 @@ import ActivationPage from './components/ActivationPage';
 import LandingPage from './components/LandingPage';
 import NotificationCenter from './components/NotificationCenter';
 import CompanySettingsView from './components/CompanySettingsView';
+import CompanyMatchingEngineView from './components/CompanyMatchingEngineView';
 import CoordinatorsSettingsView from './components/CoordinatorsSettingsView';
 import CoordinatorProfileView from './components/CoordinatorProfileView';
 import AdminLayout from './components/AdminLayout';
@@ -895,7 +896,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     };
 
     const handleNavClick = (view: string) => {
-        if (view === props.activeView) return;
+        const inMatchingOrScreening = props.isMatchingJobs || props.isScreening;
+        if (view === props.activeView && !inMatchingOrScreening) return;
         runIfLeaveAllowed(() => props.handleSetActiveView(view));
     };
 
@@ -1154,8 +1156,8 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/post-job', element: <ExternalJobPostView /> },
         { path: '/jobs', element: <JobsView /> },
         { path: '/jobs/new', element: <NewJobView onCancel={() => {}} onSave={props.handleSaveJob} /> },
-        { path: '/jobs/edit/:jobId', element: <ExistingJobView onCancel={() => {}} onSave={props.handleSaveJob} openSummaryDrawer={props.openSummaryDrawer} /> },
-        { path: '/jobs/existing', element: <ExistingJobView onCancel={() => {}} onSave={props.handleSaveJob} openSummaryDrawer={props.openSummaryDrawer} /> },
+        { path: '/jobs/edit/:jobId', element: <ExistingJobView onCancel={() => {}} onSave={props.handleSaveJob} openSummaryDrawer={props.openSummaryDrawer} openMessageModal={props.openMessageModal} onOpenNewTask={props.onOpenNewTask} /> },
+        { path: '/jobs/existing', element: <ExistingJobView onCancel={() => {}} onSave={props.handleSaveJob} openSummaryDrawer={props.openSummaryDrawer} openMessageModal={props.openMessageModal} onOpenNewTask={props.onOpenNewTask} /> },
         { path: '/jobs/existing/events', element: <JobEventsView /> },
         { path: '/jobs/:jobId/publish', element: <PublishJobView /> },
         { path: '/jobs/:jobId/screen', element: <JobScreeningView /> },
@@ -1165,9 +1167,33 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/jobs/public/:jobIdOrCode', element: <JobLandingPage /> },
         { path: '/clients', element: <ClientsListView openMessageModal={props.openMessageModal} /> },
         { path: '/clients/new', element: <NewClientView onCancel={() => {}} onSave={props.handleSaveClient} /> },
-        { path: '/clients/:clientId', element: <ClientProfileView openMessageModal={props.openMessageModal} /> },
-        { path: '/organizations/tmp/:organizationTmpId', element: <OrganizationProfileView openMessageModal={props.openMessageModal} /> },
-        { path: '/organizations/:organizationId', element: <OrganizationProfileView openMessageModal={props.openMessageModal} /> },
+        {
+            path: '/clients/:clientId',
+            element: (
+                <ClientProfileView
+                    openMessageModal={props.openMessageModal}
+                    openSummaryDrawer={props.openSummaryDrawer}
+                />
+            ),
+        },
+        {
+            path: '/organizations/tmp/:organizationTmpId',
+            element: (
+                <OrganizationProfileView
+                    openMessageModal={props.openMessageModal}
+                    openSummaryDrawer={props.openSummaryDrawer}
+                />
+            ),
+        },
+        {
+            path: '/organizations/:organizationId',
+            element: (
+                <OrganizationProfileView
+                    openMessageModal={props.openMessageModal}
+                    openSummaryDrawer={props.openSummaryDrawer}
+                />
+            ),
+        },
         {
             path: '/clients/:clientId/contacts/:contactId',
             element: (
@@ -1201,6 +1227,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                  { index: true, element: <Navigate to="company" replace /> },
                  { path: 'company', element: <CompanySettingsView /> },
+                 { path: 'matching-engine', element: <CompanyMatchingEngineView /> },
                  { path: 'publishing', element: <PublishingSettingsView /> },
                  { path: 'company-images', element: <CompanyImagesSettingsView /> },
                  { path: 'statuses', element: <StatusSettingsView /> },

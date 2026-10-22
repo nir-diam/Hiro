@@ -237,6 +237,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
 																							
     const isOpen = isSidebarOpen; 
     const pathname = location.pathname;
+    const clientsListTab = new URLSearchParams(location.search).get('tab');
 
     const isCandidatesActive = pathname.startsWith('/candidates');
     const isCandidatePoolActive = pathname.startsWith('/candidate-pool');
@@ -512,10 +513,16 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             <div className={`overflow-hidden transition-all duration-300 ${isOpen && isClientsOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
                                 <div className="mt-1 space-y-0.5">
                                     <SubMenuLink 
-                                        to="/clients"
+                                        to="/clients?tab=companies"
                                         label={t('nav.list_clients')} 
-                                        onClick={() => handleNavigation('/clients')} 
-                                        isActive={pathname === '/clients' || /^\/clients\/\d+/.test(pathname)}
+                                        onClick={() => handleNavigation('/clients?tab=companies')} 
+                                        isActive={(pathname === '/clients' && clientsListTab !== 'contacts' && clientsListTab !== 'events') || /^\/clients\/\d+/.test(pathname)}
+                                    />
+                                    <SubMenuLink 
+                                        to="/clients?tab=contacts"
+                                        label={t('nav.list_contacts')} 
+                                        onClick={() => handleNavigation('/clients?tab=contacts')} 
+                                        isActive={pathname === '/clients' && clientsListTab === 'contacts'}
                                     />
                                     <SubMenuLink 
                                         to="/clients/new"

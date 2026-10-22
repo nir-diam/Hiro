@@ -1,12 +1,14 @@
 
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
-import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon, BanknotesIcon, SparklesIcon, TagIcon, ArrowPathIcon, BuildingOffice2Icon } from './Icons';
+import { Link } from 'react-router-dom';
+import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon, BanknotesIcon, SparklesIcon, TagIcon, ArrowPathIcon, BuildingOffice2Icon, PencilIcon } from './Icons';
 import SearchableSelect from './SearchableSelect';
 import UsageSettingsTab from './UsageSettingsTab';
 import CompanyTagsSettingsView from './CompanyTagsSettingsView';
 import CustomFieldsSettingsView from './CustomFieldsSettingsView';
 import JobHealthSettingsView from './JobHealthSettingsView';
 import ClientHealthSettingsView from './ClientHealthSettingsView'; // New Import
+import PublicSitesSettingsPanel from './PublicSitesSettingsPanel';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { fetchClientMatchingEngineConfigs, type ClientMatchingEnginePresetDto } from '../services/matchingEngineClientApi';
@@ -204,11 +206,13 @@ const ClientBrandingSection: React.FC<{
         logoUrl: null,
         primaryColor: '#1e293b',
         jobHeroBrandSource: 'company',
+        publishOnHiroBoard: true,
     });
     const [savedBranding, setSavedBranding] = useState<ClientBranding>({
         logoUrl: null,
         primaryColor: '#1e293b',
         jobHeroBrandSource: 'company',
+        publishOnHiroBoard: true,
     });
     const [brandingLoading, setBrandingLoading] = useState(false);
     const [brandingLoadError, setBrandingLoadError] = useState<string | null>(null);
@@ -241,8 +245,8 @@ const ClientBrandingSection: React.FC<{
 
     useEffect(() => {
         if (!clientId) {
-            setBranding({ logoUrl: null, primaryColor: '#1e293b', jobHeroBrandSource: 'company' });
-            setSavedBranding({ logoUrl: null, primaryColor: '#1e293b', jobHeroBrandSource: 'company' });
+            setBranding({ logoUrl: null, primaryColor: '#1e293b', jobHeroBrandSource: 'company', publishOnHiroBoard: true });
+            setSavedBranding({ logoUrl: null, primaryColor: '#1e293b', jobHeroBrandSource: 'company', publishOnHiroBoard: true });
             return;
         }
         let cancelled = false;
@@ -255,6 +259,7 @@ const ClientBrandingSection: React.FC<{
                     logoUrl: data.logoUrl,
                     primaryColor: data.primaryColor || '#1e293b',
                     jobHeroBrandSource: data.jobHeroBrandSource || 'company',
+                    publishOnHiroBoard: data.publishOnHiroBoard !== false,
                 };
                 setBranding(normalized);
                 setSavedBranding(normalized);
@@ -277,7 +282,8 @@ const ClientBrandingSection: React.FC<{
     const brandingDirty =
         (branding.logoUrl || null) !== (savedBranding.logoUrl || null) ||
         normalizeBrandColor(branding.primaryColor) !== normalizeBrandColor(savedBranding.primaryColor) ||
-        (branding.jobHeroBrandSource || 'company') !== (savedBranding.jobHeroBrandSource || 'company');
+        (branding.jobHeroBrandSource || 'company') !== (savedBranding.jobHeroBrandSource || 'company') ||
+        (branding.publishOnHiroBoard !== false) !== (savedBranding.publishOnHiroBoard !== false);
 
     const handleSaveBranding = async () => {
         if (!clientId) return;
@@ -289,11 +295,13 @@ const ClientBrandingSection: React.FC<{
                 logoUrl: branding.logoUrl,
                 primaryColor: branding.primaryColor.trim() || '#1e293b',
                 jobHeroBrandSource: branding.jobHeroBrandSource || 'company',
+                publishOnHiroBoard: branding.publishOnHiroBoard !== false,
             });
             const normalized: ClientBranding = {
                 logoUrl: saved.logoUrl,
                 primaryColor: saved.primaryColor || '#1e293b',
                 jobHeroBrandSource: saved.jobHeroBrandSource || 'company',
+                publishOnHiroBoard: saved.publishOnHiroBoard !== false,
             };
             setBranding(normalized);
             setSavedBranding(normalized);
@@ -319,11 +327,13 @@ const ClientBrandingSection: React.FC<{
                 logoUrl: publicUrl,
                 primaryColor: branding.primaryColor.trim() || '#1e293b',
                 jobHeroBrandSource: branding.jobHeroBrandSource || 'company',
+                publishOnHiroBoard: branding.publishOnHiroBoard !== false,
             });
             const normalized: ClientBranding = {
                 logoUrl: saved.logoUrl,
                 primaryColor: saved.primaryColor || '#1e293b',
                 jobHeroBrandSource: saved.jobHeroBrandSource || 'company',
+                publishOnHiroBoard: saved.publishOnHiroBoard !== false,
             };
             if (suggestedFromFile) {
                 normalized.primaryColor = suggestedFromFile;
@@ -336,6 +346,7 @@ const ClientBrandingSection: React.FC<{
                 logoUrl: saved.logoUrl,
                 primaryColor: saved.primaryColor || '#1e293b',
                 jobHeroBrandSource: saved.jobHeroBrandSource || 'company',
+                publishOnHiroBoard: saved.publishOnHiroBoard !== false,
             });
             setBrandingSaveSuccess(true);
             setTimeout(() => setBrandingSaveSuccess(false), 2500);
@@ -481,8 +492,17 @@ const ClientBrandingSection: React.FC<{
                                 <span className="text-sm text-text-default">בחירה — יוגדר בכל משרה בעמוד הפרסום</span>
                             </label>
                             <p className="text-xs text-text-muted">
-                                «חברה» משתמש בצבע מותג ראשי למעלה (למשל בורדו במימד אנושי). «לקוח» — מותג המעסיק; אם חסר — נופל לחברה.
+                                אותה הגדרה קובעת גם אם שם הלקוח מוסתר באתר המשרות. «חברה» = לקוח חסוי (ברירת המחדל). «לקוח» = השם גלוי. «בחירה» = לכל משרה בנפרד.
                             </p>
+                            <label className="flex items-center gap-2 cursor-pointer pt-2">
+                                <input
+                                    type="checkbox"
+                                    checked={branding.publishOnHiroBoard !== false}
+                                    onChange={(e) => setBranding((prev) => ({ ...prev, publishOnHiroBoard: e.target.checked }))}
+                                    className="text-primary-600"
+                                />
+                                <span className="text-sm text-text-default">לפרסם משרות של הארגון באתר המאגד (hiro.co.il)</span>
+                            </label>
                         </div>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
@@ -937,7 +957,7 @@ const CompanySettingsView: React.FC = () => {
     const [clientDetails, setClientDetails] = useState<ClientDetailsRow | null>(null);
     const [clientDetailsLoading, setClientDetailsLoading] = useState(false);
     const [clientDetailsError, setClientDetailsError] = useState<string | null>(null);
-    const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health' | 'client_health' | 'finance_defaults'>('details');
+    const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health' | 'client_health' | 'finance_defaults' | 'public_sites'>('details');
     const [monthlyGoal, setMonthlyGoal] = useState('20');
     const [matchingConfigs, setMatchingConfigs] = useState<ClientMatchingEnginePresetDto[]>([]);
     const [matchingConfigsLoading, setMatchingConfigsLoading] = useState(false);
@@ -1317,11 +1337,9 @@ const CompanySettingsView: React.FC = () => {
                                             savedMatchingPresetId === preset.id &&
                                             selectedMatchingPresetId === savedMatchingPresetId;
                                         return (
-                                            <button
+                                            <div
                                                 key={preset.id}
-                                                type="button"
-                                                onClick={() => setSelectedMatchingPresetId(preset.id)}
-                                                className={`p-4 rounded-xl border transition-all text-right group relative flex flex-col items-start h-full
+                                                className={`rounded-xl border transition-all text-right group relative flex flex-col items-start h-full
                                                     ${
                                                         isSelected
                                                             ? 'border-purple-500 ring-2 ring-purple-500 bg-purple-50 shadow-md shadow-purple-200'
@@ -1329,10 +1347,25 @@ const CompanySettingsView: React.FC = () => {
                                                     }`}
                                             >
                                                 {isPersisted && (
-                                                    <span className="absolute top-2.5 right-2.5 bg-purple-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                                    <span className="absolute top-2.5 right-2.5 bg-purple-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full z-[1]">
                                                         פעיל
                                                     </span>
                                                 )}
+                                                <div className="absolute top-3 left-3 z-20">
+                                                    <Link
+                                                        to={`/settings/matching-engine?presetId=${preset.id}&clientId=${encodeURIComponent(usageClientId)}`}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        className="p-1.5 bg-white/95 hover:bg-primary-50 text-slate-500 hover:text-primary-700 rounded-lg border border-border-subtle hover:border-primary-200 shadow-sm transition-colors inline-flex"
+                                                        title="ערוך תבנית שקלול"
+                                                    >
+                                                        <PencilIcon className="w-4 h-4" />
+                                                    </Link>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSelectedMatchingPresetId(preset.id)}
+                                                    className="p-4 w-full h-full flex flex-col items-start text-right"
+                                                >
                                                 <div className="flex items-center gap-2 mb-2 pr-8 w-full">
                                                     <div
                                                         className={`p-2 bg-white rounded-lg shadow-sm transition-colors shrink-0 ${
@@ -1366,7 +1399,8 @@ const CompanySettingsView: React.FC = () => {
                                                         })}
                                                     </div>
                                                 )}
-                                            </button>
+                                                </button>
+                                            </div>
                                         );
                                     })}
                                 </div>
@@ -1384,7 +1418,8 @@ const CompanySettingsView: React.FC = () => {
                             )}
                             <p className="text-xs text-text-muted mt-4 text-right leading-relaxed">
                                 הבחירה נשמרת בהגדרות השימוש של הלקוח (client_usage_settings). ללא בחירה, המערכת
-                                משתמשת בגישה הראשונה המתאימה ללקוח. עריכת תבניות — ממשק הניהול מנוע התאמה.
+                                משתמשת בגישה הראשונה המתאימה ללקוח.
+                                {' לעריכת משקלים ופרמטרים — לחצו על עיפרון בכרטיס.'}
                             </p>
                         </div>
 
@@ -1555,6 +1590,8 @@ const CompanySettingsView: React.FC = () => {
                 return <ClientHealthSettingsView />;
             case 'finance_defaults':
                 return <FinanceDefaultsTab />;
+            case 'public_sites':
+                return isPlatformAdmin ? <PublicSitesSettingsPanel clientOptions={clientOptions} /> : null;
             default:
                 return null;
         }
@@ -1596,6 +1633,9 @@ const CompanySettingsView: React.FC = () => {
                         <TabButton title="דופק משרה" isActive={activeTab === 'health'} onClick={() => setActiveTab('health')} icon={<ChartBarIcon className="w-4 h-4"/>}/>
                         <TabButton title="דופק לקוח" isActive={activeTab === 'client_health'} onClick={() => setActiveTab('client_health')} icon={<ChartBarIcon className="w-4 h-4"/>}/>
                         <TabButton title="הגדרות כספים" isActive={activeTab === 'finance_defaults'} onClick={() => setActiveTab('finance_defaults')} icon={<BanknotesIcon className="w-4 h-4"/>} />
+                        {isPlatformAdmin && (
+                            <TabButton title="אתרי משרות" isActive={activeTab === 'public_sites'} onClick={() => setActiveTab('public_sites')} />
+                        )}
                     </nav>
                 </div>
             </header>

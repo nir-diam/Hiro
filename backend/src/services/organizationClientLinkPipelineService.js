@@ -115,7 +115,7 @@ const processNewCompanyForClientLink = async (payload = {}) => {
 
   if (isOrganizationRecord(result)) {
     orgPipeline.aiDecision = 'organization';
-    const backgroundEnrichment = payload.backgroundEnrichment === true;
+    const backgroundEnrichment = payload.backgroundEnrichment !== false;
 
     if (backgroundEnrichment) {
       console.log(`[orgLinkPipeline] Gemini → Organization (id=${result.id}) — scheduling background enrichment`);

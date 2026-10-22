@@ -57,7 +57,7 @@ const create = async (req, res) => {
     }
 
     const client = await clientService.create(req.body);
-    const skipOrgStaging = clientService.isPlatformAdmin(actor) || req.body?.skipOrganizationLink === true;
+    const skipOrgStaging = req.body?.backgroundEnrichment === false;
     const linked = await clientService.attachOrganizationAfterCreate(client, req.body, {
       skipOrganizationStaging: skipOrgStaging,
     }).catch((err) => {
@@ -147,6 +147,11 @@ const update = async (req, res) => {
       console.error('[clientController.update] audit failed', err?.message || err);
     });
     const client = await clientService.getByIdForApi(req.params.id);
+    if (req.body && (req.body.name || req.body.displayName || req.body.logoUrl || req.body.metadata)) {
+      try {
+        require('../services/publicJobsWebhookService').scheduleCompanyUpdated(req.params.id);
+      } catch { /* webhook must not block the save */ }
+    }
     res.json(client);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });

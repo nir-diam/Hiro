@@ -62,7 +62,7 @@ const CandidateNav: React.FC<CandidateNavProps> = ({
             />
             {onMatchJobsClick ? (
                 <NavButton
-                    title={`${t('profile.matches')} (${jobMatchesCount})`}
+                    title={`${t('profile.matches')} `}
                     isActive={isMatchingJobs}
                     onClick={onMatchJobsClick}
                 />

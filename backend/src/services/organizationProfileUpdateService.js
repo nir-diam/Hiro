@@ -195,7 +195,11 @@ const listForClient = async (clientId, actor, { page = 1, limit = 50 } = {}) => 
 
 const list = async ({ status = 'pending', page = 1, limit = 50, search = '' } = {}) => {
   const where = {};
-  if (status && status !== 'all') where.status = status;
+  if (status === 'handled') {
+    where.status = { [Op.in]: ['approved', 'rejected'] };
+  } else if (status && status !== 'all') {
+    where.status = status;
+  }
   const q = String(search || '').trim();
   const offset = (Math.max(1, Number(page) || 1) - 1) * Math.min(200, Math.max(1, Number(limit) || 50));
   const take = Math.min(200, Math.max(1, Number(limit) || 50));

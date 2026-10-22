@@ -14,9 +14,18 @@ const _inMemEmbCache = new Map(); // hash → { emb, expiresAt }
 
 const GEMINI_API_KEY =
   process.env.GEMINI_API_KEY || process.env.GEMINI_API_TOKEN;
-const geminiClient = GEMINI_API_KEY
-  ? new GoogleGenAI({ apiKey: GEMINI_API_KEY })
-  : null;
+
+const createGeminiClient = (apiKey) => {
+  const googleKey = process.env.GOOGLE_API_KEY;
+  if (googleKey) delete process.env.GOOGLE_API_KEY;
+  try {
+    return new GoogleGenAI({ apiKey });
+  } finally {
+    if (googleKey) process.env.GOOGLE_API_KEY = googleKey;
+  }
+};
+
+const geminiClient = GEMINI_API_KEY ? createGeminiClient(GEMINI_API_KEY) : null;
 
 async function embedText(text) {
   if (!geminiClient) {

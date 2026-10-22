@@ -109,7 +109,7 @@ root.render(
         <DevModeProvider>
           <ErrorBoundary>
             <SavedSearchesProvider>
-              <BrowserRouter>
+              <BrowserRouter future={{ v7_relativeSplatPath: true }}>
                 <AuthProvider>
                   <UserPreferencesProvider>
                     <App />

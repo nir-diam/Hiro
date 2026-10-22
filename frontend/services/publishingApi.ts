@@ -732,10 +732,28 @@ export async function fetchBoardPublications(params?: {
   return Array.isArray(data.publications) ? data.publications : [];
 }
 
+export type RecruitmentSourceSelectionHistoryEntry = {
+  at: string;
+  userId?: string | null;
+  userName: string;
+  selected: boolean;
+};
+
+export type JobBoardRecruitmentSourcePayload = {
+  id: string;
+  name: string;
+  selected: boolean;
+  status: string;
+  alertDays: number | null;
+  publishedAt?: string | null;
+  unpublishedAt?: string | null;
+  selectionHistory?: RecruitmentSourceSelectionHistoryEntry[];
+};
+
 export async function patchJobBoardSources(
   jobId: string,
-  recruitmentSources: Array<{ id: string; name: string; selected: boolean; status: string; alertDays: number | null; publishedAt?: string | null; unpublishedAt?: string | null }>,
-): Promise<void> {
+  recruitmentSources: JobBoardRecruitmentSourcePayload[],
+): Promise<JobBoardRecruitmentSourcePayload[]> {
   const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(jobId)}/board-sources`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
@@ -745,6 +763,8 @@ export async function patchJobBoardSources(
     const err = await res.json().catch(() => ({})) as { message?: string };
     throw new Error(err.message || 'Failed to save board sources');
   }
+  const data = (await res.json()) as { recruitmentSources?: JobBoardRecruitmentSourcePayload[] };
+  return Array.isArray(data.recruitmentSources) ? data.recruitmentSources : recruitmentSources;
 }
 
 export async function fetchJobPublicationCandidates(jobId: string) {

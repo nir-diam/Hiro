@@ -34,19 +34,40 @@ export function rawEventMatchesContactScope(
     opts: { contactId: string; contactName?: string | null },
 ): boolean {
     const { contactId, contactName } = opts;
-    if (rawEventLinkedToContactId(row, contactId)) return true;
+    const cid = String(contactId || '').trim();
+    if (!cid) return false;
+    if (rawEventLinkedToContactId(row, cid)) return true;
 
-    const name = String(contactName || '').trim();
-    if (!name) return false;
-
-    if (String(row.contactName || '').trim() === name) return true;
+    const eventContactId = String(row.contactId || '').trim();
+    if (eventContactId && eventContactId !== cid) return false;
 
     const linked =
         row.linkedTo && typeof row.linkedTo === 'object' && !Array.isArray(row.linkedTo)
             ? (row.linkedTo as Record<string, unknown>)
             : null;
-    if (linked && String(linked.name || '').trim() === name) return true;
+    const linkedId = linked ? String(linked.id || '').trim() : '';
+    if (linkedId && linkedId !== cid) return false;
 
+    const meta = row.metadata;
+    if (meta && typeof meta === 'object' && !Array.isArray(meta)) {
+        const linkedContacts = (meta as Record<string, unknown>).linkedContacts;
+        if (Array.isArray(linkedContacts) && linkedContacts.length > 0) {
+            const ids = linkedContacts
+                .map((item) => {
+                    if (!item || typeof item !== 'object') return '';
+                    return String((item as Record<string, unknown>).id || '').trim();
+                })
+                .filter(Boolean);
+            if (ids.length > 0) return ids.includes(cid);
+        }
+    }
+
+    // Legacy rows with no contact id: exact full name only.
+    if (eventContactId || linkedId) return false;
+    const name = String(contactName || '').trim();
+    if (!name) return false;
+    if (String(row.contactName || '').trim() === name) return true;
+    if (linked && String(linked.name || '').trim() === name) return true;
     return false;
 }
 

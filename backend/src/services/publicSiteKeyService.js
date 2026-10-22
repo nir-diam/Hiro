@@ -1,4 +1,5 @@
 const PublicSiteKey = require('../models/PublicSiteKey');
+const PublicSite = require('../models/PublicSite');
 const Client = require('../models/Client');
 const { PUBLIC_SITE_KEY_MODES } = require('../constants/publicJobsApi');
 const { hashSiteKey, keyPrefix, timingSafeEqualHex } = require('../utils/publicSiteKeyCrypto');
@@ -24,6 +25,7 @@ const parseEnvSiteKeys = () => {
             keyHash: hashSiteKey(row.key),
             keyPrefix: keyPrefix(row.key),
             revokedAt: null,
+            persisted: false,
           });
         }
       }
@@ -42,6 +44,7 @@ const parseEnvSiteKeys = () => {
       keyHash: hashSiteKey(agg),
       keyPrefix: keyPrefix(agg),
       revokedAt: null,
+      persisted: false,
     });
   }
   envKeysCache = entries;
@@ -69,7 +72,7 @@ const resolveSiteKey = async (rawKey) => {
           attributes: ['id', 'name', 'displayName', 'domain', 'logoUrl', 'primaryColor', 'metadata'],
         });
       }
-      return { ...envRow, client };
+      return { ...envRow, client, persisted: false, environment: 'development', siteId: null };
     }
   }
 
@@ -88,13 +91,33 @@ const resolveSiteKey = async (rawKey) => {
       attributes: ['id', 'name', 'displayName', 'domain', 'logoUrl', 'primaryColor', 'metadata'],
     });
   }
+  let site = null;
+  if (plain.siteId) {
+    site = await PublicSite.findByPk(plain.siteId);
+  }
+  const sitePlain = site ? site.get({ plain: true }) : null;
+  if (!client && sitePlain?.clientId) {
+    client = await Client.findByPk(sitePlain.clientId, {
+      attributes: ['id', 'name', 'displayName', 'domain', 'logoUrl', 'primaryColor', 'metadata'],
+    });
+  }
+  const mode = sitePlain?.scope === 'aggregator'
+    ? PUBLIC_SITE_KEY_MODES.AGGREGATOR
+    : sitePlain?.scope === 'tenant'
+      ? PUBLIC_SITE_KEY_MODES.TENANT
+      : plain.mode;
   return {
     id: plain.id,
-    name: plain.name,
-    mode: plain.mode,
-    clientId: plain.clientId,
+    name: sitePlain?.name || plain.name,
+    mode,
+    clientId: sitePlain?.clientId || plain.clientId,
     siteLabels: Array.isArray(plain.siteLabels) ? plain.siteLabels : [],
     client,
+    siteId: sitePlain?.id || plain.siteId || null,
+    environment: sitePlain?.environment || 'production',
+    domain: sitePlain?.domain || null,
+    recruitmentSourceName: sitePlain?.recruitmentSourceName || null,
+    persisted: true,
   };
 };
 

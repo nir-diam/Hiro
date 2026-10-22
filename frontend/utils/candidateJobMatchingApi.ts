@@ -83,12 +83,16 @@ export interface JobMatchResult {
 
 export interface MatchQuery {
   limit?: number;
+  offset?: number;
   minScore?: number;
   statuses?: string[];
   clientIds?: string[];
   cities?: string[];
   jobTypes?: string[];
   useVector?: boolean;
+  hardFilters?: string[];
+  /** none | exact | same_cluster | same_category — omit or none = rank only */
+  affinityLevel?: 'none' | 'exact' | 'same_cluster' | 'same_category';
 }
 
 const apiBase = () => (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
@@ -108,16 +112,39 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-/** Fetch AI + parametric job matches for a candidate. */
-export async function fetchJobMatches(candidateId: string, query: MatchQuery = {}): Promise<JobMatchResult[]> {
+export interface JobMatchPage {
+  rows: JobMatchResult[];
+  total: number;
+  offset: number;
+  nextOffset: number;
+  hasMore: boolean;
+}
+
+/** Fetch one page of AI + parametric job matches for a candidate. */
+export async function fetchJobMatchesPage(candidateId: string, query: MatchQuery = {}): Promise<JobMatchPage> {
   const base = apiBase();
   const res = await fetch(`${base}/api/candidates/${encodeURIComponent(candidateId)}/job-matches`, {
     method: 'POST',
     headers: authHeaders(),
     body: JSON.stringify(query),
   });
-  const data = await handleResponse<{ rows: JobMatchResult[] }>(res);
-  return Array.isArray(data.rows) ? data.rows : [];
+  const data = await handleResponse<Partial<JobMatchPage> & { rows?: JobMatchResult[] }>(res);
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  const offset = Number(data.offset) || Number(query.offset) || 0;
+  const nextOffset = Number.isFinite(Number(data.nextOffset)) ? Number(data.nextOffset) : offset + rows.length;
+  return {
+    rows,
+    total: Number(data.total) || rows.length,
+    offset,
+    nextOffset,
+    hasMore: Boolean(data.hasMore),
+  };
+}
+
+/** Fetch AI + parametric job matches for a candidate. */
+export async function fetchJobMatches(candidateId: string, query: MatchQuery = {}): Promise<JobMatchResult[]> {
+  const page = await fetchJobMatchesPage(candidateId, query);
+  return page.rows;
 }
 
 export type JobMatchIgnoreItem = {

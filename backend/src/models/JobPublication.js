@@ -33,6 +33,8 @@ const JobPublication = sequelize.define(
     landingLayouts: { type: DataTypes.JSONB, defaultValue: {} },
     visitCount: { type: DataTypes.INTEGER, defaultValue: 0 },
     submissionCount: { type: DataTypes.INTEGER, defaultValue: 0 },
+    /** Public career-site fields: slug, salary toggle, sites, structured copy. */
+    publicBoard: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
   },
   {
     tableName: 'job_publications',

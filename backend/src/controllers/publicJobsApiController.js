@@ -1,9 +1,11 @@
 const publicJobsApiService = require('../services/publicJobsApiService');
+const { readMultipartApplication } = require('../utils/publicJobApplication');
 
 const sendServiceError = (res, err) => {
   const status = err.status || 500;
   const payload = { message: err.message || 'Request failed' };
   if (err.code) payload.code = err.code;
+  if (err.field) payload.field = err.field;
   if (err.fields) payload.fields = err.fields;
   return res.status(status).json(payload);
 };
@@ -91,10 +93,15 @@ const recordView = async (req, res) => {
 
 const submitApplication = async (req, res) => {
   try {
+    const contentType = String(req.headers['content-type'] || '');
+    const body = contentType.includes('multipart/form-data')
+      ? await readMultipartApplication(req)
+      : (req.body || {});
     const payload = await publicJobsApiService.submitJobApplication(
       req.publicSiteContext,
       req.params.id,
-      req.body || {},
+      body,
+      { forwardedFor: req.headers['x-forwarded-for'] || req.ip },
     );
     res.status(201).json({ applicationId: payload.applicationId });
   } catch (err) {

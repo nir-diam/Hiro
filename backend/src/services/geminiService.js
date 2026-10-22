@@ -7,6 +7,19 @@ const MODEL = 'gemini-3-flash-preview';
 const fetchImpl = (typeof fetch !== 'undefined') ? fetch : ((...args) => import('node-fetch').then(({ default: f }) => f(...args)));
 const appLogger = require('../utils/appLogger');
 
+/** A hung Gemini socket otherwise pins org enrichment, CV parse, and the email ingest slots forever. */
+const GEMINI_TIMEOUT_MS = Math.max(
+  15000,
+  Number(process.env.GEMINI_TIMEOUT_MS || 120000) || 120000,
+);
+
+const geminiFetch = (url, options = {}) => {
+  const timeoutSignal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(GEMINI_TIMEOUT_MS)
+    : undefined;
+  return fetchImpl(url, timeoutSignal ? { ...options, signal: timeoutSignal } : options);
+};
+
 /** Prefer GEMINI_* keys — GOOGLE_API_KEY is often a separate key (e.g. Search) blocked on Generative Language API. */
 const resolveGeminiApiKey = () =>
   process.env.GEMINI_API_KEY ||
@@ -84,6 +97,7 @@ const sendChat = async ({
   responseSchema,
   promptId,
   llmInputJson,
+  model,
 }) => {
   if (!apiKey) {
     const err = new Error('Gemini API key not configured');
@@ -91,7 +105,10 @@ const sendChat = async ({
     throw err;
   }
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${apiKey}`;
+  const chosenModel = /^[a-zA-Z0-9._-]+$/.test(String(model || '').trim())
+    ? String(model).trim()
+    : MODEL;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${chosenModel}:generateContent?key=${apiKey}`;
   const contents = buildContentsFromHistory(history, message);
 
   const mergedGenConfig = { ...(generationConfig || {}) };
@@ -124,12 +141,12 @@ const sendChat = async ({
       history,
       generationConfig: Object.keys(mergedGenConfig).length ? mergedGenConfig : null,
       variables: llmInputJson,
-      model: MODEL,
+      model: chosenModel,
     });
   };
 
   try {
-    const res = await fetchImpl(url, {
+    const res = await geminiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -249,7 +266,7 @@ const sendSingleTurnChat = async ({
   };
 
   try {
-    const res = await fetchImpl(url, {
+    const res = await geminiFetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

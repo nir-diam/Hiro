@@ -263,9 +263,11 @@ const {
   listJobIdsByTag,
 } = require('./candidateTagService');
 const { enrichJobAnalyzeResult } = require('../utils/jobAiAnalyzeNormalize');
+const { parseLenientJsonObject } = require('../utils/parseLenientJson');
 const {
   enrichJobsWithOrganizationIds,
   resolveOrganizationIdForJob,
+  resolveOrganizationIdForAnalyze,
 } = require('./jobOrganizationResolveService');
 
 /** Normalize LLM output → UI/db-safe daily hours (matches candidate WorkingHoursInput). */
@@ -319,6 +321,7 @@ const JOB_ANALYZE_FIELDS_APPENDIX = `
 - "availabilityOptions": string[] — When multiple start-readiness levels are acceptable, list each as the exact picklist string above (OR semantics). [] if not stated.
 - "licenseType": string|null — Primary required driving license (Hebrew label or class letter, e.g. "B", "רישיון נהיגה ורכב"). null / omit if not required.
 - "licenseTypes": string[] — All acceptable license types when more than one is mentioned (OR). [] if none.
+- "client": string|null — Hiring company named in the posting (שם החברה). Short brand only, e.g. "D-AND-D" from "לחברת D-AND-D יבוא ושיווק...". Do not return the job title, the city, or a full sentence. null if no company is named.
 `;
 
 const JOB_ANALYZE_SKILL_QUOTE_APPENDIX = `
@@ -429,6 +432,37 @@ const JOB_LIST_FIND_ATTRIBUTES = {
 
 const JOB_COMPOSE_FIND_ATTRIBUTES = ['id', 'title', 'client', 'postingCode'];
 
+function staffActorLabel(actor) {
+  if (!actor) return null;
+  const name = String(actor.name || '').trim();
+  if (name) return name;
+  const email = String(actor.email || '').trim();
+  if (email) return email;
+  return actor.id ? String(actor.id) : null;
+}
+
+/** Record that a staff user opened the job profile (edit/view). */
+const recordStaffJobView = async (jobId, actor) => {
+  const id = String(jobId || '').trim();
+  if (!id || !actor?.id) return null;
+  const now = new Date();
+  const label = staffActorLabel(actor);
+  await Job.update(
+    {
+      lastOpenedByUserId: String(actor.id),
+      lastOpenedByName: label,
+      lastOpenedAt: now,
+    },
+    { where: { id } },
+  );
+  await jobCacheDel(id);
+  return {
+    lastOpenedByUserId: String(actor.id),
+    lastOpenedByName: label,
+    lastOpenedAt: now.toISOString(),
+  };
+};
+
 /** API payloads must never include embedding vectors (large JSONB). */
 const toApiJob = (job) => {
   if (!job) return job;
@@ -455,8 +489,327 @@ const toApiJobListRow = (job) => {
   return plain;
 };
 
+const JOB_GRID_SORT_COLUMNS = {
+  title: 'title',
+  client: 'client',
+  status: 'status',
+  priority: 'priority',
+  recruiter: 'recruiter',
+  postingCode: 'postingCode',
+  field: 'field',
+  role: 'role',
+  clientType: 'clientType',
+  location: 'location',
+  openDate: 'openDate',
+  updatedAt: 'updatedAt',
+  lastUpdated: 'updatedAt',
+  salaryMin: 'salaryMin',
+  salaryRange: 'salaryMin',
+  ageMin: 'ageMin',
+  ageRange: 'ageMin',
+  openPositions: 'openPositions',
+  associatedCandidates: 'associatedCandidates',
+  waitingForScreening: 'waitingForScreening',
+  activeProcess: 'activeProcess',
+  rating: 'rating',
+  recruitingCoordinator: 'recruitingCoordinator',
+  accountManager: 'accountManager',
+  validityDays: 'validityDays',
+  gender: 'gender',
+  licenseType: 'licenseType',
+  id: 'id',
+};
+
+function queryListParam(value) {
+  if (value == null) return [];
+  const raw = Array.isArray(value) ? value : [value];
+  return raw
+    .flatMap((part) => String(part || '').split(','))
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function parseBoolFlag(value) {
+  const v = String(value || '').trim().toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
+
+async function buildTenantJobScopeWhere(clientId) {
+  const effectiveClientId = clientId != null ? String(clientId).trim() : '';
+  if (!effectiveClientId) return null;
+  const tenantClient = await Client.findByPk(effectiveClientId, { attributes: ['id', 'domain'] });
+  const domain = String(tenantClient?.domain || '').trim().toLowerCase();
+  const scopeWhere = [{ clientId: effectiveClientId }];
+  if (domain) {
+    scopeWhere.push(
+      { uniqueEmail: { [Op.iLike]: `${domain}+%@app.hiro.co.il` } },
+      { uniqueEmail: { [Op.iLike]: `${domain}@app.hiro.co.il` } },
+    );
+  }
+  return { [Op.or]: scopeWhere };
+}
+
+function buildJobGridFilterWhere(query = {}) {
+  const and = [];
+  const search = String(query.search || query.searchTerm || '').trim();
+  if (search) {
+    const like = { [Op.iLike]: `%${search}%` };
+    const or = [
+      { title: like },
+      { publicJobTitle: like },
+      { client: like },
+      { location: like },
+      { city: like },
+      { region: like },
+      { postingCode: like },
+      { recruiter: like },
+    ];
+    const uuidish = /^[0-9a-f-]{8,}$/i.test(search);
+    if (uuidish) or.push({ id: like });
+    and.push({ [Op.or]: or });
+  }
+
+  const statuses = queryListParam(query.status || query.statuses);
+  if (statuses.length) and.push({ status: { [Op.in]: statuses } });
+
+  const client = String(query.client || '').trim();
+  if (client) and.push({ client });
+
+  const recruiter = String(query.recruiter || '').trim();
+  if (recruiter) and.push({ recruiter });
+
+  const field = String(query.field || '').trim();
+  if (field) and.push({ field });
+
+  const companyIndustry = String(query.companyIndustry || '').trim();
+  if (companyIndustry) and.push({ field: companyIndustry });
+
+  const role = String(query.role || '').trim();
+  if (role) and.push({ role });
+
+  const priority = String(query.priority || '').trim();
+  if (priority) and.push({ priority });
+
+  const clientType = String(query.clientType || '').trim();
+  if (clientType) and.push({ clientType });
+
+  const gender = String(query.gender || '').trim();
+  if (gender) and.push({ gender });
+
+  const licenseType = String(query.licenseType || '').trim();
+  if (licenseType) and.push({ licenseType });
+
+  const recruitingCoordinator = String(query.recruitingCoordinator || '').trim();
+  if (recruitingCoordinator) and.push({ recruitingCoordinator });
+
+  const accountManager = String(query.accountManager || '').trim();
+  if (accountManager) and.push({ accountManager });
+
+  const postingCode = String(query.postingCode || '').trim();
+  if (postingCode) and.push({ postingCode: { [Op.iLike]: `%${postingCode}%` } });
+
+  const jobId = String(query.jobId || '').trim();
+  if (jobId) and.push({ id: jobId });
+
+  const mobility = String(query.mobility || '').trim();
+  if (mobility === 'כן') and.push({ mobility: true });
+  else if (mobility === 'לא') and.push({ mobility: false });
+
+  const cities = queryListParam(query.city || query.cities);
+  const regions = queryListParam(query.region || query.regions);
+  if (cities.length || regions.length) {
+    const locOr = [];
+    if (cities.length) {
+      locOr.push({ city: { [Op.in]: cities } });
+      for (const c of cities) locOr.push({ location: { [Op.iLike]: `%${c}%` } });
+    }
+    if (regions.length) {
+      locOr.push({ region: { [Op.in]: regions } });
+      for (const r of regions) locOr.push({ location: { [Op.iLike]: `%${r}%` } });
+    }
+    and.push({ [Op.or]: locOr });
+  }
+
+  const scopes = queryListParam(query.jobScopes || query.jobType);
+  if (scopes.length) and.push({ jobType: { [Op.overlap]: scopes } });
+
+  const dateKind = String(query.dateKind || query.dateFilterKind || 'open').trim() === 'updated'
+    ? 'updatedAt'
+    : 'openDate';
+  const fromDate = String(query.fromDate || query.dateFrom || '').trim();
+  const toDate = String(query.toDate || query.dateTo || '').trim();
+  if (fromDate || toDate) {
+    const range = {};
+    if (fromDate) range[Op.gte] = new Date(`${fromDate}T00:00:00`);
+    if (toDate) range[Op.lte] = new Date(`${toDate}T23:59:59.999`);
+    and.push({ [dateKind]: range });
+  }
+
+  const addNumericOverlap = (minCol, maxCol, filterMinRaw, filterMaxRaw, activeFlag) => {
+    if (!parseBoolFlag(activeFlag)) return;
+    const filterMin = Number(filterMinRaw);
+    const filterMax = Number(filterMaxRaw);
+    if (!Number.isFinite(filterMin) || !Number.isFinite(filterMax)) return;
+    and.push({
+      [Op.and]: [
+        { [Op.or]: [{ [maxCol]: null }, { [maxCol]: { [Op.gte]: filterMin } }] },
+        { [Op.or]: [{ [minCol]: null }, { [minCol]: { [Op.lte]: filterMax } }] },
+      ],
+    });
+  };
+  addNumericOverlap('salaryMin', 'salaryMax', query.salaryMin, query.salaryMax, query.salaryRangeActive);
+  addNumericOverlap('ageMin', 'ageMax', query.ageMin, query.ageMax, query.ageRangeActive);
+
+  if (parseBoolFlag(query.positionsRangeActive)) {
+    const pMin = Number(query.positionsMin);
+    const pMax = Number(query.positionsMax);
+    if (Number.isFinite(pMin) && Number.isFinite(pMax)) {
+      and.push({
+        [Op.or]: [
+          { openPositions: null },
+          { openPositions: { [Op.between]: [pMin, pMax] } },
+        ],
+      });
+    }
+  }
+
+  const workingHours = String(query.workingHours || '').trim();
+  if (workingHours && workingHours !== 'גמיש' && workingHours !== 'ללא אילוצי שעות') {
+    const like = { [Op.iLike]: `%${workingHours}%` };
+    and.push({
+      [Op.or]: [{ description: like }, { internalNotes: like }, { publicJobTitle: like }],
+    });
+  }
+
+  const validityDays = String(query.validityDays || '').trim();
+  if (validityDays && Number.isFinite(Number(validityDays))) {
+    and.push({ validityDays: Number(validityDays) });
+  }
+
+  return and.length ? { [Op.and]: and } : null;
+}
+
+async function listGridFacets(scopeWhere) {
+  const where = scopeWhere || {};
+  const distinct = async (field) => {
+    const rows = await Job.findAll({
+      where: {
+        [Op.and]: [where, { [field]: { [Op.ne]: null } }, { [field]: { [Op.ne]: '' } }],
+      },
+      attributes: [field],
+      group: [field],
+      raw: true,
+      order: [[field, 'ASC']],
+    });
+    return rows.map((r) => String(r[field] || '').trim()).filter(Boolean);
+  };
+  const [clients, recruiters, fields, roles, clientTypes, recruitingCoordinators, accountManagers] = await Promise.all([
+    distinct('client'),
+    distinct('recruiter'),
+    distinct('field'),
+    distinct('role'),
+    distinct('clientType'),
+    distinct('recruitingCoordinator'),
+    distinct('accountManager'),
+  ]);
+  return { clients, recruiters, fields, roles, clientTypes, recruitingCoordinators, accountManagers };
+}
+
+async function listGridStats(scopeWhere) {
+  const openWhere = { [Op.and]: [scopeWhere, { status: 'פתוחה' }].filter(Boolean) };
+  const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+  const [agg, attentionNeeded] = await Promise.all([
+    Job.findOne({
+      where: openWhere,
+      attributes: [
+        [sequelize.fn('COUNT', sequelize.col('id')), 'openCount'],
+        [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.col('waitingForScreening')), 0), 'totalWaiting'],
+        [sequelize.fn('COALESCE', sequelize.fn('SUM', sequelize.literal('CASE WHEN "activeProcess" > 0 THEN 1 ELSE 0 END')), 0), 'momentumJobs'],
+        [sequelize.fn('COALESCE', sequelize.fn('AVG', sequelize.literal('EXTRACT(EPOCH FROM (NOW() - "openDate")) / 86400.0')), 0), 'avgDays'],
+      ],
+      raw: true,
+    }),
+    Job.count({
+      where: {
+        [Op.and]: [
+          openWhere,
+          {
+            [Op.or]: [
+              { priority: 'קריטית' },
+              {
+                associatedCandidates: { [Op.or]: [0, null] },
+                openDate: { [Op.lt]: fourteenDaysAgo },
+              },
+            ],
+          },
+        ],
+      },
+    }),
+  ]);
+  return {
+    attentionNeeded: Number(attentionNeeded) || 0,
+    totalWaiting: Number(agg?.totalWaiting) || 0,
+    momentumJobs: Number(agg?.momentumJobs) || 0,
+    avgDays: Math.round(Number(agg?.avgDays) || 0),
+  };
+}
+
 /**
- * Jobs for a tenant client, optionally narrowed to linked organizations.
+ * Paginated jobs grid (JobsView): tenant-scoped or platform-wide, with search/filters on the DB.
+ */
+const listGrid = async ({ clientId = null, query = {} } = {}) => {
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.min(200, Math.max(10, parseInt(query.limit, 10) || 50));
+  const offset = (page - 1) * limit;
+  const sortKey = JOB_GRID_SORT_COLUMNS[String(query.sort || 'openDate')] || 'openDate';
+  const sortDir = String(query.dir || query.sortDir || 'desc').toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+  const scopeWhere = clientId ? await buildTenantJobScopeWhere(clientId) : null;
+  const filterWhere = buildJobGridFilterWhere(query);
+  const whereParts = [scopeWhere, filterWhere].filter(Boolean);
+  const where = whereParts.length ? { [Op.and]: whereParts } : {};
+
+  const emptyFacets = {
+    clients: [],
+    recruiters: [],
+    fields: [],
+    roles: [],
+    clientTypes: [],
+    recruitingCoordinators: [],
+    accountManagers: [],
+  };
+  const emptyStats = { attentionNeeded: 0, totalWaiting: 0, momentumJobs: 0, avgDays: 0 };
+  const [count, rows, facets, stats] = await Promise.all([
+    Job.count({ where }),
+    Job.findAll({
+      where,
+      attributes: JOB_LIST_FIND_ATTRIBUTES,
+      order: [[sortKey, sortDir], ['id', 'DESC']],
+      limit,
+      offset,
+    }),
+    listGridFacets(scopeWhere || {}).catch(() => emptyFacets),
+    listGridStats(scopeWhere || {}).catch(() => emptyStats),
+  ]);
+
+  await Promise.all([
+    enrichJobsWithCandidateCounts(rows),
+    enrichJobsWithOrganizationIds(rows),
+  ]);
+
+  return {
+    jobs: rows.map(toApiJobListRow),
+    total: count,
+    page,
+    limit,
+    facets,
+    stats,
+  };
+};
+
+/**
+ * Jobs for a tenant client: rows with matching clientId, plus jobs whose application inbox
+ * uses the tenant domain prefix (e.g. humand+1000017@…) when clientId was never set on create.
  */
 const findJobsScopedToClient = async (clientId, { attributes = JOB_LIST_FIND_ATTRIBUTES } = {}) => {
   const effectiveClientId = clientId != null ? String(clientId).trim() : '';
@@ -467,40 +820,14 @@ const findJobsScopedToClient = async (clientId, { attributes = JOB_LIST_FIND_ATT
     queryAttributes = [...attributes, 'organizationId'];
   }
 
-  const rows = await Job.findAll({
-    where: { clientId: effectiveClientId },
+  const scopeWhere = await buildTenantJobScopeWhere(effectiveClientId);
+  if (!scopeWhere) return [];
+
+  return Job.findAll({
+    where: scopeWhere,
     attributes: queryAttributes,
     order: [['openDate', 'DESC']],
   });
-
-  const linkedOrgs = await ClientOrganizationLink.findAll({
-    where: { clientId: effectiveClientId },
-    include: [
-      { model: Organization, as: 'organization', required: false, attributes: ['id', 'name'] },
-      { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
-    ],
-  });
-
-  if (linkedOrgs.length === 0) return rows;
-
-  const linkedOrgIds = new Set();
-  const linkedOrgNames = new Set();
-  for (const link of linkedOrgs) {
-    const org = link.organization || link.organizationTmp;
-    if (!org) continue;
-    linkedOrgIds.add(String(org.id));
-    const nm = (org.name || '').toLowerCase().trim();
-    if (nm) linkedOrgNames.add(nm);
-  }
-
-  const filtered = rows.filter((job) => {
-    const plain = job.toJSON ? job.toJSON() : job;
-    if (plain.organizationId && linkedOrgIds.has(String(plain.organizationId))) return true;
-    const clientName = String(plain.client || '').toLowerCase().trim();
-    return clientName && linkedOrgNames.has(clientName);
-  });
-
-  return filtered.length > 0 ? filtered : rows;
 };
 
 const list = async ({ tagId = null } = {}) => {
@@ -598,38 +925,97 @@ const enrichJobsWithCandidateCounts = async (jobs) => {
     ]),
   );
 
+  const referralsByJob = await loadJobReferralCounts(ids);
+
   for (const job of jobs) {
     const id = job?.id != null ? String(job.id) : '';
     const counts = byJob.get(id) || { total: 0, waiting: 0, active: 0 };
+    const referrals = referralsByJob.get(id) || 0;
     if (typeof job.setDataValue === 'function') {
       job.setDataValue('associatedCandidates', counts.total);
       job.setDataValue('waitingForScreening', counts.waiting);
       job.setDataValue('activeProcess', counts.active);
+      job.setDataValue('referralsCount', referrals);
     } else {
       job.associatedCandidates = counts.total;
       job.waitingForScreening = counts.waiting;
       job.activeProcess = counts.active;
+      job.referralsCount = referrals;
     }
   }
   return jobs;
 };
 
-const listForPicker = async () => {
-  const rows = await Job.findAll({
-    attributes: [
-      'id', 'title', 'client', 'city', 'status', 'openDate', 'healthProfile',
-      'associatedCandidates', 'waitingForScreening', 'activeProcess',
-    ],
-    order: [['title', 'ASC']],
-  });
+/** CV sends to client for a job (`notification_messages.category = screening_cv`). */
+const loadJobReferralCounts = async (jobIds) => {
+  const out = new Map();
+  if (!Array.isArray(jobIds) || !jobIds.length) return out;
+  try {
+    const rows = await sequelize.query(
+      `
+      SELECT
+        NULLIF(TRIM(metadata #>> '{taskPayload,jobId}'), '') AS "jobId",
+        COUNT(*)::int AS n
+      FROM notification_messages
+      WHERE category = 'screening_cv'
+        AND NULLIF(TRIM(metadata #>> '{taskPayload,jobId}'), '') IN (:ids)
+      GROUP BY 1
+      `,
+      { replacements: { ids: jobIds }, type: QueryTypes.SELECT },
+    );
+    for (const r of Array.isArray(rows) ? rows : []) {
+      const id = r?.jobId != null ? String(r.jobId).trim() : '';
+      if (id) out.set(id, Number(r.n) || 0);
+    }
+  } catch (err) {
+    console.warn('[jobService] loadJobReferralCounts failed:', err.message || err);
+  }
+  return out;
+};
+
+const JOB_PICKER_ATTRIBUTES = [
+  'id',
+  'title',
+  'client',
+  'city',
+  'status',
+  'openDate',
+  'healthProfile',
+  'associatedCandidates',
+  'waitingForScreening',
+  'activeProcess',
+  'postingCode',
+  'recruiter',
+  'recruitingCoordinator',
+  'accountManager',
+];
+
+const mapJobPickerRows = async (rows) => {
   await enrichJobsWithCandidateCounts(rows);
   return rows.map((r) => {
-    const plain = r.get({ plain: true });
+    const plain = typeof r.get === 'function' ? r.get({ plain: true }) : { ...r };
     plain.associatedCandidates = Number(plain.associatedCandidates) || 0;
     plain.activeProcess = Number(plain.activeProcess) || 0;
     plain.waitingForScreening = Number(plain.waitingForScreening) || 0;
+    plain.referralsCount = Number(plain.referralsCount) || 0;
     return plain;
   });
+};
+
+/** Staff job picker — tenant-scoped; platform admins see all jobs. */
+const listForPicker = async ({ clientId, platformAdmin } = {}) => {
+  let rows;
+  if (platformAdmin) {
+    rows = await Job.findAll({
+      attributes: JOB_PICKER_ATTRIBUTES,
+      order: [['title', 'ASC']],
+    });
+  } else if (clientId) {
+    rows = await findJobsScopedToClient(clientId, { attributes: JOB_PICKER_ATTRIBUTES });
+  } else {
+    return [];
+  }
+  return mapJobPickerRows(rows);
 };
 
 const getById = async (id, { skipCache = false } = {}) => {
@@ -659,8 +1045,37 @@ const getById = async (id, { skipCache = false } = {}) => {
   return job;
 };
 
+/** Keep an explicitly chosen organization on the job and label the job with that company name. */
+const bindExplicitJobOrganization = async (data, { requireClientLink = false } = {}) => {
+  const orgId = data.organizationId ? String(data.organizationId).trim() : '';
+  if (!orgId) return;
+  const org = await Organization.findByPk(orgId, { attributes: ['id', 'name'] });
+  if (!org) {
+    const err = new Error('החברה שנבחרה לא נמצאה');
+    err.status = 400;
+    throw err;
+  }
+  data.organizationId = String(org.id);
+  const orgName = String(org.name || '').trim();
+  if (orgName) data.client = orgName;
+
+  if (!requireClientLink) return;
+  const clientId = data.clientId ? String(data.clientId).trim() : '';
+  if (!clientId) return;
+  const link = await ClientOrganizationLink.findOne({
+    where: { clientId, organizationId: data.organizationId },
+    attributes: ['id'],
+  });
+  if (!link) {
+    const err = new Error('החברה שנבחרה אינה מקושרת לחשבון');
+    err.status = 400;
+    throw err;
+  }
+};
+
 const create = async (payload) => {
   const { data, skills } = stripSkillsFromPayload(prepareCvForwardSettingsForSave(payload));
+  await bindExplicitJobOrganization(data, { requireClientLink: true });
   if (!data.organizationId) {
     const resolved = await resolveOrganizationIdForJob({
       organizationId: data.organizationId,
@@ -688,6 +1103,14 @@ const update = async (id, payload) => {
     throw err;
   }
   const { data, skills, hasSkills } = stripSkillsFromPayload(prepareCvForwardSettingsForSave(payload));
+  for (const key of ['city', 'location', 'region']) {
+    if (Object.prototype.hasOwnProperty.call(data, key) && !String(data[key] ?? '').trim()) {
+      data[key] = null;
+    }
+  }
+  if (data.organizationId) {
+    await bindExplicitJobOrganization(data, { requireClientLink: false });
+  }
   const nextClient = data.client !== undefined ? data.client : existing.client;
   const nextClientId = data.clientId !== undefined ? data.clientId : existing.clientId;
   if (data.organizationId === undefined || data.organizationId == null) {
@@ -732,12 +1155,27 @@ const findByPostingCode = async (code) => {
 /** First posting code for newly created jobs (then +1 per job, no random). */
 const POSTING_CODE_FIRST = 1_000_000;
 
+/** Only codes in [POSTING_CODE_FIRST … POSTING_CODE_ALLOC_MAX] participate in auto-allocation (ignores legacy 6-digit and stray huge values). */
+const POSTING_CODE_ALLOC_MAX = 9_999_999;
+
+/** Minimum numeric posting code accepted when matching inbound email (+ or bare number in headers/subject). */
+const POSTING_CODE_MATCH_MIN = 100_000;
+
+function isPostingCodeValidForMatch(code) {
+  const raw = String(code || '').trim();
+  if (!raw) return false;
+  if (!/^\d+$/.test(raw)) return true;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= POSTING_CODE_MATCH_MIN;
+}
+
 /** Postgres advisory lock key — serializes posting-code allocation across app instances. */
 const POSTING_CODE_ALLOC_LOCK_KEY = 891_234;
 
 /**
- * Next numeric posting code: max(existing numeric codes, POSTING_CODE_FIRST - 1) + 1.
- * Legacy random 6-digit codes remain on old jobs; new jobs start at 1_000_000.
+ * Next posting code in the official sequence (1_000_000, 1_000_001, …).
+ * Syncs `job_posting_code_seq` to max allocated code in DB, then nextval (+1).
+ * Legacy / stray codes outside the band do not affect the counter.
  */
 const allocateNextPostingCode = async () => {
   return sequelize.transaction(async (transaction) => {
@@ -748,15 +1186,39 @@ const allocateNextPostingCode = async () => {
     const rows = await sequelize.query(
       `SELECT MAX(CAST("postingCode" AS BIGINT)) AS max
        FROM jobs
-       WHERE "postingCode" ~ '^[0-9]+$'`,
-      { type: QueryTypes.SELECT, transaction },
+       WHERE "postingCode" ~ '^[0-9]+$'
+         AND CAST("postingCode" AS BIGINT) >= :first
+         AND CAST("postingCode" AS BIGINT) <= :allocMax`,
+      {
+        type: QueryTypes.SELECT,
+        transaction,
+        replacements: { first: POSTING_CODE_FIRST, allocMax: POSTING_CODE_ALLOC_MAX },
+      },
     );
     const maxRaw = rows?.[0]?.max;
     const maxNum = maxRaw != null && maxRaw !== '' ? Number(maxRaw) : NaN;
-    const next =
-      Number.isFinite(maxNum)
-        ? Math.max(POSTING_CODE_FIRST, maxNum + 1)
-        : POSTING_CODE_FIRST;
+    if (Number.isFinite(maxNum) && maxNum >= POSTING_CODE_FIRST) {
+      await sequelize.query(
+        `SELECT setval('job_posting_code_seq', :maxNum::bigint, true)`,
+        { transaction, replacements: { maxNum } },
+      );
+    } else {
+      // next nextval() → POSTING_CODE_FIRST (is_called = false)
+      await sequelize.query(
+        `SELECT setval('job_posting_code_seq', :first::bigint, false)`,
+        { transaction, replacements: { first: POSTING_CODE_FIRST } },
+      );
+    }
+    const [nextRow] = await sequelize.query(
+      `SELECT nextval('job_posting_code_seq') AS next`,
+      { type: QueryTypes.SELECT, transaction },
+    );
+    const next = nextRow?.next != null ? Number(nextRow.next) : POSTING_CODE_FIRST;
+    if (!Number.isFinite(next) || next < POSTING_CODE_FIRST || next > POSTING_CODE_ALLOC_MAX) {
+      const err = new Error('Posting code sequence exhausted or invalid');
+      err.status = 500;
+      throw err;
+    }
     return String(next);
   });
 };
@@ -765,7 +1227,32 @@ const {
   classifyJobTaxonomyForAnalyze,
 } = require('./jobTaxonomyClassificationService');
 
-const analyzeRawDescription = async (rawText) => {
+const pickHiringCompanyName = (parsed) => {
+  if (!parsed || typeof parsed !== 'object') return '';
+  const keys = [
+    'client',
+    'clientName',
+    'company',
+    'companyName',
+    'employer',
+    'employerName',
+    'organization',
+    'organizationName',
+    'hiringCompany',
+  ];
+  for (const key of keys) {
+    const value = parsed[key];
+    if (value && typeof value === 'object') {
+      const nested = value.name || value.label || value.companyName;
+      if (nested != null && String(nested).trim()) return String(nested).trim();
+      continue;
+    }
+    if (value != null && String(value).trim()) return String(value).trim();
+  }
+  return '';
+};
+
+const analyzeRawDescription = async (rawText, options = {}) => {
   if (!rawText || !String(rawText).trim()) {
     const err = new Error('Raw job description is required');
     err.status = 400;
@@ -799,6 +1286,7 @@ const analyzeRawDescription = async (rawText) => {
     history: [],
     message: String(rawText),
     promptId: 'create_new_job',
+    responseMimeType: 'application/json',
     llmInputJson: {
       rawDescriptionLength: String(rawText).length,
       rawDescriptionPreview: String(rawText).slice(0, 4000),
@@ -810,36 +1298,23 @@ const analyzeRawDescription = async (rawText) => {
 
   let parsed;
   try {
-    const text = String(rawResponse || '').trim();
-
-    // Strip markdown code fences if present
-    let cleaned = text;
-    if (cleaned.startsWith('```')) {
-      cleaned = cleaned.replace(/^```[a-zA-Z]*\s*/, ''); // remove ``` or ```json
-      if (cleaned.endsWith('```')) {
-        cleaned = cleaned.slice(0, -3);
-      }
-      cleaned = cleaned.trim();
-    }
-
-    // Try to extract JSON object substring if extra text exists
-    const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-    const candidate =
-      firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace
-        ? cleaned.slice(firstBrace, lastBrace + 1)
-        : cleaned;
-
-    parsed = JSON.parse(candidate);
+    parsed = parseLenientJsonObject(rawResponse);
     const pwhRaw = pickPreferredWorkingHoursRawFromParsed(parsed);
     const coerced = coercePreferredWorkingHoursFromJobAi(pwhRaw);
     parsed.preferredWorkingHours = coerced;
   } catch (e) {
+    const cause = e?.cause || e;
+    const positionMatch = String(cause?.message || '').match(/position\s+(\d+)/i);
+    const pos = positionMatch ? Number(positionMatch[1]) : null;
+    const raw = String(rawResponse || '');
     // eslint-disable-next-line no-console
-    console.error('[jobService.analyzeRawDescription] Failed to parse AI JSON response:', rawResponse);
-    const err = new Error('Failed to parse AI response as JSON');
-    err.status = 500;
-    throw err;
+    console.error('[jobService.analyzeRawDescription] Failed to parse AI JSON response', {
+      message: cause?.message || e?.message,
+      length: raw.length,
+      around: pos == null ? raw.slice(0, 240) : raw.slice(Math.max(0, pos - 80), pos + 80),
+    });
+    if (!e.status) e.status = 500;
+    throw e;
   }
 
   enrichJobAnalyzeResult(parsed);
@@ -879,10 +1354,17 @@ const analyzeRawDescription = async (rawText) => {
     }
   }
 
+  const hiringCompany = pickHiringCompanyName(parsed);
+  if (hiringCompany) parsed.client = hiringCompany;
+
   if (parsed.client && String(parsed.client).trim()) {
     try {
       const Organization = require('../models/Organization');
-      const orgId = await resolveOrganizationIdForJob({ client: parsed.client, clientId: null });
+      const scopeClientId = options.clientId ? String(options.clientId).trim() : '';
+      const orgId = await resolveOrganizationIdForAnalyze({
+        client: parsed.client,
+        clientId: scopeClientId || null,
+      });
       if (orgId) {
         parsed.suggestedOrganizationId = orgId;
         const org = await Organization.findByPk(orgId, { attributes: ['name'] });
@@ -915,6 +1397,7 @@ const toPlainJobForMatchScore = (job) => {
 
 module.exports = {
   list,
+  listGrid,
   listForTenantGrid,
   listForComposePicker,
   listForPicker,
@@ -926,6 +1409,9 @@ module.exports = {
   findByPostingCode,
   allocateNextPostingCode,
   POSTING_CODE_FIRST,
+  POSTING_CODE_ALLOC_MAX,
+  POSTING_CODE_MATCH_MIN,
+  isPostingCodeValidForMatch,
   analyzeRawDescription,
   hydrateJobSkills,
   hydrateJobsSkills,
@@ -938,4 +1424,5 @@ module.exports = {
   mapSystemTagsToJobSkills,
   listJobTags,
   resolveReferralContactsForJob,
+  recordStaffJobView,
 };

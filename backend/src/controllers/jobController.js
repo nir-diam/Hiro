@@ -23,6 +23,7 @@ const {
   getJobEmbedding,
   buildLinkedInfoFromJobCandidate,
   buildIntentOptionsByCandidateIds,
+  invalidateCityCache,
 } = require('../services/matchingScoreService');
 const { resolveEngineConfigForJob } = require('../services/matchingEngineService');
 
@@ -38,6 +39,66 @@ const JOB_ID_UUID_RE =
  * - Clears unpublishedAt when a source is re-published.
  * - Preserves existing timestamps when status hasn't changed.
  */
+const SELECTION_HISTORY_CAP = 50;
+
+const actorFromDbUser = (u) => {
+  if (!u) return { userId: null, userName: 'מערכת' };
+  const plain = u.get && typeof u.get === 'function' ? u.get({ plain: true }) : u;
+  const name = plain.name && String(plain.name).trim();
+  const email = plain.email && String(plain.email).trim();
+  return {
+    userId: plain.id != null ? String(plain.id) : null,
+    userName: name || email || 'משתמש',
+  };
+};
+
+const normalizeSelectionHistory = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((row) => {
+      if (!row || typeof row !== 'object') return null;
+      const at = row.at != null ? String(row.at).trim() : '';
+      if (!at) return null;
+      return {
+        at,
+        userId: row.userId != null ? String(row.userId) : null,
+        userName: row.userName != null ? String(row.userName).trim() || 'משתמש' : 'משתמש',
+        selected: Boolean(row.selected),
+      };
+    })
+    .filter(Boolean)
+    .slice(0, SELECTION_HISTORY_CAP);
+};
+
+/**
+ * Append checkbox on/off audit rows when `selected` changes (stored on job.recruitmentSources JSONB).
+ */
+const applySourceSelectionHistory = (newSources, existingSources, actor) => {
+  const now = new Date().toISOString();
+  const existingMap = Object.fromEntries(
+    (Array.isArray(existingSources) ? existingSources : []).map((s) => [String(s.id), s]),
+  );
+  const who = actor || { userId: null, userName: 'מערכת' };
+  return newSources.map((src) => {
+    const prev = existingMap[String(src.id)] || {};
+    const wasSelected = Boolean(prev.selected);
+    const isSelected = Boolean(src.selected);
+    let history = normalizeSelectionHistory(prev.selectionHistory);
+    if (wasSelected !== isSelected) {
+      history = [
+        {
+          at: now,
+          userId: who.userId,
+          userName: who.userName,
+          selected: isSelected,
+        },
+        ...history,
+      ].slice(0, SELECTION_HISTORY_CAP);
+    }
+    return { ...src, selectionHistory: history };
+  });
+};
+
 const applySourceTimestamps = (newSources, existingSources) => {
   const now = new Date().toISOString();
   const existingMap = Object.fromEntries(
@@ -58,6 +119,13 @@ const applySourceTimestamps = (newSources, existingSources) => {
     return { ...src, publishedAt, unpublishedAt };
   });
 };
+
+const mergeRecruitmentSourcesMeta = (newSources, existingSources, actor) =>
+  applySourceSelectionHistory(
+    applySourceTimestamps(newSources, existingSources),
+    existingSources,
+    actor,
+  );
 
 const valuesDiffer = (a, b) => {
   if (isMissingValue(a) && isMissingValue(b)) return false;
@@ -139,6 +207,7 @@ const SKIP_JOB_UPDATE_COMPARE_KEYS = new Set([
   'associatedCandidates',
   'waitingForScreening',
   'activeProcess',
+  'referralsCount',
   'openDate',
 ]);
 
@@ -163,16 +232,23 @@ const collectJobFieldChangesForAudit = (prevPlain, nextPlain) => {
 
 const analyzeDescription = async (req, res) => {
   try {
-    const { text } = req.body || {};
+    const { text, clientId: bodyClientId } = req.body || {};
+    const scopeClientId =
+      (bodyClientId && String(bodyClientId).trim()) ||
+      (req.user?.clientId && String(req.user.clientId).trim()) ||
+      '';
     // eslint-disable-next-line no-console
     console.log('[jobController.analyzeDescription] incoming request', {
       method: req.method,
       url: req.originalUrl || req.url,
       host: req.headers.host,
       textLength: text ? String(text).length : 0,
+      scopeClientId: scopeClientId || null,
     });
 
-    const result = await jobService.analyzeRawDescription(text);
+    const result = await jobService.analyzeRawDescription(text, {
+      clientId: scopeClientId || null,
+    });
 
     // Audit: 'ניתוח ועיבוד משרה' — AI analyzed a job description
     systemEventEmitter.emit(req, {
@@ -200,6 +276,12 @@ const analyzeDescription = async (req, res) => {
 
 const list = async (req, res) => {
   try {
+    const wantsGrid =
+      req.query.paginated === '1' || req.query.paginated === 'true' || req.query.page != null;
+    if (wantsGrid) {
+      const payload = await jobService.listGrid({ query: req.query });
+      return res.json(payload);
+    }
     const search = String(req.query.search || '').trim();
     if (search.length >= 2) {
       const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 5), 50);
@@ -254,6 +336,12 @@ const listForTenantGrid = async (req, res) => {
     }
     const client = await Client.findByPk(effectiveClientId, { attributes: ['id'] });
     if (!client) return res.json([]);
+    const wantsGrid =
+      req.query.paginated === '1' || req.query.paginated === 'true' || req.query.page != null;
+    if (wantsGrid) {
+      const payload = await jobService.listGrid({ clientId: effectiveClientId, query: req.query });
+      return res.json(payload);
+    }
     const rows = await jobService.listForTenantGrid(effectiveClientId);
     return res.json(rows);
   } catch (err) {
@@ -295,7 +383,10 @@ const create = async (req, res) => {
     }
 
     const uniqueEmail = `${inboxPrefix}+${postingCode}@app.hiro.co.il`;
-    const payload = { ...req.body, postingCode, uniqueEmail };
+    const body = { ...(req.body || {}) };
+    delete body.postingCode;
+    delete body.uniqueEmail;
+    const payload = { ...body, postingCode, uniqueEmail };
     const aiPasteAnalyzeUsed = Boolean(payload.aiPasteAnalyzeUsed);
     delete payload.aiPasteAnalyzeUsed;
 
@@ -414,6 +505,8 @@ const update = async (req, res) => {
   try {
     const payload = { ...req.body };
     delete payload.aiPasteAnalyzeUsed;
+    delete payload.postingCode;
+    delete payload.uniqueEmail;
 
     // Snapshot previous job state for change-detection-based audits.
     let previous = null;
@@ -471,15 +564,20 @@ const update = async (req, res) => {
       }
     }
 
+    const user = req.dbUser;
+
     // Stamp publish/unpublish timestamps whenever recruitmentSources changes
     if (Array.isArray(payload.recruitmentSources) && previous) {
       const prevSources = Array.isArray(previous.recruitmentSources) ? previous.recruitmentSources : [];
-      payload.recruitmentSources = applySourceTimestamps(payload.recruitmentSources, prevSources);
+      payload.recruitmentSources = mergeRecruitmentSourcesMeta(
+        payload.recruitmentSources,
+        prevSources,
+        actorFromDbUser(user),
+      );
     }
 
     // For tenant users, always preserve the correct clientId — never let the payload override it
     // with null/undefined and accidentally disconnect the job from the tenant account.
-    const user = req.dbUser;
     const isPlatformAdminUser = user?.role === 'admin' || user?.role === 'super_admin';
     if (!isPlatformAdminUser && user?.clientId) {
       const tenantClient = await Client.findByPk(user.clientId, { attributes: ['id'] });
@@ -589,83 +687,152 @@ const remove = async (req, res) => {
   }
 };
 
+const JOB_CANDIDATE_SCORE_CONCURRENCY = 4;
+
+async function mapWithConcurrency(items, concurrency, fn) {
+  const queue = items.slice();
+  const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      if (!item) break;
+      await fn(item);
+    }
+  });
+  await Promise.all(workers);
+}
+
+/**
+ * Live match scores for a slice of job-candidate rows.
+ * The cost is here: full candidate+tag rows, intent links, and computeMatchPackage
+ * (including geo). Callers page this so a job with dozens of candidates does not
+ * score every row on the first paint.
+ */
+async function scoreJobCandidateViews(job, jobId, candidates, options = {}) {
+  const candidateMap = new Map();
+  let jobPlain = null;
+  let screeningSettings = null;
+  if (!job || !candidates.length) {
+    return { candidateMap, jobPlain, screeningSettings };
+  }
+
+  // Each visit reloads the cities catalog so a region/coord edit applies immediately.
+  invalidateCityCache();
+  jobPlain = jobService.toPlainJobForMatchScore(job);
+  screeningSettings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
+  const tenantClientId = options.tenantClientId ? String(options.tenantClientId).trim() : '';
+  const engineConfig = await resolveEngineConfigForJob(jobPlain, {
+    tenantClientId: tenantClientId || null,
+  });
+  const jobEmb = await getJobEmbedding(jobPlain);
+
+  const candidateIds = candidates.map((c) => c.id).filter(Boolean);
+  const candidateService = require('../services/candidateService');
+  const [fullCandidateRows, jcRows] = await Promise.all([
+    candidateService.findManyWithTagsForMatchScore(candidateIds),
+    JobCandidate.findAll({
+      where: { jobId, candidateId: candidateIds },
+      attributes: ['id', 'candidateId', 'status', 'source'],
+    }),
+  ]);
+  for (const row of fullCandidateRows) {
+    if (!row) continue;
+    const plain = candidateService.toPlainCandidateForMatchScore(row);
+    candidateMap.set(String(plain.id), plain);
+  }
+  const jcMap = new Map(jcRows.map((r) => [String(r.candidateId), r.get ? r.get({ plain: true }) : r]));
+  const intentByCandidate = await buildIntentOptionsByCandidateIds(candidateIds);
+
+  await mapWithConcurrency(candidates, JOB_CANDIDATE_SCORE_CONCURRENCY, async (cView) => {
+    const candPlain = candidateMap.get(String(cView.id));
+    if (!candPlain) return;
+    const cid = String(cView.id);
+    cView.tagDetails = candPlain.tagDetails;
+    cView.tags = candPlain.tags;
+    cView.skills = candPlain.skills;
+    cView.matchAnalysis = candPlain.matchAnalysis;
+    cView.workExperience = candPlain.workExperience;
+    cView.experience = candPlain.experience;
+    cView.languages = candPlain.languages;
+    cView.field = candPlain.field;
+    cView.industry = candPlain.industry;
+    cView.professionalSummary = candPlain.professionalSummary;
+    const jcData = jcMap.get(cid) || null;
+    const linkedInfo = buildLinkedInfoFromJobCandidate(jcData);
+    const intentOpts = intentByCandidate.get(cid) || {};
+    try {
+      const result = await computeMatchPackage(
+        candPlain,
+        jobPlain,
+        jobEmb,
+        engineConfig,
+        linkedInfo,
+        intentOpts,
+      );
+      cView.matchScore = Math.round(result.matchScore);
+      cView.scoreBreakdown = result.scoreBreakdown;
+      cView.parameterMatches = result.parameterMatches;
+    } catch (e) {
+      // keep stored matchScore on individual scoring failure
+    }
+  });
+
+  return { candidateMap, jobPlain, screeningSettings };
+}
+
 const getCandidates = async (req, res) => {
   try {
     const jobId = req.params.id;
+    const lite = req.query.lite === '1' || req.query.lite === 'true';
+    const hasLimit = req.query.limit != null && String(req.query.limit).trim() !== '';
+    const limit = hasLimit
+      ? Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20))
+      : null;
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    const q = String(req.query.q || '').trim().toLowerCase();
+
     const job = await jobService.getById(jobId);
-    const candidates = await jobCandidateService.listForJob(jobId);
+    let candidates = await jobCandidateService.listForJob(jobId);
     const returnMonths = await clientUsageSettingService.resolveReturnMonthsForJobRequest(job, req);
+
+    if (q) {
+      candidates = candidates.filter((c) => {
+        const name = String(c.name || '').toLowerCase();
+        const title = String(c.title || '').toLowerCase();
+        return name.includes(q) || title.includes(q);
+      });
+    }
+
+    const sort = String(req.query.sort || '').trim();
+    const receivedDir = String(req.query.dir || 'desc').toLowerCase() === 'asc' ? 1 : -1;
+    if (!sort || sort === 'received') {
+      candidates.sort((a, b) => {
+        const at = a.createdDate ? new Date(a.createdDate).getTime() : 0;
+        const bt = b.createdDate ? new Date(b.createdDate).getTime() : 0;
+        if (at !== bt) return (at - bt) * receivedDir;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+    }
+
+    const total = candidates.length;
+    const page = limit != null ? candidates.slice(offset, offset + limit) : candidates;
 
     let candidateMap = new Map();
     let jobPlain = null;
     let screeningSettings = null;
 
-    // Enrich each candidate's matchScore with the full multi-dimensional engine
-    try {
-      if (job && candidates.length) {
-        jobPlain = jobService.toPlainJobForMatchScore(job);
-        screeningSettings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
-        const engineConfig = await resolveEngineConfigForJob(jobPlain);
-        const jobEmb = await getJobEmbedding(jobPlain);
-
-        // Load full candidate rows + their JobCandidate link rows in parallel
-        const candidateIds = candidates.map((c) => c.id).filter(Boolean);
-        const candidateService = require('../services/candidateService');
-        const [fullCandidateRows, jcRows] = await Promise.all([
-          candidateService.findManyWithTagsForMatchScore(candidateIds),
-          JobCandidate.findAll({
-            where: { jobId, candidateId: candidateIds },
-            attributes: ['id', 'candidateId', 'status', 'source'],
-          }),
-        ]);
-        candidateMap = new Map(
-          fullCandidateRows
-            .filter(Boolean)
-            .map((row) => {
-              const plain = candidateService.toPlainCandidateForMatchScore(row);
-              return [String(plain.id), plain];
-            }),
-        );
-        const jcMap = new Map(jcRows.map((r) => [String(r.candidateId), r.get ? r.get({ plain: true }) : r]));
-        const intentByCandidate = await buildIntentOptionsByCandidateIds(candidateIds);
-
-        for (const cView of candidates) {
-          const candPlain = candidateMap.get(String(cView.id));
-          if (!candPlain) continue;
-          const cid = String(cView.id);
-          // Tag-matching payload for job-candidates gap UI (same pools as Sonar).
-          cView.tagDetails = candPlain.tagDetails;
-          cView.tags = candPlain.tags;
-          cView.skills = candPlain.skills;
-          cView.matchAnalysis = candPlain.matchAnalysis;
-          cView.workExperience = candPlain.workExperience;
-          cView.experience = candPlain.experience;
-          cView.languages = candPlain.languages;
-          cView.field = candPlain.field;
-          cView.industry = candPlain.industry;
-          cView.professionalSummary = candPlain.professionalSummary;
-          const jcData = jcMap.get(cid) || null;
-          const linkedInfo = buildLinkedInfoFromJobCandidate(jcData);
-          const intentOpts = intentByCandidate.get(cid) || {};
-          try {
-            const result = await computeMatchPackage(
-              candPlain,
-              jobPlain,
-              jobEmb,
-              engineConfig,
-              linkedInfo,
-              intentOpts,
-            );
-            cView.matchScore = Math.round(result.matchScore);
-            cView.scoreBreakdown = result.scoreBreakdown;
-            cView.parameterMatches = result.parameterMatches;
-          } catch (e) {
-            // keep stored matchScore on individual scoring failure
-          }
-        }
+    // lite=1 is the sidebar/funnel path: status and source only, no engine scoring.
+    if (!lite) {
+      try {
+        const tenantClientId = req.dbUser
+          ? await authService.resolveEffectiveClientIdForUser(req.dbUser)
+          : null;
+        const scored = await scoreJobCandidateViews(job, jobId, page, { tenantClientId });
+        candidateMap = scored.candidateMap;
+        jobPlain = scored.jobPlain;
+        screeningSettings = scored.screeningSettings;
+      } catch (e) {
+        console.warn('[getCandidates] live scoring skipped:', e.message || e);
       }
-    } catch (e) {
-      console.warn('[getCandidates] live scoring skipped:', e.message || e);
     }
 
     const digitalQuestions = Array.isArray(jobPlain?.digitalQuestions)
@@ -673,9 +840,9 @@ const getCandidates = async (req, res) => {
       : Array.isArray(job?.digitalQuestions)
         ? job.digitalQuestions
         : [];
-    if (digitalQuestions.length && candidates.length) {
+    if (!lite && digitalQuestions.length && page.length) {
       try {
-        const candidateIds = candidates.map((c) => c.id).filter(Boolean);
+        const candidateIds = page.map((c) => c.id).filter(Boolean);
         const screeningRows = await JobCandidateScreening.findAll({
           where: { jobId, candidateId: candidateIds },
           attributes: ['candidateId', 'digitalAnswers', 'screeningStatus', 'rejectionReason', 'rejectionNotes'],
@@ -686,7 +853,7 @@ const getCandidates = async (req, res) => {
             return [String(plain.candidateId), plain];
           }),
         );
-        for (const cView of candidates) {
+        for (const cView of page) {
           const row = screeningByCandidate.get(String(cView.id));
           if (!row) {
             cView.digitalScreening = {
@@ -710,7 +877,7 @@ const getCandidates = async (req, res) => {
     }
 
     const visibleCandidates = [];
-    for (const cView of candidates) {
+    for (const cView of page) {
       const candPlain = candidateMap.get(String(cView.id));
       if (candPlain && jobPlain && screeningSettings) {
         const hard = screeningInclusionService.checkHardRequirements(
@@ -728,10 +895,20 @@ const getCandidates = async (req, res) => {
     }
 
     const jobForApi = jobService.toApiJob(job);
+    const nextOffset = offset + page.length;
+    const hasMore = nextOffset < total;
 
     res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.set('Pragma', 'no-cache');
-    res.json({ job: jobForApi, candidates: visibleCandidates, returnMonths });
+    res.json({
+      job: jobForApi,
+      candidates: visibleCandidates,
+      returnMonths,
+      total,
+      offset,
+      nextOffset,
+      hasMore,
+    });
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
   }
@@ -765,6 +942,23 @@ const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Staff opened the “ייבוא חכם” / AI paste modal on NewJobView. */
+/** POST — record staff opening job edit (requires auth). */
+const recordStaffView = async (req, res) => {
+  try {
+    const id = String(req.params.id || '').trim();
+    if (!JOB_ID_UUID_RE.test(id)) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    const meta = await jobService.recordStaffJobView(id, req.dbUser);
+    if (!meta) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+    return res.json(meta);
+  } catch (err) {
+    return res.status(err.status || 500).json({ message: err.message || 'Failed to record view' });
+  }
+};
+
 const logSmartImportModalOpen = async (req, res) => {
   try {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -816,7 +1010,10 @@ const getScreeningPoolForJob = async (req, res) => {
 const postJobSonarScan = async (req, res) => {
   try {
     const jobId = req.params.id;
-    const data = await jobSonarService.runSonarScan(jobId, req.body || {});
+    const tenantClientId = req.dbUser
+      ? await authService.resolveEffectiveClientIdForUser(req.dbUser)
+      : null;
+    const data = await jobSonarService.runSonarScan(jobId, req.body || {}, { tenantClientId });
     res.set('Cache-Control', 'private, no-store');
     return res.json(data);
   } catch (err) {
@@ -852,9 +1049,20 @@ const clearSonarIgnore = async (req, res) => {
 
 const listForPicker = async (req, res) => {
   try {
-    const rows = await jobService.listForPicker();
-    res.set('Cache-Control', 'private, max-age=30');
-    res.json(rows);
+    res.set('Cache-Control', 'private, no-store');
+    const user = req.dbUser;
+    const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+
+    if (!isPlatformAdmin && !effectiveClientId) {
+      return res.json([]);
+    }
+
+    const rows = await jobService.listForPicker({
+      clientId: effectiveClientId,
+      platformAdmin: isPlatformAdmin,
+    });
+    return res.json(rows);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
   }
@@ -926,54 +1134,10 @@ const listBoardPublications = async (req, res) => {
           )                                           AS "candidatesCount",
           COALESCE(
             (
-              SELECT COUNT(DISTINCT jc."candidateId")::int
-              FROM job_candidates jc
-              WHERE jc."jobId" = j.id
-                AND (
-                  (
-                    jc.source LIKE 'public_apply:%'
-                    AND (
-                      jc.source = 'public_apply:' || COALESCE(NULLIF(TRIM(src->>'id'), ''), '')
-                      OR REPLACE(jc.source, 'public_apply:', '') = TRIM(COALESCE(src->>'id', ''))
-                      OR REPLACE(jc.source, 'public_apply:', '') = regexp_replace(
-                        lower(COALESCE(src->>'name', '')),
-                        '\s+',
-                        '_',
-                        'g'
-                      )
-                      OR EXISTS (
-                        SELECT 1
-                        FROM job_publications jp
-                        CROSS JOIN LATERAL jsonb_array_elements(
-                          COALESCE(jp."trackingLinks", '[]'::jsonb)
-                        ) AS tl
-                        WHERE jp."jobId" = j.id
-                          AND (
-                            tl->>'id' = src->>'id'
-                            OR tl->>'srcKey' = src->>'id'
-                            OR lower(COALESCE(tl->>'srcKey', '')) = lower(
-                              regexp_replace(COALESCE(src->>'name', ''), '\s+', '_', 'g')
-                            )
-                          )
-                          AND jc.source = 'public_apply:' || COALESCE(
-                            NULLIF(TRIM(tl->>'srcKey'), ''),
-                            NULLIF(TRIM(tl->>'id'), ''),
-                            'direct'
-                          )
-                      )
-                    )
-                  )
-                  OR (
-                    NULLIF(TRIM(src->>'id'), '') IS NOT NULL
-                    AND EXISTS (
-                      SELECT 1
-                      FROM candidates c
-                      WHERE c.id = jc."candidateId"
-                        AND c."isDeleted" = false
-                        AND c."recruitmentSourceId"::text = TRIM(src->>'id')
-                    )
-                  )
-                )
+              SELECT COUNT(DISTINCT NULLIF(BTRIM(nm.metadata #>> '{taskPayload,candidateId}'), ''))::int
+              FROM notification_messages nm
+              WHERE nm.category = 'screening_cv'
+                AND NULLIF(BTRIM(nm.metadata #>> '{taskPayload,jobId}'), '') = j.id::text
             ),
             0
           )                                           AS "referralsCount",
@@ -1120,7 +1284,7 @@ const patchBoardSources = async (req, res) => {
 
     const rawSources = Array.isArray(recruitmentSources) ? recruitmentSources : [];
     const existing = Array.isArray(job.recruitmentSources) ? job.recruitmentSources : [];
-    const sources = applySourceTimestamps(rawSources, existing);
+    const sources = mergeRecruitmentSourcesMeta(rawSources, existing, actorFromDbUser(u));
     await job.update({ recruitmentSources: sources });
 
     // Emit system event for each source status change
@@ -1149,6 +1313,7 @@ module.exports = {
   listForCompose,
   listForTenantGrid,
   get,
+  recordStaffView,
   create,
   update,
   remove,

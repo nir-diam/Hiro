@@ -31,6 +31,7 @@ import {
   type LandingContact,
 } from '../services/publishingApi';
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
+import { fetchPublishSiteOptions, type PublicSiteOption } from '../services/publicSitesApi';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -455,6 +456,17 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     const [newLinkSource, setNewLinkSource] = useState('');
     const [recruitmentSourceOptions, setRecruitmentSourceOptions] = useState<{ id: string; name: string }[]>([]);
     const [publishToGeneralBoard, setPublishToGeneralBoard] = useState(true);
+    const [publishSites, setPublishSites] = useState<PublicSiteOption[]>([]);
+    const [publicBoard, setPublicBoard] = useState({
+        publishSalary: false,
+        showAddress: false,
+        showClientName: null as boolean | null,
+        confidentialDisplayName: '',
+        workModel: 'office',
+        hoursDescription: '',
+        suitableFor: [] as string[],
+        publishedSiteIds: [] as string[],
+    });
 
     // AI Chat State
     const [isChatOpen, setIsChatOpen] = useState(false);
@@ -570,19 +582,31 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
         });
     }, [targetJobId, postingCode, linkRouteKey]);
 
+    const jobForPublicationRef = useRef(job);
+    jobForPublicationRef.current = job;
+    const publicationRequestRef = useRef<{ id: string; promise: Promise<any> } | null>(null);
+
     useEffect(() => {
         if (!targetJobId || !apiBase) return;
         if (!jobFromParent && jobLoading) return;
-        if (!jobFromParent && jobId && !(job as any)?.title && !(job as any)?.publicJobTitle) return;
+        const currentJob = jobForPublicationRef.current as { title?: string; publicJobTitle?: string };
+        if (!jobFromParent && jobId && !currentJob?.title && !currentJob?.publicJobTitle) return;
+
+        let request = publicationRequestRef.current;
+        if (!request || request.id !== targetJobId) {
+            request = { id: targetJobId, promise: fetchJobPublication(targetJobId) };
+            publicationRequestRef.current = request;
+        }
 
         let isMounted = true;
-        fetchJobPublication(targetJobId)
+        request.promise
             .then((pub) => {
                 if (!isMounted || !pub) return;
-                const { layouts, active: activeLayout } = normalizeLandingLayoutsFromPublication(pub, job);
+                const loadedJob = jobForPublicationRef.current;
+                const { layouts, active: activeLayout } = normalizeLandingLayoutsFromPublication(pub, loadedJob);
                 setLandingLayouts(layouts);
                 setSelectedLandingLayout(activeLayout);
-                const canonical = resolveCanonicalPublishContent(layouts, pub, job);
+                const canonical = resolveCanonicalPublishContent(layouts, pub, loadedJob);
                 const activeVariant = layouts[activeLayout];
                 setPublicJobTitle(activeVariant?.publicJobTitle?.trim() || canonical.publicJobTitle);
                 setPublicJobDescription(canonical.publicJobDescription);
@@ -649,7 +673,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                             mapTrackingLinkFromApi(
                                 link,
                                 targetJobId,
-                                (job as any)?.postingCode || publishingCode,
+                                (loadedJob as any)?.postingCode || publishingCode,
                                 routeKeyFromPub,
                             ),
                         ),
@@ -658,10 +682,35 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                 if (typeof pub.publishToGeneralBoard === 'boolean') {
                     setPublishToGeneralBoard(pub.publishToGeneralBoard);
                 }
+                const board = pub.publicBoard && typeof pub.publicBoard === 'object' ? pub.publicBoard : {};
+                setPublicBoard({
+                    publishSalary: board.publishSalary === true,
+                    showAddress: board.showAddress === true,
+                    showClientName: typeof board.showClientName === 'boolean' ? board.showClientName : null,
+                    confidentialDisplayName: board.confidentialDisplayName || '',
+                    workModel: board.workModel || 'office',
+                    hoursDescription: board.hoursDescription || '',
+                    suitableFor: Array.isArray(board.suitableFor) ? board.suitableFor : [],
+                    publishedSiteIds: Array.isArray(board.publishedSiteIds) ? board.publishedSiteIds : [],
+                });
+                const clientId = (loadedJob as { clientId?: string } | null)?.clientId;
+                fetchPublishSiteOptions(clientId).then(setPublishSites).catch(() => setPublishSites([]));
             })
-            .catch(() => {});
+            .catch(() => {
+                if (publicationRequestRef.current?.id === targetJobId) {
+                    publicationRequestRef.current = null;
+                }
+            });
         return () => { isMounted = false; };
-    }, [job, jobId, apiBase, jobFromParent, jobLoading, publishingCode, targetJobId]);
+    }, [
+        targetJobId,
+        apiBase,
+        jobFromParent,
+        jobLoading,
+        jobId,
+        (job as any)?.title,
+        (job as any)?.publicJobTitle,
+    ]);
 
     useEffect(() => {
         let active = true;
@@ -862,12 +911,16 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
             videoUrl: videoUrl.trim() || null,
             heroImageUrl: heroImageUrl.trim() || null,
             heroDesignInstructions: heroDesignInstructions.trim() || null,
-            heroBrandSource,
+            heroBrandSource: heroBrandDefaultPolicy === 'choice' ? heroBrandSource : null,
             heroBrandColorOverride: heroBrandColorIsOverridden ? effectiveHeroBrandColor : null,
             landingPageFields,
             screeningQuestions,
             trackingLinks: trackingLinksToPayload(linksOverride ?? trackingLinks),
             publishToGeneralBoard,
+            publicBoard: {
+                ...publicBoard,
+                showClientName: publicBoard.showClientName,
+            },
         };
 
         await saveJobPublication(targetJobId, payload);
@@ -1172,6 +1225,90 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                         checked={publishToGeneralBoard}
                         onChange={(e) => setPublishToGeneralBoard(e.target.checked)}
                     />
+                    {publishSites.length > 0 && (
+                        <div className="space-y-2">
+                            <p className="text-sm font-semibold text-text-default">אתרים</p>
+                            {publishSites.map((site) => (
+                                <label key={site.id} className="flex items-center gap-2 text-sm">
+                                    <input
+                                        type="checkbox"
+                                        checked={publicBoard.publishedSiteIds.includes(site.id)}
+                                        onChange={(e) => {
+                                            setPublicBoard((prev) => ({
+                                                ...prev,
+                                                publishedSiteIds: e.target.checked
+                                                    ? [...prev.publishedSiteIds, site.id]
+                                                    : prev.publishedSiteIds.filter((id) => id !== site.id),
+                                            }));
+                                            if (site.scope === 'aggregator') setPublishToGeneralBoard(e.target.checked);
+                                        }}
+                                    />
+                                    <span>{site.name} ({site.domain})</span>
+                                </label>
+                            ))}
+                            <p className="text-xs text-text-muted">בחירה כאן קובעת את האתרים. בלי בחירה, המתג למעלה הוא הפרסום הישן ללוח הכללי.</p>
+                        </div>
+                    )}
+                    <label className="flex items-center gap-2 text-sm">
+                        <input type="checkbox" checked={publicBoard.publishSalary} onChange={(e) => setPublicBoard((prev) => ({ ...prev, publishSalary: e.target.checked }))} />
+                        לפרסם שכר
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                        <input type="checkbox" checked={publicBoard.showAddress} onChange={(e) => setPublicBoard((prev) => ({ ...prev, showAddress: e.target.checked }))} />
+                        להציג כתובת
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                        <input
+                            type="checkbox"
+                            checked={publicBoard.showClientName === true}
+                            onChange={(e) => setPublicBoard((prev) => ({ ...prev, showClientName: e.target.checked ? true : null }))}
+                        />
+                        הצג את שם הלקוח (עקיפה של ברירת המחדל)
+                    </label>
+                    <input
+                        className="w-full border border-border-default rounded-lg p-2 text-sm"
+                        placeholder="שם תצוגה ללקוח חסוי (אופציונלי)"
+                        value={publicBoard.confidentialDisplayName}
+                        onChange={(e) => setPublicBoard((prev) => ({ ...prev, confidentialDisplayName: e.target.value }))}
+                    />
+                    <select
+                        className="w-full border border-border-default rounded-lg p-2 text-sm"
+                        value={publicBoard.workModel}
+                        onChange={(e) => setPublicBoard((prev) => ({ ...prev, workModel: e.target.value }))}
+                    >
+                        <option value="office">מהמשרד</option>
+                        <option value="hybrid">היברידי</option>
+                        <option value="remote">מהבית</option>
+                    </select>
+                    <input
+                        className="w-full border border-border-default rounded-lg p-2 text-sm"
+                        placeholder="שעות / משמרות"
+                        value={publicBoard.hoursDescription}
+                        onChange={(e) => setPublicBoard((prev) => ({ ...prev, hoursDescription: e.target.value }))}
+                    />
+                    <div className="flex flex-wrap gap-3 text-sm">
+                        {[
+                            ['students', 'סטודנטים'],
+                            ['discharged_soldiers', 'חיילים משוחררים'],
+                            ['retirees', 'גמלאים'],
+                            ['parents', 'הורים'],
+                            ['disabilities', 'אנשים עם מוגבלות'],
+                        ].map(([value, label]) => (
+                            <label key={value} className="flex items-center gap-1">
+                                <input
+                                    type="checkbox"
+                                    checked={publicBoard.suitableFor.includes(value)}
+                                    onChange={(e) => setPublicBoard((prev) => ({
+                                        ...prev,
+                                        suitableFor: e.target.checked
+                                            ? [...prev.suitableFor, value]
+                                            : prev.suitableFor.filter((item) => item !== value),
+                                    }))}
+                                />
+                                {label}
+                            </label>
+                        ))}
+                    </div>
                 </div>
             </AccordionSection>
 
@@ -1257,7 +1394,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                                       : 'בהגדרות החברה נקבע מותג לקוח המשרה — חל אוטומטית על פרסום זה.'}
                             </p>
                         </div>
-                        {heroBrandDefaultPolicy === 'choice' ? (
+                        {heroBrandDefaultPolicy === 'choice' && (
                             <div className="flex flex-wrap gap-4">
                                 <label className="flex items-center gap-2 cursor-pointer">
                                     <input
@@ -1286,20 +1423,28 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                                     <span className="text-sm">לקוח המשרה</span>
                                 </label>
                             </div>
-                        ) : (
-                            <div className="flex flex-wrap items-center gap-2 text-sm">
-                                <span className="font-semibold text-text-default">
-                                    {heroBrandSource === 'job_client' ? 'לקוח המשרה' : 'חברה'}
-                                </span>
-                                <span className="text-text-muted">·</span>
-                                <span className="text-text-muted">{heroBrandPreview.brandName}</span>
-                                <span
-                                    className="inline-block w-4 h-4 rounded-full border border-border-default shrink-0"
-                                    style={{ backgroundColor: heroBrandPreview.baseColor }}
-                                    title={heroBrandPreview.baseColor}
-                                />
-                            </div>
                         )}
+                        <div className="flex flex-wrap items-center gap-2 text-sm">
+                            <span className="font-semibold text-text-default">
+                                {heroBrandSource === 'job_client' ? 'לקוח המשרה' : 'חברה'}
+                            </span>
+                            <span className="text-text-muted">·</span>
+                            <span className="text-text-muted">{heroBrandPreview.brandName}</span>
+                            {heroBrandPreview.logoUrl ? (
+                                <span className="inline-flex items-center justify-center h-10 w-24 bg-bg-card border border-border-default rounded-md px-1.5 shrink-0">
+                                    <img
+                                        src={heroBrandPreview.logoUrl}
+                                        alt={heroBrandPreview.brandName}
+                                        className="max-h-full max-w-full object-contain"
+                                    />
+                                </span>
+                            ) : null}
+                            <span
+                                className="inline-block w-4 h-4 rounded-full border border-border-default shrink-0"
+                                style={{ backgroundColor: heroBrandPreview.baseColor }}
+                                title={heroBrandPreview.baseColor}
+                            />
+                        </div>
                         <div className="flex flex-wrap items-center gap-3">
                             <label className="text-sm font-semibold text-text-muted">צבע למשרה זו</label>
                             <input

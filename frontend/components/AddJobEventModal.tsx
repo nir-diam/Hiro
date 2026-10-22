@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { XMarkIcon, PlusIcon } from './Icons';
 import { fetchEventTypes, filterEventTypesForContext, type EventTypeApiRow } from '../services/eventTypesApi';
 import { normalizeEventTypes } from '../utils/eventTypeChips';
@@ -188,11 +189,12 @@ const AddJobEventModal: React.FC<AddJobEventModalProps> = ({ isOpen, onClose, on
     );
   };
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black bg-opacity-40 p-4 pt-10 sm:pt-14 pb-8"
+      className="fixed inset-0 z-[200] overflow-y-auto bg-black/40"
       onClick={onClose}
     >
+      <div className="flex min-h-full items-center justify-center p-4">
       <div
         className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden text-text-default border border-border-default"
         onClick={(e) => e.stopPropagation()}
@@ -332,7 +334,9 @@ const AddJobEventModal: React.FC<AddJobEventModalProps> = ({ isOpen, onClose, on
           </footer>
         </form>
       </div>
-    </div>
+      </div>
+    </div>,
+    document.body,
   );
 };
 

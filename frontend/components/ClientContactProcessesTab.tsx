@@ -111,7 +111,11 @@ const ClientContactProcessesTab: React.FC<ClientContactProcessesTabProps> = ({
         cache: 'no-store',
       }).then((r) => (r.ok ? r.json() : [])),
       fetchPipelines(clientId).catch(() => [] as PipelineDto[]),
-      fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/events?summary=1&limit=1200`, {
+      fetch(
+        `${apiBase}/api/clients/${encodeURIComponent(clientId)}/events?summary=1&limit=1200${
+          contactId ? `&contactId=${encodeURIComponent(contactId)}` : ''
+        }`,
+        {
         headers: authHeaders(true),
         cache: 'no-store',
       }).then((r) => (r.ok ? r.json() : [])),
@@ -167,7 +171,7 @@ const ClientContactProcessesTab: React.FC<ClientContactProcessesTabProps> = ({
     return () => {
       active = false;
     };
-  }, [apiBase, clientId, organizationId, organizationTmpId]);
+  }, [apiBase, clientId, organizationId, organizationTmpId, contactId]);
 
   const scopedContacts = useMemo(() => {
     if (!contactId) return contacts;

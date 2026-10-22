@@ -1,5 +1,7 @@
 
 import React, { useCallback, useEffect, useState } from 'react';
+import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
+import { confirmLeaveWithoutSave } from '../utils/confirmLeaveWithoutSave';
 import { useParams } from 'react-router-dom';
 import { 
     BuildingOffice2Icon, 
@@ -397,9 +399,16 @@ export const ClientInsightsDashboard: React.FC<{
 
 interface ClientProfileViewProps {
     openMessageModal: (config: MessageModalConfig) => void;
+    openSummaryDrawer: (
+        candidate: import('./CandidatesListView').Candidate | number,
+        options?: import('../hooks/useUIState').SummaryDrawerOptions,
+    ) => void;
 }
 
-const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal }) => {
+const ClientProfileView: React.FC<ClientProfileViewProps> = ({
+    openMessageModal,
+    openSummaryDrawer,
+}) => {
     const { t } = useLanguage();
     const { clientId } = useParams<{ clientId: string }>();
     const [activeTab, setActiveTab] = useState<Tab>('details');
@@ -408,6 +417,17 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
     const [client, setClient] = useState<any | null>(null);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [detailsDirty, setDetailsDirty] = useState(false);
+    const [eventsDirty, setEventsDirty] = useState(false);
+    const hasUnsavedLeaveBlock = detailsDirty || eventsDirty;
+
+    useUnsavedChangesGuard(hasUnsavedLeaveBlock);
+
+    const trySetActiveTab = (tab: Tab) => {
+        if (tab === activeTab) return;
+        if (hasUnsavedLeaveBlock && !confirmLeaveWithoutSave()) return;
+        setActiveTab(tab);
+    };
 
     useEffect(() => {
         if (!apiBase || !clientId) return;
@@ -462,11 +482,21 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                             <ClientInsightsDashboard clientId={clientId!} creationDate={client?.creationDate || client?.createdAt} />
                         </div>
                         <div className="lg:col-span-1 space-y-6">
-                            <ClientDetailsTab client={client} onClientUpdated={setClient} />
+                            <ClientDetailsTab
+                                client={client}
+                                onDirtyChange={setDetailsDirty}
+                                onClientUpdated={setClient}
+                            />
                         </div>
                     </div>
                 );
-            case 'tasks': return <ClientTasksTab clientId={clientId!} />; 
+            case 'tasks':
+                return (
+                    <ClientTasksTab
+                        clientId={clientId!}
+                        onOpenCandidateSummary={openSummaryDrawer}
+                    />
+                ); 
             case 'contacts': return <ClientContactsTab clientId={clientId!} onOpenMessageModal={openMessageModal} />;
             case 'processes': return (
                 <ClientContactProcessesTab
@@ -475,7 +505,13 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                 />
             );
             case 'jobs': return <ClientJobsTab clientId={clientId!} allLinkedOrganizations />;
-            case 'events': return <ClientEventsTab clientId={clientId!} clientName={client.displayName || client.name} />;
+            case 'events': return (
+                <ClientEventsTab
+                    clientId={clientId!}
+                    clientName={client.displayName || client.name}
+                    onDirtyChange={setEventsDirty}
+                />
+            );
             case 'documents': return <ClientDocumentsTab clientId={clientId!} clientName={client.displayName || client.name} />;
             case 'finance': return <ClientFinanceTab clientId={clientId!} clientName={client.displayName || client.name} />;
             case 'history': return <ClientHistoryTab clientId={clientId!} clientName={client.displayName || client.name} />;
@@ -495,7 +531,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                     {tabs.map(tab => (
                          <button 
                             key={tab.id}
-                            onClick={() => setActiveTab(tab.id)}
+                            onClick={() => trySetActiveTab(tab.id)}
                             className={`flex items-center gap-2 py-3 px-5 font-semibold transition-colors shrink-0 ${activeTab === tab.id ? 'border-b-2 border-primary-500 text-primary-600' : 'text-text-muted hover:text-text-default'}`}
                         >
                             {React.cloneElement(tab.icon as React.ReactElement<{ className?: string }>, { className: 'w-5 h-5' })}

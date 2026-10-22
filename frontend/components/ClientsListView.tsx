@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { 
     PlusIcon, MagnifyingGlassIcon, BuildingOffice2Icon, PencilIcon, TrashIcon, 
     Cog6ToothIcon, ChevronDownIcon, TableCellsIcon, Squares2X2Icon, 
@@ -58,6 +58,7 @@ export interface Client {
   notes?: string;
   isContactProcess?: boolean;
   logo?: string;
+  createdAt?: string;
 }
 
 export interface Contact {
@@ -76,6 +77,7 @@ export interface Contact {
     pipelineId?: string;
     stageId?: string;
     createdAt?: string;
+    updatedAt?: string;
 }
 
 export type LinkedOrganizationItem = {
@@ -95,6 +97,190 @@ export type LinkedOrganizationItem = {
     statusLabel: string;
     pipelineId?: string;
     pipelineStage?: string;
+    createdAt?: string;
+    updatedAt?: string;
+};
+
+function pickIsoDate(value: unknown): string | undefined {
+    if (value == null || value === '') return undefined;
+    if (typeof value === 'string') {
+        const d = new Date(value);
+        return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+    }
+    if (value instanceof Date) {
+        return Number.isNaN(value.getTime()) ? undefined : value.toISOString();
+    }
+    const d = new Date(value as string | number);
+    return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+function formatListDate(value?: string | null): string {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString('he-IL');
+}
+
+type DateRangeFilter = { from: string; to: string };
+
+const CLIENT_DATE_COLUMNS = new Set(['lastContact', 'nextActivity', 'createdAt']);
+const ORG_DATE_COLUMNS = new Set(['createdAt', 'updatedAt']);
+const CONTACT_DATE_COLUMNS = new Set(['createdAt', 'updatedAt']);
+
+const columnFilterInputClass =
+    'w-full min-w-[6.5rem] bg-bg-card border border-border-default rounded-md px-1.5 py-1 text-[11px] font-normal normal-case text-text-default focus:ring-1 focus:ring-primary-500 outline-none';
+
+function matchesTextColumnFilter(value: string, query: string | undefined): boolean {
+    const q = String(query || '').trim().toLowerCase();
+    if (!q) return true;
+    return String(value || '').toLowerCase().includes(q);
+}
+
+/** "51-100" / "1000+" contains the typed headcount; "20-50" does not contain 55. */
+function parseHeadcountSpan(label: string): { min: number; max: number } | null {
+    const s = String(label || '').replace(/,/g, '').replace(/[–—]/g, '-');
+    const range = s.match(/(\d+)\s*-\s*(\d+)/);
+    if (range) {
+        const min = Number(range[1]);
+        const max = Number(range[2]);
+        if (Number.isFinite(min) && Number.isFinite(max)) return { min: Math.min(min, max), max: Math.max(min, max) };
+    }
+    const plus = s.match(/(\d+)\s*\+/);
+    if (plus) {
+        const min = Number(plus[1]);
+        if (Number.isFinite(min)) return { min, max: Number.POSITIVE_INFINITY };
+    }
+    const exact = s.trim().match(/^(\d+)$/);
+    if (exact) {
+        const n = Number(exact[1]);
+        if (Number.isFinite(n)) return { min: n, max: n };
+    }
+    return null;
+}
+
+function matchesHeadcountFilter(value: string, query: string | undefined): boolean {
+    const q = String(query || '').trim().replace(/,/g, '');
+    if (!q) return true;
+    if (/^\d+$/.test(q)) {
+        const n = Number(q);
+        const span = parseHeadcountSpan(value);
+        if (!span) return false;
+        return n >= span.min && n <= span.max;
+    }
+    return matchesTextColumnFilter(value, query);
+}
+
+function dateSortValue(iso?: string | null): number | null {
+    if (!iso) return null;
+    const ts = new Date(iso).getTime();
+    return Number.isNaN(ts) ? null : ts;
+}
+
+function compareColumnSort(
+    a: string | number | null | undefined,
+    b: string | number | null | undefined,
+    direction: 'asc' | 'desc',
+): number {
+    const dir = direction === 'asc' ? 1 : -1;
+    const aEmpty = a == null || a === '';
+    const bEmpty = b == null || b === '';
+    if (aEmpty && bEmpty) return 0;
+    if (aEmpty) return 1;
+    if (bEmpty) return -1;
+    if (typeof a === 'number' && typeof b === 'number') {
+        if (a === b) return 0;
+        return a < b ? -dir : dir;
+    }
+    return String(a).localeCompare(String(b), 'he', { numeric: true, sensitivity: 'base' }) * dir;
+}
+
+const PULSE_SORT_RANK: Record<'green' | 'yellow' | 'red', number> = { green: 0, yellow: 1, red: 2 };
+
+function matchesDateColumnFilter(iso: string | null | undefined, range: DateRangeFilter | undefined): boolean {
+    if (!range || (!range.from && !range.to)) return true;
+    if (!iso) return false;
+    const ts = new Date(iso).getTime();
+    if (Number.isNaN(ts)) return false;
+    if (range.from) {
+        const from = new Date(range.from).setHours(0, 0, 0, 0);
+        if (ts < from) return false;
+    }
+    if (range.to) {
+        const to = new Date(range.to).setHours(23, 59, 59, 999);
+        if (ts > to) return false;
+    }
+    return true;
+}
+
+function rowMatchesColumnFilters(
+    dateColumnIds: Set<string>,
+    textFor: (columnId: string) => string,
+    dateFor: (columnId: string) => string | null | undefined,
+    textFilters: Record<string, string>,
+    dateFilters: Record<string, DateRangeFilter>,
+): boolean {
+    for (const [columnId, query] of Object.entries(textFilters)) {
+        if (dateColumnIds.has(columnId) || columnId === 'actions') continue;
+        const cell = textFor(columnId);
+        const matches = columnId === 'employeeCount'
+            ? matchesHeadcountFilter(cell, query)
+            : matchesTextColumnFilter(cell, query);
+        if (!matches) return false;
+    }
+    for (const columnId of dateColumnIds) {
+        if (!matchesDateColumnFilter(dateFor(columnId), dateFilters[columnId])) return false;
+    }
+    return true;
+}
+
+const ColumnFilterCell: React.FC<{
+    columnId: string;
+    dateColumnIds: Set<string>;
+    textFilters: Record<string, string>;
+    dateFilters: Record<string, DateRangeFilter>;
+    onTextChange: (columnId: string, value: string) => void;
+    onDateChange: (columnId: string, patch: Partial<DateRangeFilter>) => void;
+}> = ({ columnId, dateColumnIds, textFilters, dateFilters, onTextChange, onDateChange }) => {
+    if (columnId === 'actions') {
+        return <th className="px-2 pb-2" />;
+    }
+    if (dateColumnIds.has(columnId)) {
+        const range = dateFilters[columnId] || { from: '', to: '' };
+        return (
+            <th className="px-2 pb-2 align-top font-normal normal-case" onClick={(e) => e.stopPropagation()}>
+                <div className="flex flex-col gap-1">
+                    <input
+                        type="date"
+                        dir="ltr"
+                        aria-label="מתאריך"
+                        value={range.from}
+                        onChange={(e) => onDateChange(columnId, { from: e.target.value })}
+                        className={columnFilterInputClass}
+                    />
+                    <input
+                        type="date"
+                        dir="ltr"
+                        aria-label="עד תאריך"
+                        value={range.to}
+                        onChange={(e) => onDateChange(columnId, { to: e.target.value })}
+                        className={columnFilterInputClass}
+                    />
+                </div>
+            </th>
+        );
+    }
+    return (
+        <th className="px-2 pb-2 align-top font-normal normal-case" onClick={(e) => e.stopPropagation()}>
+            <input
+                type="search"
+                value={textFilters[columnId] || ''}
+                onChange={(e) => onTextChange(columnId, e.target.value)}
+                placeholder={columnId === 'employeeCount' ? 'מספר בטווח' : 'סינון'}
+                aria-label={columnId === 'employeeCount' ? 'מספר בטווח' : 'סינון'}
+                className={columnFilterInputClass}
+            />
+        </th>
+    );
 };
 
 const normalizeLinkedOrganization = (raw: Record<string, unknown>): LinkedOrganizationItem => {
@@ -125,6 +311,10 @@ const normalizeLinkedOrganization = (raw: Record<string, unknown>): LinkedOrgani
         statusLabel: isPending ? 'ממתין לאישור' : String(source.activityStatus || source.dataConfidence || 'מאושר'),
         pipelineId: raw.pipelineId ? String(raw.pipelineId) : undefined,
         pipelineStage: raw.pipelineStage ? String(raw.pipelineStage) : undefined,
+        createdAt: pickIsoDate(raw.createdAt || raw.created_at || source.createdAt || source.created_at),
+        updatedAt: pickIsoDate(
+            source.updatedAt || source.updated_at || raw.updatedAt || raw.updated_at,
+        ),
     };
 };
 
@@ -519,6 +709,7 @@ const normalizeClient = (raw: any): Client => {
         notes: raw.metadata?.notes,
         isContactProcess: Boolean(raw.metadata?.isContactProcess),
         logo: raw.logoUrl || raw.metadata?.logo,
+        createdAt: pickIsoDate(raw.creationDate || raw.createdAt || raw.created_at),
     };
 };
 
@@ -564,7 +755,7 @@ function mapServerContactToListContact(
     const tenantClientName = String(clientRow?.displayName || clientRow?.name || fallback?.name || '').trim();
     // Prefer organization name for "שם לקוח" when the contact is linked to an org.
     const clientName = orgName || tenantClientName || 'לקוח';
-    const logo = row.organizationLogo || orgRow?.logo || linkedOrg?.logo || clientRow?.logoUrl || fallback?.logo;
+    const logo = String(row.organizationLogo || orgRow?.logo || linkedOrg?.logo || '').trim() || undefined;
     const nm = String(row.name || '').trim();
     const initials =
         nm
@@ -573,13 +764,8 @@ function mapServerContactToListContact(
             .slice(0, 2)
             .map((w) => w[0])
             .join('') || '?';
-    const createdRaw = row.createdAt || row.updatedAt;
-    const createdAt =
-        typeof createdRaw === 'string'
-            ? createdRaw
-            : createdRaw
-              ? new Date(createdRaw).toISOString()
-              : undefined;
+    const createdAt = pickIsoDate(row.createdAt || row.created_at);
+    const updatedAt = pickIsoDate(row.updatedAt || row.updated_at);
     const contactPipelineId = row.pipelineId ? String(row.pipelineId) : undefined;
     const contactStageId = row.processStage ? String(row.processStage) : undefined;
     const stageFromMeta = contactStageId || undefined;
@@ -598,6 +784,7 @@ function mapServerContactToListContact(
         pipelineId: contactPipelineId || inferPipelineIdForStage(stageFromMeta, pipelines),
         stageId: stageFromMeta || undefined,
         createdAt,
+        updatedAt,
     };
 }
 
@@ -618,6 +805,7 @@ const allClientColumns = [
     { id: 'pipelineStage', label: 'שלב מכירה' },
     { id: 'contactPerson', label: 'איש קשר' },
     { id: 'phone', label: 'טלפון' },
+    { id: 'createdAt', label: 'תאריך יצירה' },
     { id: 'actions', label: 'פעולות' }
 ];
 
@@ -628,6 +816,8 @@ const allLinkedOrgColumns = [
     { id: 'location', label: 'מיקום' },
     { id: 'employeeCount', label: 'עובדים' },
     { id: 'website', label: 'אתר' },
+    { id: 'createdAt', label: 'תאריך יצירה' },
+    { id: 'updatedAt', label: 'תאריך עדכון' },
     { id: 'actions', label: 'פעולות' },
 ];
 
@@ -638,6 +828,8 @@ const allContactColumns = [
     { id: 'phone', label: 'טלפון' },
     { id: 'email', label: 'אימייל' },
     { id: 'lastContact', label: 'קשר אחרון' },
+    { id: 'createdAt', label: 'תאריך יצירה' },
+    { id: 'updatedAt', label: 'תאריך עדכון' },
     { id: 'actions', label: 'פעולות' }
 ];
 
@@ -1025,13 +1217,11 @@ const ContactGridCard: React.FC<{
                 <h4 className="font-bold text-text-default text-lg">{contact.name}</h4>
                 <p className="text-primary-600 font-medium text-sm">{contact.role}</p>
                 <div className="flex items-center justify-center gap-1.5 mt-1.5 bg-bg-subtle px-2 py-1 rounded-md">
+                    {contact.clientLogo ? (
                     <div className="w-4 h-4 rounded bg-white border border-border-default flex items-center justify-center text-[8px] font-bold text-text-muted shrink-0 overflow-hidden">
-                        {contact.clientLogo ? (
                             <img src={contact.clientLogo} alt={contact.clientName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                        ) : (
-                            contact.clientName.substring(0, 2)
-                        )}
                     </div>
+                    ) : null}
                     <p className="text-text-muted text-xs font-medium">{contact.clientName}</p>
                 </div>
             </div>
@@ -1044,6 +1234,14 @@ const ContactGridCard: React.FC<{
                 <div className="flex items-center gap-2 justify-center bg-bg-subtle/50 py-1.5 px-3 rounded-lg truncate">
                     <EnvelopeIcon className="w-3.5 h-3.5"/>
                     {contact.email}
+                </div>
+                <div className="flex items-center gap-2 justify-center text-xs text-text-subtle">
+                    <CalendarDaysIcon className="w-3.5 h-3.5"/>
+                    תאריך יצירה: {formatListDate(contact.createdAt)}
+                </div>
+                <div className="flex items-center gap-2 justify-center text-xs text-text-subtle">
+                    <ClockIcon className="w-3.5 h-3.5"/>
+                    תאריך עדכון: {formatListDate(contact.updatedAt)}
                 </div>
             </div>
 
@@ -1144,6 +1342,10 @@ const ClientGridCard: React.FC<{
              {/* New data display */}
              <div className="text-xs text-text-subtle mt-2 pt-2 border-t border-border-subtle/50 flex flex-col gap-1">
                  <div className="flex justify-between">
+                     <span>תאריך יצירה:</span>
+                     <span>{formatListDate(client.createdAt)}</span>
+                 </div>
+                 <div className="flex justify-between">
                      <span>קשר אחרון:</span>
                      <span className={client.daysSinceLastContact > 14 ? 'text-red-500 font-bold' : ''}>לפני {client.daysSinceLastContact} ימים</span>
                  </div>
@@ -1241,13 +1443,21 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const { t } = useLanguage();
     const { user, ready: authReady } = useAuth();
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const tenantClientId = !isPlatformAdmin && user?.clientId ? String(user.clientId) : null;
     const isTenantUser = Boolean(tenantClientId);
     
     // --- Tabs State ---
+    type ClientsListTab = 'companies' | 'contacts' | 'tasks' | 'events';
     const CLIENTS_ACTIVE_TAB_KEY = 'hiro.clientsList.activeTab';
-    const loadClientsActiveTab = (): 'companies' | 'contacts' | 'tasks' | 'events' => {
+    const parseClientsListTab = (raw: string | null): ClientsListTab | null => {
+        if (raw === 'contacts' || raw === 'companies' || raw === 'tasks' || raw === 'events') return raw;
+        return null;
+    };
+    const loadClientsActiveTab = (): ClientsListTab => {
+        const fromUrl = parseClientsListTab(searchParams.get('tab'));
+        if (fromUrl) return fromUrl;
         if (typeof sessionStorage === 'undefined') return 'companies';
         try {
             const saved = sessionStorage.getItem(CLIENTS_ACTIVE_TAB_KEY);
@@ -1257,7 +1467,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         }
         return 'companies';
     };
-    const [activeTab, setActiveTab] = useState<'companies' | 'contacts' | 'tasks' | 'events'>(loadClientsActiveTab);
+    const [activeTab, setActiveTab] = useState<ClientsListTab>(loadClientsActiveTab);
+
+    useEffect(() => {
+        const fromUrl = parseClientsListTab(searchParams.get('tab'));
+        if (fromUrl) setActiveTab(fromUrl);
+    }, [searchParams]);
 
     useEffect(() => {
         if (typeof sessionStorage === 'undefined') return;
@@ -1528,14 +1743,15 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [contactsLoading, setContactsLoading] = useState(false);
     const [contactsError, setContactsError] = useState<string | null>(null);
     const [linkedOrgVisibleColumns, setLinkedOrgVisibleColumns] = useState<string[]>([
-        'name', 'health', 'mainField', 'location', 'employeeCount', 'website', 'actions',
+        'name', 'health', 'mainField', 'location', 'employeeCount', 'website', 'createdAt', 'updatedAt', 'actions',
     ]);
     /** Multi-select on companies tab: client.id (admin) or linkId (tenant orgs). */
     const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
     const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
-    const [contactVisibleColumns, setContactVisibleColumns] = useState<string[]>(['name', 'role', 'clientName', 'phone', 'email', 'lastContact', 'actions']);
+    const [contactVisibleColumns, setContactVisibleColumns] = useState<string[]>(['name', 'role', 'clientName', 'phone', 'email', 'lastContact', 'createdAt', 'updatedAt', 'actions']);
     const [isColumnPopoverOpen, setIsColumnPopoverOpen] = useState(false);
-    const [contactSortConfig, setContactSortConfig] = useState<{ key: keyof Contact; direction: 'asc' | 'desc' } | null>(null);
+    const [contactSortConfig, setContactSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+    const [orgSortConfig, setOrgSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     
     // New Contact Drawer State
     const [selectedContactForDrawer, setSelectedContactForDrawer] = useState<Contact | null>(null);
@@ -1551,8 +1767,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     // --- Clients Table State ---
     // Added 'health', 'lastContact', 'nextActivity'
-    const [clientVisibleColumns, setClientVisibleColumns] = useState<string[]>(['health', 'name', 'status', 'pipelineStage', 'lastContact', 'nextActivity', 'contactPerson', 'phone', 'actions']);
-    const [clientSortConfig, setClientSortConfig] = useState<{ key: keyof Client; direction: 'asc' | 'desc' } | null>(null);
+    const [clientVisibleColumns, setClientVisibleColumns] = useState<string[]>(['health', 'name', 'status', 'pipelineStage', 'lastContact', 'nextActivity', 'contactPerson', 'phone', 'createdAt', 'actions']);
+    const [clientSortConfig, setClientSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     const [isClientColumnPopoverOpen, setIsClientColumnPopoverOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const dragItemIndex = useRef<number | null>(null);
@@ -1583,6 +1799,23 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [filterContactStage, setFilterContactStage] = useState<string>('all');
     const [filterContactDateFrom, setFilterContactDateFrom] = useState('');
     const [filterContactDateTo, setFilterContactDateTo] = useState('');
+    const [clientColumnTextFilters, setClientColumnTextFilters] = useState<Record<string, string>>({});
+    const [clientColumnDateFilters, setClientColumnDateFilters] = useState<Record<string, DateRangeFilter>>({});
+    const [orgColumnTextFilters, setOrgColumnTextFilters] = useState<Record<string, string>>({});
+    const [orgColumnDateFilters, setOrgColumnDateFilters] = useState<Record<string, DateRangeFilter>>({});
+    const [contactColumnTextFilters, setContactColumnTextFilters] = useState<Record<string, string>>({});
+    const [contactColumnDateFilters, setContactColumnDateFilters] = useState<Record<string, DateRangeFilter>>({});
+
+    const patchDateFilter = (
+        setter: React.Dispatch<React.SetStateAction<Record<string, DateRangeFilter>>>,
+        columnId: string,
+        patch: Partial<DateRangeFilter>,
+    ) => {
+        setter((prev) => ({
+            ...prev,
+            [columnId]: { from: '', to: '', ...prev[columnId], ...patch },
+        }));
+    };
     
     const [isBulkProcessMenuOpen, setIsBulkProcessMenuOpen] = useState(false);
     const [bulkProcessTarget, setBulkProcessTarget] = useState<'companies' | 'contacts' | null>(null);
@@ -1642,9 +1875,56 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             if (activePipelineId !== 'all' && activePipeline) {
                 if (!orgMatchesPipelineFilter(org, activePipeline, activeStageId)) return false;
             }
-            return true;
+            const pulse = org.organizationId ? orgPulseById[org.organizationId] : null;
+            const health = pulse
+                ? `${pulseLevelStyles[(pulse.level as ClientPulseLevel) || 'green']?.label || ''} ${pulse.message || ''}`
+                : (() => {
+                    const fallback = getOrgHealthData(org);
+                    return `${pulseLevelStyles[fallback.level].label} ${fallback.message}`;
+                })();
+            return rowMatchesColumnFilters(
+                ORG_DATE_COLUMNS,
+                (columnId) => {
+                    if (columnId === 'name') {
+                        return [org.name, org.isPrimary ? 'ראשית' : '', org.isPending ? 'ממתין' : ''].filter(Boolean).join(' ');
+                    }
+                    if (columnId === 'health') return health;
+                    if (columnId === 'mainField') return org.mainField;
+                    if (columnId === 'location') return org.location;
+                    if (columnId === 'employeeCount') return org.employeeCount;
+                    if (columnId === 'website') return formatWebsiteHost(org.website);
+                    return '';
+                },
+                (columnId) => (columnId === 'updatedAt' ? org.updatedAt : org.createdAt),
+                orgColumnTextFilters,
+                orgColumnDateFilters,
+            );
         });
-    }, [linkedOrganizations, searchTerm, companyFilters, selectedLocations, activePipelineId, activeStageId, activePipeline]);
+    }, [linkedOrganizations, searchTerm, companyFilters, selectedLocations, activePipelineId, activeStageId, activePipeline, orgPulseById, orgColumnTextFilters, orgColumnDateFilters]);
+
+    const sortedLinkedOrganizations = useMemo(() => {
+        const rows = [...filteredLinkedOrganizations];
+        if (!orgSortConfig || orgSortConfig.key === 'actions') return rows;
+        const key = orgSortConfig.key;
+        rows.sort((a, b) => compareColumnSort(orgSortValue(a), orgSortValue(b), orgSortConfig.direction));
+        return rows;
+
+        function orgSortValue(org: LinkedOrganizationItem): string | number | null {
+            if (key === 'name') return org.name;
+            if (key === 'health') {
+                const pulse = org.organizationId ? orgPulseById[org.organizationId] : null;
+                const level = pulse?.level || getOrgHealthData(org).level;
+                return PULSE_SORT_RANK[level] ?? 0;
+            }
+            if (key === 'mainField') return org.mainField;
+            if (key === 'location') return org.location;
+            if (key === 'employeeCount') return org.employeeCount;
+            if (key === 'website') return org.website ? formatWebsiteHost(org.website) : '';
+            if (key === 'createdAt') return dateSortValue(org.createdAt);
+            if (key === 'updatedAt') return dateSortValue(org.updatedAt);
+            return '';
+        }
+    }, [filteredLinkedOrganizations, orgSortConfig, orgPulseById]);
     
     // Dynamic Filter Options
     const accountManagers = useMemo(() => Array.from(new Set(clients.map(c => c.accountManager))), [clients]);
@@ -1725,25 +2005,66 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  return true;
              });
 
-             return matchesSearch && matchesPipeline && matchesManager && matchesIndustry && matchesLocation;
+             if (!(matchesSearch && matchesPipeline && matchesManager && matchesIndustry && matchesLocation)) {
+                 return false;
+             }
+             return rowMatchesColumnFilters(
+                 CLIENT_DATE_COLUMNS,
+                 (columnId) => {
+                     if (columnId === 'health') {
+                         const health = getClientHealthData(c);
+                         return `${pulseLevelStyles[health.level].label} ${health.message}`;
+                     }
+                     if (columnId === 'name') return `${c.name} ${c.industry || ''}`;
+                     if (columnId === 'status') return c.status;
+                     if (columnId === 'pipelineStage') {
+                         for (const pipeline of pipelines) {
+                             const found = pipeline.stages.find((s) => s.id === c.pipelineStage);
+                             if (found) return found.name;
+                         }
+                         return c.pipelineStage || '';
+                     }
+                     if (columnId === 'contactPerson') return c.contactPerson;
+                     if (columnId === 'phone') return c.phone;
+                     return '';
+                 },
+                 (columnId) => {
+                     if (columnId === 'lastContact') return c.lastContactDate;
+                     if (columnId === 'nextActivity') return c.nextScheduledActivity;
+                     return c.createdAt;
+                 },
+                 clientColumnTextFilters,
+                 clientColumnDateFilters,
+             );
         });
-    }, [clients, searchTerm, activePipelineId, activeStageId, activePipeline, filterAccountManager, companyFilters, selectedLocations]);
+    }, [clients, searchTerm, activePipelineId, activeStageId, activePipeline, filterAccountManager, companyFilters, selectedLocations, pipelines, clientColumnTextFilters, clientColumnDateFilters]);
 
     const sortedClients = useMemo(() => {
-        let sortable = [...filteredClients];
-        if (clientSortConfig) {
-            sortable.sort((a, b) => {
-                // @ts-ignore
-                const aVal = a[clientSortConfig.key];
-                // @ts-ignore
-                const bVal = b[clientSortConfig.key];
-                if (aVal < bVal) return clientSortConfig.direction === 'asc' ? -1 : 1;
-                if (aVal > bVal) return clientSortConfig.direction === 'asc' ? 1 : -1;
-                return 0;
-            });
-        }
+        const sortable = [...filteredClients];
+        if (!clientSortConfig || clientSortConfig.key === 'actions') return sortable;
+        const key = clientSortConfig.key;
+        sortable.sort((a, b) => compareColumnSort(clientSortValue(a), clientSortValue(b), clientSortConfig.direction));
         return sortable;
-    }, [filteredClients, clientSortConfig]);
+
+        function clientSortValue(client: Client): string | number | null {
+            if (key === 'health') return PULSE_SORT_RANK[getClientHealthData(client).level];
+            if (key === 'name') return client.name;
+            if (key === 'lastContact') return dateSortValue(client.lastContactDate);
+            if (key === 'nextActivity') return dateSortValue(client.nextScheduledActivity);
+            if (key === 'status') return client.status;
+            if (key === 'pipelineStage') {
+                for (const pipeline of pipelines) {
+                    const found = pipeline.stages.find((s) => s.id === client.pipelineStage);
+                    if (found) return found.name;
+                }
+                return client.pipelineStage || '';
+            }
+            if (key === 'contactPerson') return client.contactPerson;
+            if (key === 'phone') return client.phone;
+            if (key === 'createdAt') return dateSortValue(client.createdAt);
+            return '';
+        }
+    }, [filteredClients, clientSortConfig, pipelines]);
 
 
     const filteredContacts = useMemo(() => {
@@ -1782,49 +2103,74 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 }
             }
 
-            return matchesSearch && matchesRole && matchesClient && matchesPipeline && matchesStage && matchesDate;
+            if (!(matchesSearch && matchesRole && matchesClient && matchesPipeline && matchesStage && matchesDate)) {
+                return false;
+            }
+            return rowMatchesColumnFilters(
+                CONTACT_DATE_COLUMNS,
+                (columnId) => {
+                    if (columnId === 'name') return c.name;
+                    if (columnId === 'role') return c.role;
+                    if (columnId === 'clientName') return c.clientName;
+                    if (columnId === 'phone') return c.phone;
+                    if (columnId === 'email') return c.email;
+                    if (columnId === 'lastContact') return c.lastContact;
+                    return '';
+                },
+                (columnId) => (columnId === 'updatedAt' ? c.updatedAt : c.createdAt),
+                contactColumnTextFilters,
+                contactColumnDateFilters,
+            );
         });
-    }, [contacts, searchTerm, filterContactRole, filterContactClient, filterContactPipeline, filterContactStage, filterContactDateFrom, filterContactDateTo, pipelines]);
+    }, [contacts, searchTerm, filterContactRole, filterContactClient, filterContactPipeline, filterContactStage, filterContactDateFrom, filterContactDateTo, pipelines, contactColumnTextFilters, contactColumnDateFilters]);
 
     // --- Sorting Logic (Contacts) ---
     const sortedContacts = useMemo(() => {
-        let sortable = [...filteredContacts];
-        if (contactSortConfig) {
-            sortable.sort((a, b) => {
-                const aVal = a[contactSortConfig.key];
-                const bVal = b[contactSortConfig.key];
-                if (aVal < bVal) return contactSortConfig.direction === 'asc' ? -1 : 1;
-                if (aVal > bVal) return contactSortConfig.direction === 'asc' ? 1 : -1;
-                return 0;
-            });
-        }
+        const sortable = [...filteredContacts];
+        if (!contactSortConfig || contactSortConfig.key === 'actions') return sortable;
+        const key = contactSortConfig.key;
+        sortable.sort((a, b) => compareColumnSort(contactSortValue(a), contactSortValue(b), contactSortConfig.direction));
         return sortable;
+
+        function contactSortValue(contact: Contact): string | number | null {
+            if (key === 'name') return contact.name;
+            if (key === 'role') return contact.role;
+            if (key === 'clientName') return contact.clientName;
+            if (key === 'phone') return contact.phone;
+            if (key === 'email') return contact.email;
+            if (key === 'lastContact') return dateSortValue(contact.updatedAt || contact.createdAt);
+            if (key === 'createdAt') return dateSortValue(contact.createdAt);
+            if (key === 'updatedAt') return dateSortValue(contact.updatedAt);
+            return '';
+        }
     }, [filteredContacts, contactSortConfig]);
 
-    const requestContactSort = (key: keyof Contact) => {
-        let direction: 'asc' | 'desc' = 'asc';
-        if (contactSortConfig && contactSortConfig.key === key && contactSortConfig.direction === 'asc') {
-            direction = 'desc';
-        }
-        setContactSortConfig({ key, direction });
+    const toggleSort = (
+        current: { key: string; direction: 'asc' | 'desc' } | null,
+        key: string,
+    ): { key: string; direction: 'asc' | 'desc' } => {
+        if (current?.key === key && current.direction === 'asc') return { key, direction: 'desc' };
+        return { key, direction: 'asc' };
     };
 
-    const requestClientSort = (key: keyof Client) => {
-        let direction: 'asc' | 'desc' = 'asc';
-        if (clientSortConfig && clientSortConfig.key === key && clientSortConfig.direction === 'asc') {
-            direction = 'desc';
-        }
-        setClientSortConfig({ key, direction });
+    const requestContactSort = (key: string) => {
+        if (key === 'actions') return;
+        setContactSortConfig((prev) => toggleSort(prev, key));
     };
 
-    const getContactSortIndicator = (key: keyof Contact) => {
-         if (!contactSortConfig || contactSortConfig.key !== key) return null;
-         return <span className="text-primary-500 ml-1 text-xs">{contactSortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
+    const requestClientSort = (key: string) => {
+        if (key === 'actions') return;
+        setClientSortConfig((prev) => toggleSort(prev, key));
     };
 
-    const getClientSortIndicator = (key: keyof Client) => {
-         if (!clientSortConfig || clientSortConfig.key !== key) return null;
-         return <span className="text-primary-500 ml-1 text-xs">{clientSortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
+    const requestOrgSort = (key: string) => {
+        if (key === 'actions') return;
+        setOrgSortConfig((prev) => toggleSort(prev, key));
+    };
+
+    const sortIndicator = (active: { key: string; direction: 'asc' | 'desc' } | null, key: string) => {
+        if (!active || active.key !== key) return null;
+        return <span className="text-primary-500 mr-1 text-xs">{active.direction === 'asc' ? '▲' : '▼'}</span>;
     };
 
 
@@ -2697,8 +3043,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 { key: 'role', label: 'תפקיד' },
                 { key: 'clientName', label: 'שם לקוח' },
                 { key: 'phone', label: 'טלפון' },
-                { key: 'email', label: 'אימייל' },
-                { key: 'lastContact', label: 'קשר אחרון' },
+                    { key: 'email', label: 'אימייל' },
+                    { key: 'lastContact', label: 'קשר אחרון' },
+                    { key: 'createdAt', label: 'תאריך יצירה' },
+                    { key: 'updatedAt', label: 'תאריך עדכון' },
             ],
             `contacts_${stamp}.xlsx`,
         );
@@ -2720,6 +3068,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                     { key: 'employeeCount', label: 'עובדים' },
                     { key: 'website', label: 'אתר' },
                     { key: 'statusLabel', label: 'סטטוס' },
+                    { key: 'createdAt', label: 'תאריך יצירה' },
+                    { key: 'updatedAt', label: 'תאריך עדכון' },
                 ],
                 `companies_${stamp}.xlsx`,
             );
@@ -2738,6 +3088,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                     { key: 'contactPerson', label: 'איש קשר' },
                     { key: 'phone', label: 'טלפון' },
                     { key: 'email', label: 'אימייל' },
+                    { key: 'createdAt', label: 'תאריך יצירה' },
                 ],
                 `clients_${stamp}.xlsx`,
             );
@@ -2977,6 +3328,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 return client.contactPerson;
             case 'phone':
                  return <span dir="ltr">{client.phone}</span>;
+            case 'createdAt':
+                return <span className="text-xs text-text-muted whitespace-nowrap">{formatListDate(client.createdAt)}</span>;
             case 'openJobs':
                 return <span className="inline-block bg-primary-50 text-primary-700 px-2 py-1 rounded text-xs font-bold">{client.openJobs}</span>;
             case 'actions':
@@ -3056,6 +3409,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             setSelectedLocations([]);
             setActivePipelineId('all');
             setActiveStageId('all');
+            setClientColumnTextFilters({});
+            setClientColumnDateFilters({});
+            setOrgColumnTextFilters({});
+            setOrgColumnDateFilters({});
         } else if (activeTab === 'contacts') {
             setFilterContactRole('all');
             setFilterContactClient('all');
@@ -3063,6 +3420,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             setFilterContactStage('all');
             setFilterContactDateFrom('');
             setFilterContactDateTo('');
+            setContactColumnTextFilters({});
+            setContactColumnDateFilters({});
         }
     };
 
@@ -3139,6 +3498,40 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                     onRemove: () => setActiveStageId('all'),
                 });
             }
+            const companyColumns = isTenantUser ? allLinkedOrgColumns : allClientColumns;
+            const companyTextFilters = isTenantUser ? orgColumnTextFilters : clientColumnTextFilters;
+            const companyDateFilters = isTenantUser ? orgColumnDateFilters : clientColumnDateFilters;
+            const companyDateColumns = isTenantUser ? ORG_DATE_COLUMNS : CLIENT_DATE_COLUMNS;
+            for (const col of companyColumns) {
+                if (col.id === 'actions') continue;
+                if (companyDateColumns.has(col.id)) {
+                    const range = companyDateFilters[col.id];
+                    if (range?.from || range?.to) {
+                        chips.push({
+                            id: `col-date:${col.id}`,
+                            group: col.label,
+                            label: `${range.from || '…'} – ${range.to || '…'}`,
+                            onRemove: () => {
+                                const clear = { from: '', to: '' };
+                                if (isTenantUser) setOrgColumnDateFilters((prev) => ({ ...prev, [col.id]: clear }));
+                                else setClientColumnDateFilters((prev) => ({ ...prev, [col.id]: clear }));
+                            },
+                        });
+                    }
+                    continue;
+                }
+                const q = (companyTextFilters[col.id] || '').trim();
+                if (!q) continue;
+                chips.push({
+                    id: `col-text:${col.id}`,
+                    group: col.label,
+                    label: q,
+                    onRemove: () => {
+                        if (isTenantUser) setOrgColumnTextFilters((prev) => ({ ...prev, [col.id]: '' }));
+                        else setClientColumnTextFilters((prev) => ({ ...prev, [col.id]: '' }));
+                    },
+                });
+            }
         }
 
         if (activeTab === 'contacts') {
@@ -3190,6 +3583,29 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                     },
                 });
             }
+            for (const col of allContactColumns) {
+                if (col.id === 'actions') continue;
+                if (CONTACT_DATE_COLUMNS.has(col.id)) {
+                    const range = contactColumnDateFilters[col.id];
+                    if (range?.from || range?.to) {
+                        chips.push({
+                            id: `contact-col-date:${col.id}`,
+                            group: col.label,
+                            label: `${range.from || '…'} – ${range.to || '…'}`,
+                            onRemove: () => setContactColumnDateFilters((prev) => ({ ...prev, [col.id]: { from: '', to: '' } })),
+                        });
+                    }
+                    continue;
+                }
+                const q = (contactColumnTextFilters[col.id] || '').trim();
+                if (!q) continue;
+                chips.push({
+                    id: `contact-col-text:${col.id}`,
+                    group: col.label,
+                    label: q,
+                    onRemove: () => setContactColumnTextFilters((prev) => ({ ...prev, [col.id]: '' })),
+                });
+            }
         }
 
         return chips;
@@ -3210,6 +3626,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         availableContactStageOptions,
         filterContactDateFrom,
         filterContactDateTo,
+        isTenantUser,
+        clientColumnTextFilters,
+        clientColumnDateFilters,
+        orgColumnTextFilters,
+        orgColumnDateFilters,
+        contactColumnTextFilters,
+        contactColumnDateFilters,
     ]);
 
     const listResultsSummary = useMemo(() => {
@@ -3363,14 +3786,14 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
              {/* Tab Switcher */}
              <div className="flex border-b border-border-default overflow-x-auto no-scrollbar">
                  <button 
-                    onClick={() => { setActiveTab('companies'); setSelectedContactIds(new Set()); }} 
+                    onClick={() => { setActiveTab('companies'); setSelectedContactIds(new Set()); navigate('/clients?tab=companies', { replace: true }); }} 
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'companies' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
                  >
                      <BuildingOffice2Icon className="w-5 h-5 inline-block ml-2"/>
                      {isTenantUser ? 'חברות מקושרות' : 'תיקי לקוחות'}
                  </button>
                  <button 
-                    onClick={() => { setActiveTab('contacts'); setSelectedCompanyIds(new Set()); }} 
+                    onClick={() => { setActiveTab('contacts'); setSelectedCompanyIds(new Set()); navigate('/clients?tab=contacts', { replace: true }); }} 
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'contacts' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
                  >
                      <UserGroupIcon className="w-5 h-5 inline-block ml-2"/>
@@ -3378,7 +3801,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  </button>
               
                  <button
-                    onClick={() => { setActiveTab('events'); setSelectedCompanyIds(new Set()); setSelectedContactIds(new Set()); }}
+                    onClick={() => { setActiveTab('events'); setSelectedCompanyIds(new Set()); setSelectedContactIds(new Set()); navigate('/clients?tab=events', { replace: true }); }}
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'events' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
                  >
                      <CalendarDaysIcon className="w-5 h-5 inline-block ml-2"/>
@@ -3795,16 +4218,31 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                             return (
                                                 <th
                                                     key={col.id}
-                                                    className={`p-4 ${col.id === 'health' || col.id === 'actions' ? 'text-center' : ''}`}
+                                                    className={`p-4 select-none ${col.id === 'actions' ? '' : 'cursor-pointer hover:bg-bg-hover'} ${col.id === 'health' || col.id === 'actions' ? 'text-center' : ''}`}
+                                                    onClick={() => requestOrgSort(col.id)}
                                                 >
-                                                    {col.label}
+                                                    {col.label} {sortIndicator(orgSortConfig, col.id)}
                                                 </th>
                                             );
                                         })}
                                     </tr>
+                                    <tr className="bg-bg-subtle">
+                                        <th className="px-2 pb-2" />
+                                        {linkedOrgVisibleColumns.map((colId) => (
+                                            <ColumnFilterCell
+                                                key={`filter-${colId}`}
+                                                columnId={colId}
+                                                dateColumnIds={ORG_DATE_COLUMNS}
+                                                textFilters={orgColumnTextFilters}
+                                                dateFilters={orgColumnDateFilters}
+                                                onTextChange={(id, value) => setOrgColumnTextFilters((prev) => ({ ...prev, [id]: value }))}
+                                                onDateChange={(id, patch) => patchDateFilter(setOrgColumnDateFilters, id, patch)}
+                                            />
+                                        ))}
+                                    </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-subtle">
-                                    {filteredLinkedOrganizations.map((org) => (
+                                    {sortedLinkedOrganizations.map((org) => (
                                         <tr
                                             key={org.linkId}
                                             className={`hover:bg-bg-hover transition-colors cursor-pointer group ${selectedCompanyIds.has(org.linkId) ? 'bg-primary-50/50' : ''}`}
@@ -3870,6 +4308,20 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                 }
                                                 if (colId === 'employeeCount') {
                                                     return <td key={colId} className="p-4 text-text-muted">{org.employeeCount || '—'}</td>;
+                                                }
+                                                if (colId === 'createdAt') {
+                                                    return (
+                                            <td key={colId} className="p-4 text-text-muted whitespace-nowrap">
+                                                {formatListDate(org.createdAt)}
+                                            </td>
+                                                    );
+                                                }
+                                                if (colId === 'updatedAt') {
+                                                    return (
+                                            <td key={colId} className="p-4 text-text-muted whitespace-nowrap">
+                                                {formatListDate(org.updatedAt)}
+                                            </td>
+                                                    );
                                                 }
                                                 if (colId === 'website') {
                                                     return (
@@ -4017,6 +4469,9 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                         />
                                                                     </div>
                                                                     <p className="text-xs text-text-muted mt-0.5 truncate">{org.mainField || org.location || '—'}</p>
+                                                                    <p className="text-[11px] text-text-subtle mt-1">
+                                                                        עודכן: {formatListDate(org.updatedAt)}
+                                                                    </p>
                                                                 </div>
                                                             </div>
                                                             <button
@@ -4134,6 +4589,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                  <dt className="text-text-muted">עובדים</dt>
                                                  <dd className="font-semibold">{org.employeeCount || '—'}</dd>
                                              </div>
+                                             <div className="flex justify-between gap-3">
+                                                 <dt className="text-text-muted">תאריך עדכון</dt>
+                                                 <dd className="font-semibold whitespace-nowrap">{formatListDate(org.updatedAt)}</dd>
+                                             </div>
                                              <div className="flex justify-between gap-3 items-center">
                                                  <dt className="text-text-muted">אתר</dt>
                                                  <dd className="font-semibold text-right">
@@ -4204,12 +4663,26 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                     onDragEnter={() => handleDragEnter(index, 'clients')}
                                                     onDragEnd={handleDragEnd}
                                                     onDragOver={(e) => e.preventDefault()}
-                                                    onClick={() => requestClientSort(col.id as keyof Client)}
+                                                    onClick={() => requestClientSort(col.id)}
                                                 >
-                                                     {col.label} {getClientSortIndicator(col.id as keyof Client)}
+                                                     {col.label} {sortIndicator(clientSortConfig, col.id)}
                                                  </th>
                                              );
                                          })}
+                                     </tr>
+                                     <tr className="bg-bg-subtle">
+                                         <th className="px-2 pb-2" />
+                                         {clientVisibleColumns.map((colId) => (
+                                             <ColumnFilterCell
+                                                 key={`filter-${colId}`}
+                                                 columnId={colId}
+                                                 dateColumnIds={CLIENT_DATE_COLUMNS}
+                                                 textFilters={clientColumnTextFilters}
+                                                 dateFilters={clientColumnDateFilters}
+                                                 onTextChange={(id, value) => setClientColumnTextFilters((prev) => ({ ...prev, [id]: value }))}
+                                                 onDateChange={(id, patch) => patchDateFilter(setClientColumnDateFilters, id, patch)}
+                                             />
+                                         ))}
                                      </tr>
                                  </thead>
                                  <tbody className="divide-y divide-border-subtle">
@@ -4399,12 +4872,26 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                     onDragEnter={() => handleDragEnter(index, 'contacts')}
                                                     onDragEnd={handleDragEnd}
                                                     onDragOver={(e) => e.preventDefault()}
-                                                    onClick={() => requestContactSort(col.id as keyof Contact)}
+                                                    onClick={() => requestContactSort(col.id)}
                                                 >
-                                                     {col.label} {getContactSortIndicator(col.id as keyof Contact)}
+                                                     {col.label} {sortIndicator(contactSortConfig, col.id)}
                                                  </th>
                                              );
                                          })}
+                                     </tr>
+                                     <tr className="bg-bg-subtle">
+                                         <th className="px-2 pb-2" />
+                                         {contactVisibleColumns.map((colId) => (
+                                             <ColumnFilterCell
+                                                 key={`filter-${colId}`}
+                                                 columnId={colId}
+                                                 dateColumnIds={CONTACT_DATE_COLUMNS}
+                                                 textFilters={contactColumnTextFilters}
+                                                 dateFilters={contactColumnDateFilters}
+                                                 onTextChange={(id, value) => setContactColumnTextFilters((prev) => ({ ...prev, [id]: value }))}
+                                                 onDateChange={(id, patch) => patchDateFilter(setContactColumnDateFilters, id, patch)}
+                                             />
+                                         ))}
                                      </tr>
                                  </thead>
                                  <tbody className="divide-y divide-border-subtle">
@@ -4478,18 +4965,30 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                         </td>
                                                     );
                                                 }
+                                                if (colId === 'createdAt') {
+                                                    return (
+                                                        <td key={colId} className="p-4 text-center text-text-muted whitespace-nowrap">
+                                                            {formatListDate(contact.createdAt)}
+                                                        </td>
+                                                    );
+                                                }
+                                                if (colId === 'updatedAt') {
+                                                    return (
+                                                        <td key={colId} className="p-4 text-center text-text-muted whitespace-nowrap">
+                                                            {formatListDate(contact.updatedAt)}
+                                                        </td>
+                                                    );
+                                                }
                                                 if (colId === 'clientName') {
                                                     return (
                                                         <td key={colId} className="p-4 text-center text-text-default">
                                                             <div className="flex items-center gap-2 justify-center">
                                                                 <span>{contact.clientName}</span>
+                                                                {contact.clientLogo ? (
                                                                 <div className="w-6 h-6 rounded-md bg-bg-subtle border border-border-default flex items-center justify-center text-[10px] font-bold text-text-muted shrink-0 overflow-hidden">
-                                                                    {contact.clientLogo ? (
                                                                         <img src={contact.clientLogo} alt={contact.clientName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                                                                    ) : (
-                                                                        contact.clientName.substring(0, 2)
-                                                                    )}
                                                                 </div>
+                                                                ) : null}
                                                             </div>
                                                         </td>
                                                     );
@@ -4621,6 +5120,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                     <p className="text-xs text-text-subtle mt-1 truncate flex items-center gap-1">
                                                                         <BuildingOffice2Icon className="w-3 h-3"/>
                                                                         {contact.clientName}
+                                                                    </p>
+                                                                    <p className="text-[11px] text-text-subtle mt-1">
+                                                                        נוצר: {formatListDate(contact.createdAt)}
+                                                                    </p>
+                                                                    <p className="text-[11px] text-text-subtle mt-0.5">
+                                                                        עודכן: {formatListDate(contact.updatedAt)}
                                                                     </p>
                                                                 </div>
                                                             </div>

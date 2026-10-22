@@ -15,6 +15,7 @@ import {
 } from '../utils/jobTagMatchCategories';
 import { fetchCandidate } from '../utils/candidateJobMatchingApi';
 import {
+    geoPenaltyPoints,
     isExperienceLayerActive,
     pickBreakdownScore,
     type SonarScoreBreakdown,
@@ -44,9 +45,20 @@ type LayerBarConfig = {
     key: string;
     label: string;
     score: number;
+    /** Template weight for this layer. Omitted when the payload has no weights. */
+    weight?: number;
     barClass: string;
     iconClass: string;
     Icon: React.FC<{ className?: string }>;
+};
+
+/** Breakdown keys differ from weightedContributions keys for the vector layer. */
+const CONTRIBUTION_KEYS: Record<string, string> = {
+    semantic: 'vector',
+    tags: 'tags',
+    geo: 'geo',
+    experience: 'experience',
+    intent: 'intent',
 };
 
 const LAYER_LABEL_KEYS: Record<string, string> = {
@@ -129,15 +141,22 @@ function buildLayerBars(
         },
     ];
 
+    const contributions = bd.weightedContributions;
     return rows
         .map((row) => {
             const score = pickBreakdownScore(...row.scores);
             if (score == null) return null;
+            const contribKey = CONTRIBUTION_KEYS[row.key] ?? row.key;
+            const weight = contributions?.[contribKey]?.weight;
+            // A layer at 0% in the active template (e.g. Geo on "מימד אנושי") does not
+            // enter the final score. Showing its raw score (26%) reads as if it did.
+            if (typeof weight === 'number' && weight <= 0) return null;
             const labelKey = shortLabels ? LAYER_LABEL_KEYS[row.key] : LAYER_LABEL_FULL_KEYS[row.key];
             return {
                 key: row.key,
                 label: labelKey ? t(labelKey) : row.key,
                 score,
+                weight: typeof weight === 'number' ? weight : undefined,
                 barClass: row.barClass,
                 iconClass: row.iconClass,
                 Icon: row.Icon,
@@ -156,11 +175,16 @@ const LayerBarRow: React.FC<{
     actionLoading?: boolean;
     actionLoadingLabel?: string;
 }> = ({ layer, compact, onClick, clickable, actionLoading, actionLoadingLabel }) => {
+    const { t } = useLanguage();
     const pct = Math.max(0, Math.min(100, layer.score));
     const Icon = layer.Icon;
     const shellCls = compact ? 'space-y-1.5' : 'space-y-2';
     const headerCls = `flex justify-between text-text-default ${compact ? 'text-xs font-semibold' : 'text-sm font-bold'}`;
     const scoreLabel = actionLoading && actionLoadingLabel ? actionLoadingLabel : `${pct}%`;
+    const weightLabel =
+        typeof layer.weight === 'number'
+            ? t('job.sonar.layer_weight', { weight: Math.round(layer.weight) })
+            : null;
 
     const bar = (
         <div className={`${compact ? 'h-1.5' : 'h-2.5'} bg-bg-subtle rounded-full overflow-hidden`}>
@@ -184,6 +208,9 @@ const LayerBarRow: React.FC<{
                     <span className="flex items-center gap-1.5 min-w-0">
                         <Icon className={`${compact ? 'w-3.5 h-3.5' : 'w-4 h-4'} shrink-0 ${layer.iconClass}`} />
                         <span className="truncate group-hover:text-primary-700">{layer.label}</span>
+                        {weightLabel ? (
+                            <span className="shrink-0 text-[10px] font-medium text-text-muted">{weightLabel}</span>
+                        ) : null}
                     </span>
                     <span className={compact ? 'text-text-default shrink-0' : 'text-text-muted shrink-0'}>
                         {scoreLabel}
@@ -200,6 +227,9 @@ const LayerBarRow: React.FC<{
                 <span className="flex items-center gap-1.5 min-w-0">
                     <Icon className={`${compact ? 'w-3.5 h-3.5' : 'w-4 h-4'} shrink-0 ${layer.iconClass}`} />
                     <span className="truncate">{layer.label}</span>
+                    {weightLabel ? (
+                        <span className="shrink-0 text-[10px] font-medium text-text-muted">{weightLabel}</span>
+                    ) : null}
                 </span>
                 <span className={compact ? 'text-text-default shrink-0' : 'text-text-muted shrink-0'}>{scoreLabel}</span>
             </div>
@@ -354,9 +384,28 @@ export const MatchScoreBreakdownPanel: React.FC<{
                 amount: salaryPenalty,
             });
         }
+        const hasGeoInReasons = generalReasons.some((pr) =>
+            /מרחק|מיקום|geo|distance/i.test(String(pr.key || pr.label || '')),
+        );
+        const geoAmount = geoPenaltyPoints(bd);
+        if (geoAmount > 0 && !hasGeoInReasons) {
+            const km =
+                typeof bd?.geoDistance === 'number' && Number.isFinite(bd.geoDistance)
+                    ? Math.round(bd.geoDistance)
+                    : null;
+            const maxKm =
+                typeof bd?.geoMaxKm === 'number' && Number.isFinite(bd.geoMaxKm)
+                    ? Math.round(bd.geoMaxKm)
+                    : null;
+            let label = t('job.sonar.penalty_geo');
+            if (bd?.geoMissing) label = t('job.sonar.penalty_geo_missing');
+            else if (km != null && maxKm != null) label = t('job.sonar.penalty_geo_over', { km, max: maxKm });
+            else if (km != null) label = t('job.sonar.penalty_geo_km', { km });
+            items.push({ key: 'geo', label, amount: geoAmount });
+        }
 
         return items.filter((item) => item.amount > 0);
-    }, [agePenalty, generalReasons, salaryPenalty, t]);
+    }, [agePenalty, bd, generalReasons, salaryPenalty, t]);
 
     const summaryText = professionalSummary?.trim() || null;
 

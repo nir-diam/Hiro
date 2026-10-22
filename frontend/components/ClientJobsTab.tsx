@@ -269,7 +269,7 @@ const ClientJobsTab: React.FC<ClientJobsTabProps> = ({
         let active = true;
         setLoading(true);
         setError(null);
-        fetch(url, { headers: authHeaders(true) })
+        fetch(url, { headers: authHeaders(true), cache: 'no-store' })
             .then((r) => {
                 if (!r.ok) throw new Error('Failed to load jobs');
                 return r.json();

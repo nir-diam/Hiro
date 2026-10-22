@@ -5,6 +5,8 @@ jest.mock('../vectorSearchService', () => ({
 jest.mock('../jobTaxonomyResolver', () => ({
   loadTaxonomyIndex: jest.fn().mockResolvedValue({}),
   resolveJobTaxonomy: jest.fn(() => ({})),
+  resolveAllJobTaxonomies: jest.fn(() => []),
+  taxonomiesFromCandidateProfile: jest.fn(() => []),
   buildLinkedJobsForIntent: jest.fn().mockResolvedValue([]),
 }));
 
@@ -102,6 +104,7 @@ describe('computeGeoScore regional penaltyPerKm', () => {
     ], 0);
 
     expect(lowPenalty.missing).toBe(false);
+    expect(lowPenalty.maxValidKm).toBe(10);
     expect(lowPenalty.score).toBeGreaterThan(highNorth.score);
     expect(lowPenalty.score).toBeLessThan(100);
   });
@@ -117,6 +120,28 @@ describe('computeGeoScore regional penaltyPerKm', () => {
     const a = await computeGeoScore(candidate, job, mildCenter, 0);
     const b = await computeGeoScore(candidate, job, harshCenter, 0);
     expect(a.score).toBe(b.score);
+  });
+
+  it('scores 100 when the job has no city or location, even if a region is still saved', async () => {
+    const result = await computeGeoScore(
+      { address: 'חדרה', city: 'חדרה' },
+      { city: '', location: '  ', region: 'תל אביב' },
+      geoRegions,
+      0,
+    );
+    expect(result.score).toBe(100);
+    expect(result.missing).toBe(false);
+    expect(result.distance).toBeNull();
+  });
+
+  it('uses the region saved on the job, not the city-catalog district', async () => {
+    const job = { city: 'חיפה', region: 'מרכז' };
+    const candidate = { address: 'חדרה' };
+    const result = await computeGeoScore(candidate, job, [
+      { id: 'center', grace: 15, penaltyPerKm: 2 },
+      { id: 'north', grace: 10, penaltyPerKm: 99 },
+    ], 0);
+    expect(result.maxValidKm).toBe(15);
   });
 });
 
@@ -295,6 +320,58 @@ describe('computeFullMatchScore formula', () => {
               roleId,
             },
           },
+        ],
+      },
+    );
+    expect(result.intentType).toBe('exact');
+    expect(result.score).toBe(100);
+  });
+
+  it('same_cluster matches any of the job\'s selected clusters, not only the first field', () => {
+    const weights = [
+      { id: 'exact', value: 100 },
+      { id: 'role', value: 80 },
+      { id: 'cluster', value: 50 },
+      { id: 'different', value: 0 },
+    ];
+    const result = computeIntentScore(
+      {},
+      { id: 'job-multi' },
+      null,
+      weights,
+      {
+        targetTaxonomies: [
+          { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
+          { categoryId: 'admin', clusterId: 'ops', roleId: 'ops_coord' },
+          { categoryId: 'admin', clusterId: 'secretarial', roleId: 'secretary' },
+        ],
+        linkedJobs: [
+          { jobId: 'other', taxonomy: { categoryId: 'admin', clusterId: 'ops', roleId: 'ops_coord' } },
+        ],
+      },
+    );
+    expect(result.intentType).toBe('exact');
+    expect(result.score).toBe(100);
+  });
+
+  it('uses candidate role-tag taxonomy as same-role intent when they never applied to the cluster', () => {
+    const weights = [
+      { id: 'exact', value: 100 },
+      { id: 'role', value: 80 },
+      { id: 'cluster', value: 50 },
+      { id: 'different', value: 0 },
+    ];
+    const result = computeIntentScore(
+      {},
+      { id: 'job-office' },
+      null,
+      weights,
+      {
+        targetTaxonomies: [
+          { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
+        ],
+        candidateTaxonomies: [
+          { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
         ],
       },
     );

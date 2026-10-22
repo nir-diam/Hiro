@@ -21,6 +21,7 @@ const Candidate = require('../models/Candidate');
 const CandidatePipeline = require('../models/CandidatePipeline');
 const JobCandidate = require('../models/JobCandidate');
 const Job = require('../models/Job');
+const Organization = require('../models/Organization');
 const User = require('../models/User');
 const ClientContact = require('../models/ClientContact');
 const MessageTemplate = require('../models/MessageTemplate');
@@ -30,7 +31,7 @@ const clientService = require('./clientService');
 const candidateService = require('./candidateService');
 const jobCandidateStatusService = require('./jobCandidateStatusService');
 const jobCandidateProcessJournalService = require('./jobCandidateProcessJournalService');
-const messageTemplateService = require('./messageTemplateService');
+const messageTemplateService = () => require('./messageTemplateService');
 const inforuService = require('./inforuService');
 const smsService = require('./smsService');
 const auditLogger = require('../utils/auditLogger');
@@ -46,6 +47,13 @@ const {
   EVENT_CLOSED_SUMMARY,
 } = require('../utils/clientEventHistory');
 const { resolvePipelineDefaultCoordinatorString } = require('../utils/pipelineDefaultAssignees');
+const {
+  outcomeDefersMoveUntilCandidateEmail,
+  candidateInviteEmailSent,
+  appendJobLinkJournalSubUpdate,
+  isOnboardingCandidatePipeline,
+  isRecruitmentCandidatePipeline,
+} = require('./jobCandidateOnboardingIngestService');
 
 function matchStageByName(stages, name) {
   const normalized = String(name || '').trim().toLowerCase();
@@ -269,7 +277,7 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
   const defaultCoordinator = await resolvePipelineDefaultCoordinatorString(targetPipeline);
   const coordinator = defaultCoordinator || actor;
   const now = new Date().toISOString();
-  const client = await clientService.getById(ctx.clientId);
+  const client = await clientService.getById(ctx.clientId, { include: ['events'] });
   const prevEvents = Array.isArray(client?.events) ? client.events : [];
 
   let contactId = null;
@@ -277,6 +285,8 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
   let linkedTo = null;
   let metadata = {};
   let titleBase = '';
+  let organizationId = null;
+  let organizationTmpId = null;
   let sourceEvent = ctx.kind === 'client' ? ctx.event : null;
 
   if (!sourceEvent && ctx.clientEventId) {
@@ -284,9 +294,26 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
   }
 
   if (sourceEvent) {
-    contactId = sourceEvent.contactId || null;
-    contactName = sourceEvent.contactName || '';
-    linkedTo = sourceEvent.linkedTo || null;
+    const linkedType = String(sourceEvent.linkedTo?.type || '').trim();
+    const linkedIsPerson = linkedType === 'איש קשר' || linkedType === 'מועמד';
+    const metaContacts = Array.isArray(sourceEvent.metadata?.linkedContacts)
+      ? sourceEvent.metadata.linkedContacts
+      : [];
+    const firstLinkedContact = metaContacts.find((c) => c && c.id);
+    contactId = sourceEvent.contactId
+      || (linkedIsPerson ? sourceEvent.linkedTo?.id : null)
+      || firstLinkedContact?.id
+      || null;
+    contactName = sourceEvent.contactName
+      || (linkedIsPerson ? sourceEvent.linkedTo?.name : '')
+      || firstLinkedContact?.name
+      || '';
+    linkedTo = sourceEvent.linkedTo
+      || (contactId
+        ? { type: 'איש קשר', id: contactId, name: contactName || 'איש קשר' }
+        : null);
+    organizationId = sourceEvent.organizationId || null;
+    organizationTmpId = sourceEvent.organizationTmpId || null;
     metadata = { ...(sourceEvent.metadata && typeof sourceEvent.metadata === 'object' ? sourceEvent.metadata : {}) };
     titleBase = String(sourceEvent.title || contactName || 'אירוע').trim() || 'אירוע';
   } else if (ctx.candidateId) {
@@ -301,6 +328,27 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
     titleBase = contactName;
   } else {
     return { status: 'skipped', reason: 'missing_entity' };
+  }
+
+  if (!organizationId && contactId) {
+    const linkedContact = await ClientContact.findByPk(contactId, {
+      attributes: ['id', 'organizationId'],
+    });
+    if (linkedContact?.organizationId) {
+      organizationId = String(linkedContact.organizationId);
+      organizationTmpId = null;
+    }
+  }
+
+  metadata = { ...metadata, ...jobMetaFromContext(ctx) };
+  if (ctx.job?.organizationId) {
+    organizationId = String(ctx.job.organizationId);
+    organizationTmpId = null;
+    if (!trim(metadata.organizationName)) {
+      const org = await Organization.findByPk(organizationId, { attributes: ['id', 'name'] }).catch(() => null);
+      const orgName = trim(org?.name);
+      if (orgName) metadata.organizationName = orgName;
+    }
   }
 
   const newEvent = {
@@ -318,6 +366,8 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
     contactId,
     contactName,
     linkedTo,
+    organizationId,
+    organizationTmpId,
     description: `תהליך נוסף נפתח אוטומטית (${targetPipeline.name} · ${targetStage.name || ''})`,
     updates: [
       {
@@ -602,7 +652,7 @@ async function buildCandidateContext(clientId, jobCandidateId, candidateId) {
 }
 
 async function buildClientEventContext(clientId, clientEventId) {
-  const client = await clientService.getById(clientId);
+  const client = await clientService.getById(clientId, { include: ['events'] });
   const events = Array.isArray(client.events) ? client.events : [];
   const event = events.find((e) => String(e.id) === String(clientEventId));
   if (!event) throw Object.assign(new Error('Client event not found'), { status: 404 });
@@ -618,7 +668,7 @@ async function buildClientEventContext(clientId, clientEventId) {
 /** Reload clients.events from DB — required before each automation (ctx.client is stale after prior writes). */
 async function reloadClientEventContext(ctx) {
   if (!ctx || ctx.kind !== 'client' || !ctx.clientId) return ctx;
-  const client = await clientService.getById(ctx.clientId);
+  const client = await clientService.getById(ctx.clientId, { include: ['events'] });
   ctx.client = client;
   if (ctx.clientEventId) {
     const events = Array.isArray(client.events) ? client.events : [];
@@ -656,13 +706,13 @@ async function sendTemplateSms({ templateId, clientId, toPhones, candidateRecord
 
   let namedMap = {};
   if (candidateRecord) {
-    namedMap = await messageTemplateService.buildNamedPlaceholdersFromCandidate(
+    namedMap = await messageTemplateService().buildNamedPlaceholdersFromCandidate(
       candidateRecord,
       placeholderContext || {},
     );
   }
-  let body = messageTemplateService.applyNamedPlaceholders(String(plain.body || ''), namedMap);
-  body = messageTemplateService.applyNumberedPlaceholders(body, []);
+  let body = messageTemplateService().applyNamedPlaceholders(String(plain.body || ''), namedMap);
+  body = messageTemplateService().applyNumberedPlaceholders(body, []);
 
   const phones = (Array.isArray(toPhones) ? toPhones : [toPhones]).filter(Boolean);
   if (!phones.length) throw Object.assign(new Error('No valid SMS recipients'), { status: 400 });
@@ -680,7 +730,7 @@ async function sendTemplateEmail({ templateId, clientId, toEmails, candidateReco
 
   const results = [];
   for (const toEmail of emails) {
-    const result = await messageTemplateService.sendScopedTemplateEmail({
+    const result = await messageTemplateService().sendScopedTemplateEmail({
       name: plain.name,
       toEmail,
       clientId,
@@ -986,6 +1036,13 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
       const statusName = automation.statusName ? String(automation.statusName).trim() : '';
       if (!statusName) return { status: 'skipped', reason: 'missing_status' };
 
+      if (pipelineKind === 'candidate' && ctx.pipelineId) {
+        const onboardingPipeline = await loadPipelineDto('candidate', ctx.clientId, ctx.pipelineId);
+        if (onboardingPipeline && isOnboardingCandidatePipeline(onboardingPipeline)) {
+          return { status: 'skipped', reason: 'onboarding_does_not_change_job_link_status' };
+        }
+      }
+
       let jobCandidateId = ctx.jobCandidateId || ctx.jobCandidate?.id || null;
       if (!jobCandidateId && ctx.candidateId) {
         const links = await JobCandidate.findAll({
@@ -1148,32 +1205,26 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline, options 
   if (manualJournal.historyTitle) note = manualJournal.historyTitle;
 
   if (ctx.candidateId && nextStageId) {
-    await candidateService.update(ctx.candidateId, {
-      candidatePipelineId: pipeline.id,
-      pipelineStageId: nextStageId,
-    });
+    await patchCandidatePipelinePlacement(ctx.candidateId, pipeline.id, nextStageId);
   }
 
-  if (ctx.jobCandidateId) {
+  const syncJobLinkFromOutcome = !isOnboardingCandidatePipeline(pipeline);
+
+  if (ctx.jobCandidateId && syncJobLinkFromOutcome) {
     const jc = await JobCandidate.findByPk(ctx.jobCandidateId);
     if (!jc) throw Object.assign(new Error('Job link not found'), { status: 404 });
     ctx.jobCandidate = jc;
     const actorName = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
     let prevMeta = await jobCandidateProcessJournalService.materializeStatusJournalForPatch(ctx.jobCandidate);
-    if (dueDate) prevMeta.dueDate = dueDate;
-    if (dueTime !== undefined) prevMeta.dueTime = dueTime;
-    prevMeta.internalNote = note;
-    prevMeta.workflowUpdatedAt = new Date().toISOString();
-    const journalMeta = jobCandidateProcessJournalService.applyJournalOnStatusPatch({
+    const journalMeta = jobCandidateProcessJournalService.recordOutcomeOnCurrentJournal({
       workflowMeta: prevMeta,
       prevStatus: ctx.jobCandidate.status,
       newStatus: String(nextStageName || ctx.jobCandidate.status).trim(),
       actor: actorName,
-      internalNoteChanged: true,
-      internalNote: note,
-      dueDate: prevMeta.dueDate || null,
-      dueTime: prevMeta.dueTime || null,
-      forceAppendStatus: true,
+      summary: note,
+      comment: manualJournal.historyComment,
+      dueDate: dueDate || prevMeta.dueDate || null,
+      dueTime: dueTime !== undefined ? dueTime : prevMeta.dueTime || null,
     });
     await jobCandidateStatusService.applyJobCandidateStatusChange({
       jobCandidateId: ctx.jobCandidateId,
@@ -1279,7 +1330,7 @@ async function syncClientEventAfterCandidateOutcome(
   const eventId = String(clientEventId || '').trim();
   if (!cid || !eventId) return null;
 
-  const client = await clientService.getById(cid);
+  const client = await clientService.getById(cid, { include: ['events'] });
   const events = Array.isArray(client?.events) ? client.events : [];
   const event = events.find((e) => String(e.id) === eventId);
   if (!event) return null;
@@ -1382,10 +1433,18 @@ async function executeOutcome(req, params) {
     if (context.jobCandidateId) ctx.jobCandidateId = context.jobCandidateId;
   }
 
+  const deferMoveUntilCandidateEmail = outcomeDefersMoveUntilCandidateEmail(outcome, {
+    pipelineKind,
+    source,
+    skipCandidateAction,
+  });
+
   let actionResult;
   if (pipelineKind === 'candidate') {
     if (skipCandidateAction) {
       actionResult = { skippedAction: true };
+    } else if (deferMoveUntilCandidateEmail) {
+      actionResult = { deferredMoveUntilCandidateEmail: true, outcomeName: outcome.name };
     } else {
       actionResult = await applyCandidateOutcomeAction(req, ctx, outcome, pipeline, journalOptions);
       if (context.clientEventId) {
@@ -1420,6 +1479,35 @@ async function executeOutcome(req, params) {
         status: 'error',
         message: err.message || String(err),
       });
+    }
+  }
+
+  if (deferMoveUntilCandidateEmail && !skipCandidateAction) {
+    if (candidateInviteEmailSent(automationResults)) {
+      actionResult = await applyCandidateOutcomeAction(req, ctx, outcome, pipeline, journalOptions);
+      if (context.clientEventId) {
+        const updatedEvent = await syncClientEventAfterCandidateOutcome(
+          req,
+          clientId,
+          context.clientEventId,
+          outcome,
+          actionResult,
+          ctx,
+          journalOptions,
+        );
+        if (updatedEvent) actionResult.event = updatedEvent;
+      }
+    } else if (ctx.jobCandidateId) {
+      await appendJobLinkJournalSubUpdate(
+        ctx.jobCandidateId,
+        'לא נשלח מייל הזמנה למועמד — נשאר בשלב קליטת קורות חיים',
+        req,
+      );
+      actionResult = {
+        ...actionResult,
+        deferredMoveSkipped: true,
+        reason: 'candidate_email_not_sent',
+      };
     }
   }
 
@@ -1597,13 +1685,19 @@ async function ensureClientEventForCandidate(
   const { resolveCandidateJobEventMeta } = require('../utils/candidateKanbanStageMoveEvent');
   const jobMeta = await resolveCandidateJobEventMeta(cid, jobCandidateId);
 
-  const client = await clientService.getById(clientId);
+  const client = await clientService.getById(clientId, { include: ['events'] });
   const prevEvents = Array.isArray(client?.events) ? client.events : [];
+  const jcScope = jobCandidateId != null ? String(jobCandidateId).trim() : '';
   const existing = prevEvents.find((event) => {
     if (event?.isActive === false) return false;
     const meta = event?.metadata && typeof event.metadata === 'object' ? event.metadata : {};
     if (meta.profileCompletenessOnly || meta.missingDetailsCompletedCandidate || meta.profileApprovedByCandidate) {
       return false;
+    }
+    if (jcScope) {
+      const eventJc = meta.jobCandidateId != null ? String(meta.jobCandidateId).trim() : '';
+      if (eventJc && eventJc === jcScope) return true;
+      if (eventJc && eventJc !== jcScope) return false;
     }
     if (String(event?.contactId || '') === cid) return true;
     if (String(meta.candidateId || '') === cid) return true;
@@ -1653,7 +1747,12 @@ async function ensureClientEventForCandidate(
     description: '',
     updates: [],
     history: [],
-    metadata: { candidateId: cid, systemEventBootstrap: true, ...jobMeta },
+    metadata: {
+      candidateId: cid,
+      systemEventBootstrap: true,
+      ...(jcScope ? { jobCandidateId: jcScope } : {}),
+      ...jobMeta,
+    },
     isActive: true,
   };
   await clientService.update(clientId, { events: [event, ...prevEvents] });
@@ -1692,9 +1791,6 @@ async function dispatchFromSystemEvent(req, payload) {
       triggerName,
       eventName,
     );
-    if (!triggered.length) return [];
-
-    const candidate = await Candidate.findByPk(entityId, { attributes: ['id', 'fullName'] });
     let jobCandidateId = explicitJobCandidateId ? String(explicitJobCandidateId) : null;
     if (!jobCandidateId) {
       const links = await JobCandidate.findAll({
@@ -1705,8 +1801,24 @@ async function dispatchFromSystemEvent(req, payload) {
       });
       jobCandidateId = links[0]?.id ? String(links[0].id) : null;
     }
+    const isCvReceived =
+      String(triggerName || '').trim() === 'נקלטו קורות חיים' ||
+      String(eventName || '').trim() === 'קליטת קו"ח';
+    const triggeredFiltered = isCvReceived
+      ? triggered.filter((m) => {
+          if (m.pipelineKind === 'client') return false;
+          if (jobCandidateId) {
+            if (isOnboardingCandidatePipeline(m.pipeline)) return false;
+            return isRecruitmentCandidatePipeline(m.pipeline);
+          }
+          return !isOnboardingCandidatePipeline(m.pipeline);
+        })
+      : triggered;
+    if (!triggeredFiltered.length) return [];
 
-    for (const match of triggered) {
+    const candidate = await Candidate.findByPk(entityId, { attributes: ['id', 'fullName'] });
+
+    for (const match of triggeredFiltered) {
       let context = { candidateId: entityId, jobCandidateId };
       if (match.pipelineKind === 'client') {
         const clientEventId = await ensureClientEventForCandidate(clientId, entityId, {
@@ -1750,7 +1862,7 @@ async function dispatchFromSystemEvent(req, payload) {
       eventName,
     );
 
-    const client = await clientService.getById(entityId);
+    const client = await clientService.getById(entityId, { include: ['events'] });
     const events = Array.isArray(client.events) ? client.events : [];
     const activeEvents = events.filter((e) => e.isActive !== false && e.processId && e.stageId);
 

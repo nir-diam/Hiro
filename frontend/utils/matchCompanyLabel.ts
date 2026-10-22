@@ -43,6 +43,14 @@ export const companyNameLookupVariants = (name: string): string[] => {
     add(afterParen);
   }
 
+  const compactCompanyKey = (value: string) =>
+    value.toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9\u0590-\u05ff]+/gi, '');
+
+  for (const key of [...variants]) {
+    const compact = compactCompanyKey(key);
+    if (compact.length >= 4) variants.add(compact);
+  }
+
   return [...variants];
 };
 
@@ -73,6 +81,16 @@ export const namesLikelySameCompany = (left: string, right: string): boolean => 
     }
   }
   return false;
+};
+
+/** Exact label match only (tenant jobs — do not bind via alias/substring). */
+export const matchOrgOptionExact = (
+  searchLabel: string | null | undefined,
+  options: CompanyLabelOption[],
+): CompanyLabelOption | null => {
+  const needle = trimStr(searchLabel).toLowerCase();
+  if (!needle || !options.length) return null;
+  return options.find((opt) => trimStr(opt.label).toLowerCase() === needle) ?? null;
 };
 
 /** Match AI/client label to an org picker option (exact, dash-split, or substring). */

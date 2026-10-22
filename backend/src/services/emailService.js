@@ -2,6 +2,25 @@ const EmailUpload = require('../models/EmailUpload');
 const nodemailer = require('nodemailer');
 const { Resend } = require('resend');
 
+const SEND_MAIL_TIMEOUT_MS = Number.parseInt(process.env.SEND_MAIL_TIMEOUT_MS || '90000', 10) || 90000;
+
+const withSendTimeout = (promise, label = 'sendEmail') =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${SEND_MAIL_TIMEOUT_MS}ms`));
+    }, SEND_MAIL_TIMEOUT_MS);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+
 const create = async (payload) => {
   const record = await EmailUpload.create(payload);
   return record;
@@ -54,6 +73,18 @@ const isSmtpComplete = (cfg) =>
   );
 
 const isValidEmail = (s) => Boolean(s && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(s).trim()));
+
+const isAsciiMailAddress = (s) => !/[^\u0000-\u007f]/.test(String(s || ''));
+
+/** Resend rejects non-ASCII in `to`; strip display names and drop invalid entries. */
+const normalizeOneMailRecipient = (raw) => {
+  let s = String(raw || '').trim();
+  if (!s) return '';
+  const angle = s.match(/<([^>]+)>/);
+  if (angle) s = angle[1].trim();
+  if (!isAsciiMailAddress(s)) return '';
+  return isValidEmail(s) ? s : '';
+};
 
 /**
  * Humand env uses e.g. no-reply@humand.co.il; outbound mail should use the logged-in sender's
@@ -168,17 +199,20 @@ const resolveSendPlan = (ctx = {}) => {
 };
 
 const normalizeMailRecipientList = (value) => {
-  if (value == null || value === '') return [];
-  if (Array.isArray(value)) {
-    return value.map((x) => String(x || '').trim()).filter(Boolean);
-  }
-  if (typeof value === 'string') {
-    return value
-      .split(/[,;\n]/)
-      .map((x) => x.trim())
-      .filter(Boolean);
-  }
-  return [];
+  const rawList = (() => {
+    if (value == null || value === '') return [];
+    if (Array.isArray(value)) {
+      return value.map((x) => String(x || '').trim()).filter(Boolean);
+    }
+    if (typeof value === 'string') {
+      return value
+        .split(/[,;\n]/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+    }
+    return [];
+  })();
+  return rawList.map(normalizeOneMailRecipient).filter(Boolean);
 };
 
 async function sendWithResend(plan, { toEmail, bcc, subject, text, html, fromEmail, attachments }) {
@@ -215,7 +249,12 @@ async function sendWithResend(plan, { toEmail, bcc, subject, text, html, fromEma
   }
 
   const toList = normalizeMailRecipientList(toEmail);
-  const toField = toList.length <= 1 ? (toList[0] || String(toEmail || '').trim()) : toList;
+  if (!toList.length) {
+    throw new Error(
+      'Invalid `to` field — no valid ASCII email addresses (Resend rejects non-ASCII recipients)',
+    );
+  }
+  const toField = toList.length === 1 ? toList[0] : toList;
   const bccList = normalizeMailRecipientList(bcc);
   const resend = new Resend(plan.apiKey);
   const { data, error } = await resend.emails.send({
@@ -260,15 +299,18 @@ const sendEmail = async ({
         : '';
 
   if (plan.type === 'resend') {
-    return sendWithResend(plan, {
-      toEmail,
-      bcc,
-      subject,
-      text,
-      html,
-      fromEmail: humandFrom || fromEmail,
-      attachments,
-    });
+    return withSendTimeout(
+      sendWithResend(plan, {
+        toEmail,
+        bcc,
+        subject,
+        text,
+        html,
+        fromEmail: humandFrom || fromEmail,
+        attachments,
+      }),
+      'Resend send',
+    );
   }
 
   const { host, port, user, pass, defaultFrom } = plan;
@@ -286,13 +328,21 @@ const sendEmail = async ({
     port,
     secure: false,
     auth: { user, pass },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: SEND_MAIL_TIMEOUT_MS,
   });
 
   const toList = normalizeMailRecipientList(toEmail);
+  if (!toList.length) {
+    throw new Error(
+      'Invalid `to` field — no valid ASCII email addresses (Resend rejects non-ASCII recipients)',
+    );
+  }
   const bccList = normalizeMailRecipientList(bcc);
   const mail = {
     from: resolvedFrom,
-    to: toList.length <= 1 ? (toList[0] || toEmail) : toList,
+    to: toList.length === 1 ? toList[0] : toList,
     subject,
     text: plainForSmtp,
     html,
@@ -313,7 +363,7 @@ const sendEmail = async ({
     });
   }
 
-  return transporter.sendMail(mail);
+  return withSendTimeout(transporter.sendMail(mail), 'SMTP send');
 };
 
 module.exports = { create, sendEmail, resolveSmtpConfig, resolveSendPlan };

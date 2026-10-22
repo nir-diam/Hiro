@@ -26,6 +26,19 @@ function normalizeEmpty(html: string): string {
     return t || '<p><br></p>';
 }
 
+/** Quill's HTML paste collapses bare newlines to spaces. Keep visual line breaks as blocks. */
+function htmlForQuillPaste(html: string): string {
+    const raw = String(html || '').trim();
+    if (!raw) return '<p><br></p>';
+    if (/<(p|ul|ol|div|h[1-6]|li)\b/i.test(raw)) return normalizeEmpty(raw);
+    const withBreaks = /<br\b/i.test(raw)
+        ? raw
+        : raw.replace(/\r\n/g, '\n').replace(/\n/g, '<br />');
+    const parts = withBreaks.split(/<br\s*\/?>/i);
+    if (parts.length <= 1) return normalizeEmpty(raw);
+    return parts.map((line) => `<p>${line.trim() ? line : '<br>'}</p>`).join('');
+}
+
 /** Quill 2 + React 19: avoid `react-quill` (uses removed `findDOMNode`). */
 export const OpinionQuillEditor: React.FC<{
     jobId: string;
@@ -64,7 +77,7 @@ export const OpinionQuillEditor: React.FC<{
             quill.root.style.textAlign = 'right';
         }
 
-        quill.clipboard.dangerouslyPasteHTML(normalizeEmpty(value));
+        quill.clipboard.dangerouslyPasteHTML(htmlForQuillPaste(value));
         lastEmittedRef.current = quill.root.innerHTML;
 
         const handler = () => {
@@ -77,16 +90,21 @@ export const OpinionQuillEditor: React.FC<{
         return () => {
             quill.off('text-change', handler);
             quillRef.current = null;
+            const toolbar = host.previousElementSibling;
+            if (toolbar instanceof HTMLElement && toolbar.classList.contains('ql-toolbar')) {
+                toolbar.remove();
+            }
             host.innerHTML = '';
+            host.classList.remove('ql-container', 'ql-snow');
         };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- remount only when job changes; initial `value` is read on mount
-    }, [jobId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- remount when job/toolbar mode changes; initial `value` is read on mount
+    }, [jobId, showToolbar, rtl, minHeight, placeholder]);
 
     useEffect(() => {
         const quill = quillRef.current;
         if (!quill) return;
         if (value === lastEmittedRef.current) return;
-        quill.clipboard.dangerouslyPasteHTML(normalizeEmpty(value));
+        quill.clipboard.dangerouslyPasteHTML(htmlForQuillPaste(value));
         lastEmittedRef.current = quill.root.innerHTML;
     }, [value]);
 
@@ -94,9 +112,21 @@ export const OpinionQuillEditor: React.FC<{
 };
 
 function htmlToPlainText(html: string): string {
-    if (typeof document === 'undefined') return html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const raw = String(html || '').trim();
+    if (!raw) return '';
+    if (typeof document === 'undefined') {
+        return raw
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/p>/gi, '\n')
+            .replace(/<[^>]+>/g, '')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+    if (!/<[a-z][\s\S]*>/i.test(raw)) {
+        return raw.replace(/\r\n/g, '\n');
+    }
     const d = document.createElement('div');
-    d.innerHTML = html;
+    d.innerHTML = raw;
     return (d.innerText || d.textContent || '').trim();
 }
 

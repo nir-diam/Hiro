@@ -28,6 +28,10 @@ const {
   EVENT_CLOSED_SUMMARY,
   EVENT_REOPENED_SUMMARY,
 } = require('../utils/clientEventHistory');
+const {
+  parseJournalListQuery,
+  filterJournalMappedRows,
+} = require('../utils/clientEventJournalQuery');
 
 const displayNameFromUser = (u) => {
   if (!u) return 'מערכת';
@@ -103,49 +107,179 @@ const mapClientEventToJournalRow = (event, clientId, clientName, options = {}) =
   });
 };
 
+const normalizeEmployerLabel = (value) => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+
+/** Events with a candidate and no stored organization show that candidate's employer, not the tenant client. */
+const attachMissingCandidateEmployers = async (events) => {
+  const pending = [];
+  for (const event of events || []) {
+    if (!event || String(event.organizationId || '').trim()) continue;
+    const meta = event.metadata && typeof event.metadata === 'object' ? event.metadata : {};
+    const candidateId = String(meta.candidateId || '').trim();
+    if (!candidateId) continue;
+    pending.push({ event, candidateId });
+  }
+  if (!pending.length) return;
+
+  const { sequelize } = require('../config/db');
+  const { QueryTypes } = require('sequelize');
+  const ids = [...new Set(pending.map((row) => row.candidateId))];
+  const [orgRows, expRows] = await Promise.all([
+    sequelize.query(
+      `SELECT co."candidateId" AS "candidateId", o.id, o.name
+       FROM candidate_organizations co
+       JOIN organizations o ON o.id = co."organizationId"
+       WHERE co."candidateId" = ANY($1::uuid[])`,
+      { bind: [ids], type: QueryTypes.SELECT },
+    ),
+    sequelize.query(
+      `SELECT c.id,
+              (
+                SELECT elem->>'company'
+                FROM jsonb_array_elements(COALESCE(c."companyExperiences", '[]'::jsonb)) elem
+                WHERE LOWER(COALESCE(elem->>'isCurrent', '')) IN ('true', 't', '1')
+                LIMIT 1
+              ) AS "currentCompany"
+       FROM candidates c
+       WHERE c.id = ANY($1::uuid[])`,
+      { bind: [ids], type: QueryTypes.SELECT },
+    ),
+  ]);
+
+  const orgsByCandidate = new Map();
+  for (const row of orgRows) {
+    const candidateId = String(row.candidateId);
+    if (!orgsByCandidate.has(candidateId)) orgsByCandidate.set(candidateId, []);
+    const name = String(row.name || '').trim();
+    if (!name) continue;
+    orgsByCandidate.get(candidateId).push({ id: String(row.id), name });
+  }
+  const expByCandidate = new Map();
+  for (const row of expRows) {
+    expByCandidate.set(String(row.id), String(row.currentCompany || '').trim());
+  }
+
+  for (const { event, candidateId } of pending) {
+    const orgs = orgsByCandidate.get(candidateId) || [];
+    if (!orgs.length) continue;
+    const currentCompany = expByCandidate.get(candidateId) || '';
+    const chosen = (currentCompany && orgs.find((org) => normalizeEmployerLabel(org.name) === normalizeEmployerLabel(currentCompany)))
+      || (orgs.length === 1 ? orgs[0] : null);
+    if (!chosen) continue;
+    event.organizationId = chosen.id;
+    event.metadata = {
+      ...(event.metadata && typeof event.metadata === 'object' ? event.metadata : {}),
+      organizationName: chosen.name,
+    };
+  }
+};
+
 const parsePositiveInt = (raw, fallback, max) => {
   const n = parseInt(String(raw ?? ''), 10);
   if (!Number.isFinite(n) || n < 1) return fallback;
   return Math.min(n, max);
 };
 
-const filterEventsByOrganizationScope = (rows, { organizationId, organizationTmpId } = {}) => {
+const eventLinkedContactIds = (event) => {
+  const ids = [];
+  const direct = String(event?.contactId || '').trim();
+  if (direct) ids.push(direct);
+  const linkedType = String(event?.linkedTo?.type || '').trim();
+  const linkedId = String(event?.linkedTo?.id || '').trim();
+  if (linkedId && (linkedType === 'איש קשר' || linkedType === 'מועמד')) ids.push(linkedId);
+  const metaContacts = event?.metadata?.linkedContacts;
+  if (Array.isArray(metaContacts)) {
+    for (const row of metaContacts) {
+      const id = String(row?.id || '').trim();
+      if (id) ids.push(id);
+    }
+  }
+  return ids;
+};
+
+const filterEventsByOrganizationScope = async (rows, { organizationId, organizationTmpId, clientId } = {}) => {
   const orgId = organizationId ? String(organizationId).trim() : '';
   const tmpId = organizationTmpId ? String(organizationTmpId).trim() : '';
   if (!orgId && !tmpId) return rows;
 
-  return rows.filter((e) => {
+  let contactIds = new Set();
+  if (orgId && clientId) {
+    const ClientContact = require('../models/ClientContact');
+    const contacts = await ClientContact.findAll({
+      where: { clientId, organizationId: orgId },
+      attributes: ['id'],
+    });
+    contactIds = new Set(contacts.map((c) => String(c.id)));
+  }
+
+  const byId = new Map(rows.map((e) => [String(e?.id || ''), e]));
+
+  const eventMatchesOrg = (e, seen = new Set()) => {
     const eventOrgId = String(e?.organizationId || '').trim();
     const eventTmpId = String(e?.organizationTmpId || '').trim();
     if (tmpId) {
       if (eventTmpId) return eventTmpId === tmpId;
       if (eventOrgId) return false;
-      return false;
+    } else if (orgId) {
+      if (eventOrgId === orgId) return true;
+      if (eventLinkedContactIds(e).some((id) => contactIds.has(id))) return true;
     }
-    if (orgId) return eventOrgId === orgId;
-    return true;
-  });
+    const parentId = String(e?.metadata?.parentEventId || '').trim();
+    if (parentId && !seen.has(parentId)) {
+      seen.add(parentId);
+      const parent = byId.get(parentId);
+      if (parent) return eventMatchesOrg(parent, seen);
+    }
+    return false;
+  };
+
+  return rows.filter((e) => eventMatchesOrg(e));
 };
 
 const list = async (req, res) => {
-  const client = await clientService.getById(req.params.id);
-  const organizationId = req.query?.organizationId
-    ? String(req.query.organizationId).trim()
-    : null;
-  const organizationTmpId = req.query?.organizationTmpId
-    ? String(req.query.organizationTmpId).trim()
-    : null;
-  const summary = req.query?.summary === '1' || req.query?.summary === 'true';
-  const limit = parsePositiveInt(req.query?.limit, 0, 5000);
-  let rows = Array.isArray(client.events) ? client.events : [];
-  rows = filterEventsByOrganizationScope(rows, { organizationId, organizationTmpId });
-  const clientId = String(client.id);
-  const clientName = String(client.displayName || client.name || '').trim() || 'לקוח';
-  const mapped = rows
-    .map((e) => mapClientEventToJournalRow(e, clientId, clientName, { summary }))
-    .filter(Boolean);
-  mapped.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
-  res.json(limit > 0 ? mapped.slice(0, limit) : mapped);
+  try {
+    const contactId = req.query?.contactId ? String(req.query.contactId).trim() : '';
+    const client = await clientService.getByIdForJournal(req.params.id, {
+      contactId: contactId || undefined,
+    });
+    const organizationId = req.query?.organizationId
+      ? String(req.query.organizationId).trim()
+      : null;
+    const organizationTmpId = req.query?.organizationTmpId
+      ? String(req.query.organizationTmpId).trim()
+      : null;
+    const summary = req.query?.summary === '1' || req.query?.summary === 'true';
+    const journalQuery = parseJournalListQuery(req.query, req.dbUser);
+    const limit = parsePositiveInt(req.query?.limit, 20, 5000);
+    let rows = Array.isArray(client.events) ? client.events : [];
+    if (!contactId) {
+      rows = await filterEventsByOrganizationScope(rows, {
+        organizationId,
+        organizationTmpId,
+        clientId: String(client.id),
+      });
+    }
+    const clientId = String(client.id);
+    const clientName = String(client.displayName || client.name || '').trim() || 'לקוח';
+    const mapped = rows
+      .map((e) => mapClientEventToJournalRow(e, clientId, clientName, { summary }))
+      .filter(Boolean);
+    try {
+      await attachMissingCandidateEmployers(mapped);
+    } catch (attachErr) {
+      console.warn(
+        '[clientEventController] candidate employer attach failed',
+        String(attachErr && attachErr.message ? attachErr.message : attachErr).slice(0, 160),
+      );
+    }
+    const filtered = filterJournalMappedRows(mapped, journalQuery);
+    filtered.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+    res.json(limit > 0 ? filtered.slice(0, limit) : filtered);
+  } catch (err) {
+    const timedOut = err?.parent?.code === '57014' || /statement timeout/i.test(String(err?.message || ''));
+    const status = err.status || (timedOut ? 504 : 500);
+    res.status(status).json({ message: err.message || 'Failed to list events' });
+  }
 };
 
 /** Cross-client events journal (admin sees all; tenant sees own client only). */
@@ -161,7 +295,8 @@ const listAll = async (req, res) => {
       ? String(req.query.organizationTmpId).trim()
       : null;
     const summary = req.query?.summary !== '0' && req.query?.summary !== 'false';
-    const limit = parsePositiveInt(req.query?.limit, 600, 2000);
+    const journalQuery = parseJournalListQuery(req.query, req.dbUser);
+    const limit = parsePositiveInt(req.query?.limit, 20, 2000);
 
     const where = {};
     if (clientIdFilter) {
@@ -185,7 +320,11 @@ const listAll = async (req, res) => {
       const clientId = String(plain.id);
       const clientName = String(plain.displayName || plain.name || '').trim() || 'לקוח';
       let rows = Array.isArray(plain.events) ? plain.events : [];
-      rows = filterEventsByOrganizationScope(rows, { organizationId, organizationTmpId });
+      rows = await filterEventsByOrganizationScope(rows, {
+        organizationId,
+        organizationTmpId,
+        clientId,
+      });
       if (rows.length > perClientCap) {
         rows = [...rows]
           .sort((a, b) => new Date(b?.date || 0).getTime() - new Date(a?.date || 0).getTime())
@@ -197,8 +336,18 @@ const listAll = async (req, res) => {
       }
     }
 
-    out.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
-    return res.json(out.slice(0, limit));
+    try {
+      await attachMissingCandidateEmployers(out);
+    } catch (attachErr) {
+      console.warn(
+        '[clientEventController] candidate employer attach failed',
+        String(attachErr && attachErr.message ? attachErr.message : attachErr).slice(0, 160),
+      );
+    }
+
+    const filtered = filterJournalMappedRows(out, journalQuery);
+    filtered.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+    return res.json(filtered.slice(0, limit));
   } catch (err) {
     return res.status(500).json({ message: err.message || 'Failed to list events' });
   }
@@ -206,7 +355,7 @@ const listAll = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    const client = await clientService.getById(req.params.id);
+    const client = await clientService.getByIdForJournal(req.params.id);
     const prev = Array.isArray(client.events) ? client.events : [];
     const payload = req.body || {};
     const organizationId = payload.organizationId != null
@@ -287,7 +436,7 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const client = await clientService.getById(req.params.id);
+    const client = await clientService.getByIdForJournal(req.params.id);
     const prev = Array.isArray(client.events) ? client.events : [];
     const eventId = String(req.params.eventId);
     const payload = req.body || {};
@@ -350,7 +499,7 @@ const update = async (req, res) => {
 
 const remove = async (req, res) => {
   try {
-    const client = await clientService.getById(req.params.id);
+    const client = await clientService.getByIdForJournal(req.params.id);
     const prev = Array.isArray(client.events) ? client.events : [];
     const eventId = String(req.params.eventId);
     const next = prev.filter((e) => String(e.id) !== eventId);

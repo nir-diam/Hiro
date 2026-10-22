@@ -3,13 +3,14 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
     UserIcon, BriefcaseIcon, LinkIcon, UserGroupIcon, ArrowLeftIcon,
-    LockClosedIcon, ShieldCheckIcon, PencilIcon, CheckCircleIcon,
+    LockClosedIcon, ShieldCheckIcon, PencilIcon, CheckCircleIcon, CircleStackIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import {
     fetchStaffUser,
     resetStaffUserPassword,
     updateStaffUser,
+    duplicateStaffUser,
     type EmailSignatureDto,
     type StaffUserDto,
 } from '../services/usersApi';
@@ -543,6 +544,80 @@ const PermissionsTab: React.FC<{
     );
 };
 
+const DuplicateCoordinatorModal: React.FC<{
+    open: boolean;
+    onClose: () => void;
+    onSubmit: (fields: { name: string; email: string; phone: string }) => Promise<void>;
+    duplicating: boolean;
+    error: string | null;
+}> = ({ open, onClose, onSubmit, duplicating, error }) => {
+    const [name, setName] = useState('');
+    const [email, setEmail] = useState('');
+    const [phone, setPhone] = useState('');
+
+    useEffect(() => {
+        if (open) {
+            setName('');
+            setEmail('');
+            setPhone('');
+        }
+    }, [open]);
+
+    if (!open) return null;
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" dir="rtl">
+            <div
+                role="dialog"
+                aria-modal="true"
+                className="bg-bg-card rounded-2xl shadow-xl border border-border-default w-full max-w-md"
+            >
+                <div className="p-5 border-b border-border-default">
+                    <h2 className="text-lg font-bold text-text-default">פרטי הרכז החדש</h2>
+                    <p className="text-sm text-text-muted mt-1">
+                        תפקיד, הרשאות, היקף נתונים, שלוחה וחתימת מייל יועתקו מהרכז הנוכחי.
+                    </p>
+                </div>
+                <form
+                    className="p-5 space-y-4"
+                    onSubmit={(e) => {
+                        e.preventDefault();
+                        void onSubmit({ name, email, phone });
+                    }}
+                >
+                    {error && <p className="text-sm text-red-600">{error}</p>}
+                    <FormInput label="שם מלא" name="dupName" value={name} onChange={(e) => setName(e.target.value)} />
+                    <FormInput
+                        label="דוא״ל *"
+                        name="dupEmail"
+                        type="email"
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                    />
+                    <FormInput label="טלפון" name="dupPhone" value={phone} onChange={(e) => setPhone(e.target.value)} />
+                    <div className="flex justify-end gap-2 pt-2">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            disabled={duplicating}
+                            className="px-4 py-2 rounded-lg text-sm font-semibold text-text-muted hover:bg-bg-subtle disabled:opacity-60"
+                        >
+                            ביטול
+                        </button>
+                        <button
+                            type="submit"
+                            disabled={duplicating || !email.trim()}
+                            className="px-4 py-2 rounded-lg text-sm font-bold bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-60"
+                        >
+                            {duplicating ? 'יוצר...' : 'צור רכז משוכפל'}
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    );
+};
+
 const CoordinatorProfileView: React.FC = () => {
     const { t } = useLanguage();
     const { coordinatorId } = useParams<{ coordinatorId: string }>();
@@ -555,6 +630,9 @@ const CoordinatorProfileView: React.FC = () => {
     const [formData, setFormData] = useState<Record<string, unknown>>({});
     const [detailsSaving, setDetailsSaving] = useState(false);
     const [detailsMsg, setDetailsMsg] = useState<string | null>(null);
+    const [duplicateModalOpen, setDuplicateModalOpen] = useState(false);
+    const [duplicating, setDuplicating] = useState(false);
+    const [duplicateError, setDuplicateError] = useState<string | null>(null);
 
     const loadUser = useCallback(async () => {
         if (!coordinatorId) return;
@@ -581,6 +659,30 @@ const CoordinatorProfileView: React.FC = () => {
     useEffect(() => {
         void loadUser();
     }, [loadUser]);
+
+    const handleDuplicateClick = () => {
+        const ok = window.confirm(
+            'לשכפל את הרכז? שאר ההגדרות (תפקיד, הרשאות, היקף, שלוחה, חתימה) יועתקו — יש להזין שם, דוא״ל וטלפון חדשים.',
+        );
+        if (!ok) return;
+        setDuplicateError(null);
+        setDuplicateModalOpen(true);
+    };
+
+    const submitDuplicate = async (fields: { name: string; email: string; phone: string }) => {
+        if (!staffUser) return;
+        setDuplicateError(null);
+        setDuplicating(true);
+        try {
+            const created = await duplicateStaffUser(staffUser, fields);
+            setDuplicateModalOpen(false);
+            navigate(`/settings/coordinators/${created.id}`);
+        } catch (e: unknown) {
+            setDuplicateError(e instanceof Error ? e.message : 'שכפול נכשל');
+        } finally {
+            setDuplicating(false);
+        }
+    };
 
     const saveDetails = async () => {
         if (!coordinatorId) return;
@@ -655,15 +757,36 @@ const CoordinatorProfileView: React.FC = () => {
                         </p>
                     </div>
                 </div>
-                <button
-                    type="button"
-                    onClick={() => navigate('/settings/coordinators')}
-                    className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition flex items-center gap-2 self-start sm:self-center"
-                >
-                    <ArrowLeftIcon className="w-5 h-5" />
-                    <span>חזרה לרשימה</span>
-                </button>
+                <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
+                    <button
+                        type="button"
+                        onClick={handleDuplicateClick}
+                        disabled={duplicating}
+                        className="text-primary-700 font-semibold py-2 px-4 rounded-lg bg-primary-50 hover:bg-primary-100 border border-primary-200 transition flex items-center gap-2 disabled:opacity-60"
+                    >
+                        <CircleStackIcon className="w-5 h-5" />
+                        <span>שכפול רכז</span>
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => navigate('/settings/coordinators')}
+                        className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition flex items-center gap-2"
+                    >
+                        <ArrowLeftIcon className="w-5 h-5" />
+                        <span>חזרה לרשימה</span>
+                    </button>
+                </div>
             </header>
+
+            <DuplicateCoordinatorModal
+                open={duplicateModalOpen}
+                onClose={() => {
+                    if (!duplicating) setDuplicateModalOpen(false);
+                }}
+                onSubmit={submitDuplicate}
+                duplicating={duplicating}
+                error={duplicateError}
+            />
 
             <div className="border-b border-border-default overflow-x-auto">
                 <nav className="flex items-center -mb-px gap-6 min-w-max">

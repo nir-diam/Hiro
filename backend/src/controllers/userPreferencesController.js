@@ -23,7 +23,11 @@ const patchMine = async (req, res) => {
     const prefs = await userPreferencesService.updateForUser(userId, patch);
     return res.json(prefs);
   } catch (err) {
-    console.error('[userPreferencesController.patchMine]', err);
+    const code = err?.parent?.code || err?.original?.code;
+    console.error('[userPreferencesController.patchMine]', code || err?.name, err?.message || err);
+    if (code === '57014' || code === '55P03') {
+      return res.status(503).json({ message: 'Database is busy, preference save was not stored' });
+    }
     return res.status(500).json({ message: err.message || 'Failed to save preferences' });
   }
 };

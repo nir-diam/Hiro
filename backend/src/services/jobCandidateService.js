@@ -6,7 +6,7 @@ const Job = require('../models/Job');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const { resolveStatusGroup } = require('../utils/recruitmentStatusGroups');
 
-const JC_JOB_KEY = (jobId) => `jobcandidates:job:${jobId}`;
+const JC_JOB_KEY = (jobId) => `jobcandidates:job:${jobId}:v2`;
 const JC_CANDIDATE_KEY = (candidateId) => `jobcandidates:candidate:${candidateId}`;
 const JC_TTL = 5 * 60; // 5 minutes — high-churn data, short TTL
 
@@ -50,6 +50,8 @@ const buildCandidateView = (record) => {
     name,
     title: candidate.title || '',
     status,
+    email: candidate.email || '',
+    phone: candidate.phone || '',
     address,
     matchScore: Number(candidate.matchScore) || 0,
     source,

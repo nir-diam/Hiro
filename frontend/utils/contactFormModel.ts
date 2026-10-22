@@ -34,6 +34,7 @@ export interface ContactFormState {
   distributionEmail: boolean;
   distributionSms: boolean;
   distributionWhatsapp: boolean;
+  createdAt?: string;
 }
 
 export const newContactEntryId = (): string => {
@@ -158,6 +159,7 @@ export const emptyContactForm = (partial: Partial<ContactFormState> = {}): Conta
   distributionEmail: partial.distributionEmail !== false,
   distributionSms: partial.distributionSms !== false,
   distributionWhatsapp: partial.distributionWhatsapp !== false,
+  createdAt: partial.createdAt,
 });
 
 export const contactFromApi = (row: Record<string, unknown>): ContactFormState => {
@@ -189,6 +191,7 @@ export const contactFromApi = (row: Record<string, unknown>): ContactFormState =
     distributionEmail: row.distributionEmail !== false,
     distributionSms: row.distributionSms !== false,
     distributionWhatsapp: row.distributionWhatsapp !== false,
+    createdAt: row.createdAt ? String(row.createdAt) : row.created_at ? String(row.created_at) : undefined,
   });
 };
 

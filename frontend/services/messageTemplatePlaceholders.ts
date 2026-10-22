@@ -9,6 +9,13 @@ import {
     emailSignaturePlainText,
     parseEmailSignature,
 } from '../utils/emailSignature';
+import {
+    collapseAdjacentBlankBlocks,
+    isRichHtmlContent,
+    mixedTextAndHtmlToEmailEditorHtml,
+    plainTextToEmailHtml,
+    stripInsignificantHtmlBlocks,
+} from '../utils/parsedSearchTextHtml';
 
 /** Logical keys (without `{}`) — used when merging templates before send. */
 export type MessageTemplateToken =
@@ -78,6 +85,25 @@ function escapeRegExp(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function isBlankPlaceholderValue(value: string): boolean {
+    return !String(value ?? '').trim();
+}
+
+/** Drop the whole line when `{token}` is on its own line and resolves empty — avoids extra blank lines in compose. */
+function replaceTemplateTokenInText(text: string, tokenKey: string, value: string): string {
+    const token = `{${tokenKey}}`;
+    const escaped = escapeRegExp(token);
+    if (isBlankPlaceholderValue(value)) {
+        let out = text;
+        out = out.replace(new RegExp(`\\n[ \\t]*${escaped}[ \\t]*\\n`, 'g'), '\n');
+        out = out.replace(new RegExp(`^\\s*${escaped}\\s*\\n`, 'gm'), '');
+        out = out.replace(new RegExp(`\\n\\s*${escaped}\\s*$`, 'gm'), '\n');
+        out = out.replace(new RegExp(escaped, 'g'), '');
+        return out;
+    }
+    return text.replace(new RegExp(escaped, 'g'), String(value));
+}
+
 function staffFetchHeaders(): HeadersInit {
     const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
     const token = raw != null ? String(raw).trim() || null : null;
@@ -114,6 +140,58 @@ function splitFullName(fullName: string): { first: string; last: string } {
     const parts = s.split(/\s+/).filter(Boolean);
     if (parts.length === 1) return { first: parts[0], last: '' };
     return { first: parts[0], last: parts.slice(1).join(' ') };
+}
+
+function textContent(value: unknown): string {
+    return String(value ?? '')
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function firstNonEmptyText(...values: unknown[]): string {
+    for (const value of values) {
+        if (textContent(value)) return String(value).trim();
+    }
+    return '';
+}
+
+function detailedPublishContent(publication: Record<string, unknown> | null): Record<string, unknown> | null {
+    const layouts = publication?.landingLayouts;
+    if (!layouts || typeof layouts !== 'object') return null;
+    const detailed = (layouts as Record<string, unknown>).detailed;
+    return detailed && typeof detailed === 'object' ? (detailed as Record<string, unknown>) : null;
+}
+
+/** Public posting copy. Internal title/description are used only when no public copy exists. */
+function resolvePublicJobTitle(
+    job: Record<string, unknown> | null,
+    publication: Record<string, unknown> | null,
+    composeTitle: string,
+): string {
+    const detailed = detailedPublishContent(publication);
+    return firstNonEmptyText(
+        job?.publicJobTitle,
+        detailed?.publicJobTitle,
+        publication?.publicJobTitle,
+        job?.title,
+        composeTitle,
+    );
+}
+
+function resolvePublicJobDescription(
+    job: Record<string, unknown> | null,
+    publication: Record<string, unknown> | null,
+): string {
+    const detailed = detailedPublishContent(publication);
+    return firstNonEmptyText(
+        job?.PublicDescription,
+        job?.publicDescription,
+        detailed?.publicJobDescription,
+        publication?.publicJobDescription,
+        job?.description,
+    );
 }
 
 function formatRequirements(job: Record<string, unknown>): string {
@@ -160,17 +238,37 @@ export function applyMessageTemplatePlaceholders(
         merged[k] = values[k] != null ? String(values[k]) : '';
     }
     for (const key of Object.keys(merged)) {
-        const re = new RegExp(`\\{${escapeRegExp(key)}\\}`, 'g');
-        let val = merged[key];
-        if (key === 'recruiter_signature' && val) {
-            if (options?.emailCompose) {
-                const dir = detectEmailTextDirection(out);
-                val = alignEmailSignatureHtml(val, dir);
-            } else {
-                val = emailSignaturePlainText({ html: val }) || '[חתימת רכז]';
-            }
+        if (key === 'recruiter_signature') continue;
+        out = replaceTemplateTokenInText(out, key, merged[key]);
+    }
+    if (isBlankPlaceholderValue(merged.recruiter_signature)) {
+        out = replaceTemplateTokenInText(out, 'recruiter_signature', '');
+    }
+
+    const sigRaw = merged.recruiter_signature || '';
+    const sigTokenRe = /\{recruiter_signature\}/g;
+    if (options?.emailCompose) {
+        out = stripInsignificantHtmlBlocks(out);
+        const dir = detectEmailTextDirection(out);
+        const sigHtml = sigRaw ? alignEmailSignatureHtml(sigRaw, dir) : '';
+        const bodyWithoutSigToken = out.replace(sigTokenRe, '');
+        if (!isRichHtmlContent(bodyWithoutSigToken)) {
+            const marker = '\u0000SIG\u0000';
+            out = out
+                .replace(sigTokenRe, marker)
+                .split(marker)
+                .map((part, i, parts) => {
+                    const html = plainTextToEmailHtml(part);
+                    return i < parts.length - 1 ? `${html}${sigHtml}` : html;
+                })
+                .join('');
+        } else {
+            out = out.replace(sigTokenRe, sigHtml);
+            out = mixedTextAndHtmlToEmailEditorHtml(out);
         }
-        out = out.replace(re, val);
+    } else {
+        const sigPlain = sigRaw ? emailSignaturePlainText({ html: sigRaw }) || '[חתימת רכז]' : '';
+        out = out.replace(sigTokenRe, sigPlain);
     }
     return out;
 }
@@ -203,6 +301,7 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
     let cand: Record<string, unknown> | null = null;
     let linked: unknown[] = [];
     let jobFull: Record<string, unknown> | null = null;
+    let jobPublication: Record<string, unknown> | null = null;
     let jobClientDomain: string | null = null;
     let clientMetadata: Record<string, unknown> | null = null;
 
@@ -246,7 +345,8 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
             if (pubRes.ok) {
                 const pub = (await pubRes.json()) as unknown;
                 if (pub && typeof pub === 'object') {
-                    const branding = (pub as Record<string, unknown>).clientBranding;
+                    jobPublication = pub as Record<string, unknown>;
+                    const branding = jobPublication.clientBranding;
                     if (branding && typeof branding === 'object') {
                         jobClientDomain =
                             resolvePublicClientRouteKey(
@@ -284,12 +384,11 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
     const jobReferrals = formatLinkedJobsSummary(linked);
 
     const compose = args.jobComposeRow;
-    const jobTitle =
-        jobFull != null && String(jobFull.title ?? '').trim()
-            ? String(jobFull.title).trim()
-            : compose != null
-              ? String(compose.title || '').trim()
-              : '';
+    const jobTitle = resolvePublicJobTitle(
+        jobFull,
+        jobPublication,
+        compose != null ? String(compose.title || '').trim() : '',
+    );
 
     const clientLabel =
         jobFull != null && String(jobFull.client ?? '').trim()
@@ -298,10 +397,7 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
               ? String(compose.client || '').trim()
               : '';
 
-    const description =
-        jobFull != null
-            ? String(jobFull.description ?? jobFull.PublicDescription ?? jobFull.publicDescription ?? '').trim()
-            : '';
+    const description = resolvePublicJobDescription(jobFull, jobPublication);
 
     const requirements = jobFull != null ? formatRequirements(jobFull) : '';
 

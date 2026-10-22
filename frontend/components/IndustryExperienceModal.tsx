@@ -1,10 +1,15 @@
 import React, { useMemo } from 'react';
 import IndustryExperienceTable from './IndustryExperienceTable';
 import { XMarkIcon } from './Icons';
+import {
+  resolveRoleTagForJob,
+  type RoleTagDetailLike,
+} from '../utils/workExperienceRoleTag';
 
 interface IndustryExperienceModalProps {
   onClose: () => void;
   experiences?: any[];
+  tagDetails?: RoleTagDetailLike[];
   candidateName?: string;
   candidateTitle?: string;
   candidateSummary?: string;
@@ -42,7 +47,7 @@ const computeYearsAgo = (end?: string) => {
   return Math.max(0, now.getFullYear() - endDate.getFullYear());
 };
 
-const normalizeExperiences = (items: any[] = []) => {
+const normalizeExperiences = (items: any[] = [], tagDetails: RoleTagDetailLike[] = []) => {
   return items.map((exp, index) => {
     if (!exp || typeof exp === 'string') {
       return {
@@ -76,6 +81,7 @@ const normalizeExperiences = (items: any[] = []) => {
       yearsOfExperience: durationYears,
       yearsAgo: ago,
       tags: Array.isArray(exp.tags) ? exp.tags : [],
+      roleTag: resolveRoleTagForJob(exp, tagDetails),
       location: exp.location || exp.city || '',
       type: exp.type || exp.companyType || '',
       size: exp.size || exp.companySize || '',
@@ -89,11 +95,15 @@ const normalizeExperiences = (items: any[] = []) => {
 const IndustryExperienceModal: React.FC<IndustryExperienceModalProps> = ({
   onClose,
   experiences = [],
+  tagDetails = [],
   candidateName,
   candidateSummary,
   candidateTitle,
 }) => {
-  const normalized = useMemo(() => normalizeExperiences(experiences), [experiences]);
+  const normalized = useMemo(
+    () => normalizeExperiences(experiences, tagDetails),
+    [experiences, tagDetails],
+  );
   const totalYears = useMemo(
     () => normalized.reduce((acc, item) => acc + (item.yearsOfExperience || 0), 0),
     [normalized],

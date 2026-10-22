@@ -17,7 +17,6 @@ const {
   extractResumeTextFromUpload,
   buildParsedUpdates,
   fetchResumeBinaryForMail,
-  buildCandidateModelSchemaJsonForPrompt,
   ensureOrganizationsFromExperience,
   enrichCandidateFromResumeText,
 } = require('./candidateController');
@@ -27,8 +26,18 @@ const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const candidateTagService = require('../services/candidateTagService');
 const candidateCompletenessService = require('../services/candidateCompletenessService');
-const promptService = require('../services/promptService');
-const picklistService = require('../services/picklistService');
+const {
+  CV_PARSING_PROMPT_ID,
+  buildResumeResponseSchema,
+  getResumePromptTemplate,
+} = require('../services/cvParsingPromptService');
+const {
+  normalizeWorkExperience,
+  enrichWorkExperienceRoleTags,
+  ensureRoleTagCoverage,
+  attachTagIdsToWorkExperience,
+  workExperienceTagLinksChanged,
+} = require('../utils/workExperienceNormalize');
 const { sendChat } = require('../services/geminiService');
 const User = require('../models/User');
 const authService = require('../services/authService');
@@ -38,6 +47,18 @@ const RecruitmentSource = require('../models/RecruitmentSource');
 const { Op, Sequelize, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
+const { stripCvDocumentTitleFromPersonName, nameLooksLikeJobHeadline, sanitizePersonNameFields } = require('../utils/personName');
+const { bufferLooksLikeResume } = require('../utils/resumeFileKind');
+const {
+  resolveGeminiModelName,
+  maybeUpgradeParseWithPro,
+  assessCvParseQuality,
+  extractContactFromInboundMessage,
+  applyInboundContact,
+  activeTagCount,
+  THIN_RESUME_TEXT_CHARS,
+} = require('../services/cvParseQuality');
+const { syncTagsWithRetry, stampCvParseQuality, stampSavedCandidateQuality } = require('../services/cvParseQualityService');
 const proposalService = require('../services/proposalService');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const cvForwardService = require('../services/cvForwardService');
@@ -53,6 +74,85 @@ const {
   resolvePrimaryFromHashMatch,
 } = require('../services/cvContentHashService');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
+const { applyJobLinkOnboardingStageOne } = require('../services/jobCandidateOnboardingIngestService');
+
+const EMAIL_INGEST_MAX_CONCURRENT = Math.max(
+  1,
+  Math.min(6, Number(process.env.EMAIL_INGEST_MAX_CONCURRENT || 2) || 2),
+);
+let emailIngestActive = 0;
+const emailIngestWaitQueue = [];
+
+const acquireEmailIngestSlot = () =>
+  new Promise((resolve) => {
+    if (emailIngestActive < EMAIL_INGEST_MAX_CONCURRENT) {
+      emailIngestActive += 1;
+      resolve();
+      return;
+    }
+    emailIngestWaitQueue.push(resolve);
+  });
+
+const releaseEmailIngestSlot = () => {
+  emailIngestActive = Math.max(0, emailIngestActive - 1);
+  const next = emailIngestWaitQueue.shift();
+  if (next) {
+    emailIngestActive += 1;
+    next();
+  }
+};
+
+/** Backstop if a parse never returns. The slot must drop or every later upload notify waits forever. */
+const EMAIL_INGEST_TIMEOUT_MS = Math.max(
+  60_000,
+  Number(process.env.EMAIL_INGEST_TIMEOUT_MS || 8 * 60 * 1000) || 8 * 60 * 1000,
+);
+
+const ORG_SYNC_AFTER_EMAIL_DELAY_MS = Math.max(
+  0,
+  Number(process.env.ORG_SYNC_AFTER_EMAIL_DELAY_MS || 12000) || 12000,
+);
+
+/** Run work-experience → org linking after ingest finishes so Gemini does not compete with CV parsing. */
+const scheduleOrganizationsFromExperienceAfterIngest = (experience, candidateId) => {
+  if (!candidateId) return;
+  setTimeout(() => {
+    void ensureOrganizationsFromExperience(experience, candidateId);
+  }, ORG_SYNC_AFTER_EMAIL_DELAY_MS);
+};
+
+async function resolveClientIdForJobLinkOnboarding(resolvedJobClientId, resolvedJob) {
+  const fromArg = resolvedJobClientId != null ? String(resolvedJobClientId).trim() : '';
+  if (fromArg) return fromArg;
+  const jobId = resolvedJob?.id != null ? String(resolvedJob.id).trim() : '';
+  if (!jobId) return null;
+  const job = await Job.findByPk(jobId, { attributes: ['clientId', 'client'] });
+  if (!job) return null;
+  if (job.clientId) return String(job.clientId).trim();
+  return clientUsageSettingService.getClientIdForJobClientLabel(job.client);
+}
+
+async function ensureJobLinkRecruitmentStageOne({
+  jobCandidateId,
+  clientId,
+  req,
+  source = 'email_ingest',
+} = {}) {
+  const jcId = jobCandidateId != null ? String(jobCandidateId).trim() : '';
+  const cid = clientId != null ? String(clientId).trim() : '';
+  if (!jcId || !cid) return null;
+  try {
+    return await applyJobLinkOnboardingStageOne({
+      jobCandidateId: jcId,
+      clientId: cid,
+      req,
+      source,
+    });
+  } catch (err) {
+    console.warn('[email] recruitment stage 01 init failed', err?.message || err);
+    return null;
+  }
+}
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
 const supportedMimes = ['pdf', 'msword', 'officedocument', 'application/octet-stream'];
@@ -260,9 +360,9 @@ const postingCodeFromPlusAddressText = (text = '') => {
   return m ? m[1] : null;
 };
 
-const { POSTING_CODE_FIRST } = jobService;
+const { POSTING_CODE_MATCH_MIN, isPostingCodeValidForMatch } = jobService;
 
-/** Fallback when plus-tagging missed: first standalone number >= POSTING_CODE_FIRST (1_000_000). */
+/** Fallback when plus-tagging missed: first standalone number >= POSTING_CODE_MATCH_MIN (100_000). */
 const extractPostingCodeFromLargeNumberInText = (text = '') => {
   const src = String(text || '').trim();
   if (!src) return null;
@@ -272,7 +372,7 @@ const extractPostingCodeFromLargeNumberInText = (text = '') => {
     const digits = m[1];
     if (digits.length > 12) continue;
     const n = Number(digits);
-    if (Number.isFinite(n) && n >= POSTING_CODE_FIRST) return digits;
+    if (Number.isFinite(n) && n >= POSTING_CODE_MATCH_MIN) return digits;
   }
   return null;
 };
@@ -305,9 +405,9 @@ const extractPostingCodeFromFileKey = (fileKey = '') => {
   } catch {
     /* keep raw */
   }
-  const dashMatch = name.match(/[-–—]\s*(\d{4,8})(?:\.[^.]+)?$/);
+  const dashMatch = name.match(/[-–—]\s*(\d{4,12})(?:\.[^.]+)?$/);
   if (dashMatch) return dashMatch[1];
-  const tailMatch = name.match(/(\d{4,8})(?:\.[^.]+)?$/);
+  const tailMatch = name.match(/(\d{4,12})(?:\.[^.]+)?$/);
   return tailMatch ? tailMatch[1] : null;
 };
 
@@ -316,10 +416,19 @@ const extractPostingCodeFromSubject = (subject = '') => {
   if (!text) return null;
   const fromPlus = postingCodeFromPlusAddressText(text);
   if (fromPlus) return fromPlus;
+  // AllJobs: … מס' 640478
+  const masMatch = text.match(/מס['\u05F3]?\s*(\d{4,12})/u);
+  if (masMatch && isPostingCodeValidForMatch(masMatch[1])) return masMatch[1];
   const fromLargeNumber = extractPostingCodeFromLargeNumberInText(text);
   if (fromLargeNumber) return fromLargeNumber;
-  const codeMatch = text.match(/\b(\d{4,8})\b/);
-  return codeMatch ? codeMatch[1] : null;
+  // JobMaster: "Name - 538515"
+  const dashMatch = text.match(/[-–—]\s*(\d{4,12})\s*$/);
+  if (dashMatch && isPostingCodeValidForMatch(dashMatch[1])) return dashMatch[1];
+  const all = [...text.matchAll(/\b(\d{4,12})\b/g)].map((m) => m[1]);
+  for (let i = all.length - 1; i >= 0; i -= 1) {
+    if (isPostingCodeValidForMatch(all[i])) return all[i];
+  }
+  return null;
 };
 
 const formatJobForEmailUpload = (job) => {
@@ -349,7 +458,9 @@ const isResumeAttachment = (attachment) => {
   const filename = (attachment.filename || '').toLowerCase();
   if (supportedResumeExtensions.some((ext) => filename.endsWith(ext))) return true;
   const contentType = (attachment.contentType || '').toLowerCase();
-  return supportedMimes.some((mimeHint) => contentType.includes(mimeHint));
+  if (supportedMimes.some((mimeHint) => contentType.includes(mimeHint))) return true;
+  // No extension and a generic type: decide from the file bytes (pdf / doc / docx / image).
+  return bufferLooksLikeResume(attachment.content);
 };
 
 const BORING_EMAIL_PREFIX = new Set(['noreply', 'no-reply', 'mailer-daemon', 'donotreply', 'no_reply']);
@@ -564,12 +675,14 @@ const isPdfAttachmentBuffer = (buf, mimeType = '') => {
 };
 
 /** Full Gemini parse + vision fallback (same as staff upload) when email text extract is empty. */
-const runEmailIngestFullEnrichment = async (candidateId, combinedText, attachment, fileLabel) => {
+const runEmailIngestFullEnrichment = async (candidateId, combinedText, attachment, fileLabel, inbound = null) => {
   const buf = attachment?.content;
   if (!buf?.length) return false;
   const mimeType = attachment.contentType || 'application/octet-stream';
   const isPdf = isPdfAttachmentBuffer(buf, mimeType);
   const isImage = String(mimeType || '').toLowerCase().startsWith('image/');
+  const thin = String(combinedText || '').trim().length < THIN_RESUME_TEXT_CHARS;
+  if (!isPdf && !isImage && !thin && !(combinedText || '').trim()) return false;
   if (!isPdf && !isImage && !(combinedText || '').trim()) return false;
 
   const base = await candidateService.getById(candidateId);
@@ -577,6 +690,7 @@ const runEmailIngestFullEnrichment = async (candidateId, combinedText, attachmen
     pdfBuffer: isPdf ? buf : undefined,
     fileName: attachment.filename || fileLabel || 'resume.pdf',
     mimeType,
+    inbound,
   });
   return true;
 };
@@ -628,7 +742,7 @@ const extractNameHintFromCvBody = (text) => {
       .replace(/^קו["׳״]?ח\s*[-–]?\s*/i, '')
       .replace(/^קורות\s*חיים\s*[-–]?\s*/i, '')
       .trim();
-    if (L.length >= 2 && L.length < 90 && !/@/.test(L) && !/^\d+$/.test(L)) return L;
+    if (L.length >= 2 && L.length < 90 && !/@/.test(L) && !/^\d+$/.test(L) && !nameLooksLikeJobHeadline(L)) return L;
   }
   return null;
 };
@@ -680,7 +794,22 @@ async function resolveCandidateAuditDisplayName(candidateRef) {
   }
 }
 
-const processEmailUpload = async (record) => {
+const processEmailUpload = async (record, req = null) => {
+  await acquireEmailIngestSlot();
+  let slotHeld = true;
+  const releaseSlotOnce = () => {
+    if (!slotHeld) return;
+    slotHeld = false;
+    releaseEmailIngestSlot();
+  };
+  const slotTimer = setTimeout(() => {
+    console.error('[email] ingest slot timeout — releasing so the API is not blocked', {
+      id: record?.id,
+      fileKey: record?.fileKey,
+      timeoutMs: EMAIL_INGEST_TIMEOUT_MS,
+    });
+    releaseSlotOnce();
+  }, EMAIL_INGEST_TIMEOUT_MS);
   console.log('[email] processing upload record', {
     id: record.id,
     bucket: record.bucket,
@@ -780,7 +909,10 @@ const processEmailUpload = async (record) => {
     if (!postingCode) {
       postingCode =
         extractPostingCodeFromLargeNumberInText(parsed.to?.text || '') ||
-        extractPostingCodeFromLargeNumberInText(subject || '');
+        extractPostingCodeFromSubject(subject || '');
+    }
+    if (postingCode && !isPostingCodeValidForMatch(postingCode)) {
+      postingCode = null;
     }
     let resolvedJob = null;
     if (postingCode) {
@@ -790,6 +922,13 @@ const processEmailUpload = async (record) => {
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
       if (resolvedJob && !isUuid(resolvedJob.id)) {
         resolvedJob = null;
+      }
+      if (!resolvedJob) {
+        console.warn('[email] posting code parsed but no matching job', {
+          recordId: record.id,
+          postingCode,
+          subject: String(subject || '').slice(0, 160),
+        });
       }
     }
     const inboxToText = parsed.to?.text || '';
@@ -813,6 +952,7 @@ const processEmailUpload = async (record) => {
     // For job-directed mail (posting code in To), inbound-only reuse is dangerous:
     // one recruiter can forward many applicants from the same From address.
     let candidate = null;
+    let stampedCandidateId = null;
     let candidateCreatedViaEmailIngest = false;
     let reusedExistingCandidateByHash = false;
 
@@ -821,7 +961,9 @@ const processEmailUpload = async (record) => {
     // Never reuse by envelope From — recruiter inboxes forward many applicants from one sender.
     if (!candidate) {
       const inferredName =
-        fromAddress?.name?.trim() || fromEmail.split('@')[0] || 'מועמד חדש';
+        stripCvDocumentTitleFromPersonName(fromAddress?.name?.trim())
+        || fromEmail.split('@')[0]
+        || 'מועמד חדש';
       candidate = await candidateService.create(
         {
           /** Stable key when CV/AI later overwrites `email` to a different address. */
@@ -941,6 +1083,17 @@ const processEmailUpload = async (record) => {
         fileKey: record.fileKey,
         attempted: totalResumes,
       });
+      if (candidate?.id) {
+        try {
+          await stampSavedCandidateQuality(candidate.id, {
+            source: emailIngestSource,
+            hasResumeFile: false,
+            textLength: 0,
+          });
+        } catch (stampErr) {
+          console.warn('[email] quality stamp after failed upload', candidate.id, stampErr?.message || stampErr);
+        }
+      }
       return;
     }
 
@@ -1155,6 +1308,11 @@ const processEmailUpload = async (record) => {
       hasCvText &&
       (candidateCreatedViaEmailIngest || !reusedExistingCandidateByHash || profileNeedsEnrichment);
     let ranFullEnrichment = false;
+    const inboundContact = extractContactFromInboundMessage({
+      body: parsed.text || '',
+      html: typeof parsed.html === 'string' ? parsed.html : '',
+      fromEmail,
+    });
 
     if (reusedExistingCandidateByHash && profileIncompleteOnDb && !hasCvText) {
       console.warn('[email] hash-reused candidate still incomplete — will try vision/text enrich', {
@@ -1171,6 +1329,7 @@ const processEmailUpload = async (record) => {
           combinedText,
           resumeAttachments[0],
           uploaded[0]?.fileLabel,
+          inboundContact,
         );
         if (ranFullEnrichment) {
           shouldRunAiParse = true;
@@ -1186,6 +1345,37 @@ const processEmailUpload = async (record) => {
           candidate.id,
           fullEnrichErr?.message || fullEnrichErr,
         );
+      }
+    }
+
+    const attachmentIsPdf = Boolean(
+      resumeAttachments[0]?.content
+      && isPdfAttachmentBuffer(resumeAttachments[0].content, resumeAttachments[0].contentType),
+    );
+    const thinExtract = String(combinedText || '').trim().length < THIN_RESUME_TEXT_CHARS;
+    if (
+      !ranFullEnrichment
+      && attachmentIsPdf
+      && thinExtract
+      && (candidateCreatedViaEmailIngest || profileIncompleteOnDb)
+    ) {
+      try {
+        await markIngestPending(candidate.id);
+        ranFullEnrichment = await runEmailIngestFullEnrichment(
+          candidate.id,
+          combinedText,
+          resumeAttachments[0],
+          uploaded[0]?.fileLabel,
+          inboundContact,
+        );
+        if (ranFullEnrichment) {
+          console.log('[email] thin PDF text — sent the file to the model', {
+            candidateId: candidate.id,
+            textLen: String(combinedText || '').trim().length,
+          });
+        }
+      } catch (thinErr) {
+        console.warn('[email] thin PDF enrichment failed', candidate.id, thinErr?.message || thinErr);
       }
     }
 
@@ -1231,26 +1421,33 @@ const processEmailUpload = async (record) => {
       });
     }
 
+    if (ranFullEnrichment && candidate?.id) {
+      stampedCandidateId = String(candidate.id);
+    }
+
     if (shouldRunAiParse && !ranFullEnrichment) {
       await markIngestPending(candidate.id);
       const parsedUpdates = buildParsedUpdates(candidate, combinedText || '');
       if (Object.keys(parsedUpdates).length) {
         await candidateService.update(candidate.id, parsedUpdates);
       }
-      const { aiFields, aiTags } = await deriveCandidateFieldsFromResume(combinedText);
+      const { aiFields, aiTags, parseMeta } = await deriveCandidateFieldsFromResume(combinedText);
+      let savedTagCount = 0;
       if (aiFields && Object.keys(aiFields).length) {
-        const safeAi = { ...aiFields };
+        const safeAi = applyInboundContact({ ...aiFields }, inboundContact);
         if (safeAi.email && String(safeAi.email).includes('@')) {
           safeAi.email = String(safeAi.email).trim().toLowerCase();
         } else {
-          // Keep any email extracted directly from the CV; never fall back to the envelope From.
           delete safeAi.email;
           const cvMail = extractCvContactEmail(combinedText || '', emailInFirstCv);
           const fromNorm = String(fromEmail || '').trim().toLowerCase();
           if (cvMail && cvMail !== fromNorm) {
             safeAi.email = cvMail;
+          } else if (inboundContact.email) {
+            safeAi.email = inboundContact.email;
           }
         }
+        if (!safeAi.phone && inboundContact.phone) safeAi.phone = inboundContact.phone;
         await candidateService.update(candidate.id, safeAi);
 
         const auditNameAfterAi = await resolveCandidateAuditDisplayName(candidate);
@@ -1276,7 +1473,8 @@ const processEmailUpload = async (record) => {
         }
       }
       if (aiTags.length) {
-        await candidateTagService.syncTagsForCandidate(candidate.id, aiTags);
+        const synced = await syncTagsWithRetry(candidate.id, aiTags, { source: emailIngestSource });
+        savedTagCount = activeTagCount(synced);
 
         const auditNameAfterTags = await resolveCandidateAuditDisplayName(candidate);
 
@@ -1286,14 +1484,41 @@ const processEmailUpload = async (record) => {
           .filter(Boolean)
           .slice(0, 12)
           .join(', ');
-        await systemEventEmitter.emit(null, {
-          ...SYSTEM_EVENTS.CV_TAGS,
-          entityType: 'Candidate',
-          entityId: candidate.id,
-          entityName: auditNameAfterTags,
-          params: { tags: tagsLabel || `${aiTags.length} תגיות` },
-        });
+        if (savedTagCount) {
+          await systemEventEmitter.emit(null, {
+            ...SYSTEM_EVENTS.CV_TAGS,
+            entityType: 'Candidate',
+            entityId: candidate.id,
+            entityName: auditNameAfterTags,
+            params: { tags: tagsLabel || `${aiTags.length} תגיות` },
+          });
+        }
+        const rowForLink = await candidateService.getById(candidate.id);
+        const roleEnsured = ensureRoleTagCoverage([], rowForLink?.workExperience || []);
+        const linkedExp = attachTagIdsToWorkExperience(roleEnsured.workExperience, synced);
+        if (workExperienceTagLinksChanged(rowForLink?.workExperience, linkedExp)) {
+          await candidateService.update(candidate.id, { workExperience: linkedExp });
+        }
       }
+      const stampedRow = await candidateService.getById(candidate.id);
+      const parseQuality = assessCvParseQuality({
+        fullName: stampedRow?.fullName,
+        firstName: stampedRow?.firstName,
+        lastName: stampedRow?.lastName,
+        email: stampedRow?.email,
+        phone: stampedRow?.phone,
+        workExperience: stampedRow?.workExperience,
+        tagCount: savedTagCount,
+        extractedTextLength: String(combinedText || '').trim().length,
+        hasResumeFile: true,
+      });
+      await stampCvParseQuality(candidate.id, parseQuality, {
+        source: emailIngestSource,
+        model: parseMeta?.model || null,
+        textLength: String(combinedText || '').trim().length,
+        retriedWithPro: Boolean(parseMeta?.retriedWithPro),
+      });
+      stampedCandidateId = String(candidate.id);
     } else if (!ranFullEnrichment) {
       const skipReason = !hasCvText
         ? 'no_cv_text_extracted'
@@ -1338,14 +1563,23 @@ const processEmailUpload = async (record) => {
       console.warn('[email] identity merge failed', identityErr?.message || identityErr);
     }
 
+    if (candidate?.id && String(candidate.id) !== stampedCandidateId) {
+      try {
+        await stampSavedCandidateQuality(candidate.id, {
+          source: emailIngestSource,
+          textLength: String(combinedText || '').trim().length,
+          hasResumeFile: Boolean(uploaded[0]?.publicUrl),
+        });
+      } catch (stampErr) {
+        console.warn('[email] quality stamp after ingest', candidate.id, stampErr?.message || stampErr);
+      }
+    }
+
     try {
       await candidateCompletenessService.refreshCandidateDataStatusForClient(candidate.id, resolvedJobClientId);
     } catch (cmpErr) {
       console.warn('[email] completeness after ingest', cmpErr?.message || cmpErr);
     }
-
-    const primarySynced = await candidateService.getById(candidate.id);
-    await ensureOrganizationsFromExperience(primarySynced?.workExperience, candidate.id);
 
     if (shouldRunAiParse && !ranFullEnrichment) {
       try {
@@ -1361,8 +1595,26 @@ const processEmailUpload = async (record) => {
       source: 'email',
       manualOverride: false,
     });
+    const linkedJobCandidateId = association?.record?.id ?? null;
+    const jobLinkOnboardingClientId = await resolveClientIdForJobLinkOnboarding(
+      resolvedJobClientId,
+      resolvedJob,
+    );
+    if (linkedJobCandidateId && jobLinkOnboardingClientId) {
+      const onboardingInit = await ensureJobLinkRecruitmentStageOne({
+        jobCandidateId: linkedJobCandidateId,
+        clientId: jobLinkOnboardingClientId,
+        req,
+      });
+      if (onboardingInit?.applied) {
+        console.log('[email] job link set to recruitment stage 01', {
+          jobCandidateId: linkedJobCandidateId,
+          stageName: onboardingInit.stageName,
+        });
+      }
+    }
     console.log('[email] associated candidate with job', {
-      jobCandidateId: association?.id ?? null,
+      jobCandidateId: linkedJobCandidateId,
       jobId: resolvedJob?.id || null,
       candidateId: candidate.id,
     });
@@ -1386,7 +1638,11 @@ const processEmailUpload = async (record) => {
         entityId: primaryAuditId,
         entityName: primaryAuditName,
         clientId: resolvedJobClientId || null,
-        params: { id: record?.id != null ? String(record.id) : primaryAuditId },
+        jobCandidateId: linkedJobCandidateId,
+        params: {
+          id: record?.id != null ? String(record.id) : primaryAuditId,
+          jobCandidateId: linkedJobCandidateId,
+        },
       });
       await systemEventEmitter.emit(null, {
         ...SYSTEM_EVENTS.CV_SOURCE,
@@ -1396,6 +1652,21 @@ const processEmailUpload = async (record) => {
         clientId: resolvedJobClientId || null,
         params: { source: emailIngestSource },
       });
+    }
+
+    if (linkedJobCandidateId && jobLinkOnboardingClientId) {
+      const afterAutomations = await ensureJobLinkRecruitmentStageOne({
+        jobCandidateId: linkedJobCandidateId,
+        clientId: jobLinkOnboardingClientId,
+        req,
+        source: 'email_ingest_after_automation',
+      });
+      if (afterAutomations?.applied) {
+        console.log('[email] job link re-synced to recruitment stage 01 after automations', {
+          jobCandidateId: linkedJobCandidateId,
+          stageName: afterAutomations.stageName,
+        });
+      }
     }
 
     const welcomeClientId = resolvedJobClientId;
@@ -1545,22 +1816,46 @@ const processEmailUpload = async (record) => {
         splitCand._pendingCvAudit = { sid, sname };
       }
       const tj = textChunks[j] || '';
+      let splitStampedId = null;
       if (!splitHashReused) {
-        const { aiFields: splitAi, aiTags: splitTags } = await deriveCandidateFieldsFromResume(tj);
+        const { aiFields: splitAi, aiTags: splitTags, parseMeta: splitMeta } = await deriveCandidateFieldsFromResume(tj);
         if (splitAi && Object.keys(splitAi).length) {
-          const safeS = { ...splitAi };
+          const safeS = applyInboundContact({ ...splitAi }, inboundContact);
           if (safeS.email && String(safeS.email).includes('@')) {
             safeS.email = String(safeS.email).trim().toLowerCase();
           } else if (norm && norm !== fromEmail) {
             safeS.email = norm;
+          } else if (inboundContact.email) {
+            safeS.email = inboundContact.email;
           } else {
             delete safeS.email;
           }
+          if (!safeS.phone && inboundContact.phone) safeS.phone = inboundContact.phone;
           await candidateService.update(splitCand.id, safeS);
         }
+        let splitTagCount = 0;
         if (splitTags && splitTags.length) {
-          await candidateTagService.syncTagsForCandidate(splitCand.id, splitTags);
+          const synced = await syncTagsWithRetry(splitCand.id, splitTags, { source: emailIngestSource });
+          splitTagCount = activeTagCount(synced);
         }
+        const splitRow = await candidateService.getById(splitCand.id);
+        splitStampedId = String(splitCand.id);
+        await stampCvParseQuality(splitCand.id, assessCvParseQuality({
+          fullName: splitRow?.fullName,
+          firstName: splitRow?.firstName,
+          lastName: splitRow?.lastName,
+          email: splitRow?.email,
+          phone: splitRow?.phone,
+          workExperience: splitRow?.workExperience,
+          tagCount: splitTagCount,
+          extractedTextLength: String(tj || '').trim().length,
+          hasResumeFile: true,
+        }), {
+          source: emailIngestSource,
+          model: splitMeta?.model || null,
+          textLength: String(tj || '').trim().length,
+          retriedWithPro: Boolean(splitMeta?.retriedWithPro),
+        });
       } else {
         console.log('[email] split CV: skipping AI parse/embed — hash-reused candidate', {
           attachmentIndex: j,
@@ -1580,6 +1875,17 @@ const processEmailUpload = async (record) => {
         }
       } catch (splitIdentityErr) {
         console.warn('[email] split identity merge failed', splitIdentityErr?.message || splitIdentityErr);
+      }
+      if (splitCand?.id && String(splitCand.id) !== splitStampedId) {
+        try {
+          await stampSavedCandidateQuality(splitCand.id, {
+            source: emailIngestSource,
+            textLength: String(tj || '').trim().length,
+            hasResumeFile: true,
+          });
+        } catch (stampErr) {
+          console.warn('[email] split quality stamp after ingest', splitCand.id, stampErr?.message || stampErr);
+        }
       }
       await jobCandidateService.associateCandidateWithJob({
         jobId: resolvedJob?.id || null,
@@ -1608,7 +1914,7 @@ const processEmailUpload = async (record) => {
         delete splitCand._pendingCvAudit;
       }
       const splitFresh = await candidateService.getById(splitCand.id);
-      await ensureOrganizationsFromExperience(splitFresh?.workExperience, splitCand.id);
+      scheduleOrganizationsFromExperienceAfterIngest(splitFresh?.workExperience, splitCand.id);
       if (!splitHashReused) {
         try {
           await embedCandidateAndSave(splitCand.id, tj || '');
@@ -1669,6 +1975,9 @@ const processEmailUpload = async (record) => {
     console.log('[email] resume(s) attached for candidate', candidate.id, record.fileKey, {
       count: totalResumes,
     });
+
+    const primaryForOrgSync = await candidateService.getById(candidate.id);
+    scheduleOrganizationsFromExperienceAfterIngest(primaryForOrgSync?.workExperience, candidate.id);
   } catch (error) {
     console.error('[email][processEmailUpload]', {
       message: error?.message || error,
@@ -1677,18 +1986,65 @@ const processEmailUpload = async (record) => {
       fileKey: record?.fileKey,
     });
   } finally {
+    clearTimeout(slotTimer);
+    releaseSlotOnce();
     await releaseAllIngestPending();
   }
 };
+
+/** Duplicate ingest notifies insert a later row with the same S3 key and no parsed headers. */
+function emailUploadRichness(record) {
+  const plain = record?.get ? record.get({ plain: true }) : record || {};
+  let score = 0;
+  if (String(plain.subject || '').trim()) score += 4;
+  if (String(plain.from || '').trim()) score += 2;
+  if (String(plain.to || '').trim()) score += 1;
+  if (String(plain.body || '').trim()) score += 8;
+  if (String(plain.userNotes || '').trim()) score += 1;
+  return score;
+}
+
+function dedupeEmailUploadRows(records) {
+  const byFile = new Map();
+  const withoutFileKey = [];
+  for (const record of records) {
+    const fileKey = String(record.fileKey || '').trim();
+    const candidateId = String(record.candidateId || '').trim();
+    if (!fileKey) {
+      withoutFileKey.push(record);
+      continue;
+    }
+    const groupKey = `${candidateId}::${fileKey}`;
+    const current = byFile.get(groupKey);
+    if (!current) {
+      byFile.set(groupKey, record);
+      continue;
+    }
+    const nextScore = emailUploadRichness(record);
+    const currentScore = emailUploadRichness(current);
+    if (nextScore > currentScore) {
+      byFile.set(groupKey, record);
+      continue;
+    }
+    if (nextScore === currentScore && Number(record.id) < Number(current.id)) {
+      byFile.set(groupKey, record);
+    }
+  }
+  return [...withoutFileKey, ...byFile.values()].sort((a, b) => {
+    const aTime = new Date(a.createdAt || 0).getTime();
+    const bTime = new Date(b.createdAt || 0).getTime();
+    return bTime - aTime;
+  });
+}
 
 async function fetchEmailUploadsForCandidates(candidateIds) {
   const ids = [...new Set(candidateIds.map((id) => String(id || '').trim()).filter(Boolean))];
   if (!ids.length) return [];
 
-  const records = await EmailUpload.findAll({
+  const records = dedupeEmailUploadRows(await EmailUpload.findAll({
     where: { candidateId: { [Op.in]: ids } },
     order: [['createdAt', 'DESC']],
-  });
+  }));
 
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   const isJobUuid = (value) => UUID_RE.test(String(value || '').trim());
@@ -2043,11 +2399,24 @@ function slimNotificationRowForSummary(row) {
   return stripNotificationHeavyFields(row, { maxTextLen: 360, maxThreadTextLen: 240 });
 }
 
+/**
+ * List metadata must not walk `attachments` (base64 lives there and TOAST-detoasts the whole JSONB).
+ * Keep only small keys the inbox UI needs; full metadata is loaded on GET /messages/:id.
+ */
+const NOTIFICATION_METADATA_LIST_SQL = `(
+  jsonb_strip_nulls(jsonb_build_object(
+    'taskPayload', COALESCE("NotificationMessage"."metadata", '{}'::jsonb)->'taskPayload',
+    'taskCompleted', COALESCE("NotificationMessage"."metadata", '{}'::jsonb)->'taskCompleted',
+    'channel', COALESCE("NotificationMessage"."metadata", '{}'::jsonb)->'channel',
+    'linkedContactId', COALESCE("NotificationMessage"."metadata", '{}'::jsonb)->'linkedContactId'
+  ))
+)`;
+
 const NOTIFICATION_MESSAGE_LIST_ATTRIBUTES = [
   'id',
   'toEmail',
   'subject',
-  'text',
+  [sequelize.literal('LEFT("NotificationMessage"."text", 2000)'), 'text'],
   'messageType',
   'status',
   'isTask',
@@ -2058,7 +2427,7 @@ const NOTIFICATION_MESSAGE_LIST_ATTRIBUTES = [
   'dueTime',
   'sla',
   'senderUserId',
-  'metadata',
+  [sequelize.literal(NOTIFICATION_METADATA_LIST_SQL), 'metadata'],
   'createdAt',
   'updatedAt',
 ];
@@ -2076,6 +2445,13 @@ const NOTIFICATION_MESSAGE_LIST_ORDER = [
   ['updatedAt', 'DESC'],
   ['createdAt', 'DESC'],
 ];
+
+async function findNotificationMessageList(options) {
+  return sequelize.transaction(async (t) => {
+    await sequelize.query('SET LOCAL statement_timeout = 60000', { transaction: t });
+    return NotificationMessage.findAll({ ...options, transaction: t });
+  });
+}
 
 function mergeNotificationRowsDeduped(rowSets, limit = 500) {
   const byId = new Map();
@@ -2282,19 +2658,19 @@ const getNotificationMessages = async (req, res) => {
       const senderWhere = contactScopeLiteral
         ? { [Op.and]: [statusNotDeleted, { senderUserId: ctx.userId }, contactScopeLiteral] }
         : { [Op.and]: [statusNotDeleted, { senderUserId: ctx.userId }] };
-      queries.push(NotificationMessage.findAll({ ...listQueryBase, where: senderWhere }));
+      queries.push(findNotificationMessageList({ ...listQueryBase, where: senderWhere }));
 
       const assigneeWhere = contactScopeLiteral
         ? { [Op.and]: [statusNotDeleted, { assigneeId: ctx.userId }, contactScopeLiteral] }
         : { [Op.and]: [statusNotDeleted, { assigneeId: ctx.userId }] };
-      queries.push(NotificationMessage.findAll({ ...listQueryBase, where: assigneeWhere }));
+      queries.push(findNotificationMessageList({ ...listQueryBase, where: assigneeWhere }));
     }
 
     if (recipientOr.length) {
       const recipientWhere = contactScopeLiteral
         ? { [Op.and]: [statusNotDeleted, { [Op.or]: recipientOr }, contactScopeLiteral] }
         : { [Op.and]: [statusNotDeleted, { [Op.or]: recipientOr }] };
-      queries.push(NotificationMessage.findAll({ ...listQueryBase, where: recipientWhere }));
+      queries.push(findNotificationMessageList({ ...listQueryBase, where: recipientWhere }));
     }
 
     const rowSets = await Promise.all(queries);
@@ -2702,10 +3078,26 @@ const upload = async (req, res) => {
   }
 
   try {
+    const priorComplete = await EmailUpload.findOne({
+      where: {
+        bucket,
+        fileKey,
+        candidateId: { [Op.not]: null },
+      },
+      order: [['id', 'ASC']],
+    });
+    if (priorComplete?.candidateId) {
+      console.log('[email] upload notify deduped — fileKey already ingested', {
+        priorRecordId: priorComplete.id,
+        candidateId: priorComplete.candidateId,
+        fileKey,
+      });
+      return res.status(200).json(priorComplete);
+    }
     const record = await emailService.create({ jobId, fileKey, bucket });
     // Await: 201 only after all attachments are stored and candidate is updated, so clients
     // that load the profile right away see every file (void + early 201 caused a race).
-    await processEmailUpload(record);
+    await processEmailUpload(record, req);
     return res.status(201).json(record);
   } catch (error) {
     console.error('Failed to save email upload', error);
@@ -2775,8 +3167,8 @@ const send = async (req, res) => {
 
     console.log('[email][send] request received', {
       to: Array.isArray(to) ? `array(${to.length})` : typeof to,
-      toEmail: typeof toEmail,
-      subject: typeof subject === 'string' ? subject : undefined,
+      toEmail: typeof toEmail === 'string' ? toEmail.slice(0, 120) : typeof toEmail,
+      subject: typeof subject === 'string' ? subject.slice(0, 120) : undefined,
       hasText: typeof text === 'string' && text.trim().length > 0,
       hasHtml: typeof html === 'string' && html.trim().length > 0,
     });
@@ -3321,63 +3713,53 @@ const mergeScreeningCvPayloadFromDb = async (
 };
 
 /**
- * Job description, requirements, screening Q&A, telephone impression, internal opinion — for screening CV mail + DB text.
- * Plain strings for description/requirements/Q&A/phone come pre-stripped from the client; opinion is HTML.
+ * Candidate contact, then opinion, then screening Q&A (no job description/requirements) — screening CV mail body.
  */
-const buildScreeningCvDetailsAppendix = (block) => {
-  const jobDescriptionPlain = String(block?.jobDescriptionPlain ?? '')
-    .trim();
-  const jobRequirementsPlain = Array.isArray(block?.jobRequirementsPlain)
-    ? block.jobRequirementsPlain.map((r) => String(r ?? '').trim()).filter(Boolean)
-    : [];
+const buildScreeningCvReferralBodyContent = (cand, block) => {
+  const phone = cand?.phone != null ? String(cand.phone).trim() : '';
+  const email = cand?.email != null ? String(cand.email).trim() : '';
+  const addr = cand?.address != null ? String(cand.address).trim() : '';
+  const loc = cand?.location != null ? String(cand.location).trim() : '';
+  const locAddr = [loc, addr].filter(Boolean).join(' · ');
+
   const screeningQa = Array.isArray(block?.screeningQa)
     ? block.screeningQa.map((row) => ({
         question: String(row?.question ?? '').trim(),
         answer: String(row?.answer ?? '').trim(),
       }))
     : [];
-  const telephoneImpression = String(block?.telephoneImpression ?? '')
-    .trim();
+  const telephoneImpression = String(block?.telephoneImpression ?? '').trim();
   const internalOpinionHtml = String(block?.internalOpinionHtml ?? '');
 
   const dash = '—';
-  const textParts = [];
-  const htmlParts = [];
+  const textParts = [
+    'פרטי התקשרות למועמד:',
+    `טלפון: ${phone || dash}`,
+    `מייל: ${email || dash}`,
+    `עיר / כתובת: ${locAddr || dash}`,
+    '',
+    'חוות דעת:',
+  ];
+  const htmlParts = [
+    `<p dir="rtl"><strong>פרטי התקשרות למועמד</strong></p>`,
+    `<ul dir="rtl" style="margin:8px 0;padding-right:20px">`,
+    `<li style="margin:4px 0"><strong>טלפון:</strong> ${escapeHtmlMail(phone || dash)}</li>`,
+    `<li style="margin:4px 0"><strong>מייל:</strong> ${escapeHtmlMail(email || dash)}</li>`,
+    `<li style="margin:4px 0"><strong>עיר / כתובת:</strong> ${escapeHtmlMail(locAddr || dash)}</li>`,
+    '</ul>',
+    `<p dir="rtl" style="margin-top:16px"><strong>חוות דעת</strong></p>`,
+  ];
 
-  textParts.push('———— פרטי המשרה והסינון ————');
-
-  textParts.push(`\nתיאור המשרה:\n${jobDescriptionPlain || dash}`);
-  htmlParts.push(
-    `<p dir="rtl"><strong>תיאור המשרה</strong></p><div dir="rtl" style="white-space:pre-wrap">${htmlFromPlainTextForMail(
-      jobDescriptionPlain || dash,
-    )}</div>`,
-  );
-
-  textParts.push('\nדרישות:');
-  if (jobRequirementsPlain.length === 0) {
-    textParts.push(dash);
-    htmlParts.push(`<p dir="rtl"><strong>דרישות</strong></p><p dir="rtl">${escapeHtmlMail(dash)}</p>`);
+  if (internalOpinionHtml.trim()) {
+    textParts.push(stripHtmlMail(internalOpinionHtml));
+    htmlParts.push(`<div dir="rtl">${internalOpinionHtml}</div>`);
   } else {
-    const lines = jobRequirementsPlain
-      .map((r) => (typeof r === 'string' ? r.trim() : String(r)))
-      .filter(Boolean);
-    if (lines.length === 0) {
-      textParts.push(dash);
-      htmlParts.push(`<p dir="rtl"><strong>דרישות</strong></p><p dir="rtl">${escapeHtmlMail(dash)}</p>`);
-    } else {
-      lines.forEach((line) => {
-        textParts.push(`• ${line}`);
-      });
-      htmlParts.push(
-        `<p dir="rtl"><strong>דרישות</strong></p><ul dir="rtl" style="margin:8px 0;padding-right:20px">${lines
-          .map((line) => `<li style="margin:4px 0">${htmlFromPlainTextForMail(line)}</li>`)
-          .join('')}</ul>`,
-      );
-    }
+    textParts.push(dash);
+    htmlParts.push(`<p dir="rtl">${escapeHtmlMail(dash)}</p>`);
   }
 
-  textParts.push('\nשאלות סינון ותשובות:');
-  htmlParts.push('<p dir="rtl"><strong>שאלות סינון ותשובות</strong></p>');
+  textParts.push('', 'שאלות ותשובות:');
+  htmlParts.push('<p dir="rtl" style="margin-top:16px"><strong>שאלות ותשובות</strong></p>');
   if (screeningQa.length === 0) {
     textParts.push(dash);
     htmlParts.push(`<p dir="rtl">${escapeHtmlMail(dash)}</p>`);
@@ -3386,7 +3768,8 @@ const buildScreeningCvDetailsAppendix = (block) => {
       const q = String(row?.question ?? '').trim();
       const a = String(row?.answer ?? '').trim();
       textParts.push(`ש: ${q || dash}`);
-      textParts.push(`ת: ${a || dash}\n`);
+      textParts.push(`ת: ${a || dash}`);
+      textParts.push('');
       htmlParts.push(
         `<div dir="rtl" style="margin-bottom:12px"><div><strong>ש:</strong> ${htmlFromPlainTextForMail(
           q || dash,
@@ -3395,30 +3778,18 @@ const buildScreeningCvDetailsAppendix = (block) => {
     });
   }
 
-  textParts.push('רושם טלפוני:');
-  textParts.push(telephoneImpression || dash);
-  htmlParts.push(
-    `<p dir="rtl"><strong>רושם טלפוני</strong></p><div dir="rtl" style="white-space:pre-wrap">${htmlFromPlainTextForMail(
-      telephoneImpression || dash,
-    )}</div>`,
-  );
-
-  textParts.push('\nחוות דעת פנימית:');
-  if (internalOpinionHtml && internalOpinionHtml.trim()) {
-    textParts.push(stripHtmlMail(internalOpinionHtml));
+  if (telephoneImpression) {
+    textParts.push('רושם טלפוני:', telephoneImpression);
     htmlParts.push(
-      `<p dir="rtl"><strong>חוות דעת פנימית</strong></p><div dir="rtl">${internalOpinionHtml}</div>`,
-    );
-  } else {
-    textParts.push(dash);
-    htmlParts.push(
-      `<p dir="rtl"><strong>חוות דעת פנימית</strong></p><p dir="rtl">${escapeHtmlMail(dash)}</p>`,
+      `<p dir="rtl" style="margin-top:16px"><strong>רושם טלפוני</strong></p><div dir="rtl" style="white-space:pre-wrap">${htmlFromPlainTextForMail(
+        telephoneImpression,
+      )}</div>`,
     );
   }
 
   return {
-    detailsText: textParts.join('\n'),
-    detailsHtml: htmlParts.join('\n'),
+    textBlock: textParts.join('\n'),
+    htmlBlock: htmlParts.join('\n'),
   };
 };
 
@@ -3693,12 +4064,12 @@ const sendScreeningCv = async (req, res) => {
       const additionalNotesPlain =
         typeof block.additionalNotes === 'string' ? block.additionalNotes : '';
 
-      let detailsText = '';
-      let detailsHtml = '';
+      let referralContentText = '';
+      let referralContentHtml = '';
       if (!minimalCvReferralBody) {
-        const appendix = buildScreeningCvDetailsAppendix(block);
-        detailsText = appendix.detailsText;
-        detailsHtml = appendix.detailsHtml;
+        const referralContent = buildScreeningCvReferralBodyContent(candidate, block);
+        referralContentText = referralContent.textBlock;
+        referralContentHtml = referralContent.htmlBlock;
       }
 
       const buildBodies = ({ email, name }) => {
@@ -3722,9 +4093,7 @@ const sendScreeningCv = async (req, res) => {
           `<p dir="rtl">מצורפות קורות החיים של <strong>${escapeHtmlMail(candLabel)}</strong>${
             jobTitle ? ` עבור המשרה <strong>${escapeHtmlMail(jobTitle)}</strong>` : ''
           }${company ? ` (${escapeHtmlMail(company)})` : ''}.</p>`,
-          candContactHtml,
-          '<hr/>',
-          detailsHtml,
+          referralContentHtml,
         ];
         const htmlBody = htmlParts.join('\n');
         const textBody = [
@@ -3734,9 +4103,8 @@ const sendScreeningCv = async (req, res) => {
               company ? ` (${company})` : ''
             }.`,
           ),
-          candContactText,
           '',
-          detailsText,
+          referralContentText,
         ].join('\n');
         return { htmlBody, textBody };
       };
@@ -4078,6 +4446,10 @@ const parseScreeningCvReferralsQuery = (q, wantsPagination) => {
     candidateName: String(q.candidateName || '').trim(),
     /** Exact backend candidate UUID (screening row `metadata.taskPayload.candidateId`). */
     candidateId: String(q.candidateId || '').trim(),
+    jobId: String(q.jobId || '').trim(),
+    /** Normalized titles of the scoped job (filled in listScreeningCvReferrals). */
+    jobTitleAliases: [],
+    jobTitleQuery: String(q.jobTitle || '').trim(),
     source: String(q.source || '').trim(),
     sortKey: String(q.sortKey || 'referralDate').trim() || 'referralDate',
     sortDir: String(q.sortDir || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc',
@@ -4142,6 +4514,20 @@ const screeningReferralRowMatchesFilters = (row, f) => {
   }
   if (f.candidateId) {
     if (String(row.candidateId || '') !== f.candidateId) return false;
+  }
+  if (f.jobId || (Array.isArray(f.jobTitleAliases) && f.jobTitleAliases.length)) {
+    const want = String(f.jobId || '').trim().toLowerCase();
+    const got = String(row.jobId || '').trim().toLowerCase();
+    const idMatch = Boolean(want && got && got === want);
+    const rowTitle = String(row.jobTitle || '')
+      .trim()
+      .replace(/\s+/g, ' ')
+      .toLowerCase();
+    const titleMatch =
+      Boolean(rowTitle) &&
+      Array.isArray(f.jobTitleAliases) &&
+      f.jobTitleAliases.some((alias) => alias === rowTitle);
+    if (!idMatch && !titleMatch) return false;
   }
   if (f.source) {
     if (!String(row.source || '').toLowerCase().includes(f.source.toLowerCase())) return false;
@@ -4234,6 +4620,20 @@ const listScreeningCvReferrals = async (req, res) => {
     const wantsPagination =
       (q0.page != null && String(q0.page) !== '') || (q0.pageSize != null && String(q0.pageSize) !== '');
     const filterParams = parseScreeningCvReferralsQuery(q0, wantsPagination);
+    if (filterParams.jobId) {
+      const scopedJob = await Job.findByPk(filterParams.jobId, {
+        attributes: ['id', 'title', 'publicJobTitle'],
+      });
+      const aliases = [];
+      for (const raw of [scopedJob?.title, scopedJob?.publicJobTitle, filterParams.jobTitleQuery]) {
+        const n = String(raw || '')
+          .trim()
+          .replace(/\s+/g, ' ')
+          .toLowerCase();
+        if (n && !aliases.includes(n)) aliases.push(n);
+      }
+      filterParams.jobTitleAliases = aliases;
+    }
 
     let tenantClientLabels = null;
     if (!isBroad && userId) {
@@ -4268,12 +4668,38 @@ const listScreeningCvReferrals = async (req, res) => {
     const where = await buildScreeningCvReferralAccessWhere(req, {
       tenantHasClientScope: Boolean(tenantClientLabels?.length),
     });
+    const jobScopeParts = [];
+    if (filterParams.jobId) {
+      const jobIdSql = sequelize.escape(String(filterParams.jobId));
+      jobScopeParts.push(`NULLIF(BTRIM(COALESCE(metadata #>> '{taskPayload,jobId}', '')), '') = ${jobIdSql}`);
+      jobScopeParts.push(`NULLIF(BTRIM(COALESCE(metadata #>> '{taskPayload,linkedJobId}', '')), '') = ${jobIdSql}`);
+      jobScopeParts.push(`NULLIF(BTRIM(COALESCE(metadata #>> '{jobId}', '')), '') = ${jobIdSql}`);
+      jobScopeParts.push(`NULLIF(BTRIM(COALESCE(metadata #>> '{linkedJobId}', '')), '') = ${jobIdSql}`);
+    }
+    if (Array.isArray(filterParams.jobTitleAliases) && filterParams.jobTitleAliases.length) {
+      const titleIn = filterParams.jobTitleAliases.map((a) => sequelize.escape(a)).join(', ');
+      jobScopeParts.push(
+        `LOWER(REGEXP_REPLACE(BTRIM(COALESCE(metadata #>> '{taskPayload,jobTitle}', '')), '\\s+', ' ', 'g')) IN (${titleIn})`,
+      );
+    }
+    if (jobScopeParts.length) {
+      where[Op.and] = [...(Array.isArray(where[Op.and]) ? where[Op.and] : []), sequelize.literal(`(${jobScopeParts.join(' OR ')})`)];
+    }
 
     const rows = await NotificationMessage.findAll({
       where,
+      attributes: [
+        'id',
+        'toEmail',
+        'subject',
+        'status',
+        'createdAt',
+        'senderUserId',
+        [sequelize.literal(NOTIFICATION_METADATA_LIST_SQL), 'metadata'],
+      ],
       include: [{ model: User, as: 'sender', attributes: ['name'], required: false }],
       order: [['createdAt', 'DESC']],
-      limit: 20000,
+      limit: filterParams.jobId ? 500 : 1000,
     });
 
     const candIds = [
@@ -4324,10 +4750,13 @@ const listScreeningCvReferrals = async (req, res) => {
       const internalStr =
         internal != null && String(internal).trim() !== '' ? String(internal).trim() : '';
       const cand = tp.candidateId ? candById.get(tp.candidateId) : null;
+      const rawJobId = tp.jobId || tp.linkedJobId || meta.jobId || meta.linkedJobId;
+      const rowJobId =
+        rawJobId != null && String(rawJobId).trim() !== '' ? String(rawJobId).trim() : null;
       return {
         id: plain.id,
         candidateId: tp.candidateId || null,
-        jobId: tp.jobId || null,
+        jobId: rowJobId,
         candidateName: tp.candidateName || '',
         jobTitle: tp.jobTitle || '',
         clientName: tp.clientName || '',
@@ -4481,30 +4910,6 @@ const normalizeStringArray = (val) => {
   return [];
 };
 
-const normalizeWorkExperience = (arr) => {
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .map((x, idx) => {
-      if (!x || typeof x !== 'object') return null;
-      const title = String(x.title || '').trim();
-      const company = String(x.company || '').trim();
-      const description = String(x.description || '').trim();
-      if (!title && !company && !description) return null;
-      const startDate = String(x.startDate || '').trim() || '2000-01';
-      const endDate = String(x.endDate || '').trim() || (startDate || '2000-12');
-      return {
-        id: x.id || idx + 1,
-        title: title || 'ניסיון תעסוקתי',
-        company,
-        companyField: String(x.companyField || '').trim(),
-        startDate,
-        endDate,
-        description: description || [title, company].filter(Boolean).join(' - '),
-      };
-    })
-    .filter(Boolean);
-};
-
 const normalizeEducation = (arr) => {
   if (!Array.isArray(arr)) return [];
   return arr
@@ -4576,10 +4981,12 @@ const extractStructuredFields = (text) => {
   const pipeParts = firstLine.split('|').map((p) => p.trim()).filter(Boolean);
   const nameCandidate = (() => {
     const raw = pipeParts[0] ? pipeParts[0].split(',')[0].trim() : firstLine.split(',')[0].trim();
-    if (!raw) return undefined;
-    if (/\d/.test(raw) || raw.includes('@')) return undefined;
-    if (raw.length < 2 || raw.length > 80) return undefined;
-    return raw;
+    const cleaned = stripCvDocumentTitleFromPersonName(raw);
+    if (!cleaned) return undefined;
+    if (/\d/.test(cleaned) || cleaned.includes('@')) return undefined;
+    if (cleaned.length < 2 || cleaned.length > 80) return undefined;
+    if (nameLooksLikeJobHeadline(cleaned)) return undefined;
+    return cleaned;
   })();
   const phoneRegex = /(\+?972[-\s]?\d{1,3}[-\s]?\d{6,8}|\b0\d[-\s]?\d{7,8}\b|\+?\d{2,3}[-\s]?\d{7,10})/;
   const addressCandidate = (() => {
@@ -4865,38 +5272,6 @@ Output constraints:
 - Do not wrap in \`\`\` fences.
 `;
 
-/** Same appendix as candidateController: forces preferredWorkingHours / availability into model output. */
-const CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX = `
---- Backend-required JSON keys (add to the SAME single JSON object; use null when not stated in the CV) ---
-- "availability": string|null — Notice period, start date, or employment readiness ONLY if explicitly written (e.g. מיידי, חודש התראה, זמין מ-…).
-- "preferredWorkingHours": string|null — Preferred daily work schedule ONLY if explicit. If absent in the CV, use null (do not guess).
-  When present, use ONE of: "גמיש", "ללא אילוצי שעות", or a single 24h range "HH:mm-HH:mm" with zero-padded hours (e.g. "09:00-18:00").
-  Map phrases like "שעות גמישות", "משמרות גמישות", "flexible hours" to "גמיש".
-`;
-
-/** Same appendix as candidateController: forces a verbatim `quote` on every candidate tag. */
-const CV_PARSING_TAG_QUOTE_APPENDIX = `
---- Required additional field on EVERY object inside the "tags" array ---
-- "quote": string|null — The EXACT, verbatim substring copied character-by-character from the
-  input CV/email text that caused this tag to be created.
-  STRICT RULES:
-  * MUST be a literal substring of the input text — no paraphrase, no synonyms, no translation,
-    no punctuation/whitespace edits beyond trimming leading/trailing spaces.
-  * Pick the SHORTEST span that proves the tag (usually a phrase or short sentence). Hard cap ~240 characters.
-  * If the same evidence supports multiple tags, repeat the quote per tag — do NOT deduplicate.
-  * If the input does not contain a verbatim phrase that justifies the tag, set "quote" to null (very rare).
-  * "quote" is REQUIRED on every tag object and is IN ADDITION to "tag_reason" and the legacy "evidence" field.
-  * If you also emit the legacy "evidence" field, it MUST equal "quote" (same verbatim substring).
-`;
-
-/** Overrides any legacy "10-15 tags" / hard-cap wording in the stored cv_parsing prompt. */
-const CV_PARSING_TAG_COUNT_APPENDIX = `
---- Tag count (OVERRIDES any earlier cap in this prompt) ---
-- There is NO maximum tag count. Extract every relevant professional tag supported by evidence in the CV.
-- Include roles, skills, tools, seniority, industry, methodologies, degrees, and soft skills whenever they appear.
-- Still aim for at least 1-2 Role tags, one Seniority tag, and one Industry tag when the CV supports them.
-`;
-
 const coercePreferredWorkingHoursFromAi = (raw) => {
   if (raw == null || raw === '') return null;
   const s = String(raw).trim();
@@ -4919,40 +5294,32 @@ const coercePreferredWorkingHoursFromAi = (raw) => {
   return s.slice(0, 255);
 };
 
-const getResumePromptTemplate = async () => {
-  try {
-    const record = await promptService.getById('cv_parsing');
-    const schemaJson = buildCandidateModelSchemaJsonForPrompt();
-    const mobilityPicklist = await picklistService.formatCategoryValuesForLlmPrompt('mobility');
-    const drivingPicklist = await picklistService.formatCategoryValuesForLlmPrompt('driving_license');
-    let template = String(record.template || '');
-    template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
-    template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
-    template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
-    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}`;
-    return { ...record, template };
-  } catch (err) {
-    console.warn('[emailController] cv_parsing prompt missing', err.message || err);
-    return null;
-  }
-};
-
-const parseResumeWithAi = async ({ resumeText }) => {
+const parseResumeWithAi = async ({ resumeText, model = null }) => {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) return null;
   if (!resumeText || !String(resumeText).trim()) return null;
-  const promptRecord = await getResumePromptTemplate();
+  const promptRecord = await getResumePromptTemplate({ appendices: 'email' });
+  const chosenModel = resolveGeminiModelName(model || promptRecord?.model, null);
   const systemPrompt = (promptRecord?.template?.replace('{candidate_tag}', getCandidateTagsSchemaText())) || buildAiResumePrompt(getCandidateTagsSchemaText());
   const cvText = resumeText.slice(0, 50000);
+  console.log('[email] cv parse model', { model: chosenModel || 'gemini-3-flash-preview' });
   const raw = await sendChat({
     apiKey,
     systemPrompt,
     history: [{ role: 'user', text: cvText }],
     message: resumeText,
-    promptId: 'cv_parsing',
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 16384,
+      responseMimeType: 'application/json',
+      responseSchema: buildResumeResponseSchema(),
+    },
+    promptId: CV_PARSING_PROMPT_ID,
+    model: chosenModel,
     llmInputJson: {
       cvTextLength: cvText.length,
       cvTextPreview: cvText.slice(0, 4000),
+      model: chosenModel || 'gemini-3-flash-preview',
     },
   });
   const parsed = tryParseJson(raw);
@@ -4962,9 +5329,26 @@ const parseResumeWithAi = async ({ resumeText }) => {
 const deriveCandidateFieldsFromResume = async (text) => {
   const trimmed = typeof text === 'string' ? text.trim() : '';
   if (!trimmed) {
-    return { aiFields: null, aiTags: [], rawResult: null };
+    return { aiFields: null, aiTags: [], rawResult: null, parseMeta: { model: null, retriedWithPro: false } };
   }
-  const aiResult = (await parseResumeWithAi({ resumeText: trimmed })) || {};
+  const promptRecord = await getResumePromptTemplate({ appendices: 'email' });
+  const configuredModel = resolveGeminiModelName(promptRecord?.model, 'gemini-3-flash-preview');
+  let aiResult = (await parseResumeWithAi({ resumeText: trimmed, model: configuredModel })) || {};
+  let parseMeta = { model: configuredModel, retriedWithPro: false };
+  try {
+    const upgraded = await maybeUpgradeParseWithPro(aiResult, {
+      resumeText: trimmed,
+      modelUsed: configuredModel,
+      parseWithModel: ({ resumeText: nextText, model }) => parseResumeWithAi({ resumeText: nextText, model }),
+    });
+    if (upgraded?.ai) aiResult = upgraded.ai;
+    parseMeta = {
+      model: upgraded?.model || configuredModel,
+      retriedWithPro: Boolean(upgraded?.retriedWithPro),
+    };
+  } catch (upgradeErr) {
+    console.warn('[email] cv quality retry skipped', upgradeErr?.message || upgradeErr);
+  }
   const fallback = extractStructuredFields(trimmed);
 
   const aiSkills = aiResult.skills || {};
@@ -4989,8 +5373,28 @@ const deriveCandidateFieldsFromResume = async (text) => {
 
   availabilityFromAi=null; //dont change it!
 
+  const sanitizedName = sanitizePersonNameFields({
+    firstName: aiResult.firstName,
+    lastName: aiResult.lastName,
+    fullName: aiResult.fullName || fallback.fullName,
+  });
+  const heuristicName = sanitizedName.fullName && !nameLooksLikeJobHeadline(sanitizedName.fullName)
+    ? sanitizedName.fullName
+    : '';
+  const fullName = sanitizedName.cleared ? '' : (heuristicName || '');
+  let workExperience = normalizeWorkExperience(aiResult.workExperience || fallback.workExperience);
+  let aiTags = Array.isArray(aiResult.tags) && aiResult.tags.length
+    ? aiResult.tags
+    : tags.map((name) => ({ name }));
+  const roleTagEnriched = enrichWorkExperienceRoleTags(workExperience, aiTags);
+  const roleCovered = ensureRoleTagCoverage(roleTagEnriched.tagEntries, roleTagEnriched.workExperience);
+  workExperience = roleCovered.workExperience;
+  aiTags = roleCovered.tagEntries;
+  if (!tags.length) tags = aiTags.map((entry) => entry.name).filter(Boolean);
   const aiFields = {
-    fullName: aiResult.fullName || fallback.fullName || 'מועמד חדש',
+    fullName,
+    ...(sanitizedName.firstName ? { firstName: sanitizedName.firstName } : { firstName: null }),
+    ...(sanitizedName.lastName ? { lastName: sanitizedName.lastName } : { lastName: null }),
     email: aiResult.email || fallback.email || null,
     phone: aiResult.phone || fallback.phone || null,
     address: aiResult.address || null,
@@ -4999,12 +5403,15 @@ const deriveCandidateFieldsFromResume = async (text) => {
     title: aiResult.title || fallback.title || null,
     professionalSummary:
       aiResult.professionalSummary || fallback.professionalSummary || fallback.summary || null,
+    ...(normalizeStringArray(aiResult.keyFacts).slice(0, 3).length
+      ? { keyFacts: normalizeStringArray(aiResult.keyFacts).slice(0, 3) }
+      : {}),
     skills: {
       soft: softSkills.slice(0, 50),
       technical: techSkills.slice(0, 50),
     },
     tags,
-    workExperience: normalizeWorkExperience(aiResult.workExperience || fallback.workExperience),
+    workExperience,
     education: normalizeEducation(aiResult.education || fallback.education),
     languages: normalizeLanguages(aiResult.languages || fallback.languages),
     industryAnalysis: aiResult.industryAnalysis || fallback.industryAnalysis || {},
@@ -5012,10 +5419,6 @@ const deriveCandidateFieldsFromResume = async (text) => {
     searchTextSavedAt: new Date(),
   };
 
-  const aiTags = Array.isArray(aiResult.tags) && aiResult.tags.length
-    ? aiResult.tags
-    : tags.map((name) => ({ name }));
-
-  return { aiFields, aiTags, rawResult: aiResult };
+  return { aiFields, aiTags, rawResult: aiResult, parseMeta };
 };
 

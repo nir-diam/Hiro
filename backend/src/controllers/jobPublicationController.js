@@ -130,9 +130,15 @@ const submitApplication = async (req, res) => {
   }
 };
 
+const publishingTenantClientId = async (req) => {
+  if (!req.dbUser) return null;
+  return authService.resolveEffectiveClientIdForUser(req.dbUser);
+};
+
 const getPublication = async (req, res) => {
   try {
-    const data = await jobPublicationService.getPublicationForJob(req.params.id);
+    const tenantClientId = await publishingTenantClientId(req);
+    const data = await jobPublicationService.getPublicationForJob(req.params.id, { tenantClientId });
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to load publication' });
@@ -141,7 +147,8 @@ const getPublication = async (req, res) => {
 
 const updatePublication = async (req, res) => {
   try {
-    const data = await jobPublicationService.updatePublicationForJob(req.params.id, req.body || {});
+    const tenantClientId = await publishingTenantClientId(req);
+    const data = await jobPublicationService.updatePublicationForJob(req.params.id, req.body || {}, { tenantClientId });
     res.json(data);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Failed to update publication' });
@@ -355,7 +362,11 @@ const removeHeroGalleryImage = async (req, res) => {
 
 const generateHeroImage = async (req, res) => {
   try {
-    const data = await jobPublicationService.generateHeroImageForJob(req.params.id, req.body || {});
+    const tenantClientId = await publishingTenantClientId(req);
+    const data = await jobPublicationService.generateHeroImageForJob(req.params.id, {
+      ...(req.body || {}),
+      tenantClientId,
+    });
     res.json(data);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to generate image' });

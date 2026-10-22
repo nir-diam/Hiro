@@ -27,7 +27,14 @@ interface ContactGroup {
 
 const normalizeContact = (row: any): ContactFormState => contactFromApi(row);
 
-const defaultVisibleColumns = ['name', 'role', 'actions', 'phone', 'email', 'isActive', 'system_access'];
+const defaultVisibleColumns = ['name', 'role', 'actions', 'phone', 'email', 'isActive', 'system_access', 'createdAt'];
+
+const formatContactCreatedAt = (value?: string): string => {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString('he-IL');
+};
 
 const ContactCard: React.FC<{ 
     contact: ContactFormState; 
@@ -71,6 +78,7 @@ const ContactCard: React.FC<{
             <p><strong>טלפון:</strong> {primaryPhone(contact, 'office') || '—'}</p>
             <p><strong>נייד:</strong> {primaryPhone(contact, 'mobile') || '—'}</p>
             <p><strong>דוא"ל:</strong> {primaryEmail(contact) || '—'}</p>
+            <p><strong>תאריך יצירה:</strong> {formatContactCreatedAt(contact.createdAt)}</p>
         </div>
         <div className="flex justify-between items-center mt-3 pt-3 border-t border-border-subtle" onClick={e => e.stopPropagation()}>
             <div className="flex items-center gap-1">
@@ -120,7 +128,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
     const [isSaving, setIsSaving] = useState(false);
 
     const allColumnIds = useMemo(
-        () => ['select', 'name', 'role', 'actions', 'phone', 'mobilePhone', 'email', 'isActive', 'system_access'],
+        () => ['select', 'name', 'role', 'actions', 'phone', 'mobilePhone', 'email', 'isActive', 'system_access', 'createdAt'],
         [],
     );
     const {
@@ -159,6 +167,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
         { id: 'email', header: t('contacts.col_email') },
         { id: 'isActive', header: t('contacts.col_status') },
         { id: 'system_access', header: 'גישה למערכת' },
+        { id: 'createdAt', header: t('contacts.col_created_at') },
     ], [t]);
 
 
@@ -528,6 +537,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({
                 if (columnId === 'phone') return primaryPhone(contact, 'office') || '—';
                 if (columnId === 'mobilePhone') return primaryPhone(contact, 'mobile') || '—';
                 if (columnId === 'email') return primaryEmail(contact) || '—';
+                if (columnId === 'createdAt') return formatContactCreatedAt(contact.createdAt);
                 return (contact as any)[columnId];
             }
         }

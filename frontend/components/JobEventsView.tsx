@@ -8,6 +8,7 @@ import {
 import { EventsFilterMultiselect } from './EventsFilterMultiselect';
 import AddJobEventModal from './AddJobEventModal';
 import { useLanguage } from '../context/LanguageContext';
+import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
 import { eventTypeChipClasses } from '../utils/eventTypeChips';
 import { hebrewDescriptionChangeLine, hebrewLinkedListChangeLine } from '../utils/eventHistoryText';
 import {
@@ -210,6 +211,7 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
 
     const [isEventModalOpen, setIsEventModalOpen] = useState(false);
     const [editingEvent, setEditingEvent] = useState<JobEvent | null>(null);
+    useUnsavedChangesGuard(isEventModalOpen);
     const [openMenuId, setOpenMenuId] = useState<string | null>(null);
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
     const [historyVisibleEventId, setHistoryVisibleEventId] = useState<string | null>(null);

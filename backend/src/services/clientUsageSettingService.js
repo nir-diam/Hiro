@@ -342,20 +342,30 @@ const resolveClientIdForWelcomeEmail = async ({
   if (jid) {
     try {
       const Job = require('../models/Job');
-      const job = await Job.findByPk(jid, { attributes: ['client'] });
-      if (job?.client) {
-        let cid = await getClientIdForJobClientLabel(job.client);
-        if (!cid) {
-          const { resolveClientIdFromJobLabel } = require('./matchingEngineService');
-          cid = await resolveClientIdFromJobLabel(
-            job.get ? job.get({ plain: true }) : job,
-          );
+      const job = await Job.findByPk(jid, {
+        attributes: ['client', 'clientId', 'uniqueEmail'],
+      });
+      if (job) {
+        const plain = job.get ? job.get({ plain: true }) : job;
+        if (plain.clientId != null && String(plain.clientId).trim()) {
+          return String(plain.clientId).trim();
         }
-        if (cid) return cid;
-        console.warn('[clientUsageSettings] job.client did not match any Client row', {
-          jobId: jid,
-          jobClient: String(job.client).slice(0, 80),
-        });
+        if (plain.uniqueEmail) {
+          const fromJobInbox = await resolveClientIdFromJobInbox(plain.uniqueEmail);
+          if (fromJobInbox) return fromJobInbox;
+        }
+        if (plain.client) {
+          let cid = await getClientIdForJobClientLabel(plain.client);
+          if (!cid) {
+            const { resolveClientIdFromJobLabel } = require('./matchingEngineService');
+            cid = await resolveClientIdFromJobLabel(plain);
+          }
+          if (cid) return cid;
+          console.warn('[clientUsageSettings] job.client did not match any Client row', {
+            jobId: jid,
+            jobClient: String(plain.client).slice(0, 80),
+          });
+        }
       }
     } catch (err) {
       console.warn('[clientUsageSettings] resolveClientIdForWelcomeEmail job lookup failed', err?.message || err);

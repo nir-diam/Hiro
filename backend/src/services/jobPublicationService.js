@@ -299,6 +299,25 @@ const resolveJobBySlug = async (slug) => {
 
 const resolveClientForJob = async (job) => {
   const jobPlain = job.get ? job.get({ plain: true }) : job;
+  const directId = String(jobPlain.clientId || '').trim();
+  if (directId) {
+    const direct = await Client.findByPk(directId, {
+      attributes: [
+        'id',
+        'name',
+        'displayName',
+        'domain',
+        'logoUrl',
+        'primaryColor',
+        'metadata',
+        'email',
+        'phone',
+        'mainContactEmail',
+        'mainContactPhone',
+      ],
+    });
+    if (direct) return direct;
+  }
   let clientId = await clientUsageSettingService.resolveClientIdFromJobInbox(jobPlain.uniqueEmail);
   if (!clientId) {
     clientId = await clientUsageSettingService.getClientIdForJobClientLabel(jobPlain.client);
@@ -916,11 +935,9 @@ async function processPublicApplyResume(
 
   // createFromAi already calls tryEmbedCandidate — skip duplicate embed here.
 
-  try {
-    await ensureOrganizationsFromExperience(candidate?.workExperience, targetCandidateId);
-  } catch (orgErr) {
+  void ensureOrganizationsFromExperience(candidate?.workExperience, targetCandidateId).catch((orgErr) => {
     console.warn('[jobPublicationService] org sync after public apply failed', targetCandidateId, orgErr?.message || orgErr);
-  }
+  });
 
   const client = await resolveClientForJob(job);
   try {
@@ -1058,7 +1075,7 @@ function buildPublicApplyEnrichmentTask(
 
 const submitApplication = async (slug, body = {}) => {
   const job = await resolveJobBySlug(slug);
-  if (job.status !== 'פתוחה' && job.status !== 'מוקפאת') {
+  if (!body.publicSiteApply && job.status !== 'פתוחה' && job.status !== 'מוקפאת') {
     const err = new Error('This job is not accepting applications');
     err.status = 400;
     throw err;
@@ -1069,11 +1086,12 @@ const submitApplication = async (slug, body = {}) => {
     ? publication.landingPageFields
     : DEFAULT_LANDING_FIELDS;
   const srcKey = body.src || body.source || 'direct';
+  const publicSiteApply = body.publicSiteApply === true;
 
   const fullName = resolveApplicantFullName(body);
   const email = trimField(body.email).toLowerCase();
 
-  for (const field of fields) {
+  if (!publicSiteApply) for (const field of fields) {
     if (field.status !== 'mandatory') continue;
     const val = body[field.key];
     if (field.key === 'cv') {
@@ -1107,7 +1125,15 @@ const submitApplication = async (slug, body = {}) => {
     }
   }
 
-  if (!fullName || !email) {
+  if (publicSiteApply) {
+    if (!fullName) {
+      const err = new Error('שם מלא נדרש');
+      err.status = 422;
+      err.code = 'VALIDATION';
+      err.field = 'fullName';
+      throw err;
+    }
+  } else if (!fullName || !email) {
     const err = new Error('שם מלא ודוא"ל נדרשים');
     err.status = 400;
     throw err;
@@ -1118,8 +1144,10 @@ const submitApplication = async (slug, body = {}) => {
     ? publication.screeningQuestions
     : []
   ).filter((q) => q && q.isPublished !== false);
+  const { isVideoQuestion } = require('../utils/publicJobCatalog');
 
   for (const q of publishedQuestions) {
+    if (publicSiteApply && isVideoQuestion(q)) continue;
     if (!q.isMandatory) continue;
     const answer = screeningAnswers[String(q.id)];
     if (answer == null || String(answer).trim() === '') {
@@ -1131,9 +1159,23 @@ const submitApplication = async (slug, body = {}) => {
 
   const screeningNote = formatScreeningAnswersNote(screeningAnswers, publishedQuestions);
 
-  let candidate = await candidateService.findByEmail(email);
+  let candidate = null;
+  if (publicSiteApply) {
+    const candidateIdentityService = require('./candidateIdentityService');
+    const existing = await candidateIdentityService.findExistingByIdentity({
+      email,
+      phone: body.phone,
+    });
+    if (existing?.id) candidate = await candidateService.getById(existing.id);
+  } else if (email) {
+    candidate = await candidateService.findByEmail(email);
+  }
   const isNewCandidate = !candidate;
   const candidatePayload = buildApplicationCandidatePayload(body, srcKey, candidate);
+  if (publicSiteApply && body.recruitmentSourceName) {
+    candidatePayload.source = String(body.recruitmentSourceName);
+  }
+  if (publicSiteApply && !email) delete candidatePayload.email;
   if (screeningNote) {
     candidatePayload.internalNotes = candidate?.internalNotes
       ? `${String(candidate.internalNotes).trim()}\n\n${screeningNote}`
@@ -1153,20 +1195,44 @@ const submitApplication = async (slug, body = {}) => {
   let enrichError = null;
   let runEnrichmentAfterResponse = null;
 
+  if (publicSiteApply && body.rejectIfExists && candidate?.id) {
+    const existingLink = await JobCandidate.findOne({
+      where: { jobId: job.id, candidateId: candidate.id },
+    });
+    if (existingLink) {
+      const err = new Error('Already applied');
+      err.status = 409;
+      err.code = 'ALREADY_APPLIED';
+      throw err;
+    }
+  }
+
+  const recruitmentSourceName = publicSiteApply && body.recruitmentSourceName
+    ? String(body.recruitmentSourceName)
+    : srcKey;
   const { record: jobCandidateRecord, created } = await jobCandidateService.associateCandidateWithJob({
     jobId: job.id,
     candidateId: candidate.id,
     status: 'חדש',
-    source: `public_apply:${srcKey}`,
+    source: publicSiteApply ? recruitmentSourceName : `public_apply:${srcKey}`,
     workflowMetaPatch: {
       landingPageSubmission: true,
-      recruitmentSource: srcKey,
+      recruitmentSource: recruitmentSourceName,
       screeningAnswers,
       submittedAt: new Date().toISOString(),
+      ...(publicSiteApply
+        ? {
+            publicSiteApply: true,
+            consent: body.consent || null,
+            optIns: body.optIns || null,
+            utm: body.utm || null,
+            testSubmission: body.testSubmission === true,
+          }
+        : {}),
     },
   });
 
-  if (body.cvBase64) {
+  if (body.cvBase64 && !body.skipCvForward) {
     let cvBuffer = null;
     try {
       cvBuffer = Buffer.from(String(body.cvBase64), 'base64');
@@ -1184,7 +1250,7 @@ const submitApplication = async (slug, body = {}) => {
       resumeBuffer: cvBuffer,
       resumeFileName: body.cvFileName,
       resumeMimeType: body.cvMimeType,
-      recruitmentSourceName: buildLandingPageSource(srcKey),
+      recruitmentSourceName: publicSiteApply ? recruitmentSourceName : buildLandingPageSource(srcKey),
     });
   }
 
@@ -1268,6 +1334,7 @@ const submitApplication = async (slug, body = {}) => {
   return {
     response: {
       ok: true,
+      applicationId: jobCandidateRecord?.id || candidate.id,
       candidateId: candidate.id,
       companyName: client?.displayName || client?.name || job.client,
       enriched,
@@ -1346,15 +1413,28 @@ const enrichPublicationTrackingLinks = async (job, publication, clientRow) => {
   return { trackingLinks, submissionCount };
 };
 
-const publicationToResponse = async (job, publication) => {
+const loadClientBrandById = async (clientId) => {
+  const id = String(clientId || '').trim();
+  if (!id) return null;
+  return Client.findByPk(id, { attributes: CLIENT_BRAND_ATTRIBUTES });
+};
+
+/** Company-settings brand (logo, primary color, Nano Banana source). Not the job employer label. */
+const resolveCompanySettingsClient = async (tenantClientId, jobClient) => {
+  const companyClient = await loadClientBrandById(tenantClientId);
+  return companyClient || jobClient || null;
+};
+
+const publicationToResponse = async (job, publication, options = {}) => {
   const plain = publication.get ? publication.get({ plain: true }) : publication;
   const client = await resolveClientForJob(job);
+  const companyClient = await resolveCompanySettingsClient(options.tenantClientId, client);
   const enriched = await enrichPublicationTrackingLinks(job, publication, client);
   const clientLandingContact = resolveClientLandingContact(client);
   const { trackingLinks, submissionCount } = enriched;
-  const companyBrand = buildCompanyBrandFromClient(client);
+  const companyBrand = buildCompanyBrandFromClient(companyClient);
   const employerBrand = await resolveJobEmployerBrand(job);
-  const defaultHeroBrandSource = readClientJobHeroBrandSource(client);
+  const defaultHeroBrandSource = readClientJobHeroBrandSource(companyClient);
   return {
     ...plain,
     submissionCount,
@@ -1391,7 +1471,7 @@ const publicationToResponse = async (job, publication) => {
   };
 };
 
-const getPublicationForJob = async (jobId) => {
+const getPublicationForJob = async (jobId, options = {}) => {
   const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills', 'embedding'] } });
   if (!job) {
     const err = new Error('Job not found');
@@ -1399,10 +1479,10 @@ const getPublicationForJob = async (jobId) => {
     throw err;
   }
   const publication = await getOrCreatePublication(job);
-  return publicationToResponse(job, publication);
+  return publicationToResponse(job, publication, options);
 };
 
-const updatePublicationForJob = async (jobId, payload = {}) => {
+const updatePublicationForJob = async (jobId, payload = {}, options = {}) => {
   const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills', 'embedding'] } });
   if (!job) {
     const err = new Error('Job not found');
@@ -1458,6 +1538,44 @@ const updatePublicationForJob = async (jobId, payload = {}) => {
     }
   }
 
+  const prevBoard = publication.publicBoard && typeof publication.publicBoard === 'object' && !Array.isArray(publication.publicBoard)
+    ? { ...publication.publicBoard }
+    : {};
+  const incomingBoard = payload.publicBoard && typeof payload.publicBoard === 'object' && !Array.isArray(payload.publicBoard)
+    ? payload.publicBoard
+    : null;
+  const nextBoard = incomingBoard ? { ...prevBoard, ...incomingBoard } : { ...prevBoard };
+  const nextGeneral = pubData.publishToGeneralBoard !== undefined
+    ? pubData.publishToGeneralBoard === true
+    : publication.publishToGeneralBoard === true;
+  const nextIds = Array.isArray(nextBoard.publishedSiteIds) ? nextBoard.publishedSiteIds : [];
+  const wasListed = publication.publishToGeneralBoard === true
+    || (Array.isArray(prevBoard.publishedSiteIds) && prevBoard.publishedSiteIds.length > 0);
+  const willList = nextGeneral || nextIds.length > 0;
+  if (wasListed && !willList) {
+    nextBoard.unpublished = true;
+    nextBoard.publicClosedAt = prevBoard.publicClosedAt || new Date().toISOString();
+    nextBoard.lastPublishToGeneralBoard = publication.publishToGeneralBoard === true;
+    nextBoard.lastPublishedSiteIds = Array.isArray(prevBoard.publishedSiteIds) ? prevBoard.publishedSiteIds : [];
+    pubData.publicBoard = nextBoard;
+  } else if (willList) {
+    const { composeJobSlug } = require('../utils/publicJobSlug');
+    nextBoard.unpublished = false;
+    nextBoard.publicClosedAt = null;
+    if (!nextBoard.publishedAt) nextBoard.publishedAt = new Date().toISOString();
+    if (!nextBoard.publicSlug) {
+      nextBoard.publicSlug = composeJobSlug({
+        title: pubData.publicJobTitle || publication.publicJobTitle || job.publicJobTitle || job.title,
+        city: job.city,
+        code: publication.publicationCode || job.postingCode,
+        id: job.id,
+      });
+    }
+    pubData.publicBoard = nextBoard;
+  } else if (incomingBoard) {
+    pubData.publicBoard = nextBoard;
+  }
+
   await publication.update(pubData);
 
   const jobUpdates = {};
@@ -1476,7 +1594,19 @@ const updatePublicationForJob = async (jobId, payload = {}) => {
   }
 
   await publication.reload();
-  return publicationToResponse(job, publication);
+  if (wasListed !== willList || incomingBoard) {
+    const event = !wasListed && willList ? 'job.published' : wasListed && !willList ? 'job.closed' : 'job.updated';
+    try {
+      require('./publicJobsWebhookService').scheduleJobEvent(
+        job.get ? job.get({ plain: true }) : job,
+        publication.get({ plain: true }),
+        event,
+      );
+    } catch (err) {
+      console.warn('[publicJobsWebhook] schedule failed', err?.message || err);
+    }
+  }
+  return publicationToResponse(job, publication, options);
 };
 
 const JOB_SCOPE_ATTRIBUTES = ['id', 'title', 'publicJobTitle', 'client', 'clientId', 'status', 'postingCode', 'uniqueEmail'];
@@ -2147,10 +2277,11 @@ const resolveRequestedHeroBrandSource = (publication, tenantClient, options = {}
   const fromOptions = options.heroBrandSource != null ? String(options.heroBrandSource).trim() : '';
   const fromPublication =
     publication?.heroBrandSource != null ? String(publication.heroBrandSource).trim() : '';
-  let raw = fromOptions || fromPublication || '';
-  if (raw === 'choice' || !raw) {
-    raw = defaultSource === 'choice' ? 'company' : defaultSource;
+  // Company/client policy is live. A per-job source is kept only when settings say "choice".
+  if (defaultSource !== 'choice') {
+    return defaultSource === 'job_client' ? 'job_client' : 'company';
   }
+  const raw = fromOptions || fromPublication || 'company';
   return raw === 'job_client' ? 'job_client' : 'company';
 };
 
@@ -2164,22 +2295,38 @@ const buildCompanyBrandFromClient = (client) => {
 };
 
 const resolveJobEmployerBrand = async (job) => {
-  const label = String(job?.client || '').trim();
-  if (!label) return null;
-  const employerClientId = await clientUsageSettingService.getClientIdForJobClientLabel(label);
-  if (employerClientId) {
-    const row = await Client.findByPk(employerClientId, { attributes: CLIENT_BRAND_ATTRIBUTES });
-    if (row && (row.logoUrl || row.primaryColor)) {
+  const orgId = String(job?.organizationId || '').trim();
+  if (orgId) {
+    const org = await Organization.findByPk(orgId, { attributes: ['id', 'name', 'logo'] });
+    if (org) {
       return {
-        brandName: String(row.displayName || row.name || label).trim(),
-        logoUrl: row.logoUrl || null,
-        primaryColor: row.primaryColor || null,
+        brandName: String(org.name || job?.client || '').trim(),
+        logoUrl: org.logo || null,
+        primaryColor: null,
       };
     }
   }
+  const label = String(job?.client || '').trim();
+  if (!label) return null;
+  const row = await Client.findOne({
+    where: {
+      [Op.or]: [
+        { name: { [Op.iLike]: label } },
+        { displayName: { [Op.iLike]: label } },
+      ],
+    },
+    attributes: CLIENT_BRAND_ATTRIBUTES,
+  });
+  if (row && (row.logoUrl || row.primaryColor)) {
+    return {
+      brandName: String(row.displayName || row.name || label).trim(),
+      logoUrl: row.logoUrl || null,
+      primaryColor: row.primaryColor || null,
+    };
+  }
   try {
     const org = await organizationService.findByName(label);
-    if (org?.logo) {
+    if (org?.logo || org?.name) {
       return {
         brandName: String(org.name || label).trim(),
         logoUrl: org.logo || null,
@@ -2219,7 +2366,9 @@ const resolveHeroBrandForGeneration = async (job, tenantClient, publication, opt
   }
 
   const overrideColor = normalizeHexColor(
-    options.brandColor ?? options.heroBrandColorOverride ?? publication?.heroBrandColorOverride,
+    options.heroBrandColorOverride != null
+      ? options.heroBrandColorOverride
+      : publication?.heroBrandColorOverride,
   );
   const baseColor = normalizeHexColor(picked?.primaryColor);
   const brandColor = overrideColor || baseColor || '#1e293b';
@@ -2263,16 +2412,18 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
     err.status = 404;
     throw err;
   }
-  const [publication, client] = await Promise.all([
+  const [publication, jobClient] = await Promise.all([
     getOrCreatePublication(job),
     resolveClientForJob(job),
   ]);
+  const companyClient = await resolveCompanySettingsClient(options.tenantClientId, jobClient);
+  const client = jobClient;
   const title = options.publicJobTitle
     || publication.publicJobTitle
     || job.publicJobTitle
     || job.title;
   const pubPlain = publication.get ? publication.get({ plain: true }) : publication;
-  const heroBrand = await resolveHeroBrandForGeneration(job, client, pubPlain, options);
+  const heroBrand = await resolveHeroBrandForGeneration(job, companyClient, pubPlain, options);
   const brandColor = heroBrand.brandColor;
   const clientName = heroBrand.clientName || resolveClientNameForHeroPoster(client, options);
   const landingContact = resolveClientLandingContact(client);

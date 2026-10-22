@@ -119,6 +119,11 @@ function normalizeContactFromApi(raw: Record<string, unknown>, fallback: Contact
     avatar: initials,
     pipelineId: raw.pipelineId ? String(raw.pipelineId) : fallback.pipelineId,
     stageId: raw.processStage ? String(raw.processStage) : fallback.stageId,
+    createdAt: raw.createdAt
+      ? String(raw.createdAt)
+      : raw.created_at
+        ? String(raw.created_at)
+        : fallback.createdAt,
   };
 }
 

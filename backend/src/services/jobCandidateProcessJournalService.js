@@ -85,6 +85,9 @@ function appendStatusJournal(meta, payload) {
     isActive: true,
     updates: [],
   };
+  for (let i = 0; i < journal.length; i += 1) {
+    journal[i] = { ...journal[i], isActive: false };
+  }
   journal.unshift(entry);
   base.statusJournal = journal.slice(0, JOURNAL_CAP);
   return base;
@@ -232,7 +235,7 @@ async function backfillJournalFromEvents(jc, tagMap) {
           id: `initial-${jc.id}`,
           status,
           description: wm.internalNote || '',
-          createdAt: jc.updatedAt || jc.createdAt || new Date().toISOString(),
+          createdAt: new Date(jc.updatedAt || jc.createdAt || Date.now()).toISOString(),
           creator: 'מערכת',
           dueDate: wm.dueDate || null,
           dueTime: wm.dueTime || null,
@@ -439,6 +442,85 @@ async function patchJournalEntry(jobCandidateId, entryId, body, actor) {
 }
 
 /**
+ * Keep a pipeline action on the current journal card.
+ * The previous stage stays as an older history row instead of a second card.
+ */
+function recordOutcomeOnCurrentJournal({
+  workflowMeta,
+  prevStatus,
+  newStatus,
+  actor,
+  summary,
+  comment,
+  dueDate,
+  dueTime,
+}) {
+  let meta = plainWorkflowMeta(workflowMeta);
+  const journal = Array.isArray(meta.statusJournal) ? [...meta.statusJournal] : [];
+  const actorName = String(actor || 'מערכת').trim() || 'מערכת';
+  const next = String(newStatus || '').trim();
+  const prev = String(prevStatus || '').trim();
+  const title =
+    String(summary || '').trim() ||
+    (next && prev && next !== prev ? `${prev} → ${next}` : next || prev);
+  const now = new Date().toISOString();
+  const commentText = comment != null ? String(comment).trim() : '';
+  const actionUpdate = {
+    id: uuidv4(),
+    title: title || next || 'עדכון',
+    date: now,
+    creator: actorName,
+    ...(commentText ? { comment: commentText } : {}),
+  };
+
+  if (!journal.length) {
+    meta = appendStatusJournal(meta, {
+      status: next || prev || 'חדש',
+      fromStatus: prev || null,
+      description: '',
+      creator: actorName,
+      dueDate: dueDate || null,
+      dueTime: dueTime || null,
+      forceNew: true,
+    });
+    if (meta.statusJournal?.[0]) {
+      meta.statusJournal[0].updates = [actionUpdate];
+    }
+  } else {
+    const head = { ...journal[0] };
+    const updates = Array.isArray(head.updates) ? [...head.updates] : [];
+    const headStatus = String(head.status || prev || '').trim();
+    if (next && headStatus && next !== headStatus) {
+      const priorListed = updates.some((row) => String(row?.title || '').trim() === headStatus);
+      if (!priorListed) {
+        updates.push({
+          id: `prior-${head.id || uuidv4()}`,
+          title: headStatus,
+          date: String(head.createdAt || now),
+          creator: String(head.creator || 'מערכת').trim() || 'מערכת',
+        });
+      }
+      head.fromStatus = headStatus;
+      head.status = next;
+    } else if (next && !headStatus) {
+      head.status = next;
+    }
+    updates.unshift(actionUpdate);
+    head.updates = updates.slice(0, 50);
+    head.isActive = true;
+    if (dueDate) head.dueDate = dueDate;
+    if (dueTime !== undefined) head.dueTime = dueTime || null;
+    journal[0] = head;
+    meta.statusJournal = journal;
+  }
+
+  if (dueDate) meta.dueDate = dueDate;
+  if (dueTime !== undefined) meta.dueTime = dueTime || null;
+  meta.workflowUpdatedAt = now;
+  return meta;
+}
+
+/**
  * Mutate workflowMeta with a journal row when status or notes change.
  */
 function applyJournalOnStatusPatch({
@@ -496,6 +578,7 @@ module.exports = {
   appendStatusJournal,
   appendJournalEntryActivity,
   applyJournalOnStatusPatch,
+  recordOutcomeOnCurrentJournal,
   plainWorkflowMeta,
   getProcessJournal,
   patchJournalEntry,

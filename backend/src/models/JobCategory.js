@@ -14,6 +14,10 @@ const JobCategory = sequelize.define(
       allowNull: false,
       unique: true,
     },
+    /** Stable public slug. Locked after the first publish; a Hebrew rename does not change it. */
+    publicSlug: { type: DataTypes.STRING(120), allowNull: true },
+    slugAliases: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
+    slugLocked: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     embedding: { type: DataTypes.JSONB, allowNull: true },
   },
   {

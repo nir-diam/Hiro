@@ -219,7 +219,7 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
 
   let recorded = 0;
   for (const clientId of clientIds) {
-    const client = await clientService.getById(clientId);
+    const client = await clientService.getById(clientId, { include: ['events'] });
     const prevEvents = Array.isArray(client?.events) ? client.events : [];
     const contact = await resolveClientContactForCandidate(clientId, candidate);
     const contactId = contact?.id || null;

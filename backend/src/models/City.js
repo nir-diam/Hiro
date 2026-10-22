@@ -44,6 +44,17 @@ const City = sequelize.define(
       type: DataTypes.STRING(255),
       allowNull: true,
     },
+    publicSlug: {
+      type: DataTypes.STRING(120),
+      allowNull: true,
+      field: 'public_slug',
+    },
+    slugAliases: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+      field: 'slug_aliases',
+    },
   },
   {
     tableName: 'cities',

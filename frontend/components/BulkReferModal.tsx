@@ -4,6 +4,7 @@ import type { BulkJobPickerOption } from './BulkAddToFilterModal';
 import { useLanguage } from '../context/LanguageContext';
 import { jobIsOpenForStaffPick } from '../utils/jobPickerOpen';
 import { getJobHealthData, daysOpenFromDate } from '../utils/jobHealth';
+import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferralEvents';
 
 export type BulkReferSuccessSummary = {
     /** Total email dispatches returned by the API (sum of count per candidate). */
@@ -337,6 +338,9 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
                 candidatesFailed: total - candidatesSucceeded,
                 errors,
             };
+            if (emailsSent > 0) {
+                dispatchScreeningCvReferralsUpdated({ jobId: selectedJobId });
+            }
             onSuccess?.(summary);
             onClose();
         } finally {

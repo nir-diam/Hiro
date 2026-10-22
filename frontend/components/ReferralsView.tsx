@@ -7,10 +7,14 @@ import UpdateStatusModal from './UpdateStatusModal';
 import ReReferModal, { type ReReferSendPayload } from './ReReferModal';
 import { type Job } from './JobsView';
 import JobDetailsDrawer from './JobDetailsDrawer';
+import CandidateSummaryDrawer from './CandidateSummaryDrawer';
+import { buildCandidateDrawerStub } from '../utils/processEntityDrawers';
+import type { Candidate } from './CandidatesListView';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
+import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferralEvents';
 
 type Status = 'התקבל לעבודה' | 'נדחה' | 'בהמתנה' | 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'נשלחו קו"ח' | 'נשלחו קורות חיים';
 
@@ -101,6 +105,24 @@ function ReferralNotesSummary({ referral }: { referral: ActiveReferral }) {
     );
 }
 
+function normalizeJobTitleLabel(value: string | null | undefined): string {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function referralMatchesScopedJob(
+  row: { jobId?: string | null; jobTitle?: string | null },
+  scopeJobId: string | null,
+  scopeJobTitle: string,
+): boolean {
+  if (!scopeJobId && !scopeJobTitle) return true;
+  const gotId = String(row.jobId || '').trim().toLowerCase();
+  const wantId = String(scopeJobId || '').trim().toLowerCase();
+  if (wantId && gotId && gotId === wantId) return true;
+  const rowTitle = normalizeJobTitleLabel(row.jobTitle);
+  if (scopeJobTitle && rowTitle && rowTitle === scopeJobTitle) return true;
+  return !scopeJobTitle;
+}
+
 function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): ActiveReferral {
   const rawStatus = String(row.status || '').trim();
   const status = (rawStatus !== '' ? rawStatus : 'חדש') as Status;
@@ -179,7 +201,7 @@ const ActionButton: React.FC<{ icon: React.ReactNode; colorClass: string; toolti
     </button>
 );
 
-const ReferralCard: React.FC<{ referral: ActiveReferral; onToggleDetails: () => void; isExpanded: boolean; onStatusClick: (e: React.MouseEvent, referral: ActiveReferral) => void; onJobTitleClick: () => void; onClientClick: (e: React.MouseEvent) => void; }> = ({ referral, onToggleDetails, isExpanded, onStatusClick, onJobTitleClick, onClientClick }) => {
+const ReferralCard: React.FC<{ referral: ActiveReferral; onToggleDetails: () => void; isExpanded: boolean; onStatusClick: (e: React.MouseEvent, referral: ActiveReferral) => void; onJobTitleClick: () => void; onClientClick: (e: React.MouseEvent) => void; onCandidateClick: (e: React.MouseEvent) => void; }> = ({ referral, onToggleDetails, isExpanded, onStatusClick, onJobTitleClick, onClientClick, onCandidateClick }) => {
     const style = statusStyles[referral.status] || { bg: 'bg-gray-100', text: 'text-gray-800', border: 'border-gray-200', icon: ClockIcon };
     const StatusIcon = style.icon;
 
@@ -187,7 +209,13 @@ const ReferralCard: React.FC<{ referral: ActiveReferral; onToggleDetails: () => 
         <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm p-5 hover:shadow-md transition-all group">
             <div className="flex justify-between items-start mb-3">
                 <div>
-                     <h3 className="font-bold text-text-default text-lg mb-1">{referral.candidateName}</h3>
+                     {referral.candidateId ? (
+                        <button type="button" onClick={onCandidateClick} className="font-bold text-text-default text-lg mb-1 text-right hover:text-primary-700 hover:underline">
+                            {referral.candidateName}
+                        </button>
+                     ) : (
+                        <h3 className="font-bold text-text-default text-lg mb-1">{referral.candidateName}</h3>
+                     )}
                      <button onClick={onJobTitleClick} className="text-sm font-medium text-primary-600 hover:underline block">{referral.jobTitle}</button>
                      {referral.clientId != null ? (
                         <button type="button" onClick={onClientClick} className="text-xs text-text-muted hover:text-text-default block mt-1">{referral.clientName}</button>
@@ -233,7 +261,10 @@ const ReferralsView: React.FC<{
     onOpenNewTask: () => void;
     /** When set (candidate profile), only referrals for this candidate are shown. */
     candidateId?: string | null;
-}> = ({ onOpenNewTask, candidateId }) => {
+    /** When set (job page), only referrals for this job are shown. */
+    jobId?: string | null;
+    jobTitle?: string | null;
+}> = ({ onOpenNewTask, candidateId, jobId, jobTitle = null }) => {
     const { t } = useLanguage();
     const { user } = useAuth();
     const navigate = useNavigate();
@@ -279,6 +310,8 @@ const ReferralsView: React.FC<{
     const [reReferModal, setReReferModal] = useState<{ isOpen: boolean; referral: ActiveReferral | null }>({ isOpen: false, referral: null });
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const [summaryCandidate, setSummaryCandidate] = useState<Candidate | null>(null);
+    const [isCandidateDrawerOpen, setIsCandidateDrawerOpen] = useState(false);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [jobCatalog, setJobCatalog] = useState<Job[]>([]);
     const [jobCatalogLoading, setJobCatalogLoading] = useState(false);
@@ -288,7 +321,9 @@ const ReferralsView: React.FC<{
     // Filters & Sorting
     const [startDate, setStartDate] = useState('');
     const [endDate, setEndDate] = useState('');
-    const [activePreset, setActivePreset] = useState<'today' | 'week' | 'month' | 'quarter' | 'custom'>('month');
+    const [activePreset, setActivePreset] = useState<'today' | 'week' | 'month' | 'quarter' | 'custom'>(
+        jobId != null && String(jobId).trim() !== '' ? 'custom' : 'month'
+    );
     const [searchTerm, setSearchTerm] = useState('');
     const [adminClientId, setAdminClientId] = useState<string | null>(null);
     const [clientOptions, setClientOptions] = useState<Array<{ id: string; label: string }>>([]);
@@ -302,11 +337,15 @@ const ReferralsView: React.FC<{
 
     const scopeCandidateId =
         candidateId != null && String(candidateId).trim() !== '' ? String(candidateId).trim() : null;
+    const scopeJobId =
+        jobId != null && String(jobId).trim() !== '' ? String(jobId).trim() : null;
+    const scopeJobTitle = normalizeJobTitleLabel(jobTitle);
 
-    // Initial load - set default date range (Month)
+    // Global / candidate referrals default to the last month. Job-scoped list matches all-time referralsCount.
     useEffect(() => {
+        if (scopeJobId) return;
         applyDatePreset('month');
-    }, []);
+    }, [scopeJobId]);
 
     useEffect(() => {
         if (!apiBase) return;
@@ -387,9 +426,11 @@ const ReferralsView: React.FC<{
             .then((res) => (res.ok ? res.json() : []))
             .then((data: DisqualifiedReferral[]) => {
                 if (isActive && Array.isArray(data)) {
-                    const rows = scopeCandidateId
-                        ? data.filter((r) => String(r.candidateId || '').trim() === scopeCandidateId)
-                        : data;
+                    const rows = data.filter((r) => {
+                        if (scopeCandidateId && String(r.candidateId || '').trim() !== scopeCandidateId) return false;
+                        if (!referralMatchesScopedJob(r, scopeJobId, scopeJobTitle)) return false;
+                        return true;
+                    });
                     setDisqualifiedReferrals(rows);
                 }
             })
@@ -400,7 +441,7 @@ const ReferralsView: React.FC<{
                 if (isActive) setDisqualifiedLoading(false);
             });
         return () => { isActive = false; };
-    }, [apiBase, scopeCandidateId]);
+    }, [apiBase, scopeCandidateId, scopeJobId, scopeJobTitle]);
 
     useEffect(() => {
         if (!apiBase) {
@@ -418,6 +459,8 @@ const ReferralsView: React.FC<{
         if (startDate) params.set('referralDate', startDate);
         if (endDate) params.set('referralDateEnd', endDate);
         if (scopeCandidateId) params.set('candidateId', scopeCandidateId);
+        if (scopeJobId) params.set('jobId', scopeJobId);
+        if (scopeJobTitle) params.set('jobTitle', String(jobTitle || '').trim());
         if (isPlatformAdmin && adminClientId) params.set('clientId', adminClientId);
         const qs = params.toString();
         fetch(`${apiBase}/api/email-uploads/screening-cv-referrals${qs ? `?${qs}` : ''}`, {
@@ -432,9 +475,11 @@ const ReferralsView: React.FC<{
                     : (data && typeof data === 'object' && 'items' in (data as object)
                         ? (data as { items?: ScreeningCvReferralApiRow[] }).items ?? []
                         : []);
-                const rows = scopeCandidateId
-                    ? list.filter((r) => String(r.candidateId || '').trim() === scopeCandidateId)
-                    : list;
+                const rows = list.filter((r) => {
+                    if (scopeCandidateId && String(r.candidateId || '').trim() !== scopeCandidateId) return false;
+                    if (!referralMatchesScopedJob(r, scopeJobId, scopeJobTitle)) return false;
+                    return true;
+                });
                 setActiveReferrals(rows.map(mapScreeningCvRowToActiveReferral));
             })
             .catch(() => {
@@ -444,7 +489,7 @@ const ReferralsView: React.FC<{
                 if (isActive) setActiveReferralsLoading(false);
             });
         return () => { isActive = false; };
-    }, [apiBase, scopeCandidateId, startDate, endDate, isPlatformAdmin, adminClientId]);
+    }, [apiBase, scopeCandidateId, scopeJobId, scopeJobTitle, startDate, endDate, isPlatformAdmin, adminClientId]);
     
     // Update visible columns if language changes
     useEffect(() => {
@@ -472,6 +517,14 @@ const ReferralsView: React.FC<{
         e.stopPropagation();
         if (clientId == null) return;
         navigate(`/clients/${clientId}`);
+    };
+
+    const handleOpenCandidateDrawer = (e: React.MouseEvent, candidateId: string | null | undefined, candidateName: string) => {
+        e.stopPropagation();
+        const id = String(candidateId || '').trim();
+        if (!id) return;
+        setSummaryCandidate(buildCandidateDrawerStub(id, candidateName || 'מועמד'));
+        setIsCandidateDrawerOpen(true);
     };
 
     const sortedActiveReferrals = useMemo(() => {
@@ -640,6 +693,7 @@ const ReferralsView: React.FC<{
         );
         setIsStatusModalOpen(false);
         setEditingReferral(null);
+        dispatchScreeningCvReferralsUpdated({ jobId: editingReferral.jobId || scopeJobId || null });
     };
 
     const handleOpenReReferModal = (e: React.MouseEvent, referral: ActiveReferral) => {
@@ -689,6 +743,7 @@ const ReferralsView: React.FC<{
         setActiveReferrals((prev) =>
             prev.map((r) => (r.id === ref.id ? { ...r, status: data.nextStatus as Status } : r)),
         );
+        dispatchScreeningCvReferralsUpdated({ jobId: ref.jobId || scopeJobId || null });
     };
 
     const buildFallbackJob = (jobTitle: string, clientName: string): Job => ({
@@ -770,7 +825,18 @@ const ReferralsView: React.FC<{
                 ) : (
                     <span className="font-semibold text-text-default">{referral.clientName || '—'}</span>
                 );
-            case 'candidateName': return <span className="font-bold text-text-default">{referral.candidateName}</span>;
+            case 'candidateName':
+                return referral.candidateId ? (
+                    <button
+                        type="button"
+                        onClick={(e) => handleOpenCandidateDrawer(e, referral.candidateId, referral.candidateName)}
+                        className="font-bold text-text-default hover:text-primary-700 hover:underline text-right"
+                    >
+                        {referral.candidateName}
+                    </button>
+                ) : (
+                    <span className="font-bold text-text-default">{referral.candidateName}</span>
+                );
             case 'referralDate': return <span className="text-text-muted text-sm">{new Date(referral.referralDate).toLocaleDateString('he-IL')}</span>;
             case 'isRepeat':
                 return referral.isRepeat ? (
@@ -965,6 +1031,7 @@ const ReferralsView: React.FC<{
                                 onStatusClick={handleOpenStatusModal}
                                 onJobTitleClick={() => handleOpenJobDrawer(referral.jobTitle, referral.clientName)}
                                 onClientClick={(e) => handleClientClick(e, referral.clientId)}
+                                onCandidateClick={(e) => handleOpenCandidateDrawer(e, referral.candidateId, referral.candidateName)}
                             />
                         )))}
                     </div>
@@ -1001,7 +1068,19 @@ const ReferralsView: React.FC<{
                         <tbody className="divide-y divide-border-subtle">
                             {sortedDisqualifiedReferrals.map((item) => (
                                 <tr key={item.id} className="hover:bg-bg-hover">
-                                    <td className="p-3 font-semibold text-text-default">{item.candidateName || '—'}</td>
+                                    <td className="p-3 font-semibold text-text-default">
+                                        {item.candidateId ? (
+                                            <button
+                                                type="button"
+                                                onClick={(e) => handleOpenCandidateDrawer(e, item.candidateId, item.candidateName)}
+                                                className="font-semibold text-text-default hover:text-primary-700 hover:underline text-right"
+                                            >
+                                                {item.candidateName || '—'}
+                                            </button>
+                                        ) : (
+                                            item.candidateName || '—'
+                                        )}
+                                    </td>
                                     <td className="p-3 font-medium text-text-default">{item.jobTitle}</td>
                                     <td className="p-3 text-text-muted">{item.clientName || '—'}</td>
                                     <td className="p-3 text-text-muted whitespace-nowrap">{new Date(item.eventDate).toLocaleString('he-IL')}</td>
@@ -1061,6 +1140,16 @@ const ReferralsView: React.FC<{
                 job={selectedJob}
                 isOpen={isDrawerOpen}
                 onClose={() => setIsDrawerOpen(false)}
+            />
+            <CandidateSummaryDrawer
+                candidate={summaryCandidate}
+                isOpen={isCandidateDrawerOpen && Boolean(summaryCandidate)}
+                onClose={() => {
+                    setIsCandidateDrawerOpen(false);
+                    setSummaryCandidate(null);
+                }}
+                isFavorite={false}
+                onToggleFavorite={() => {}}
             />
         </div>
     );

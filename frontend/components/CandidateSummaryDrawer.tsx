@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useId, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { 
     XMarkIcon, PhoneIcon, EnvelopeIcon, LinkedInIcon, CheckBadgeIcon, ArrowLeftIcon, UserIcon,
     BriefcaseIcon, CalendarDaysIcon, DocumentTextIcon,
@@ -882,16 +883,18 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
     }
   };
 
-  return (
+  const drawer = (
     <div 
-      className={`fixed inset-0 bg-black bg-opacity-30 ${overlayZIndexClass} transition-opacity`}
+      className={`fixed inset-0 bg-black/30 ${overlayZIndexClass} transition-opacity`}
+      dir="ltr"
       onClick={onClose}
     >
       <div 
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className={`fixed top-0 left-0 h-full bg-bg-card shadow-2xl flex flex-col transform transition-all duration-300 text-text-default ${isExpanded ? 'w-[75vw] max-w-[75vw]' : 'w-full max-w-md'}`}
+        dir="rtl"
+        className={`absolute top-0 left-0 h-full bg-bg-card shadow-2xl flex flex-col transition-all duration-300 text-text-default ${isExpanded ? 'w-[75vw] max-w-[75vw]' : 'w-full max-w-md'}`}
         onClick={(e) => e.stopPropagation()}
         style={{ animation: 'slideIn 0.3s forwards' }}
       >
@@ -973,6 +976,9 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
       </div>
     </div>
   );
+
+  if (typeof document === 'undefined') return drawer;
+  return createPortal(drawer, document.body);
 };
 
 export default CandidateSummaryDrawer;

@@ -138,6 +138,44 @@ export async function resetStaffUserPassword(
     return res.json();
 }
 
+/** Copy role, extension, scope, permissions, and email signature from `source`; identity fields come from `identity`. */
+export async function duplicateStaffUser(
+    source: StaffUserDto,
+    identity: { email: string; name?: string; phone?: string },
+): Promise<StaffUserDto> {
+    const email = identity.email.trim();
+    if (!email) throw new Error('נדרש דוא״ל');
+
+    const created = await createStaffUser({
+        email,
+        invite: true,
+        name: (identity.name || '').trim() || email,
+        role: source.role === 'manager' ? 'manager' : 'recruiter',
+        phone: (identity.phone || '').trim() || undefined,
+        extension: source.extension || undefined,
+        clientId: source.clientId || undefined,
+    });
+
+    const sig = source.uiPreferences?.emailSignature;
+    const dataScope = source.dataScope || {};
+    const permissions = source.permissions;
+
+    const patch: Parameters<typeof updateStaffUser>[1] = {
+        dataScope: {
+            candidates: typeof dataScope.candidates === 'string' ? dataScope.candidates : 'own',
+            jobs: typeof dataScope.jobs === 'string' ? dataScope.jobs : 'own',
+        },
+    };
+    if (permissions && typeof permissions === 'object') {
+        patch.permissions = { ...permissions };
+    }
+    if (sig && (sig.html || sig.logoUrl)) {
+        patch.emailSignature = { ...sig };
+    }
+
+    return updateStaffUser(created.id, patch);
+}
+
 export async function updateStaffUser(
     id: string,
     body: Partial<{

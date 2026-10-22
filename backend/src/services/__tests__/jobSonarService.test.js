@@ -22,6 +22,7 @@ jest.mock('../candidateService', () => ({
 jest.mock('../matchingScoreService', () => ({
   getJobEmbedding: jest.fn().mockResolvedValue([0.1, 0.2]),
   computeMatchPackage: jest.fn(),
+  resolveJobGeoScope: jest.fn().mockResolvedValue(null),
   buildIntentOptionsByCandidateIds: jest.fn().mockResolvedValue(new Map([['c1', { linkedJobs: [] }]])),
 }));
 
@@ -109,9 +110,13 @@ describe('jobSonarService', () => {
     expect(passesHardFilters(clean, jobWithNegative, ['negative_skill'], {})).toBe(true);
   });
 
-  it('passesDistanceHardFilter rejects weak geo when distance filter on', () => {
-    expect(passesDistanceHardFilter({ geoScore: 40, geoDistance: 80 }, ['distance'])).toBe(false);
-    expect(passesDistanceHardFilter({ geoScore: 90, geoDistance: 10 }, ['distance'])).toBe(true);
+  it('passesDistanceHardFilter keeps only candidates inside the template grace', () => {
+    expect(passesDistanceHardFilter({ geoDistance: 16, geoMaxKm: 15, geoMissing: false }, ['distance'])).toBe(false);
+    expect(passesDistanceHardFilter({ geoDistance: 15, geoMaxKm: 15, geoMissing: false }, ['distance'])).toBe(true);
+    expect(passesDistanceHardFilter({ geoDistance: 20, geoMaxKm: 20, geoMissing: false }, ['distance'])).toBe(true);
+    expect(passesDistanceHardFilter({ geoDistance: 21, geoMaxKm: 20, geoMissing: false }, ['distance'])).toBe(false);
+    expect(passesDistanceHardFilter({ geoMissing: true, geoDistance: null, geoMaxKm: 15 }, ['distance'])).toBe(false);
+    expect(passesDistanceHardFilter({ geoDistance: 80, geoMaxKm: 15 }, [])).toBe(true);
   });
 
   it('runSonarScan returns engine score + parameterMatches from computeMatchPackage', async () => {
@@ -145,6 +150,30 @@ describe('jobSonarService', () => {
     expect(data.rows[0].parameterMatches.scope).toBe('gap');
     expect(data.rows[0].scoreBreakdown.coreScore).toBe(80);
     expect(data.rows[0].candidate).not.toHaveProperty('embedding');
-    expect(computeMatchPackage).toHaveBeenCalled();
+    expect(computeMatchPackage).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      null,
+      expect.objectContaining({ skipRemoteGeocode: true }),
+    );
+  });
+
+  it('runSonarScan drops rows whose engine score is below matchThresholdMin even if vector is high', async () => {
+    searchCandidates.mockResolvedValue([
+      { id: 'c1', similarity: 0.80, fullName: 'Alice' },
+    ]);
+    candidateService.findManyWithTagsForMatchScore.mockResolvedValue([
+      { id: 'c1', fullName: 'Alice' },
+    ]);
+    computeMatchPackage.mockResolvedValue({
+      matchScore: 56,
+      scoreBreakdown: { coreScore: 65 },
+      parameterMatches: {},
+    });
+
+    const data = await runSonarScan('job-1', { limit: 20, matchThresholdMin: 70, useVector: true });
+    expect(data.rows).toHaveLength(0);
   });
 });

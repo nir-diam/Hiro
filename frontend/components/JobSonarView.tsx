@@ -5,7 +5,6 @@ import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
 import {
     ArrowPathIcon,
     CheckCircleIcon,
-    FunnelIcon,
     GlobeAmericasIcon,
     ListBulletIcon,
     NoSymbolIcon,
@@ -17,6 +16,13 @@ import {
     XMarkIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import ScanSettingsPanel, {
+    DEFAULT_AFFINITY_LEVEL,
+    DEFAULT_SCAN_BATCH_SIZE,
+    DEFAULT_SCAN_THRESHOLD,
+    type AffinityLevel,
+    toScanHardFilters,
+} from './ScanSettingsPanel';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import {
     buildJobTagMatchCategories,
@@ -27,20 +33,6 @@ import {
     formatIntentAffinityMetric,
     type SonarScoreBreakdown as SonarBreakdownFull,
 } from '../utils/sonarMatchBreakdown';
-
-const SONAR_FILTER_KEYS = [
-    'scope',
-    'hours',
-    'distance',
-    'age',
-    'gender',
-    'mobility',
-    'license',
-    'salary',
-    'affinity',
-    'mandatory_skill',
-    'negative_skill',
-] as const;
 
 /** Subset of matching engine breakdown used by Sonar cards */
 export type SonarScoreBreakdown = SonarBreakdownFull;
@@ -417,7 +409,8 @@ function buildSonarMetricCells(
     const geoKm =
         typeof rawGeoKm === 'number' && Number.isFinite(rawGeoKm) ? Math.round(rawGeoKm) : null;
     const geoMissing = Boolean(bd?.geoMissing);
-    const geoScoreNum = typeof bd?.geo === 'number' && Number.isFinite(bd.geo) ? bd.geo : null;
+    const rawMaxKm = bd?.geoMaxKm;
+    const geoMaxKm = typeof rawMaxKm === 'number' && Number.isFinite(rawMaxKm) ? rawMaxKm : null;
 
     let distanceVal: string;
     let distanceTone: SonarMetricTone = 'muted';
@@ -426,10 +419,10 @@ function buildSonarMetricCells(
         distanceTone = 'muted';
     } else if (geoKm != null) {
         distanceVal = t('job.sonar.distance_km', { km: geoKm });
-        if (geoScoreNum != null) {
-            distanceTone = geoScoreNum >= 72 ? 'good' : geoScoreNum < 55 ? 'bad' : 'muted';
+        if (geoMaxKm != null) {
+            distanceTone = geoKm <= geoMaxKm ? 'good' : 'bad';
         } else {
-            distanceTone = geoKm <= 25 ? 'good' : geoKm > 60 ? 'bad' : 'muted';
+            distanceTone = 'muted';
         }
     } else {
         distanceVal = t('job.sonar.distance_na');
@@ -939,12 +932,14 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
     const { t } = useLanguage();
     const tagJobModel = useMemo(() => jobRecordToTagMatchJob(job), [job]);
 
-    const [batchSize, setBatchSize] = useState(20);
-    const [threshold, setThreshold] = useState(70);
+    const [batchSize, setBatchSize] = useState(DEFAULT_SCAN_BATCH_SIZE);
+    const [threshold, setThreshold] = useState(DEFAULT_SCAN_THRESHOLD);
     const [vectorSimilarity, setVectorSimilarity] = useState(true);
     const [activeFilters, setActiveFilters] = useState<Set<string>>(() => new Set());
+    const [affinityLevel, setAffinityLevel] = useState<AffinityLevel>(DEFAULT_AFFINITY_LEVEL);
 
     const [rows, setRows] = useState<SonarScanRow[]>([]);
+    const [distanceScope, setDistanceScope] = useState<{ region: string; km: number } | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [feedback, setFeedback] = useState<string | null>(null);
@@ -971,42 +966,6 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
     const ignorePanelRef = useRef<HTMLDivElement>(null);
 
     const jidKey = jobId != null ? String(jobId).trim() : '';
-
-    const jobSkillHardFilterKeys = useMemo(() => {
-        const skills = Array.isArray(job.skills) ? job.skills : [];
-        const keys: string[] = [];
-        const normSkillMode = (mode?: string) => {
-            const m = String(mode || '').trim().toLowerCase();
-            if (m === 'required') return 'mandatory';
-            if (m === 'exclusion') return 'negative';
-            return m;
-        };
-        const hasMandatory = skills.some(
-            (s) => s && typeof s === 'object' && normSkillMode((s as { mode?: string }).mode) === 'mandatory',
-        );
-        const hasNegative = skills.some(
-            (s) => s && typeof s === 'object' && normSkillMode((s as { mode?: string }).mode) === 'negative',
-        );
-        if (hasMandatory) keys.push('mandatory_skill');
-        if (hasNegative) keys.push('negative_skill');
-        return keys;
-    }, [job.skills]);
-
-    const skillFiltersSyncedRef = useRef('');
-
-    useEffect(() => {
-        const syncKey = `${jidKey}|${jobSkillHardFilterKeys.join(',')}`;
-        if (syncKey === skillFiltersSyncedRef.current) return;
-        skillFiltersSyncedRef.current = syncKey;
-        setActiveFilters((prev) => {
-            const next = new Set(prev);
-            if (jobSkillHardFilterKeys.includes('mandatory_skill')) next.add('mandatory_skill');
-            else next.delete('mandatory_skill');
-            if (jobSkillHardFilterKeys.includes('negative_skill')) next.add('negative_skill');
-            else next.delete('negative_skill');
-            return next;
-        });
-    }, [jidKey, jobSkillHardFilterKeys]);
 
     const openMatchPopup = useCallback((e: React.MouseEvent, row: SonarScanRow) => {
         const candidateId = row.candidate.id != null ? String(row.candidate.id) : '';
@@ -1108,6 +1067,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
     };
 
     const toggleFilter = (key: string) => {
+        if (key === 'affinity') return;
         setActiveFilters((prev) => {
             const next = new Set(prev);
             if (next.has(key)) next.delete(key);
@@ -1134,7 +1094,8 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                     limit: batchSize,
                     matchThresholdMin: threshold,
                     useVector: vectorSimilarity,
-                    hardFilters: [...activeFilters],
+                    hardFilters: toScanHardFilters(activeFilters),
+                    affinityLevel,
                 }),
             });
             if (!res.ok) {
@@ -1143,6 +1104,13 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
             }
             const data = await res.json();
             const list = Array.isArray(data.rows) ? data.rows : [];
+            const scopeKm = Number(data?.engineConfig?.geoMaxKm);
+            const scopeRegion = String(data?.engineConfig?.geoRegion || '').trim();
+            setDistanceScope(
+                Number.isFinite(scopeKm)
+                    ? { region: scopeRegion, km: scopeKm }
+                    : null,
+            );
             setRows(list as SonarScanRow[]);
             if (!list.length) setFeedback(t('job.sonar.empty_results'));
         } catch (e) {
@@ -1152,7 +1120,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
         } finally {
             setLoading(false);
         }
-    }, [jobId, batchSize, threshold, vectorSimilarity, activeFilters, t]);
+    }, [jobId, batchSize, threshold, vectorSimilarity, activeFilters, affinityLevel, t]);
 
     const enrichCandidateForTags = useCallback(
         async (c: Record<string, unknown>): Promise<Record<string, unknown>> => {
@@ -1288,6 +1256,14 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                         <div className="flex-grow space-y-4 text-center md:text-right">
                             <div className="space-y-1">
                                 <h2 className="text-3xl font-black text-text-default">{t('job.sonar.title')}</h2>
+                                {distanceScope && activeFilters.has('distance') ? (
+                                    <p className="text-sm font-semibold text-primary-700">
+                                        {t('job.sonar.distance_scope', {
+                                            region: distanceScope.region || '—',
+                                            km: distanceScope.km,
+                                        })}
+                                    </p>
+                                ) : null}
                                 <p className="text-sm text-text-muted font-medium">
                                     {t('job.sonar.subtitle', { batch: batchSize, threshold })}
                                 </p>
@@ -1404,93 +1380,20 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                 </div>
 
                 <div className="lg:col-span-4 bg-bg-card border-2 border-border-default rounded-[2rem] p-6 shadow-xl shadow-primary-900/5 space-y-6">
-                    <div className="flex items-center gap-2 text-text-default font-black text-sm border-b border-border-default pb-3">
-                        <FunnelIcon className="w-4 h-4 text-primary-500 shrink-0" />
-                        {t('job.sonar.settings')}
-                    </div>
-                    <div className="space-y-5">
-                        <div className="space-y-3">
-                            <div className="flex justify-between items-center text-[11px] font-bold gap-2">
-                                <span className="text-text-muted">{t('job.sonar.batch')}</span>
-                                <span className="text-primary-600 bg-primary-50 px-2 py-0.5 rounded-md whitespace-nowrap">
-                                    {t('job.sonar.batch_display', { count: batchSize })}
-                                </span>
-                            </div>
-                            <input
-                                type="range"
-                                min={5}
-                                max={50}
-                                step={5}
-                                value={batchSize}
-                                onChange={(e) => setBatchSize(Number(e.target.value))}
-                                disabled={loading}
-                                className="w-full h-1.5 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-primary-600"
-                            />
-                        </div>
-                        <div className="space-y-3">
-                            <div className="flex justify-between items-center text-[11px] font-bold gap-2">
-                                <span className="text-text-muted">{t('job.sonar.threshold')}</span>
-                                <span className="text-accent-600 bg-accent-50 px-2 py-0.5 rounded-md whitespace-nowrap">
-                                    {t('job.sonar.threshold_display', { pct: threshold })}
-                                </span>
-                            </div>
-                            <input
-                                type="range"
-                                min={50}
-                                max={95}
-                                step={5}
-                                value={threshold}
-                                onChange={(e) => setThreshold(Number(e.target.value))}
-                                disabled={loading}
-                                className="w-full h-1.5 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-accent-500"
-                            />
-                        </div>
-
-                        <label className="flex items-center justify-between p-3 bg-bg-subtle/50 rounded-xl border border-border-subtle cursor-pointer hover:border-primary-300 transition-colors gap-3">
-                            <div className="flex items-center gap-3 min-w-0">
-                                <div className="p-2 bg-white rounded-lg shadow-sm shrink-0">
-                                    <SparklesIcon className="w-4 h-4 text-accent-500" />
-                                </div>
-                                <div className="space-y-0.5 min-w-0">
-                                    <span className="text-xs font-black text-text-default block">{t('job.sonar.vector')}</span>
-                                    <p className="text-[10px] text-text-muted">{t('job.sonar.vector_hint')}</p>
-                                </div>
-                            </div>
-                            <input
-                                type="checkbox"
-                                checked={vectorSimilarity}
-                                onChange={(e) => setVectorSimilarity(e.target.checked)}
-                                disabled={loading}
-                                className="w-5 h-5 rounded-md text-primary-600 focus:ring-primary-500 shrink-0"
-                            />
-                        </label>
-
-                        <div className="space-y-3">
-                            <div className="flex justify-between items-center text-[11px] font-bold pb-1 border-b border-border-default/50">
-                                <span className="text-text-muted">{t('job.sonar.filters')}</span>
-                            </div>
-                            <div className="flex flex-wrap gap-2">
-                                {SONAR_FILTER_KEYS.map((fk) => {
-                                    const active = activeFilters.has(fk);
-                                    return (
-                                        <button
-                                            key={fk}
-                                            type="button"
-                                            onClick={() => toggleFilter(fk)}
-                                            disabled={loading}
-                                            className={`px-3 py-1.5 rounded-xl text-[10px] font-bold border transition-colors ${
-                                                active
-                                                    ? 'bg-primary-50 text-primary-800 border-primary-300'
-                                                    : 'bg-bg-subtle text-text-muted border-border-default hover:bg-bg-surface'
-                                            }`}
-                                        >
-                                            {t(`job.sonar.fl_${fk}`)}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    </div>
+                    <ScanSettingsPanel
+                        batchSize={batchSize}
+                        onBatchSizeChange={setBatchSize}
+                        threshold={threshold}
+                        onThresholdChange={setThreshold}
+                        vectorSimilarity={vectorSimilarity}
+                        onVectorSimilarityChange={setVectorSimilarity}
+                        activeFilters={activeFilters}
+                        onToggleFilter={toggleFilter}
+                        affinityLevel={affinityLevel}
+                        onAffinityLevelChange={setAffinityLevel}
+                        loading={loading}
+                        batchCountLabel={t('job.sonar.batch_display', { count: batchSize })}
+                    />
                 </div>
             </div>
 

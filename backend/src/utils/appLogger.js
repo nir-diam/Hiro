@@ -10,6 +10,8 @@ const TRACKED_PROMPT_IDS = new Set([
   'candidate_job_description_written_by_ai',
   'candidate_Profile Summary AI-Enhanced',
   'cv_parsing',
+  'cv_parsing2',
+  'cv_parsing_v2',
   'Admin_Job_Categories_Smart_Agent',
   'job_taxonomy_mapping',
   'organization_ai_enriched',

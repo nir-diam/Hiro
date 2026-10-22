@@ -38,6 +38,7 @@ import {
     stripTaskLinkedAppendixFromBody,
 } from '../utils/taskLinkedContext';
 import { inboxNotificationMatchesScope, type InboxTaskScope } from '../utils/inboxLinkedTasks';
+import { authHeaders } from '../utils/authHeaders';
 
 // --- TYPES ---
 type NotificationType = 'task' | 'message' | 'system';
@@ -81,6 +82,8 @@ interface Notification {
   linkedJobId?: string;
   linkedClientId?: string;
   linkedContactId?: string;
+  linkedOrganizationId?: string;
+  linkedOrganizationTmpId?: string;
   linkedClient?: string;
   /** תצוגה מתוך taskPayload (מידע מקושר — 3 שורות קבועות) */
   linkedCandidateLabel?: string;
@@ -512,31 +515,41 @@ export type NotificationCenterProps = {
     scopeContactId?: string;
     scopeContactName?: string;
     scopeContactEmails?: string[];
+    /** Organization profile / tenant org — filters inbox by linked organization (and org jobs). */
+    scopeOrganizationId?: string;
+    scopeOrganizationTmpId?: string;
+    scopeOrganizationName?: string;
 };
 
-function notificationInContactScope(
+function notificationTaskPayload(n: Notification): Record<string, unknown> {
+    return {
+        linkedClientId: n.linkedClientId,
+        linkedContactId: n.linkedContactId,
+        linkedOrganizationId: n.linkedOrganizationId,
+        linkedOrganizationTmpId: n.linkedOrganizationTmpId,
+        linkedJobId: n.linkedJobId,
+        linkedContactLabel: n.linkedContactLabel,
+    };
+}
+
+function notificationInInboxScope(
     n: Notification,
     scope: InboxTaskScope,
     contactEmails?: string[],
 ): boolean {
-    if (!scope.contactId && !scope.contactName) return true;
-
-    const tp: Record<string, unknown> = {
-        linkedClientId: n.linkedClientId,
-        linkedContactId: n.linkedContactId,
-        linkedContactLabel: n.linkedContactLabel,
-    };
-    if (inboxNotificationMatchesScope(tp, scope)) return true;
-
-    const emails = (contactEmails || [])
-        .map((e) => String(e || '').trim().toLowerCase())
-        .filter(Boolean);
-    if (emails.length) {
-        const raw = String(n.toEmail || n.recipient || '').trim().toLowerCase();
-        const first = raw.split(/[,;]/)[0]?.trim() || '';
-        if (first && emails.includes(first)) return true;
+    if (scope.contactId || scope.contactName) {
+        if (inboxNotificationMatchesScope(notificationTaskPayload(n), scope)) return true;
+        const emails = (contactEmails || [])
+            .map((e) => String(e || '').trim().toLowerCase())
+            .filter(Boolean);
+        if (emails.length) {
+            const raw = String(n.toEmail || n.recipient || '').trim().toLowerCase();
+            const first = raw.split(/[,;]/)[0]?.trim() || '';
+            if (first && emails.includes(first)) return true;
+        }
+        return false;
     }
-    return false;
+    return inboxNotificationMatchesScope(notificationTaskPayload(n), scope);
 }
 
 type AssignAnchor = { top: number; left: number; bottom: number; right: number; width: number; height: number };
@@ -548,21 +561,49 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     scopeContactId,
     scopeContactName,
     scopeContactEmails,
+    scopeOrganizationId,
+    scopeOrganizationTmpId,
+    scopeOrganizationName,
 }) => {
     const navigate = useNavigate();
     const { user } = useAuth();
     const isEmbedded = variant === 'embedded';
 
-    const contactScope = useMemo((): InboxTaskScope | null => {
+    const [organizationJobIds, setOrganizationJobIds] = useState<ReadonlySet<string>>(() => new Set());
+
+    const inboxScope = useMemo((): InboxTaskScope | null => {
+        const clientId = String(scopeClientId || '').trim();
         const contactId = String(scopeContactId || '').trim();
         const contactName = String(scopeContactName || '').trim();
-        if (!contactId && !contactName) return null;
-        return {
-            clientId: String(scopeClientId || '').trim() || undefined,
-            contactId: contactId || undefined,
-            contactName: contactName || undefined,
-        };
-    }, [scopeClientId, scopeContactId, scopeContactName]);
+        if (contactId || contactName) {
+            return {
+                clientId: clientId || undefined,
+                contactId: contactId || undefined,
+                contactName: contactName || undefined,
+            };
+        }
+        const organizationId = String(scopeOrganizationId || '').trim();
+        const organizationTmpId = String(scopeOrganizationTmpId || '').trim();
+        if (organizationId || organizationTmpId) {
+            return {
+                clientId: clientId || undefined,
+                organizationId: organizationId || undefined,
+                organizationTmpId: organizationTmpId || undefined,
+                organizationJobIds: organizationJobIds.size ? organizationJobIds : undefined,
+            };
+        }
+        if (clientId) {
+            return { clientId };
+        }
+        return null;
+    }, [
+        scopeClientId,
+        scopeContactId,
+        scopeContactName,
+        scopeOrganizationId,
+        scopeOrganizationTmpId,
+        organizationJobIds,
+    ]);
 
     const openLinkedCandidate = (n: Notification) => {
         const backend = n.linkedCandidateBackendId?.trim();
@@ -733,6 +774,12 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                     const linkedJobId = tp.linkedJobId != null ? String(tp.linkedJobId).trim() : undefined;
                     const linkedClientId = tp.linkedClientId != null ? String(tp.linkedClientId).trim() : undefined;
                     const linkedContactId = tp.linkedContactId != null ? String(tp.linkedContactId).trim() : undefined;
+                    const linkedOrganizationId =
+                        tp.linkedOrganizationId != null ? String(tp.linkedOrganizationId).trim() : undefined;
+                    const linkedOrganizationTmpId =
+                        tp.linkedOrganizationTmpId != null
+                            ? String(tp.linkedOrganizationTmpId).trim()
+                            : undefined;
                     const rawText = String(row?.text || row?.html || '');
                     const legacyLinked = parseLegacyLinkedAppendix(rawText);
                     const linkedCandidateLabel =
@@ -783,6 +830,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                         linkedJobId: linkedJobId || undefined,
                         linkedClientId: linkedClientId || undefined,
                         linkedContactId: linkedContactId || undefined,
+                        linkedOrganizationId: linkedOrganizationId || undefined,
+                        linkedOrganizationTmpId: linkedOrganizationTmpId || undefined,
                         linkedCandidateLabel,
                         linkedJobLabel,
                         linkedClientLabel,
@@ -814,8 +863,44 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     }, [apiBase]);
 
     useEffect(() => {
+        const clientId = String(scopeClientId || '').trim();
+        const organizationId = String(scopeOrganizationId || '').trim();
+        if (!apiBase || !clientId || !organizationId) {
+            setOrganizationJobIds(new Set());
+            return;
+        }
+        let active = true;
+        void fetch(
+            `${apiBase}/api/organizations/${encodeURIComponent(organizationId)}/jobs?clientId=${encodeURIComponent(clientId)}`,
+            { headers: authHeaders(true), cache: 'no-store' },
+        )
+            .then((r) => (r.ok ? r.json() : []))
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                const ids = new Set<string>(
+                    list
+                        .map((row: { id?: string }) => String(row?.id || '').trim())
+                        .filter(Boolean),
+                );
+                setOrganizationJobIds(ids);
+            })
+            .catch(() => {
+                if (active) setOrganizationJobIds(new Set());
+            });
+        return () => {
+            active = false;
+        };
+    }, [apiBase, scopeClientId, scopeOrganizationId]);
+
+    useEffect(() => {
         detailLoadedRef.current.clear();
-    }, [contactScope?.contactId]);
+    }, [
+        inboxScope?.contactId,
+        inboxScope?.clientId,
+        inboxScope?.organizationId,
+        inboxScope?.organizationTmpId,
+    ]);
 
     useEffect(() => {
         const onRefresh = (e: Event) => {
@@ -832,18 +917,18 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     }, []);
 
     const scopedNotifications = useMemo(() => {
-        if (!contactScope) return notifications;
+        if (!inboxScope) return notifications;
         return notifications.filter((n) =>
-            notificationInContactScope(n, contactScope, scopeContactEmails),
+            notificationInInboxScope(n, inboxScope, scopeContactEmails),
         );
-    }, [notifications, contactScope, scopeContactEmails]);
+    }, [notifications, inboxScope, scopeContactEmails]);
 
     const scopedArchivedNotifications = useMemo(() => {
-        if (!contactScope) return archivedNotifications;
+        if (!inboxScope) return archivedNotifications;
         return archivedNotifications.filter((n) =>
-            notificationInContactScope(n, contactScope, scopeContactEmails),
+            notificationInInboxScope(n, inboxScope, scopeContactEmails),
         );
-    }, [archivedNotifications, contactScope, scopeContactEmails]);
+    }, [archivedNotifications, inboxScope, scopeContactEmails]);
 
     const inboxNotifications = useMemo(
         () =>
@@ -1435,7 +1520,11 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                     <p className="text-sm text-text-muted">
                         {isEmbedded && scopeContactName
                             ? `הודעות, משימות ויוצאות הקשורות ל${scopeContactName}.`
-                            : 'כל ההתראות, המשימות וההודעות שלך במקום אחד.'}
+                            : isEmbedded && scopeOrganizationName
+                              ? `הודעות ומשימות הקשורות ל${scopeOrganizationName}.`
+                              : isEmbedded && scopeClientId
+                                ? 'הודעות ומשימות ללקוח זה.'
+                                : 'כל ההתראות, המשימות וההודעות שלך במקום אחד.'}
                     </p>
                 </div>
                 {!isEmbedded ? (
@@ -2228,7 +2317,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
             </main>
             
             {selectedNotifications.length > 0 && activeTab !== 'archived' && activeTab !== 'sent' && (
-                <div className="absolute bottom-0 inset-x-0 z-20 p-4 flex justify-center pointer-events-none">
+                <div className="fixed bottom-0 inset-x-0 z-30 p-4 flex justify-center pointer-events-none">
                     <div className="pointer-events-auto w-auto max-w-full bg-bg-card shadow-2xl rounded-xl border border-border-default p-2 flex items-center flex-wrap justify-center gap-2 animate-slide-up">
                         <span className="text-sm font-semibold text-text-default px-2">
                             {selectedNotifications.length} נבחרו

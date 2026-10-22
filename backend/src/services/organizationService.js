@@ -22,6 +22,7 @@ const promptService = require('./promptService');
 const {
   GENERIC_BUCKET_SUFFIXES,
   normalizeGenericBucketLabel,
+  isGenericBucketName,
 } = require('../constants/genericOrganizationBuckets');
 
 // ─── Embedding helpers ────────────────────────────────────────────────────────
@@ -984,81 +985,97 @@ const buildScopeNameFilter = (scope) => {
   return {};
 };
 
+const findSimilarOrganizationsByText = async (trimmed, topN, scopeFilter) => {
+  const searchPrefix = trimmed.substring(0, 20);
+  const rows = await Organization.findAll({
+    attributes: ['id', 'name', 'nameEn'],
+    where: {
+      [Op.and]: [
+        scopeFilter,
+        {
+          [Op.or]: [
+            { name: { [Op.iLike]: `%${searchPrefix}%` } },
+            { nameEn: { [Op.iLike]: `%${searchPrefix}%` } },
+          ],
+        },
+      ],
+    },
+    limit: topN * 3,
+    raw: true,
+  });
+  return rows
+    .map((r) => {
+      const displayName = r.name || r.nameEn || '';
+      const simName = diceCoefficient(trimmed, r.name || '');
+      const simNameEn = diceCoefficient(trimmed, r.nameEn || '');
+      return { id: r.id, name: displayName, similarity: Math.max(simName, simNameEn) };
+    })
+    .filter((r) => r.similarity >= 20)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, topN);
+};
+
+/**
+ * Embeddings are stored as JSONB, so similarity means reading every vector into Node.
+ * That scan exceeds statement_timeout and holds a pool connection until the API looks stuck.
+ * Text match is the path that already runs after the timeout. The full scan stays opt-in.
+ */
+const findSimilarOrganizationsByEmbedding = async (trimmed, topN, scopeFilter) => {
+  const queryEmbedding = await embedTextCached(trimmed);
+  if (!Array.isArray(queryEmbedding) || !queryEmbedding.length) return [];
+  const sequelize = Organization.sequelize;
+  const rows = await sequelize.transaction(async (transaction) => {
+    await sequelize.query("SET LOCAL statement_timeout = '2500ms'", { transaction });
+    return Organization.findAll({
+      attributes: ['id', 'name', 'nameEn', 'embedding'],
+      where: {
+        [Op.and]: [
+          { embedding: { [Op.ne]: null } },
+          scopeFilter,
+        ],
+      },
+      raw: true,
+      transaction,
+    });
+  });
+  return rows
+    .map((r) => {
+      const emb = normalizeEmbedding(r.embedding);
+      if (!emb || !emb.length) return null;
+      const sim = cosineSimilarity(queryEmbedding, emb);
+      if (sim < 0) return null;
+      return {
+        id: r.id,
+        name: r.name || r.nameEn || '',
+        similarity: Math.round(sim * 100),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.similarity - a.similarity)
+    .slice(0, topN);
+};
+
 const findSimilarOrganizations = async (name, topN = 10, { scope = 'regular' } = {}) => {
   const trimmed = String(name || '').trim();
   if (!trimmed) return [];
   const scopeFilter = buildScopeNameFilter(scope);
 
-  // ── 1. Try embedding-based similarity ──────────────────────────────────────
+  let textMatches = [];
   try {
-    const queryEmbedding = await embedTextCached(trimmed);
-
-    if (Array.isArray(queryEmbedding) && queryEmbedding.length) {
-      const rows = await Organization.findAll({
-        attributes: ['id', 'name', 'nameEn', 'embedding'],
-        where: {
-          [Op.and]: [
-            { embedding: { [Op.ne]: null } },
-            scopeFilter,
-          ],
-        },
-        raw: true,
-      });
-
-      const scored = rows
-        .map((r) => {
-          const emb = normalizeEmbedding(r.embedding);
-          if (!emb || !emb.length) return null;
-          const sim = cosineSimilarity(queryEmbedding, emb);
-          if (sim < 0) return null;
-          return {
-            id: r.id,
-            name: r.name || r.nameEn || '',
-            similarity: Math.round(sim * 100),
-          };
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.similarity - a.similarity)
-        .slice(0, topN);
-
-      if (scored.length) return scored;
-    }
+    textMatches = await findSimilarOrganizationsByText(trimmed, topN, scopeFilter);
   } catch (err) {
-    console.warn('[orgService] embedding similarity failed, falling back to text search:', err?.message);
+    console.warn('[orgService] text similarity failed:', err?.message || err);
   }
 
-  // ── 2. Text fuzzy-match fallback ─────────────────────────────────────────────
+  if (process.env.ORG_EMBEDDING_SIMILARITY !== '1') return textMatches;
+
   try {
-    const searchPrefix = trimmed.substring(0, 20);
-    const rows = await Organization.findAll({
-      attributes: ['id', 'name', 'nameEn'],
-      where: {
-        [Op.and]: [
-          scopeFilter,
-          {
-            [Op.or]: [
-              { name: { [Op.iLike]: `%${searchPrefix}%` } },
-              { nameEn: { [Op.iLike]: `%${searchPrefix}%` } },
-            ],
-          },
-        ],
-      },
-      limit: topN * 3,
-      raw: true,
-    });
-    return rows
-      .map((r) => {
-        const displayName = r.name || r.nameEn || '';
-        const simName = diceCoefficient(trimmed, r.name || '');
-        const simNameEn = diceCoefficient(trimmed, r.nameEn || '');
-        return { id: r.id, name: displayName, similarity: Math.max(simName, simNameEn) };
-      })
-      .filter((r) => r.similarity >= 20)
-      .sort((a, b) => b.similarity - a.similarity)
-      .slice(0, topN);
-  } catch {
-    return [];
+    const embedded = await findSimilarOrganizationsByEmbedding(trimmed, topN, scopeFilter);
+    if (embedded.length) return embedded;
+  } catch (err) {
+    console.warn('[orgService] embedding similarity failed, using text search:', err?.message || err);
   }
+  return textMatches;
 };
 
 /** Load generic-bucket Organization rows (כללי / legacy גנרי). */
@@ -1277,6 +1294,95 @@ const hesitationBand = (level) => {
 const reviewStatusFromBand = (band) =>
   band === 'namuch' ? 'manual' : 'pending_review';
 
+const MAX_PLAUSIBLE_EMPLOYER_NAME_LEN = 72;
+const EMPLOYER_NAME_SKIP_PATTERNS = [
+  /קבוצת\s+חברות/i,
+  /עסק\s+עצמאי/i,
+  /עצמאי\s+ב/i,
+  /בעצמ(?:י|ות)/i,
+  /פרילנס/i,
+  /freelance/i,
+  /self[\s-]?employed/i,
+  /בתחום\s+ה/i,
+  /בתחום\s+[\u0590-\u05FF]/i,
+  /בתחומי\s+/i,
+  /מגוון\s+(?:תחומים|ענפים|חברות)/i,
+  /חברות\s+(?:בינלאומיות|מובילות|רב\s*לאומיות)/i,
+  /ענף\s+ה/i,
+  /תעשי(?:ית|יות)\s+ה/i,
+  /סקטור\s+ה/i,
+  /מגזר\s+ה/i,
+  /(?:private|public)\s+sector/i,
+  /engineering\s+and\s+technology/i,
+  /group\s+of\s+companies/i,
+];
+
+/**
+ * CV parsers often emit sector summaries as "company" — skip Gemini + full-org embedding scans.
+ */
+const isPlausibleEmployerName = (name) => {
+  const trimmed = String(name || '').trim();
+  if (!trimmed || trimmed.length < 2) return false;
+  if (trimmed.length > MAX_PLAUSIBLE_EMPLOYER_NAME_LEN) return false;
+  if (EMPLOYER_NAME_SKIP_PATTERNS.some((re) => re.test(trimmed))) return false;
+  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+  if (wordCount > 7) return false;
+  return true;
+};
+
+const shouldSkipAiOrgClassifyForDefaults = (defaults = {}) => {
+  if (defaults.skipAiClassify === true) return true;
+  const ctx = defaults.context || 'resume';
+  if (ctx === 'resume' && String(process.env.ORG_RESUME_AI_CLASSIFY || '').trim() !== '1') {
+    return true;
+  }
+  return false;
+};
+
+const maybeScheduleOrgEnrichment = (org, defaults = {}) => {
+  if (!org?.id) return;
+  if (defaults.context === 'resume' || defaults.skipEnrichmentSchedule === true) return;
+  const label = org.name || org.get?.({ plain: true })?.name || '';
+  if (isGenericBucketName(label)) return;
+  scheduleOrganizationEnrichmentIfNeeded(org);
+};
+
+/** Coalesce parallel findOrCreateByName for the same label (email bursts). */
+const orgFindOrCreateInflight = new Map();
+
+const ORG_CLASSIFY_MAX_CONCURRENT = Math.max(
+  1,
+  Math.min(8, Number(process.env.ORG_CLASSIFY_CONCURRENCY || 2) || 2),
+);
+let orgClassifyActive = 0;
+const orgClassifyWaitQueue = [];
+
+const orgClassifyPriorityForContext = (context) => {
+  if (context === 'manual_client_create') return 100;
+  return 0;
+};
+
+const acquireOrgClassifySlot = (priority = 0) =>
+  new Promise((resolve) => {
+    if (orgClassifyActive < ORG_CLASSIFY_MAX_CONCURRENT) {
+      orgClassifyActive += 1;
+      resolve();
+      return;
+    }
+    orgClassifyWaitQueue.push({ resolve, priority: Number(priority) || 0 });
+  });
+
+const releaseOrgClassifySlot = () => {
+  orgClassifyActive = Math.max(0, orgClassifyActive - 1);
+  if (!orgClassifyWaitQueue.length) return;
+  orgClassifyWaitQueue.sort((a, b) => b.priority - a.priority);
+  const next = orgClassifyWaitQueue.shift();
+  if (next) {
+    orgClassifyActive += 1;
+    next.resolve();
+  }
+};
+
 /**
  * Main entry-point used during candidate creation.
  *
@@ -1302,7 +1408,7 @@ const findOrCreateByName = async (name, defaults = {}) => {
   const existing = await findByName(trimmed);
   if (existing) {
     console.log(`[orgService] "${trimmed}" → already in Organization (${existing.id}) — skipping AI`);
-    scheduleOrganizationEnrichmentIfNeeded(existing);
+    maybeScheduleOrgEnrichment(existing, defaults);
     return existing;
   }
 
@@ -1311,6 +1417,69 @@ const findOrCreateByName = async (name, defaults = {}) => {
   if (existingTmp) {
     console.log(`[orgService] "${trimmed}" → already in OrganizationTmp (${existingTmp.id}) — skipping AI`);
     return existingTmp;
+  }
+
+  if (!isPlausibleEmployerName(trimmed)) {
+    console.log(
+      `[orgService] "${trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed}" → skip (not a plausible employer name)`,
+    );
+    return null;
+  }
+
+  if (shouldSkipAiOrgClassifyForDefaults(defaults)) {
+    console.log(
+      `[orgService] "${trimmed}" → no DB match; skipping AI for context=${defaults.context || 'resume'} (ORG_RESUME_AI_CLASSIFY=1 to enable)`,
+    );
+    return null;
+  }
+
+  const inflightKey = trimmed.toLowerCase();
+  const inflight = orgFindOrCreateInflight.get(inflightKey);
+  if (inflight) {
+    console.log(`[orgService] "${trimmed}" → awaiting in-flight classification`);
+    return inflight;
+  }
+
+  const classifyPriority = orgClassifyPriorityForContext(defaults.context);
+  const classifyPromise = (async () => {
+    await acquireOrgClassifySlot(classifyPriority);
+    try {
+      const afterLockExisting = await findByName(trimmed);
+      if (afterLockExisting) {
+        maybeScheduleOrgEnrichment(afterLockExisting, defaults);
+        return afterLockExisting;
+      }
+      const afterLockTmp = await findTmpByName(trimmed);
+      if (afterLockTmp) return afterLockTmp;
+
+      return await classifyAndCreateOrganizationByName(trimmed, defaults);
+    } finally {
+      releaseOrgClassifySlot();
+    }
+  })();
+
+  orgFindOrCreateInflight.set(inflightKey, classifyPromise);
+  try {
+    return await classifyPromise;
+  } finally {
+    if (orgFindOrCreateInflight.get(inflightKey) === classifyPromise) {
+      orgFindOrCreateInflight.delete(inflightKey);
+    }
+  }
+};
+
+async function classifyAndCreateOrganizationByName(trimmed, defaults = {}) {
+  if (!isPlausibleEmployerName(trimmed)) {
+    console.log(
+      `[orgService] "${trimmed.length > 48 ? `${trimmed.slice(0, 48)}…` : trimmed}" → classify aborted (implausible employer)`,
+    );
+    return null;
+  }
+  if (shouldSkipAiOrgClassifyForDefaults(defaults)) {
+    console.log(
+      `[orgService] "${trimmed}" → classify aborted (context=${defaults.context || 'resume'})`,
+    );
+    return null;
   }
 
   // 3. Find similar organizations by embedding cosine similarity
@@ -1463,7 +1632,7 @@ const findOrCreateByName = async (name, defaults = {}) => {
   saveDecision({ organizationTmpId: tmpOrg.id });
 
   return tmpOrg;
-};
+}
 
 /**
  * When a new client is created manually (not linked to an existing Organization),
@@ -1898,6 +2067,7 @@ module.exports = {
   findDuplicateGroups,
   resolveOrganizationIdForTerm,
   findOrCreateByName,
+  isPlausibleEmployerName,
   findGenericBucketOrganizations,
   stageOrganizationFromClientCreate,
   mergeOrganizations,

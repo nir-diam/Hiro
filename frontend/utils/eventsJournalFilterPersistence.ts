@@ -34,12 +34,12 @@ type StorageScope = {
 
 export function buildEventsJournalFilterStorageKey(scope: StorageScope): string | null {
   if (scope.hideFilters || scope.embeddedInModal) return null;
-  if (scope.scopeContactId) return `hiro.eventsJournal.filters.contact:${scope.scopeContactId}`;
+  if (scope.scopeContactId) return `hiro.eventsJournal.filters.v2.contact:${scope.scopeContactId}`;
   if (scope.scopeCandidateId) return `hiro.eventsJournal.filters.candidate:${scope.scopeCandidateId}`;
   if (scope.scopeJobId) return `hiro.eventsJournal.filters.job:${scope.scopeJobId}`;
-  if (scope.scopeOrganizationId) return `hiro.eventsJournal.filters.org:${scope.scopeOrganizationId}`;
+  if (scope.scopeOrganizationId) return `hiro.eventsJournal.filters.v2.org:${scope.scopeOrganizationId}`;
   if (scope.scopeOrganizationTmpId) {
-    return `hiro.eventsJournal.filters.org-tmp:${scope.scopeOrganizationTmpId}`;
+    return `hiro.eventsJournal.filters.v2.org-tmp:${scope.scopeOrganizationTmpId}`;
   }
   if (scope.crossClientJournal) return 'hiro.eventsJournal.filters.admin-global';
   return 'hiro.eventsJournal.filters.default';

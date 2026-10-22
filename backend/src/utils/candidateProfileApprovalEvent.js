@@ -4,7 +4,10 @@ const candidateService = require('../services/candidateService');
 const JobCandidate = require('../models/JobCandidate');
 const ClientContact = require('../models/ClientContact');
 const jobCandidateProcessJournalService = require('../services/jobCandidateProcessJournalService');
-const { resolveClientIdsForCandidateJournal } = require('../services/pipelineOutcomeService');
+const resolveClientIdsForCandidateJournal = async (...args) => {
+  const { resolveClientIdsForCandidateJournal: resolve } = require('../services/pipelineOutcomeService');
+  return resolve(...args);
+};
 
 /** Candidate journal event type when the candidate approves their portal profile. */
 const CANDIDATE_PROFILE_APPROVED_EVENT_TYPE = 'אישור הפרופיל על ידי המועמד';
@@ -203,7 +206,7 @@ const recordProfileApprovalClientJournal = async (
 
   const clients = [];
   for (const clientId of clientIds) {
-    const client = await clientService.getById(clientId);
+    const client = await clientService.getById(clientId, { include: ['events'] });
     const prevEvents = Array.isArray(client?.events) ? client.events : [];
     if (hasClientProfileApprovalEvent(prevEvents, cid)) {
       clients.push({ clientId, recorded: false, reason: 'already_recorded' });

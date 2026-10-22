@@ -100,6 +100,62 @@ async function updatePreset(req, res) {
   }
 }
 
+/** Tenant-safe: create a preset linked only to this client. */
+async function createPresetForClient(req, res) {
+  try {
+    const clientId = String(req.params.id || '').trim();
+    if (!assertCanAccessClient(req, clientId)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    const { label, description, config } = req.body || {};
+    const name = String(label || '').trim();
+    if (!name) {
+      return res.status(400).json({ message: 'label is required' });
+    }
+    const preset = await svc.createPreset({
+      label: name,
+      description: description || '',
+      clientIds: [clientId],
+      config: config && typeof config === 'object' ? config : {},
+    });
+    res.status(201).json(preset);
+  } catch (err) {
+    console.error('[MatchingEngine] createPresetForClient:', err);
+    res.status(500).json({ message: 'Failed to create matching engine config' });
+  }
+}
+
+/** Tenant-safe: update preset config only when preset is linked to this client. */
+async function updatePresetForClient(req, res) {
+  try {
+    const clientId = String(req.params.id || '').trim();
+    const presetId = req.params.presetId;
+    if (!assertCanAccessClient(req, clientId)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    const preset = await svc.getPreset(presetId);
+    if (!preset) return res.status(404).json({ message: 'Preset not found' });
+    const linked = Array.isArray(preset.clientIds) ? preset.clientIds.map(String) : [];
+    if (!linked.includes(clientId)) {
+      return res.status(403).json({ message: 'Preset is not assigned to this client' });
+    }
+    const { config, label, description } = req.body || {};
+    const patch = {};
+    if (config !== undefined) patch.config = config;
+    if (label !== undefined) patch.label = label;
+    if (description !== undefined) patch.description = description;
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ message: 'No updatable fields provided' });
+    }
+    const updated = await svc.updatePreset(presetId, patch);
+    if (!updated) return res.status(404).json({ message: 'Preset not found' });
+    res.json(updated);
+  } catch (err) {
+    console.error('[MatchingEngine] updatePresetForClient:', err);
+    res.status(500).json({ message: 'Failed to update matching engine config' });
+  }
+}
+
 async function deletePreset(req, res) {
   try {
     const ok = await svc.deletePreset(req.params.id);
@@ -236,6 +292,8 @@ module.exports = {
   updateConfig,
   listPresets,
   listPresetsForClient,
+  createPresetForClient,
+  updatePresetForClient,
   getPreset,
   createPreset,
   updatePreset,

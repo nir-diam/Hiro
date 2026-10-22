@@ -6,27 +6,25 @@ const Job = require('../models/Job');
 const {
   companyNameLookupVariants,
   resolveOrgIdFromLabelMap,
+  resolveOrgIdFromLabelMapExact,
 } = require('../utils/companyNameMatch');
 
 const normalizeOrgLabel = (value) => String(value || '').toLowerCase().trim();
 
-const collectOrgLabels = (org) => {
+const collectOrgLabels = (org, { includeAliases = true } = {}) => {
   if (!org) return [];
   const plain = org.get ? org.get({ plain: true }) : org;
-  return [
-    plain.name,
-    plain.nameEn,
-    plain.legalName,
-    ...(Array.isArray(plain.aliases) ? plain.aliases : []),
-  ]
-    .map(normalizeOrgLabel)
-    .filter(Boolean);
+  const labels = [plain.name, plain.nameEn, plain.legalName];
+  if (includeAliases && Array.isArray(plain.aliases)) {
+    labels.push(...plain.aliases);
+  }
+  return labels.map(normalizeOrgLabel).filter(Boolean);
 };
 
-const addOrgToMap = (map, org) => {
+const addOrgToMap = (map, org, opts = {}) => {
   if (!org?.id) return;
   const id = String(org.id);
-  for (const label of collectOrgLabels(org)) {
+  for (const label of collectOrgLabels(org, opts)) {
     if (!map.has(label)) map.set(label, id);
   }
 };
@@ -36,9 +34,14 @@ const addOrgToMap = (map, org) => {
  * Prefer orgs linked to the given clientIds; also match by exact name/alias globally
  * for any remaining labels.
  */
-const buildOrganizationLabelMap = async ({ clientIds = [], extraLabels = [] } = {}) => {
+const buildOrganizationLabelMap = async ({
+  clientIds = [],
+  extraLabels = [],
+  linkedCanonicalOnly = false,
+} = {}) => {
   const map = new Map();
   const ids = [...new Set((clientIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  const aliasOpts = linkedCanonicalOnly ? { includeAliases: false } : {};
 
   if (ids.length) {
     const links = await ClientOrganizationLink.findAll({
@@ -53,8 +56,12 @@ const buildOrganizationLabelMap = async ({ clientIds = [], extraLabels = [] } = 
       ],
     });
     for (const link of links) {
-      addOrgToMap(map, link.organization);
+      addOrgToMap(map, link.organization, aliasOpts);
     }
+  }
+
+  if (linkedCanonicalOnly) {
+    return map;
   }
 
   const missingLabels = [...new Set(
@@ -92,6 +99,20 @@ const buildOrganizationLabelMap = async ({ clientIds = [], extraLabels = [] } = 
   return map;
 };
 
+const resolvePrimaryOrganizationIdForClient = async (clientId) => {
+  const cid = String(clientId || '').trim();
+  if (!cid) return null;
+  const link = await ClientOrganizationLink.findOne({
+    where: { clientId: cid, organizationId: { [Op.ne]: null } },
+    order: [
+      ['isPrimary', 'DESC'],
+      ['created_at', 'ASC'],
+    ],
+    attributes: ['organizationId'],
+  });
+  return link?.organizationId ? String(link.organizationId) : null;
+};
+
 /**
  * Resolve organizationId for a single job payload (create/update).
  */
@@ -101,14 +122,45 @@ const resolveOrganizationIdForJob = async ({
   clientId = null,
 } = {}) => {
   if (organizationId) return String(organizationId);
+  const cid = clientId ? String(clientId).trim() : '';
+
+  if (cid) {
+    const map = await buildOrganizationLabelMap({
+      clientIds: [cid],
+      extraLabels: client ? [client] : [],
+      linkedCanonicalOnly: true,
+    });
+    if (client) {
+      const exact = resolveOrgIdFromLabelMapExact(client, map);
+      if (exact) return exact;
+    }
+    return resolvePrimaryOrganizationIdForClient(cid);
+  }
+
   const clientName = normalizeOrgLabel(client);
   if (!clientName) return null;
 
   const map = await buildOrganizationLabelMap({
-    clientIds: clientId ? [clientId] : [],
+    clientIds: [],
     extraLabels: [client],
   });
   return resolveOrgIdFromLabelMap(client, map);
+};
+
+/**
+ * Job description AI analyze — suggest org only on exact name match (no fuzzy / no primary fallback).
+ */
+const resolveOrganizationIdForAnalyze = async ({ client = null, clientId = null } = {}) => {
+  const label = String(client || '').trim();
+  if (!label) return null;
+  const cid = clientId ? String(clientId).trim() : '';
+
+  const map = await buildOrganizationLabelMap({
+    clientIds: cid ? [cid] : [],
+    extraLabels: [label],
+    linkedCanonicalOnly: Boolean(cid),
+  });
+  return resolveOrgIdFromLabelMapExact(label, map);
 };
 
 /**
@@ -185,6 +237,8 @@ const enrichJobsWithOrganizationIds = async (jobs, { persist = true } = {}) => {
 module.exports = {
   normalizeOrgLabel,
   resolveOrganizationIdForJob,
+  resolveOrganizationIdForAnalyze,
+  resolvePrimaryOrganizationIdForClient,
   enrichJobsWithOrganizationIds,
   buildOrganizationLabelMap,
 };
