@@ -191,11 +191,23 @@ async function tryLoadCoreCacheFromDisk({ allowStale = false } = {}) {
 }
 
 async function loadCandidateList(includeSearchText) {
-  const listPromise = candidateService.listSlimForVectorSearch({ includeSearchText });
+  await acquireVectorSearchSlot();
+  let listPromise;
+  try {
+    listPromise = candidateService.listSlimForVectorSearch({ includeSearchText });
+  } catch (err) {
+    releaseVectorSearchSlot();
+    throw err;
+  }
   const stampPromise = includeSearchText
     ? null
     : candidateService.getVectorEmbeddingStamp().catch(() => null);
-  const list = await listPromise;
+  let list;
+  try {
+    list = await listPromise;
+  } finally {
+    releaseVectorSearchSlot();
+  }
   const compact = list.map(compactVectorRow);
   const now = Date.now();
   if (includeSearchText) {
@@ -281,7 +293,7 @@ function warmCandidateVectorCache() {
       _coreCache = fromDisk;
       _coreCacheAt = Date.now();
       console.log(`[vectorSearch] embedding cache from disk (${fromDisk.length} candidates)`);
-      scheduleDbLoad(() => refreshCandidateListInBackground(false));
+      // Do not pull all embeddings on startup — refresh runs when cache TTL expires during search.
       return fromDisk;
     }
     scheduleDbLoad(() => {

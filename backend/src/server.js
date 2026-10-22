@@ -54,6 +54,35 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'hiro-backend' });
 });
 
+app.get('/health/db', async (_req, res) => {
+  const { sequelize } = require('./config/db');
+  const started = Date.now();
+  try {
+    await sequelize.query('SELECT 1 AS ok');
+    const pool = sequelize.connectionManager.pool;
+    res.json({
+      status: 'ok',
+      ms: Date.now() - started,
+      pool: pool
+        ? {
+          size: pool.size,
+          available: pool.available,
+          using: pool.using,
+          waiting: pool.waiting,
+        }
+        : undefined,
+    });
+  } catch (err) {
+    res.status(503).json({
+      status: 'error',
+      ms: Date.now() - started,
+      message: err.message || String(err),
+    });
+  }
+});
+
+app.use('/api/scripts', require('./routes/scriptRoutes'));
+
 const jobPublicationController = require('./controllers/jobPublicationController');
 // Optional clean share URLs when proxied to the API (same handlers as /api/public/jobs/share/...).
 app.get('/jobs/:clientHint/public/board', jobPublicationController.getBoardSharePreview);
@@ -68,6 +97,7 @@ app.use('/api', require('./middleware/rejectAgentTokenMiddleware'));
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/clients', clientRoutes);
+app.use('/api/public-sites', require('./routes/publicSiteAdminRoutes'));
 app.use('/api/organizations', organizationRoutes);
 app.use('/api/companies', companiesRoutes);
 app.use('/api/jobs', jobRoutes);
@@ -110,12 +140,27 @@ const start = async () => {
       console.warn('[server] Redis connection failed (non-fatal):', err.message);
     });
     app.listen(port, () => {
-      console.log(`API listening on port ${port}`);
+      const heapMb = Math.round(process.memoryUsage().heapTotal / 1024 / 1024);
+      console.log(
+        `[server] listening port=${port} pid=${process.pid} node=${process.version} heapTotalMb=${heapMb} heap-guard=vector-slim+notif-sql`,
+      );
+      try {
+        require('./services/vectorSearchService').warmCandidateVectorCache();
+        require('./services/jobTaxonomyResolver').loadTaxonomyIndex().catch((err) => {
+          console.warn('[server] taxonomy warmup failed', String(err && err.message ? err.message : err).slice(0, 160));
+        });
+      } catch (err) {
+        console.warn('[server] vector cache warmup skipped', err.message || err);
+      }
     });
   } catch (err) {
     console.error('Failed to start server', err);
     process.exit(1);
   }
 };
+
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', err);
+});
 
 start();
