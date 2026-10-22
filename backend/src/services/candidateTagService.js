@@ -55,7 +55,11 @@ const catalogTypesEquivalent = (a, b) => {
   const left = normalizeCandidateTagType(a) || String(a || '').toLowerCase().trim();
   const right = normalizeCandidateTagType(b) || String(b || '').toLowerCase().trim();
   if (!left || !right) return false;
-  return left === right;
+  if (left === right) return true;
+  // Parser often emits skill/role while catalog stores seniority (e.g. senior_professional).
+  const pair = `${left}|${right}`;
+  if (pair === 'seniority|skill' || pair === 'skill|seniority') return true;
+  return false;
 };
 
 const looksLikeProfessionalCertificate = (payload = {}) => {
@@ -595,14 +599,16 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
         normalizedIncoming &&
         !catalogTypesEquivalent(catalogTag.type, normalizedIncoming)
       ) {
-        console.warn('[ensureTagRecord] catalog reuse type mismatch', {
-          tagId: catalogTag.id,
-          catalogType: catalogTag.type,
-          incomingType: normalizedIncoming,
-          tagKey,
-          displayNameHe: defaults.displayNameHe,
-          matchedTarget: target,
-        });
+        if (process.env.LOG_TAG_TYPE_MISMATCH === '1') {
+          console.warn('[ensureTagRecord] catalog reuse type mismatch', {
+            tagId: catalogTag.id,
+            catalogType: catalogTag.type,
+            incomingType: normalizedIncoming,
+            tagKey,
+            displayNameHe: defaults.displayNameHe,
+            matchedTarget: target,
+          });
+        }
         continue;
       }
       await maybeUpgradeType(catalogTag);
@@ -1368,12 +1374,6 @@ const listCandidateTagsByTagName = async (name) => {
   });
 };
 
-const countRowsByTagId = (rows) =>
-  rows.reduce((acc, row) => {
-    acc[row.tag_id] = Number(row.get('count')) || 0;
-    return acc;
-  }, {});
-
 const listJobIdsByTag = async (tagId, { activeOnly = true } = {}) => {
   const tid = String(tagId || '').trim();
   if (!tid) return [];
@@ -1392,23 +1392,29 @@ const countTagUsage = async (tagIds = []) => {
   if (!Array.isArray(tagIds) || !tagIds.length) {
     return { candidates: {}, jobs: {} };
   }
-  const activeWhere = { tag_id: { [Op.in]: tagIds }, is_active: true };
-  const [candidateRows, jobRows] = await Promise.all([
-    SystemTag.findAll({
-      attributes: ['tag_id', [fn('COUNT', col('id')), 'count']],
-      where: candidateTagTypeWhere(activeWhere),
-      group: ['tag_id'],
-    }),
-    SystemTag.findAll({
-      attributes: ['tag_id', [fn('COUNT', col('id')), 'count']],
-      where: jobTagTypeWhere(activeWhere),
-      group: ['tag_id'],
-    }),
-  ]);
-  return {
-    candidates: countRowsByTagId(candidateRows),
-    jobs: countRowsByTagId(jobRows),
-  };
+  const uniqueIds = [...new Set(tagIds.map((id) => String(id).trim()).filter(Boolean))];
+  if (!uniqueIds.length) {
+    return { candidates: {}, jobs: {} };
+  }
+  // Single query — avoids holding two pool connections (was a common trigger for acquire timeouts).
+  const rows = await sequelize.query(
+    `SELECT tag_id, type, COUNT(*)::int AS count
+     FROM system_tags
+     WHERE is_active = true
+       AND type IN ('candidate', 'job')
+       AND tag_id = ANY($1::uuid[])
+     GROUP BY tag_id, type`,
+    { bind: [uniqueIds], type: QueryTypes.SELECT },
+  );
+  const candidates = {};
+  const jobs = {};
+  for (const row of rows) {
+    const tid = row.tag_id;
+    const n = Number(row.count) || 0;
+    if (row.type === SYSTEM_TAG_TYPE_CANDIDATE) candidates[tid] = n;
+    else if (row.type === SYSTEM_TAG_TYPE_JOB) jobs[tid] = n;
+  }
+  return { candidates, jobs };
 };
 
 module.exports = {

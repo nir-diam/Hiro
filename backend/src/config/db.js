@@ -11,10 +11,21 @@ const sequelize = new Sequelize(
       keepAlive: true,
     },
     pool: {
-      max: 20,
-      min: 5,
-      acquire: 60000,
-      idle: 30000,
+      max: Number.parseInt(process.env.DB_POOL_MAX || '30', 10) || 30,
+      min: 0,
+      acquire: Number.parseInt(process.env.DB_POOL_ACQUIRE || '30000', 10) || 30000,
+      idle: 8000,
+      evict: 1000,
+    },
+    hooks: {
+      afterConnect: async (connection) => {
+        try {
+          await connection.query('SET statement_timeout = 20000');
+          await connection.query('SET idle_in_transaction_session_timeout = 20000');
+        } catch (e) {
+          console.warn('[db] statement_timeout not applied:', e?.message || e);
+        }
+      },
     },
   },
 );
@@ -202,6 +213,18 @@ const connectDb = async () => {
   `).catch(() => {});
 
   await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_system_tags_type_tag_active
+      ON system_tags (type, tag_id)
+      WHERE is_active = true;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_tag_ai_decisions_manual_approval_pending
+      ON tag_ai_decisions (manual_approval_status)
+      WHERE manual_approval_status = 'pending';
+  `).catch(() => {});
+
+  await sequelize.query(`
     ALTER TABLE candidates
       ADD COLUMN IF NOT EXISTS "desiredRoles" JSONB NOT NULL DEFAULT '[]'::jsonb;
   `).catch(() => {});
@@ -250,7 +273,23 @@ const connectDb = async () => {
 
   await sequelize.query(`
     ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS "lastOpenedByUserId" UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+      ADD COLUMN IF NOT EXISTS "lastOpenedByName" TEXT NULL,
+      ADD COLUMN IF NOT EXISTS "lastOpenedAt" TIMESTAMPTZ NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE jobs
       ADD COLUMN IF NOT EXISTS "jobFields" JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE SEQUENCE IF NOT EXISTS job_posting_code_seq
+      AS BIGINT
+      START WITH 1000000
+      MINVALUE 1000000
+      MAXVALUE 9999999
+      NO CYCLE;
   `).catch(() => {});
 
   // Safe additive columns for job_publications (sync does not alter existing tables).
@@ -276,6 +315,87 @@ const connectDb = async () => {
   await sequelize.query(`
     ALTER TABLE job_publications
       ADD COLUMN IF NOT EXISTS "heroBrandColorOverride" VARCHAR(32) NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE job_publications
+      ADD COLUMN IF NOT EXISTS "publicBoard" JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE job_categories
+      ADD COLUMN IF NOT EXISTS "publicSlug" VARCHAR(120),
+      ADD COLUMN IF NOT EXISTS "slugAliases" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS "slugLocked" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE job_clusters
+      ADD COLUMN IF NOT EXISTS "publicSlug" VARCHAR(120),
+      ADD COLUMN IF NOT EXISTS "slugAliases" JSONB NOT NULL DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS "slugLocked" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+  await sequelize.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS job_categories_public_slug_uidx
+      ON job_categories ("publicSlug") WHERE "publicSlug" IS NOT NULL;
+  `).catch(() => {});
+  await sequelize.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS job_clusters_public_slug_uidx
+      ON job_clusters ("publicSlug") WHERE "publicSlug" IS NOT NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE cities
+      ADD COLUMN IF NOT EXISTS public_slug VARCHAR(120),
+      ADD COLUMN IF NOT EXISTS slug_aliases JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE organizations
+      ADD COLUMN IF NOT EXISTS "publicSlug" VARCHAR(120),
+      ADD COLUMN IF NOT EXISTS "slugLocked" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS public_sites (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      name VARCHAR(255) NOT NULL,
+      domain VARCHAR(255) NOT NULL,
+      scope VARCHAR(16) NOT NULL DEFAULT 'tenant',
+      client_id UUID NULL REFERENCES clients(id) ON DELETE CASCADE ON UPDATE CASCADE,
+      environment VARCHAR(16) NOT NULL DEFAULT 'production',
+      webhook_url TEXT NULL,
+      webhook_secret TEXT NULL,
+      recruitment_source_name VARCHAR(255) NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS public_site_webhook_deliveries (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      site_id UUID NOT NULL REFERENCES public_sites(id) ON DELETE CASCADE,
+      event VARCHAR(64) NOT NULL,
+      payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      status VARCHAR(16) NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS site_id UUID NULL;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS last_used_at TIMESTAMPTZ NULL;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS request_count INTEGER NOT NULL DEFAULT 0;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW();
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE public_site_keys ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW();
   `).catch(() => {});
 
   await sequelize.query(`

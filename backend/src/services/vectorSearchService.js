@@ -1,21 +1,299 @@
+const fs = require('fs');
+const path = require('path');
 const candidateService = require('./candidateService');
 const { embedText, embedTextCached } = require('./embeddingService');
 
-// In-memory candidate list cache — avoids re-fetching 600+ rows on every sonar scan
-const CAND_LIST_CACHE_TTL_MS = 60_000; // 60 s
-let _candListCache = null;
-let _candListCacheAt = 0;
+// In-memory candidate list cache — id + Float32 embedding only (never CV text).
+const CAND_LIST_CACHE_TTL_MS = 30 * 60_000;
+const VECTOR_SEARCH_MAX_CONCURRENT =
+  Number.parseInt(process.env.VECTOR_SEARCH_MAX_CONCURRENT || '1', 10) || 1;
+let _vectorSearchActive = 0;
+const _vectorSearchWaiters = [];
 
-async function getCandidateListCached() {
-  const now = Date.now();
-  if (_candListCache && now - _candListCacheAt < CAND_LIST_CACHE_TTL_MS) {
-    return _candListCache;
+async function acquireVectorSearchSlot() {
+  if (_vectorSearchActive < VECTOR_SEARCH_MAX_CONCURRENT) {
+    _vectorSearchActive += 1;
+    return;
   }
-  // Use slim query (no tags JOIN) — 10x faster than list()
-  const list = await candidateService.listSlimForVectorSearch();
-  _candListCache = list;
-  _candListCacheAt = now;
-  return list;
+  await new Promise((resolve) => {
+    _vectorSearchWaiters.push(resolve);
+  });
+  _vectorSearchActive += 1;
+}
+
+function releaseVectorSearchSlot() {
+  _vectorSearchActive = Math.max(0, _vectorSearchActive - 1);
+  const next = _vectorSearchWaiters.shift();
+  if (next) next();
+}
+
+let _coreCache = null;
+let _coreCacheAt = 0;
+let _kwCache = null;
+let _kwCacheAt = 0;
+let _coreLoading = null;
+let _kwLoading = null;
+
+function toFloat32(arr) {
+  if (!arr || !arr.length) return null;
+  if (arr instanceof Float32Array) return arr;
+  const out = new Float32Array(arr.length);
+  for (let i = 0; i < arr.length; i += 1) out[i] = arr[i] || 0;
+  return out;
+}
+
+function compactVectorRow(row) {
+  const emb = toFloat32(normalizeEmbedding(row.embedding));
+  let embNorm = 0;
+  if (emb) {
+    for (let i = 0; i < emb.length; i += 1) embNorm += emb[i] * emb[i];
+    embNorm = Math.sqrt(embNorm);
+  }
+  return {
+    id: row.id,
+    status: row.status,
+    address: row.address,
+    salaryMin: row.salaryMin,
+    salaryMax: row.salaryMax,
+    searchText: row.searchText || undefined,
+    embedding: emb,
+    embNorm,
+  };
+}
+
+function clearCandidateListCache() {
+  _coreCache = null;
+  _coreCacheAt = 0;
+  _kwCache = null;
+  _kwCacheAt = 0;
+}
+
+// Local snapshot of the Float32 vectors. The JSONB pull from the remote DB is ~20s;
+// reading this file is a few hundred milliseconds and stays valid for the memory TTL.
+const EMBED_CACHE_FILE = path.join(__dirname, '..', '..', '.cache', 'candidate-embeddings-v1.bin');
+const EMBED_CACHE_MAGIC = Buffer.from('HVEC');
+
+function uuidToBytes(id) {
+  const hex = String(id || '').replace(/-/g, '');
+  if (hex.length !== 32 || !/^[0-9a-fA-F]+$/.test(hex)) return null;
+  return Buffer.from(hex, 'hex');
+}
+
+function bytesToUuid(buf) {
+  const hex = buf.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function readFloat32(buf, offset, dim) {
+  const emb = new Float32Array(dim);
+  Buffer.from(emb.buffer, emb.byteOffset, dim * 4).set(buf.subarray(offset, offset + dim * 4));
+  return emb;
+}
+
+function parseEmbedCacheFile(buf) {
+  if (!buf || buf.length < 28 || !buf.subarray(0, 4).equals(EMBED_CACHE_MAGIC)) return null;
+  if (buf.readUInt32LE(4) !== 1) return null;
+  const count = buf.readUInt32LE(8);
+  const maxUpdated = Number(buf.readBigUInt64LE(12));
+  const stampCount = buf.readUInt32LE(20);
+  const rows = [];
+  let o = 28;
+  for (let i = 0; i < count; i += 1) {
+    if (o + 16 + 4 + 4 + 4 + 1 + 2 + 2 > buf.length) return null;
+    const id = bytesToUuid(buf.subarray(o, o + 16));
+    o += 16;
+    const embNorm = buf.readFloatLE(o); o += 4;
+    const salaryMinRaw = buf.readFloatLE(o); o += 4;
+    const salaryMaxRaw = buf.readFloatLE(o); o += 4;
+    const statusLen = buf.readUInt8(o); o += 1;
+    if (o + statusLen + 2 > buf.length) return null;
+    const status = buf.toString('utf8', o, o + statusLen);
+    o += statusLen;
+    const addressLen = buf.readUInt16LE(o); o += 2;
+    if (o + addressLen + 2 > buf.length) return null;
+    const address = buf.toString('utf8', o, o + addressLen);
+    o += addressLen;
+    const dim = buf.readUInt16LE(o); o += 2;
+    if (!dim || o + dim * 4 > buf.length) return null;
+    const embedding = readFloat32(buf, o, dim);
+    o += dim * 4;
+    rows.push({
+      id,
+      status,
+      address,
+      salaryMin: Number.isFinite(salaryMinRaw) ? salaryMinRaw : null,
+      salaryMax: Number.isFinite(salaryMaxRaw) ? salaryMaxRaw : null,
+      embedding,
+      embNorm,
+    });
+  }
+  return { rows, maxUpdated, stampCount };
+}
+
+function writeEmbedCacheFile(rows, stamp) {
+  const chunks = [];
+  const header = Buffer.alloc(28);
+  EMBED_CACHE_MAGIC.copy(header, 0);
+  header.writeUInt32LE(1, 4);
+  header.writeBigUInt64LE(BigInt(stamp.maxUpdated || 0), 12);
+  header.writeUInt32LE(stamp.n || 0, 20);
+  let written = 0;
+  for (const row of rows) {
+    const emb = row.embedding;
+    const idBuf = uuidToBytes(row.id);
+    if (!idBuf || !emb || !emb.length) continue;
+    const status = Buffer.from(String(row.status || ''), 'utf8').subarray(0, 255);
+    const address = Buffer.from(String(row.address || ''), 'utf8').subarray(0, 4000);
+    const rec = Buffer.alloc(16 + 4 + 4 + 4 + 1 + status.length + 2 + address.length + 2 + emb.length * 4);
+    let o = 0;
+    idBuf.copy(rec, o); o += 16;
+    rec.writeFloatLE(row.embNorm || 0, o); o += 4;
+    rec.writeFloatLE(row.salaryMin == null || !Number.isFinite(Number(row.salaryMin)) ? NaN : Number(row.salaryMin), o); o += 4;
+    rec.writeFloatLE(row.salaryMax == null || !Number.isFinite(Number(row.salaryMax)) ? NaN : Number(row.salaryMax), o); o += 4;
+    rec.writeUInt8(status.length, o); o += 1;
+    status.copy(rec, o); o += status.length;
+    rec.writeUInt16LE(address.length, o); o += 2;
+    address.copy(rec, o); o += address.length;
+    rec.writeUInt16LE(emb.length, o); o += 2;
+    Buffer.from(emb.buffer, emb.byteOffset, emb.byteLength).copy(rec, o);
+    chunks.push(rec);
+    written += 1;
+  }
+  header.writeUInt32LE(written, 8);
+  fs.mkdirSync(path.dirname(EMBED_CACHE_FILE), { recursive: true });
+  const tmp = `${EMBED_CACHE_FILE}.tmp`;
+  fs.writeFileSync(tmp, Buffer.concat([header, ...chunks]));
+  fs.renameSync(tmp, EMBED_CACHE_FILE);
+  console.log(`[vectorSearch] embedding cache saved (${written} candidates)`);
+}
+
+async function tryLoadCoreCacheFromDisk({ allowStale = false } = {}) {
+  let buf;
+  try {
+    buf = fs.readFileSync(EMBED_CACHE_FILE);
+  } catch (err) {
+    return null;
+  }
+  const parsed = parseEmbedCacheFile(buf);
+  if (!parsed || !parsed.rows.length) return null;
+  if (allowStale) return parsed.rows;
+  let ageMs = CAND_LIST_CACHE_TTL_MS;
+  try {
+    ageMs = Date.now() - fs.statSync(EMBED_CACHE_FILE).mtimeMs;
+  } catch (err) {
+    ageMs = CAND_LIST_CACHE_TTL_MS;
+  }
+  if (ageMs >= CAND_LIST_CACHE_TTL_MS) {
+    const stamp = await candidateService.getVectorEmbeddingStamp();
+    if (stamp.n !== parsed.stampCount || stamp.maxUpdated !== parsed.maxUpdated) return null;
+  }
+  return parsed.rows;
+}
+
+async function loadCandidateList(includeSearchText) {
+  const listPromise = candidateService.listSlimForVectorSearch({ includeSearchText });
+  const stampPromise = includeSearchText
+    ? null
+    : candidateService.getVectorEmbeddingStamp().catch(() => null);
+  const list = await listPromise;
+  const compact = list.map(compactVectorRow);
+  const now = Date.now();
+  if (includeSearchText) {
+    _kwCache = compact;
+    _kwCacheAt = now;
+  } else {
+    _coreCache = compact;
+    _coreCacheAt = now;
+    const stamp = await stampPromise;
+    if (stamp) {
+      try {
+        writeEmbedCacheFile(compact, stamp);
+      } catch (err) {
+        console.warn('[vectorSearch] embedding cache save failed', String(err && err.message ? err.message : err).slice(0, 200));
+      }
+    }
+  }
+  console.log(`[vectorSearch] embedding cache ready (${compact.length} candidates)`);
+  return compact;
+}
+
+function refreshCandidateListInBackground(includeSearchText) {
+  if (includeSearchText ? _kwLoading : _coreLoading) return;
+  const pending = loadCandidateList(includeSearchText).finally(() => {
+    if (includeSearchText) _kwLoading = null;
+    else _coreLoading = null;
+  });
+  pending.catch((err) => {
+    console.warn('[vectorSearch] cache refresh failed', String(err && err.message ? err.message : err).slice(0, 200));
+  });
+  if (includeSearchText) _kwLoading = pending;
+  else _coreLoading = pending;
+}
+
+async function getCandidateListCached(includeSearchText = false) {
+  const cache = includeSearchText ? _kwCache : _coreCache;
+  const at = includeSearchText ? _kwCacheAt : _coreCacheAt;
+  if (cache) {
+    if (Date.now() - at >= CAND_LIST_CACHE_TTL_MS) {
+      refreshCandidateListInBackground(includeSearchText);
+    }
+    return cache;
+  }
+  const inflight = includeSearchText ? _kwLoading : _coreLoading;
+  if (inflight) return inflight;
+  const pending = (async () => {
+    if (!includeSearchText) {
+      const fromDisk = await tryLoadCoreCacheFromDisk();
+      if (fromDisk) {
+        _coreCache = fromDisk;
+        _coreCacheAt = Date.now();
+        console.log(`[vectorSearch] embedding cache from disk (${fromDisk.length} candidates)`);
+        return fromDisk;
+      }
+    }
+    return loadCandidateList(includeSearchText);
+  })().finally(() => {
+    if (includeSearchText) _kwLoading = null;
+    else _coreLoading = null;
+  });
+  if (includeSearchText) _kwLoading = pending;
+  else _coreLoading = pending;
+  return pending;
+}
+
+function warmCandidateVectorCache() {
+  // Full embedding pull holds a pool connection for tens of seconds — never run that on listen().
+  const delayMs = Math.max(
+    0,
+    Number.parseInt(process.env.VECTOR_WARMUP_DELAY_MS || '60000', 10) || 0,
+  );
+  const scheduleDbLoad = (fn) => {
+    if (delayMs > 0) {
+      console.log(`[vectorSearch] DB embedding load scheduled in ${delayMs}ms`);
+      setTimeout(fn, delayMs);
+    } else {
+      fn();
+    }
+  };
+  return (async () => {
+    const fromDisk = await tryLoadCoreCacheFromDisk({ allowStale: true });
+    if (fromDisk) {
+      _coreCache = fromDisk;
+      _coreCacheAt = Date.now();
+      console.log(`[vectorSearch] embedding cache from disk (${fromDisk.length} candidates)`);
+      scheduleDbLoad(() => refreshCandidateListInBackground(false));
+      return fromDisk;
+    }
+    scheduleDbLoad(() => {
+      getCandidateListCached(false).catch((err) => {
+        console.warn('[vectorSearch] cache warmup failed', String(err && err.message ? err.message : err).slice(0, 200));
+      });
+    });
+    return null;
+  })().catch((err) => {
+    console.warn('[vectorSearch] cache warmup failed', String(err && err.message ? err.message : err).slice(0, 200));
+    return null;
+  });
 }
 
 const buildSearchDocument = (candidate, extraText = '') => {
@@ -79,6 +357,27 @@ const cosineSimilarity = (a = [], b = []) => {
   if (!na || !nb) return -1;
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 };
+
+/** Cosine when the query norm is already known. Used by the search loop. */
+function cosineFast(query, queryNorm, emb, embNorm) {
+  if (!query || !emb || !queryNorm || query.length !== emb.length) return -1;
+  let normB = embNorm;
+  let dot = 0;
+  if (normB) {
+    for (let i = 0; i < query.length; i += 1) dot += query[i] * emb[i];
+  } else {
+    let nb = 0;
+    for (let i = 0; i < query.length; i += 1) {
+      const vb = emb[i];
+      dot += query[i] * vb;
+      nb += vb * vb;
+    }
+    if (!nb) return -1;
+    normB = Math.sqrt(nb);
+  }
+  if (!normB) return -1;
+  return dot / (queryNorm * normB);
+}
 
 const EMBED_COOLDOWN_SEC = 5 * 60;
 const embedCooldownUntil = new Map();
@@ -198,7 +497,7 @@ const embedCandidateAndSave = async (candidateId, extraText = '') => {
       // searchText is owned by CV parse/enrich — never overwrite it during embedding.
       await candidateService.update(candidateId, { embedding });
       await clearEmbedCooldown(key);
-      _candListCache = null;
+      clearCandidateListCache();
       return embedding;
     } finally {
       if (hasLock) await releaseEmbedLock(key);
@@ -227,6 +526,7 @@ const hasKeywordMatch = (queryWords, termsText) => {
 
 const normalizeEmbedding = (emb) => {
   if (!emb) return [];
+  if (emb instanceof Float32Array) return emb;
   if (Array.isArray(emb)) return emb;
   // pgvector via Sequelize can come back as string "(...)" or "[...]" or object with "data"
   if (typeof emb === 'string') {
@@ -255,6 +555,9 @@ const normalizeEmbedding = (emb) => {
  * @param {number}  [opts.maxLimitCap]
  * @param {number}  [opts.maxInlineEmbedRebuild=0] - max on-the-fly Gemini embeds during search (keep 0 for Sonar)
  * @param {boolean} [opts.requireKeywordMatch=true] - when false, rank by vector similarity only
+ * @param {boolean} [opts.hydrateResults=true] - load full candidate rows for the top hits (API). Sonar should pass false.
+ * @param {string[]} [opts.candidateIds] - when set, rank only these ids (does not scan the full embedding table).
+ * @param {number} [opts.minSimilarity=0.30] - drop hits below this cosine.
  */
 const searchCandidates = async ({
   query,
@@ -264,7 +567,17 @@ const searchCandidates = async ({
   maxLimitCap = 20,
   maxInlineEmbedRebuild = 0,
   requireKeywordMatch = true,
+  hydrateResults = true,
+  candidateIds = null,
+  minSimilarity = 0.30,
 }) => {
+  const idFilterEarly = Array.isArray(candidateIds)
+    ? [...new Set(candidateIds.map((id) => String(id).trim()).filter(Boolean))]
+    : null;
+  const needsGlobalSlot = !idFilterEarly || idFilterEarly.length === 0;
+  if (needsGlobalSlot) await acquireVectorSearchSlot();
+
+  try {
   let qEmbedding;
   if (precomputedEmbedding && Array.isArray(precomputedEmbedding) && precomputedEmbedding.length > 0) {
     qEmbedding = precomputedEmbedding;
@@ -276,8 +589,22 @@ const searchCandidates = async ({
   }
   if (!qEmbedding.length) return [];
 
-  // Use cached candidate list to avoid repeated DB round-trips
-  const all = await getCandidateListCached();
+  const idFilter = Array.isArray(candidateIds)
+    ? [...new Set(candidateIds.map((id) => String(id).trim()).filter(Boolean))]
+    : null;
+  if (idFilter && !idFilter.length) return [];
+
+  let all;
+  if (idFilter && !requireKeywordMatch && _coreCache) {
+    const idSet = new Set(idFilter);
+    all = _coreCache.filter((c) => idSet.has(String(c.id)));
+  } else if (idFilter) {
+    all = (await candidateService.listEmbeddingsByIds(idFilter, {
+      includeSearchText: Boolean(requireKeywordMatch),
+    })).map(compactVectorRow);
+  } else {
+    all = await getCandidateListCached(Boolean(requireKeywordMatch));
+  }
   const filtered = all.filter((c) => {
     if (filters.status && c.status !== filters.status) return false;
     if (filters.city && !(c.address || '').toLowerCase().includes(filters.city.toLowerCase())) return false;
@@ -299,11 +626,22 @@ const searchCandidates = async ({
     .split(/\s+/)
     .filter(Boolean);
 
+  const queryVec = qEmbedding instanceof Float32Array ? qEmbedding : toFloat32(qEmbedding);
+  let queryNorm = 0;
+  if (queryVec) {
+    for (let i = 0; i < queryVec.length; i += 1) queryNorm += queryVec[i] * queryVec[i];
+    queryNorm = Math.sqrt(queryNorm);
+  }
+  const similarityFloor = Number.isFinite(minSimilarity) ? minSimilarity : 0.30;
+  if (!queryVec || !queryNorm) return [];
+
   const scored = [];
   const loopT0 = Date.now();
   for (let i = 0; i < filtered.length; i += 1) {
     const candidate = filtered[i];
     if (i > 0 && i % 250 === 0) {
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setImmediate(resolve));
       console.log(
         '[vectorSearch] progress',
         `${i}/${filtered.length}`,
@@ -316,13 +654,15 @@ const searchCandidates = async ({
         `${Date.now() - loopT0}ms`,
       );
     }
-    let emb = normalizeEmbedding(candidate.embedding);
-    if (!emb.length || emb.length !== qEmbedding.length) {
+    let emb = candidate.embedding instanceof Float32Array
+      ? candidate.embedding
+      : toFloat32(normalizeEmbedding(candidate.embedding));
+    if (!emb || !emb.length || emb.length !== queryVec.length) {
       if (rebuildCount < rebuildBudget) {
         rebuildCount += 1;
         try {
           const rebuilt = await embedCandidateAndSave(candidate.id);
-          emb = normalizeEmbedding(rebuilt);
+          emb = toFloat32(normalizeEmbedding(rebuilt));
         } catch (err) {
           console.error('[vectorSearch] rebuild candidate embedding failed', candidate.id, err.message || err);
           continue;
@@ -333,20 +673,17 @@ const searchCandidates = async ({
       }
     }
 
-    if (!emb.length || emb.length !== qEmbedding.length) continue;
+    if (!emb || !queryVec || emb.length !== queryVec.length) continue;
 
-    const terms = collectTerms(candidate);
-    if (requireKeywordMatch && !hasKeywordMatch(queryWords, terms)) continue;
+    if (requireKeywordMatch) {
+      const terms = String(candidate.searchText || '').toLowerCase();
+      if (!hasKeywordMatch(queryWords, terms)) continue;
+    }
 
-    const score = cosineSimilarity(qEmbedding, emb);
-    if (score < 0.30) continue;
+    const score = cosineFast(queryVec, queryNorm, emb, candidate.embNorm);
+    if (!Number.isFinite(score) || score < similarityFloor) continue;
 
-    scored.push({
-      candidate,
-      score,
-      embLen: emb.length,
-      terms,
-    });
+    scored.push({ id: candidate.id, score });
   }
 
   scored.sort((a, b) => b.score - a.score);
@@ -363,10 +700,25 @@ const searchCandidates = async ({
     Date.now() - loopT0,
   );
 
-  return scored.slice(0, maxLimit).map((s) => ({
-    ...s.candidate.toJSON ? s.candidate.toJSON() : s.candidate,
-    similarity: s.score,
-  }));
+  const top = scored.slice(0, maxLimit);
+  if (!top.length) return [];
+
+  if (!hydrateResults) {
+    return top.map((s) => ({ id: s.id, similarity: s.score }));
+  }
+
+  const heavyRows = await candidateService.findManyWithTagsForMatchScore(top.map((s) => s.id));
+  const byId = new Map(
+    heavyRows.map((r) => [String(r.id), candidateService.toPlainCandidateForMatchScore(r)]),
+  );
+  return top.map((s) => {
+    const plain = byId.get(String(s.id)) || { id: s.id };
+    const { embedding: _emb, ...rest } = plain;
+    return { ...rest, similarity: s.score };
+  });
+  } finally {
+    if (needsGlobalSlot) releaseVectorSearchSlot();
+  }
 };
 
 module.exports = {
@@ -376,6 +728,8 @@ module.exports = {
   searchCandidates,
   cosineSimilarity,
   normalizeEmbedding,
+  clearCandidateListCache,
+  warmCandidateVectorCache,
 };
 
 

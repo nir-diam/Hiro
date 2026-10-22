@@ -598,29 +598,33 @@ const listDecisions = async ({
   const offset = (safePage - 1) * safeLimit;
   const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
 
-  const { rows, count } = await TagAiDecision.findAndCountAll({
-    where,
-    include: [
-      {
-        model: Tag,
-        as: 'pendingTag',
-        attributes: ['id', 'type'],
-        required: false,
-        include: [
-          {
-            model: SystemTag,
-            as: 'systemTagEntries',
-            attributes: ['raw_type'],
-            required: false,
-            where: { is_active: true },
-          },
-        ],
-      },
-    ],
-    order: [['createdAt', sortDir]],
-    limit: safeLimit,
-    offset,
-  });
+  const includePendingTag = [
+    {
+      model: Tag,
+      as: 'pendingTag',
+      attributes: ['id', 'type'],
+      required: false,
+      include: [
+        {
+          model: SystemTag,
+          as: 'systemTagEntries',
+          attributes: ['raw_type'],
+          required: false,
+          where: { is_active: true },
+        },
+      ],
+    },
+  ];
+  const [count, rows] = await Promise.all([
+    TagAiDecision.count({ where }),
+    TagAiDecision.findAll({
+      where,
+      include: includePendingTag,
+      order: [['createdAt', sortDir]],
+      limit: safeLimit,
+      offset,
+    }),
+  ]);
 
   let hybridRefresh = null;
   if (autoRefreshHybrid && rows.length > 0) {
