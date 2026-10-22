@@ -534,7 +534,7 @@ const forkEmailIngestCandidateIfIdentityMismatch = async ({
     return { candidate, candidateCreatedViaEmailIngest, reusedExistingCandidateByHash, identityForked: false };
   }
 
-  const row = await candidateService.getById(candidate.id);
+  const row = await candidateService.getById(candidate.id, { forIngest: true });
   const existingEmail = candidateRowEmail(row);
   const existingPhone = candidateRowPhone(row);
   const rowHasRealIdentity =
@@ -633,13 +633,13 @@ const extractCvContactEmail = (text, fallbackFromFirstCv = null) => {
 
 /** Persist CV contact email on the candidate when the row has none yet. */
 const ensureCandidateEmailFromCvText = async (candidateId, cvText, fallbackFromFirstCv = null) => {
-  const row = await candidateService.getById(candidateId);
+  const row = await candidateService.getById(candidateId, { forIngest: true });
   const existing = candidateRowEmail(row);
   if (existing) return { row, email: existing };
   const extracted = extractCvContactEmail(cvText, fallbackFromFirstCv);
   if (!extracted) return { row, email: null };
   await candidateService.update(candidateId, { email: extracted });
-  const updated = await candidateService.getById(candidateId);
+  const updated = await candidateService.getById(candidateId, { forIngest: true });
   return { row: updated, email: extracted };
 };
 
@@ -685,7 +685,7 @@ const runEmailIngestFullEnrichment = async (candidateId, combinedText, attachmen
   if (!isPdf && !isImage && !thin && !(combinedText || '').trim()) return false;
   if (!isPdf && !isImage && !(combinedText || '').trim()) return false;
 
-  const base = await candidateService.getById(candidateId);
+  const base = await candidateService.getById(candidateId, { forIngest: true });
   await enrichCandidateFromResumeText(base, combinedText || '', {
     pdfBuffer: isPdf ? buf : undefined,
     fileName: attachment.filename || fileLabel || 'resume.pdf',
@@ -787,7 +787,7 @@ async function resolveCandidateAuditDisplayName(candidateRef) {
   const trimmed = String(name).trim();
   if (trimmed) return trimmed;
   try {
-    const row = await candidateService.getById(id);
+    const row = await candidateService.getById(id, { forIngest: true });
     return String(row?.fullName || '').trim() || '—';
   } catch (_) {
     return '—';
@@ -1039,7 +1039,7 @@ const processEmailUpload = async (record, req = null) => {
               console.warn('[email] failed to soft-delete stub after hash dedup', delErr?.message || delErr);
             }
           }
-          candidate = await candidateService.getById(primary.id);
+          candidate = await candidateService.getById(primary.id, { forIngest: true });
           candidateCreatedViaEmailIngest = false;
           reusedExistingCandidateByHash = true;
           hashDedupedAttachmentIndices.add(i);
@@ -1120,7 +1120,7 @@ const processEmailUpload = async (record, req = null) => {
               console.warn('[email] soft-delete stub after CV-email routing failed', delErr?.message || delErr);
             }
           }
-          candidate = await candidateService.getById(existingByCvEmail.id);
+          candidate = await candidateService.getById(existingByCvEmail.id, { forIngest: true });
           candidateCreatedViaEmailIngest = false;
           console.log('[email] routed ingest to existing candidate by CV email', {
             candidateId: candidate.id,
@@ -1234,7 +1234,7 @@ const processEmailUpload = async (record, req = null) => {
       identitySplitIndices.delete(j);
     }
 
-    const latest = await candidateService.getById(candidate.id);
+    const latest = await candidateService.getById(candidate.id, { forIngest: true });
     const prevDocs = Array.isArray(latest?.documents) ? [...latest.documents] : [];
     const extraDocEntries = uploaded
       .slice(1)
@@ -1493,14 +1493,14 @@ const processEmailUpload = async (record, req = null) => {
             params: { tags: tagsLabel || `${aiTags.length} תגיות` },
           });
         }
-        const rowForLink = await candidateService.getById(candidate.id);
+        const rowForLink = await candidateService.getById(candidate.id, { forIngest: true });
         const roleEnsured = ensureRoleTagCoverage([], rowForLink?.workExperience || []);
         const linkedExp = attachTagIdsToWorkExperience(roleEnsured.workExperience, synced);
         if (workExperienceTagLinksChanged(rowForLink?.workExperience, linkedExp)) {
           await candidateService.update(candidate.id, { workExperience: linkedExp });
         }
       }
-      const stampedRow = await candidateService.getById(candidate.id);
+      const stampedRow = await candidateService.getById(candidate.id, { forIngest: true });
       const parseQuality = assessCvParseQuality({
         fullName: stampedRow?.fullName,
         firstName: stampedRow?.firstName,
@@ -1542,7 +1542,7 @@ const processEmailUpload = async (record, req = null) => {
 
     // Duplicate identity (email / phone / tz): merge this ingest row into the existing candidate.
     try {
-      const latestForIdentity = await candidateService.getById(candidate.id);
+      const latestForIdentity = await candidateService.getById(candidate.id, { forIngest: true });
       const identityResult = await candidateService.mergeIfDuplicateIdentity(candidate.id, {
         email: latestForIdentity?.email,
         phone: latestForIdentity?.phone,
@@ -1554,7 +1554,7 @@ const processEmailUpload = async (record, req = null) => {
           candidateId: identityResult.candidateId,
           linked: Boolean(identityResult.linked),
         });
-        candidate = await candidateService.getById(identityResult.candidateId);
+        candidate = await candidateService.getById(identityResult.candidateId, { forIngest: true });
         candidateCreatedViaEmailIngest = false;
         await record.update({ candidateId: candidate.id });
       }
@@ -1713,7 +1713,7 @@ const processEmailUpload = async (record, req = null) => {
       if (!candidateRowEmail(welcomeCandidate)) {
         try {
           await candidateService.update(cand.id, { email: k });
-          const refreshed = await candidateService.getById(cand.id);
+          const refreshed = await candidateService.getById(cand.id, { forIngest: true });
           if (refreshed) welcomeCandidate = refreshed;
         } catch (persistErr) {
           console.warn('[email] welcome email persist failed', cand.id, persistErr?.message || persistErr);
@@ -1756,7 +1756,7 @@ const processEmailUpload = async (record, req = null) => {
         const hashMatch = await findCandidateByResumeContentHash(splitHash);
         if (hashMatch) {
           const primary = await resolvePrimaryFromHashMatch(hashMatch);
-          splitCand = await candidateService.getById(primary.id);
+          splitCand = await candidateService.getById(primary.id, { forIngest: true });
           splitCandIsNew = false;
           splitHashReused = true;
           console.log('[email] split CV: reusing existing candidate from resume content hash', {
@@ -1838,7 +1838,7 @@ const processEmailUpload = async (record, req = null) => {
           const synced = await syncTagsWithRetry(splitCand.id, splitTags, { source: emailIngestSource });
           splitTagCount = activeTagCount(synced);
         }
-        const splitRow = await candidateService.getById(splitCand.id);
+        const splitRow = await candidateService.getById(splitCand.id, { forIngest: true });
         splitStampedId = String(splitCand.id);
         await stampCvParseQuality(splitCand.id, assessCvParseQuality({
           fullName: splitRow?.fullName,
@@ -1863,14 +1863,14 @@ const processEmailUpload = async (record, req = null) => {
         });
       }
       try {
-        const splitFreshForIdentity = await candidateService.getById(splitCand.id);
+        const splitFreshForIdentity = await candidateService.getById(splitCand.id, { forIngest: true });
         const splitIdentity = await candidateService.mergeIfDuplicateIdentity(splitCand.id, {
           email: splitFreshForIdentity?.email,
           phone: splitFreshForIdentity?.phone,
           idNumber: splitFreshForIdentity?.idNumber,
         });
         if (splitIdentity.merged) {
-          splitCand = await candidateService.getById(splitIdentity.candidateId);
+          splitCand = await candidateService.getById(splitIdentity.candidateId, { forIngest: true });
           splitCandIsNew = false;
         }
       } catch (splitIdentityErr) {
@@ -1913,7 +1913,7 @@ const processEmailUpload = async (record, req = null) => {
         });
         delete splitCand._pendingCvAudit;
       }
-      const splitFresh = await candidateService.getById(splitCand.id);
+      const splitFresh = await candidateService.getById(splitCand.id, { forIngest: true });
       scheduleOrganizationsFromExperienceAfterIngest(splitFresh?.workExperience, splitCand.id);
       if (!splitHashReused) {
         try {
@@ -1976,7 +1976,7 @@ const processEmailUpload = async (record, req = null) => {
       count: totalResumes,
     });
 
-    const primaryForOrgSync = await candidateService.getById(candidate.id);
+    const primaryForOrgSync = await candidateService.getById(candidate.id, { forIngest: true });
     scheduleOrganizationsFromExperienceAfterIngest(primaryForOrgSync?.workExperience, candidate.id);
   } catch (error) {
     console.error('[email][processEmailUpload]', {

@@ -2477,7 +2477,24 @@ const listByWorkedAtOrganization = async ({
   };
 };
 
+/** Email ingest / internal: avoid match-score and job-submission queries per reload. */
+const getDocumentsByCandidateId = async (id) => {
+  const row = await Candidate.findByPk(id, { attributes: ['documents'], raw: true });
+  if (!row) return [];
+  return Array.isArray(row.documents) ? row.documents : [];
+};
+
 const getById = async (id, opts = {}) => {
+  if (opts.forIngest) {
+    const candidate = await Candidate.findByPk(id, { include: includeCandidateTags });
+    if (!candidate) {
+      const err = new Error('Candidate not found');
+      err.status = 404;
+      throw err;
+    }
+    return mapCandidateWithTags(candidate);
+  }
+
   // Cache-aside: return from Redis when available (skip DB + join round-trip)
   if (!opts.skipCache && isReadThroughEnabled()) {
     try {
@@ -3677,6 +3694,7 @@ module.exports = {
   listEmbeddingsByIds,
   getVectorEmbeddingStamp,
   getById,
+  getDocumentsByCandidateId,
   getByUserId,
   listByUserId,
   listProfileVersionsForCandidate,
