@@ -7,7 +7,7 @@ const {
 } = require('../utils/personName');
 
 /** Panel option "Gemini 3 Pro". Used only when a Flash parse fails the quality check. */
-const CV_PARSE_PRO_MODEL = 'gemini-3-pro-preview';
+const CV_PARSE_PRO_MODEL = 'gemini-3.1-pro-preview';
 
 /** Recruiter-facing badge. Stored on candidate.internalTags. */
 const CV_REVIEW_TAG = 'לבדוק קו"ח';
@@ -26,6 +26,8 @@ const PHONE_RE = /(?:\+972[\s\-]?|972[\s\-]?|0)(?:5\d|[23489]\d|7\d)[\s\-]?\d{3}
 function resolveGeminiModelName(model, fallback = null) {
   const raw = String(model || fallback || '').trim();
   if (!/^[a-zA-Z0-9._-]+$/.test(raw)) return fallback;
+  if (raw === 'gemini-3-flash-preview') return 'gemini-3.8-flash';
+  if (raw === 'gemini-3-pro-preview') return 'gemini-3.1-pro-preview';
   return raw;
 }
 

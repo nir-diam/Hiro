@@ -236,11 +236,15 @@ const list = async (options = {}) => {
     isProtected,
   } = options;
 
-  const hasLimit = typeof limit !== 'undefined' && limit !== null;
-  const normalizedLimit =
-    hasLimit ? Math.max(1, Math.min(Number(limit) || 100, 10000)) : null;
+  // Never load the full tags table — unbounded list caused 20s timeouts and RDS connection exhaustion.
+  const DEFAULT_TAG_LIST_LIMIT = 100;
+  const MAX_TAG_LIST_LIMIT = 500;
+  const normalizedLimit = Math.max(
+    1,
+    Math.min(Number(limit) || DEFAULT_TAG_LIST_LIMIT, MAX_TAG_LIST_LIMIT),
+  );
   const normalizedPage = Math.max(1, Number(page) || 1);
-  const offset = hasLimit ? (normalizedPage - 1) * normalizedLimit : 0;
+  const offset = (normalizedPage - 1) * normalizedLimit;
 
   const where = {};
   if (isProtected === true || isProtected === 'true' || isProtected === '1') {
@@ -461,14 +465,13 @@ const list = async (options = {}) => {
     attributes: {
       exclude: ['embedding'],
     },
-    ...(hasLimit
-      ? {
-          limit: normalizedLimit,
-          offset,
-        }
-      : {}),
+    limit: normalizedLimit,
+    offset,
   };
-  const { count, rows } = await Tag.findAndCountAll(queryOptions);
+  const [count, rows] = await Promise.all([
+    Tag.count({ where }),
+    Tag.findAll(queryOptions),
+  ]);
 
   return { rows, total: count, page: normalizedPage, limit: normalizedLimit };
 };

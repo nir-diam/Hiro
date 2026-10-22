@@ -11,7 +11,7 @@ const sequelize = new Sequelize(
       keepAlive: true,
     },
     pool: {
-      max: Number.parseInt(process.env.DB_POOL_MAX || '30', 10) || 30,
+      max: Number.parseInt(process.env.DB_POOL_MAX || '15', 10) || 15,
       min: 0,
       acquire: Number.parseInt(process.env.DB_POOL_ACQUIRE || '30000', 10) || 30000,
       idle: 8000,
@@ -222,6 +222,21 @@ const connectDb = async () => {
     CREATE INDEX IF NOT EXISTS idx_tag_ai_decisions_manual_approval_pending
       ON tag_ai_decisions (manual_approval_status)
       WHERE manual_approval_status = 'pending';
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_tags_status ON tags (status);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_tags_catalog_tag_key
+      ON tags (tag_key)
+      WHERE status IS DISTINCT FROM 'pending';
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_email_uploads_bucket_file_key
+      ON email_uploads (bucket, "fileKey");
   `).catch(() => {});
 
   await sequelize.query(`
