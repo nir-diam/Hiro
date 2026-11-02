@@ -12,6 +12,7 @@ const tagEmbeddingService = require('../services/tagEmbeddingService');
 const tagCorrectionAgentService = require('../services/tagCorrectionAgentService');
 const tagAiDecisionResolveService = require('../services/tagAiDecisionResolveService');
 const tagSelectorSuggestService = require('../services/tagSelectorSuggestService');
+const { purgeCatalogTagRows } = require('../services/tagDeletionService');
 const User = require('../models/User');
 const TagAiDecision = require('../models/TagAiDecision');
 
@@ -376,7 +377,12 @@ const listTagJobsHelper = async (tagId) => {
   });
 };
 
-const cleanupPendingTagCorrections = async (terms = []) => {
+/**
+ * Delete leftover pending (duplicate) catalog tags that carry one of `terms` as their name.
+ * Child rows are re-pointed/removed first — see `purgeCatalogTagRows`.
+ * Best-effort: never let duplicate cleanup break a merge that already succeeded.
+ */
+const cleanupPendingTagCorrections = async (terms = [], { excludeIds = [], targetTag = null } = {}) => {
   const normalizedTerms = Array.from(
     new Set(
       (Array.isArray(terms) ? terms : [])
@@ -385,16 +391,55 @@ const cleanupPendingTagCorrections = async (terms = []) => {
     ),
   );
   if (!normalizedTerms.length) return;
-  await Tag.destroy({
-    where: {
-      status: 'pending',
-      [Op.or]: [
-        { displayNameHe: { [Op.in]: normalizedTerms } },
-        { displayNameEn: { [Op.in]: normalizedTerms } },
-        { tagKey: { [Op.in]: normalizedTerms } },
-      ],
-    },
-  });
+
+  const excluded = (Array.isArray(excludeIds) ? excludeIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean);
+
+  try {
+    // Never delete a pending tag that an open AI decision still points at — that would strand
+    // the decision with a NULL pending_tag_id.
+    const openDecisions = await TagAiDecision.findAll({
+      where: {
+        pendingTagId: { [Op.ne]: null },
+        reviewStatus: { [Op.in]: ['pending_review', 'manual_queue'] },
+      },
+      attributes: ['pendingTagId'],
+      raw: true,
+    });
+    const keepIds = [
+      ...excluded,
+      ...(targetTag?.id ? [String(targetTag.id)] : []),
+      ...openDecisions.map((row) => String(row.pendingTagId || '').trim()).filter(Boolean),
+    ];
+
+    const duplicates = await Tag.findAll({
+      where: {
+        status: 'pending',
+        [Op.or]: [
+          { displayNameHe: { [Op.in]: normalizedTerms } },
+          { displayNameEn: { [Op.in]: normalizedTerms } },
+          { tagKey: { [Op.in]: normalizedTerms } },
+        ],
+        ...(keepIds.length ? { id: { [Op.notIn]: keepIds } } : {}),
+      },
+      attributes: ['id'],
+      raw: true,
+    });
+    const ids = [...new Set(duplicates.map((row) => row.id).filter(Boolean))];
+    if (!ids.length) return;
+
+    const removed = await purgeCatalogTagRows(ids, { targetTag });
+    console.log(
+      `[cleanupPendingTagCorrections] removed ${removed} duplicate pending tag(s)`
+      + (targetTag?.id ? ` (links moved to ${targetTag.id})` : ''),
+    );
+  } catch (err) {
+    console.warn(
+      '[cleanupPendingTagCorrections] skipped duplicate cleanup:',
+      err?.message || err,
+    );
+  }
 };
 
 const listTagCandidates = async (req, res) => {
@@ -597,47 +642,6 @@ const listPending = async (req, res) => {
   }
 };
 
-/** Remove or reassign every system_tags row still pointing at a catalog tag (before tag delete). */
-const clearSystemTagLinksForCatalogTag = async (tagId, { action, targetTag } = {}) => {
-  if (!tagId) return;
-  const rows = await SystemTag.findAll({ where: { tag_id: tagId } });
-  if (!rows.length) return;
-
-  const targetActive =
-    targetTag &&
-    targetTag.status &&
-    String(targetTag.status).toLowerCase() === 'active';
-  const targetPlain = targetTag?.toJSON
-    ? targetTag.toJSON()
-    : targetTag?.get
-      ? targetTag.get({ plain: true })
-      : targetTag;
-  const targetType = targetPlain?.type;
-
-  for (const row of rows) {
-    if (action === 'link' && targetTag) {
-      const typ = row.type || SYSTEM_TAG_TYPE_CANDIDATE;
-      const alreadyHas = await SystemTag.findOne({
-        where: { entity_id: row.entity_id, tag_id: targetTag.id, type: typ },
-      });
-      if (alreadyHas) {
-        await row.destroy();
-        if (typ === SYSTEM_TAG_TYPE_JOB && targetActive && !alreadyHas.is_active) {
-          await alreadyHas.update({ is_active: true });
-        }
-      } else {
-        await row.update({
-          tag_id: targetTag.id,
-          is_active: typ === SYSTEM_TAG_TYPE_JOB ? targetActive : true,
-          ...(typ === SYSTEM_TAG_TYPE_JOB && targetType ? { raw_type: targetType } : {}),
-        });
-      }
-    } else {
-      await row.destroy();
-    }
-  }
-};
-
 const resolvePendingTags = async ({ ids = [], action, targetTagId, aliasPriority = 3, bypassStatusCheck = false } = {}) => {
   if (!Array.isArray(ids) || !ids.length) {
     const err = new Error('No tag IDs provided');
@@ -799,13 +803,16 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId, aliasPriority
 
         await targetTag.save({ fields: ['aliases', 'synonyms'] });
         console.log(`[resolvePendingTags] alias "${suggestedName}" (priority ${aliasPriority}) added to tag "${targetTag.displayNameHe || targetTag.tagKey}"`);
-        await cleanupPendingTagCorrections(existingAliases);
+        // Remove leftover pending duplicates that carry this same term — never the rows we are
+        // still resolving — and move their candidate/job links onto this merge target.
+        await cleanupPendingTagCorrections(
+          [...existingAliases, entry.displayNameHe, entry.displayNameEn, entry.tagKey],
+          { excludeIds: pendingTagIds, targetTag },
+        );
       }
 
       if (action !== 'create') {
-        await clearSystemTagLinksForCatalogTag(entry.id, { action, targetTag });
-        await TagHistory.destroy({ where: { tag_id: entry.id } });
-        await entry.destroy();
+        await purgeCatalogTagRows([entry.id], { targetTag });
       }
     }
 
@@ -1134,6 +1141,7 @@ module.exports = {
   rebuildEmbeddings,
   rebuildEmbedding,
   resolvePendingTags,
+  purgeCatalogTagRows,
   getCorrectionAgentSettings,
   putCorrectionAgentSettings,
   listAiDecisions,

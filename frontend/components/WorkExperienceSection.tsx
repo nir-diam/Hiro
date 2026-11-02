@@ -131,15 +131,33 @@ const calculateDuration = (startDate: string, endDate: string): string => {
 };
 
 
-const roleTagLabels = (ids: string[], tagDetails: unknown[]): string[] =>
-    ids.map((tid) => {
+/**
+ * Labels for the chips shown in the edit form.
+ * Falls back to the row's own `roleTag` text when a selected id has no match in `tagDetails`
+ * (catalog tag still pending → its candidate link is inactive and filtered out of the payload).
+ * Never renders a bare UUID: that is not a tag name a recruiter can read.
+ */
+const roleTagLabels = (
+    ids: string[],
+    tagDetails: unknown[],
+    fallbackLabel = '',
+): string[] =>
+    ids.map((tid, index) => {
         const detail = (Array.isArray(tagDetails) ? tagDetails : []).find((d) => {
             if (!d || typeof d !== 'object') return false;
             const raw = d as Record<string, unknown>;
             const id = raw.tagId ?? raw.tag_id ?? (raw.tag as { id?: string })?.id;
             return id != null && String(id) === tid;
         }) as Record<string, unknown> | undefined;
-        return String(detail?.displayNameHe || detail?.displayNameEn || detail?.tagKey || tid).trim();
+        const label = String(detail?.displayNameHe || detail?.displayNameEn || detail?.tagKey || '').trim();
+        if (label) return label;
+        if (index === 0) {
+            const fallback = String(fallbackLabel || '').trim();
+            if (fallback && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(fallback)) {
+                return fallback;
+            }
+        }
+        return '';
     }).filter(Boolean);
 
 const ExperienceForm: React.FC<{
@@ -244,7 +262,20 @@ const ExperienceForm: React.FC<{
     };
 
     const handleRoleTagsSave = (selected: TagOption[]) => {
-        setRoleTagIds(selected.map((t) => String(t.id)).filter((id) => !id.startsWith('custom-')).slice(0, MAX_ROLE_TAGS_PER_ROW));
+        const picked = selected
+            .map((t) => String(t.id))
+            .filter((id) => !id.startsWith('custom-'));
+        // Ids whose catalog tag is not in this payload (e.g. still `pending`, so the candidate link
+        // is inactive) cannot be rendered by the modal and must not be dropped by an unrelated save.
+        const knownIds = new Set(
+            (Array.isArray(tagDetails) ? tagDetails : [])
+                .map((d) => (d && typeof d === 'object'
+                    ? String((d as Record<string, unknown>).tagId ?? (d as Record<string, unknown>).tag_id ?? '')
+                    : ''))
+                .filter(Boolean),
+        );
+        const preserved = roleTagIds.filter((id) => !knownIds.has(id));
+        setRoleTagIds([...new Set([...picked, ...preserved])].slice(0, MAX_ROLE_TAGS_PER_ROW));
         setRoleTagModalOpen(false);
     };
 
@@ -257,7 +288,26 @@ const ExperienceForm: React.FC<{
         onSave(payload);
     };
 
-    const selectedRoleLabels = roleTagLabels(roleTagIds, tagDetails);
+    const selectedRoleLabels = roleTagLabels(
+        roleTagIds,
+        tagDetails,
+        String((item as Record<string, unknown>)?.roleTag ?? ''),
+    );
+
+    /** Drop one chip by its label (a `pending` catalog tag is not selectable inside the modal). */
+    const removeRoleTagLabel = (label: string) => {
+        const target = String(label || '').trim().toLowerCase();
+        if (!target) return;
+        const keptIds = roleTagIds.filter((id, index) => {
+            const idLabel = roleTagLabels(
+                [id],
+                tagDetails,
+                index === 0 ? String((item as Record<string, unknown>)?.roleTag ?? '') : '',
+            )[0];
+            return String(idLabel || '').trim().toLowerCase() !== target;
+        });
+        setRoleTagIds(keptIds);
+    };
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
@@ -377,9 +427,17 @@ const ExperienceForm: React.FC<{
                         selectedRoleLabels.map((label) => (
                             <span
                                 key={label}
-                                className="text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-purple-50 text-purple-700 border-purple-200"
+                                className="inline-flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border bg-purple-50 text-purple-700 border-purple-200"
                             >
                                 {label}
+                                <button
+                                    type="button"
+                                    onClick={() => removeRoleTagLabel(label)}
+                                    aria-label={`הסר תגית ${label}`}
+                                    className="text-purple-400 hover:text-purple-700 leading-none"
+                                >
+                                    ×
+                                </button>
                             </span>
                         ))
                     ) : (
@@ -469,7 +527,6 @@ const WorkExperienceSection: React.FC<WorkExperienceSectionProps> = ({ experienc
     const contextTagsById = useMemo(() => {
         const map = new Map<number, ExperienceContextTag[]>();
         const details = Array.isArray(tagDetails) ? tagDetails : [];
-        if (!details.length) return map;
         for (const item of experience) {
             map.set(item.id, resolveExperienceContextTags(item as unknown as Record<string, unknown>, details));
         }

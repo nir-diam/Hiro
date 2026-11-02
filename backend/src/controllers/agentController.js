@@ -6,13 +6,27 @@ const agentAuditService = require('../services/agentAuditService');
 const agentClientService = require('../services/agentClientService');
 const { AGENT_CAPABILITIES } = require('../constants/agentCapabilities');
 
-const handleServiceError = (res, err) =>
-  res.status(err.status || 500).json({
+const isForeignKeyViolation = (err) =>
+  err?.code === '23503'
+  || err?.parent?.code === '23503'
+  || /violates foreign key constraint/i.test(err?.message || '');
+
+const handleServiceError = (res, err) => {
+  if (isForeignKeyViolation(err)) {
+    return res.status(409).json({
+      message:
+        'Tag is still referenced by candidates, jobs or AI decisions. Retry — the reference is now released automatically.',
+      code: 'TAG_STILL_REFERENCED',
+      detail: err.message,
+    });
+  }
+  return res.status(err.status || 500).json({
     message: err.message || 'Request failed',
     ...(err.code ? { code: err.code } : {}),
     ...(err.allowedValues ? { allowedValues: err.allowedValues } : {}),
     ...(err.existingOrganization ? { existingOrganization: err.existingOrganization } : {}),
   });
+};
 
 const me = async (req, res) => {
   return res.json({ agent: req.agent || agentAuthService.publicAgentView() });

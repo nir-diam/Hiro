@@ -50,6 +50,7 @@ const buildCandidateListCacheKey = (version, params = {}) => {
     tenantClientId: params.tenantClientId ? String(params.tenantClientId) : '',
     blacklistedEmails: [...(params.blacklistedEmails || [])].map(String).sort(),
     blacklistedPhones: [...(params.blacklistedPhones || [])].map(String).sort(),
+    listProfileKind: params.listProfileKind ? String(params.listProfileKind) : 'primary',
   };
   const hash = crypto
     .createHash('sha256')

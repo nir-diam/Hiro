@@ -554,16 +554,48 @@ export function ensureProposalLogoVisible(html: string, logo: ProposalLogoInput,
     return prepend + html;
 }
 
-export function prepareProposalHtmlForDelivery(html: string, logo?: ProposalLogoInput): string {
+/**
+ * Rewrite third-party `<img src="http…">` through the backend image proxy.
+ *
+ * Templates reference branding assets hosted on systems that send no
+ * `Access-Control-Allow-Origin` (e.g. `clients.frontask.co.il`). With `useCORS: true`,
+ * html2canvas fails that load and **silently omits the image**, which is why the stamped
+ * signature disappeared from the PDF preview. Serving the bytes from our own origin
+ * removes CORS from the picture entirely.
+ *
+ * @param html
+ * @param apiBase  Origin of our API (e.g. `http://localhost:4000`). Empty → no rewrite.
+ */
+export function proxyRemoteImages(html: string, apiBase: string): string {
+    const base = String(apiBase || '').replace(/\/$/, '');
+    if (!base) return html;
+    return String(html ?? '').replace(
+        /(<img\b[^>]*?\bsrc=)(["'])(https?:\/\/[^"']+)\2/gi,
+        (_full, pre: string, quote: string, url: string) =>
+            `${pre}${quote}${base}/api/media/proxy-image?url=${encodeURIComponent(url)}${quote}`,
+    );
+}
+
+export function prepareProposalHtmlForDelivery(
+    html: string,
+    logo?: ProposalLogoInput,
+    apiBase = '',
+): string {
     const withLogo = injectProposalLogo(html, logo, 'delivery');
-    return enhanceProposalListsForExport(withLogo, logo);
+    const withLists = enhanceProposalListsForExport(withLogo, logo);
+    return proxyRemoteImages(withLists, apiBase);
 }
 
 /** PDF attachment path — manual RTL list markers + guaranteed logo for html2canvas capture. */
-export function prepareProposalHtmlForPdf(html: string, logo?: ProposalLogoInput): string {
+export function prepareProposalHtmlForPdf(
+    html: string,
+    logo?: ProposalLogoInput,
+    apiBase = '',
+): string {
     const withLogo = injectProposalLogo(html, logo, 'pdf');
     const withVisibleLogo = ensureProposalLogoVisible(withLogo, logo, 'pdf');
-    return convertProposalListsToManualRtlMarkup(withVisibleLogo, logo);
+    const withLists = convertProposalListsToManualRtlMarkup(withVisibleLogo, logo);
+    return proxyRemoteImages(withLists, apiBase);
 }
 
 export function wrapProposalEmailBlock(innerHtml: string, title: string): string {

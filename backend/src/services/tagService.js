@@ -704,6 +704,9 @@ const remove = async (id, options = {}) => {
   const tag = await getById(id);
   assertTagNotProtectedForMutation(tag);
   const transaction = options.transaction;
+  // Deliberately left as a bare destroy: if candidate/job links still exist the FK raises,
+  // and `remove` in tagController turns that into a 409 listing the blocking usages.
+  // Merge/resolve paths use `purgeCatalogTagRows` instead, which re-points those links.
   await tag.destroy({ transaction });
   bumpTagListCache();
 };
@@ -831,7 +834,8 @@ const mergeCatalogTagIntoTarget = async (
   }
 
   await TagHistory.destroy({ where: { tag_id: sourceId } });
-  await sourceTag.destroy();
+  const { purgeCatalogTagRows } = require('./tagDeletionService');
+  await purgeCatalogTagRows([sourceId], { targetTag });
 
   fireAndForget(tagEmbeddingService.scheduleTagEmbedding({ id: targetId }));
 

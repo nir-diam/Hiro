@@ -87,13 +87,18 @@ const findHybridCandidates = async (originalTerm, contextSample = '', options = 
     console.warn('[tagHybridSearch] embed failed', err?.message || err);
   }
 
+  // The caller's type comes from an LLM guess and is frequently wrong (e.g. a forklift
+  // licence detected as `tool` while the catalog stores `certification`). Filtering
+  // strictly by it would hide the real tag from the agent, so the agent proposes "create"
+  // and a duplicate pending row is born. Same-type hits rank first; a few high-confidence
+  // cross-type hits are allowed through so the agent can still propose a merge.
+  const CROSS_TYPE_MAX = 5;
   const vectorHits = [];
   if (queryEmbedding.length) {
     const activeTags = await Tag.findAll({
       where: {
         status: 'active',
         embedding: { [Op.ne]: null },
-        ...(typeFilter || {}),
       },
       attributes: ['id', 'tagKey', 'displayNameHe', 'displayNameEn', 'type', 'embedding'],
       limit: 800,
@@ -103,19 +108,27 @@ const findHybridCandidates = async (originalTerm, contextSample = '', options = 
         const plain = tag.get ? tag.get({ plain: true }) : tag;
         const emb = normalizeEmbedding(plain.embedding);
         const score = cosineSimilarity(queryEmbedding, emb);
-        return { tag: plain, score };
+        const sameType = !typeFilter || plain.type === typeFilter.type;
+        return { tag: plain, score, sameType };
       })
       .filter((row) => row.score >= VECTOR_MIN_SCORE)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, VECTOR_LIMIT);
+      // Same type first, then semantic score — a cross-type hit only survives on real similarity.
+      .sort((a, b) => Number(b.sameType) - Number(a.sameType) || b.score - a.score);
 
+    let crossTypeUsed = 0;
     for (const row of scored) {
+      if (vectorHits.length >= VECTOR_LIMIT) break;
+      if (!row.sameType) {
+        if (crossTypeUsed >= CROSS_TYPE_MAX) continue;
+        crossTypeUsed += 1;
+      }
       vectorHits.push({
         name: displayLabel(row.tag),
         tagKey: row.tag.tagKey || null,
         source: 'vector',
         score: row.score,
         tagId: row.tag.id,
+        ...(row.sameType ? {} : { typeMismatch: row.tag.type || null }),
       });
     }
   }
@@ -155,16 +168,15 @@ const findHybridCandidates = async (originalTerm, contextSample = '', options = 
   const excludeVectorClause = vectorIds.length
     ? `AND id NOT IN (${vectorIds.map((id) => sequelize.escape(String(id))).join(', ')})`
     : '';
-  const typeClause = typeFilter
-    ? `AND type = ${sequelize.escape(typeFilter.type)}`
-    : '';
 
+  // Deliberately NOT type-filtered: a term that literally matches display_name_he/en/tag_key
+  // is an identity match regardless of the detected type, and hiding it is exactly how
+  // `forklift_license` (tool) coexists with `forklift_license` (certification).
   const ilikeRows = await sequelize.query(
     `
     SELECT id, tag_key, display_name_he, display_name_en, type
     FROM tags
     WHERE status = 'active'
-      ${typeClause}
       ${excludeVectorClause}
       AND ${fuzzyMatchClause}
     ORDER BY usage_count DESC NULLS LAST
@@ -222,6 +234,14 @@ const resolveTargetTagIdByName = async (name, options = {}) => {
   if (!trimmed) return null;
   const found = await candidateTagService.findTagByNameOrAlias(trimmed);
   if (!found?.id) return null;
+
+  // A name/alias hit is authoritative: the caller's tagType is an LLM guess, and rejecting
+  // the match over a type disagreement is what leaves the merge unresolved. The exact
+  // identity match must always win, so only *non*-exact matches are type-checked.
+  const exactIdentity = String(found.displayNameHe || '').trim().toLowerCase() === trimmed.toLowerCase()
+    || String(found.displayNameEn || '').trim().toLowerCase() === trimmed.toLowerCase()
+    || String(found.tagKey || '').trim().toLowerCase() === trimmed.toLowerCase();
+  if (exactIdentity) return found.id;
 
   const typeFilter = buildTypeFilter(options.tagType);
   if (typeFilter && catalogTagType(found.type) !== typeFilter.type) {

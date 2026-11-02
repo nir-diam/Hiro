@@ -41,6 +41,8 @@ import {
     buildMainEmailHtmlFromCompose,
     detectEmailTextDirection,
     prepareEmailHtmlWithInlineImages,
+    stripTrailingHtmlSignature,
+    stripTrailingSignatureTable,
 } from '../utils/emailSignature';
 import { htmlToPlainText } from '../utils/parsedSearchTextHtml';
 import ProposalTemplateTinyMceEditor, {
@@ -377,6 +379,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     linkedContactId,
     recipientType,
 }) => {
+    /**
+     * API origin — used to rewrite third-party template images through our proxy
+     * (see `proxyRemoteImages`). Declared here so every callback closure sees it.
+     */
+    const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
     const [content, setContent] = useState('');
     const contentPlainText = useMemo(() => htmlToPlainText(content), [content]);
     const [subject, setSubject] = useState('');
@@ -857,7 +864,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const resolveProposalBodyHtml = useCallback(
         (tpl: ProposalTemplateDto, rowIndex: number): string =>
-            prepareProposalHtmlForDelivery(resolveProposalRawHtml(tpl, rowIndex), proposalLogoPayload),
+            prepareProposalHtmlForDelivery(resolveProposalRawHtml(tpl, rowIndex), proposalLogoPayload, apiBase),
         [resolveProposalRawHtml, proposalLogoPayload],
     );
 
@@ -896,7 +903,6 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             .slice(0, 25);
         if (!missing.length) return;
         let cancelled = false;
-        const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
         void (async () => {
             const found: Record<string, string> = {};
             await Promise.all(
@@ -1193,7 +1199,6 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             return;
         }
         let cancelled = false;
-        const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
         void fetch(`${apiBase}/api/organizations/${encodeURIComponent(orgId)}`, {
             headers: authHeaders(true),
             credentials: 'include',
@@ -1351,7 +1356,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     const title = tpl.name;
                     if (sendAsPdf) {
                         const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
-                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload, apiBase);
                         const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
                         const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
                         const binary = atob(pdfBase64);
@@ -1362,7 +1367,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         proposalPreviewUrlRef.current = objectUrl;
                         setProposalPreview({ kind: 'pdf', title, objectUrl });
                     } else {
-                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload, apiBase);
                         const html = wrapProposalEmailBlock(bodyHtml, escapeHtml(title));
                         setProposalPreview({ kind: 'html', title, html });
                     }
@@ -1374,7 +1379,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     const title = `הצעה ${proposal.number}`;
                     if (sendAsPdf) {
                         const { renderScreeningCvHtmlToPdfBase64 } = await import('../utils/screeningCvPdfExport');
-                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload, apiBase);
                         const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
                         const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
                         const binary = atob(pdfBase64);
@@ -1385,7 +1390,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         proposalPreviewUrlRef.current = objectUrl;
                         setProposalPreview({ kind: 'pdf', title, objectUrl });
                     } else {
-                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload, apiBase);
                         const html = wrapProposalEmailBlock(bodyHtml, escapeHtml(title));
                         setProposalPreview({ kind: 'html', title, html });
                     }
@@ -1621,7 +1626,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             const sigRaw = String(placeholderValues.recruiter_signature ?? '').trim();
             const dir = detectEmailTextDirection(htmlToPlainText(trimmedContent) || trimmedContent);
             const signatureHtml = sigRaw ? alignEmailSignatureHtml(sigRaw, dir) : '';
-            const mainHtml = buildMainEmailHtmlFromCompose(trimmedContent, signatureHtml || undefined, dir);
+            /**
+             * Body WITHOUT the signature here. Proposal blocks are concatenated after the body,
+             * so baking the signature into `mainHtml` left it stranded above the proposals —
+             * and made proposal-only messages end with no signature at all.
+             * The signature is appended last, after `${proposalsHtml}`, further below.
+             */
+            const mainHtml = buildMainEmailHtmlFromCompose(trimmedContent, undefined, dir);
 
             const proposalHtmlBlocks: string[] = [];
             const proposalPdfAttachments: SendNotificationEmailAttachment[] = [];
@@ -1652,7 +1663,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     const rawHtml = resolveProposalRawHtml(tpl, rowIndex);
                     const sendAsPdf = proposalSendAsPdfAttachment(proposalRowCustomizations[rowIndex]);
                     if (sendAsPdf) {
-                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload, apiBase);
                         const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
                         const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
                         const dupCount = proposalEntries.filter((e) => e.tpl.id === tpl.id).length;
@@ -1669,7 +1680,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                             contentType: 'application/pdf',
                         });
                     } else {
-                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload, apiBase);
                         proposalHtmlBlocks.push(wrapProposalEmailBlock(bodyHtml, escapeHtml(tpl.name)));
                     }
                 }
@@ -1678,7 +1689,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     const sendAsPdf = proposalSendAsPdfAttachment(savedProposalRowCustomizations[rowIndex]);
                     const blockTitle = escapeHtml(`הצעה ${proposal.number}`);
                     if (sendAsPdf) {
-                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload);
+                        const pdfBodyHtml = prepareProposalHtmlForPdf(rawHtml, deliveryLogoPayload, apiBase);
                         const pdfHtml = wrapProposalPdfDocument(pdfBodyHtml);
                         const pdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
                         const filename = buildProposalPdfAttachmentFilename(
@@ -1694,7 +1705,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                             contentType: 'application/pdf',
                         });
                     } else {
-                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload);
+                        const bodyHtml = prepareProposalHtmlForDelivery(rawHtml, deliveryLogoPayload, apiBase);
                         proposalHtmlBlocks.push(wrapProposalEmailBlock(bodyHtml, blockTitle));
                     }
                 }
@@ -1714,8 +1725,20 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                               .join('')}</ul><p style="margin:8px 0 0;font-size:13px;color:#475569;">הצעות המחיר מצורפות כקובצי PDF — ניתן לפתוח אותן מהמייל.</p></div>`
                         : '';
 
+                /**
+                 * A selected email template may already carry the signature inline (the
+                 * `{recruiter_signature}` token is expanded in `applyMessageTemplatePlaceholders`).
+                 * Strip that trailing block so re-appending it at the end cannot duplicate it.
+                 */
+                let bodyHtmlForSend = mainHtml;
+                if (signatureHtml) {
+                    bodyHtmlForSend = stripTrailingHtmlSignature(bodyHtmlForSend, signatureHtml);
+                    bodyHtmlForSend = stripTrailingSignatureTable(bodyHtmlForSend);
+                }
+
                 const prepared = prepareEmailHtmlWithInlineImages(
-                    `${mainHtml}${pdfAttachmentNoticeHtml}${proposalsHtml}`,
+                    // Signature goes last, after the proposal blocks, so it always closes the email.
+                    `${bodyHtmlForSend}${pdfAttachmentNoticeHtml}${proposalsHtml}${signatureHtml}`,
                 );
                 const html = prepared.html;
                 const inlineImageAttachments: SendNotificationEmailAttachment[] =
@@ -2236,7 +2259,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         const proposal = contactSavedProposals.find((p) => p.id === pid);
         if (!proposal) return;
         const rawHtml = resolveSavedProposalRawHtml(proposal, index);
-        setProposalEditDraft(prepareProposalHtmlForDelivery(rawHtml, proposalLogoPayload));
+        setProposalEditDraft(prepareProposalHtmlForDelivery(rawHtml, proposalLogoPayload, apiBase));
         setProposalEditModal({
             rowIndex: index,
             templateName: `הצעה ${proposal.number}`,

@@ -496,6 +496,32 @@ const preferActiveCatalogTag = async (found, searchTargets = []) => {
   return found;
 };
 
+/**
+ * Hard identity check: the incoming term resolves to the same canonical tag identity
+ * (tagKey, or both display names) as this catalog row.
+ *
+ * The caller's `type` is an LLM guess. When the term and the canonical key are identical,
+ * a type disagreement (e.g. AI says `tool`, catalog says `certification`) must NOT fork a
+ * duplicate catalog row — `forklift_license` was cloned exactly this way.
+ */
+const isSameCatalogIdentity = (catalogTag, identity = {}) => {
+  if (!catalogTag) return false;
+  const norm = (value) => String(value || '').trim().toLowerCase();
+
+  const catalogKey = norm(catalogTag.tagKey);
+  const incomingKey = norm(identity.tagKey);
+  if (catalogKey && incomingKey && catalogKey === incomingKey) return true;
+
+  const catalogHe = norm(catalogTag.displayNameHe);
+  const catalogEn = norm(catalogTag.displayNameEn);
+  const incomingHe = norm(identity.displayNameHe);
+  const incomingEn = norm(identity.displayNameEn);
+  return Boolean(
+    catalogHe && incomingHe && catalogHe === incomingHe
+    && catalogEn && incomingEn && catalogEn === incomingEn,
+  );
+};
+
 const doesTagNameOrAliasExist = async (name) => Boolean(await findTagByNameOrAlias(name));
 
 const recordTagUsage = async (tagRecord) => {
@@ -590,6 +616,12 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     return catalogTag;
   };
 
+  const identity = {
+    tagKey,
+    displayNameHe: defaults.displayNameHe,
+    displayNameEn: defaults.displayNameEn,
+  };
+
   for (const target of searchTargets) {
     const found = await findTagByNameOrAlias(target);
     if (found) {
@@ -598,22 +630,38 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
       const catalogTag = await preferActiveCatalogTag(found, searchTargets);
       // If the best catalog match is also deprecated, skip it.
       if (String(catalogTag.status).toLowerCase() === 'deprecated') return null;
+
+      // A name/alias hit is authoritative. A type disagreement NEVER forks a duplicate row:
+      // the detected type is an LLM guess (`tool` for a forklift licence) while the catalog
+      // stores the real one (`certification`). Previously this `continue` fell through to
+      // Tag.create() and cloned `forklift_license` as a second pending tag. Reuse the
+      // existing row instead so the term merges into it.
       if (
         normalizedIncoming &&
         !catalogTypesEquivalent(catalogTag.type, normalizedIncoming)
       ) {
-        if (process.env.LOG_TAG_TYPE_MISMATCH === '1') {
-          console.warn('[ensureTagRecord] catalog reuse type mismatch', {
-            tagId: catalogTag.id,
-            catalogType: catalogTag.type,
-            incomingType: normalizedIncoming,
-            tagKey,
-            displayNameHe: defaults.displayNameHe,
-            matchedTarget: target,
-          });
+        const sameIdentity = isSameCatalogIdentity(catalogTag, identity);
+        const mismatch = {
+          tagId: catalogTag.id,
+          catalogType: catalogTag.type,
+          incomingType: normalizedIncoming,
+          tagKey,
+          displayNameHe: defaults.displayNameHe,
+          matchedTarget: target,
+          sameIdentity,
+        };
+        if (sameIdentity) {
+          // Expected: the same term detected under a different type. Reuse silently.
+          if (process.env.LOG_TAG_TYPE_MISMATCH === '1') {
+            console.info('[ensureTagRecord] reusing tag across types (same identity)', mismatch);
+          }
+        } else if (process.env.LOG_TAG_TYPE_MISMATCH === '1') {
+          // Matched via an alias/synonym of another type — reusable, but worth surfacing
+          // because the alias may be wrong. Opt-in only: this runs per tag on every sync.
+          console.warn('[ensureTagRecord] alias matched across types — reusing existing tag', mismatch);
         }
-        continue;
       }
+
       await maybeUpgradeType(catalogTag);
       if (String(catalogTag.status).toLowerCase() === 'pending') {
         try {
@@ -635,11 +683,21 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     const active = await findTagByNameOrAlias(trimmed, { status: 'active' });
     if (active) {
       if (String(active.status).toLowerCase() === 'deprecated') return null;
+      // Same rule as above: an active name/alias hit is reused regardless of the detected
+      // type. Never fall through to Tag.create() over a type disagreement.
       if (
         normalizedIncoming &&
         !catalogTypesEquivalent(active.type, normalizedIncoming)
+        && process.env.LOG_TAG_TYPE_MISMATCH === '1'
       ) {
-        continue;
+        console.warn('[ensureTagRecord] active tag matched across types — reusing existing tag', {
+          tagId: active.id,
+          catalogType: active.type,
+          incomingType: normalizedIncoming,
+          tagKey,
+          matchedTarget: target,
+          sameIdentity: isSameCatalogIdentity(active, identity),
+        });
       }
       await maybeUpgradeType(active);
       return { tag: active, created: false };
@@ -1451,6 +1509,7 @@ module.exports = {
   syncTagsForJob,
   removeAbsentTags,
   ensureTagRecord,
+  isSameCatalogIdentity,
   findTagByNameOrAlias,
   mapSystemTagsToJobSkills,
   listJobTags,

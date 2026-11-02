@@ -228,8 +228,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return !!eff[key];
     }, [user]);
 
+    /** A path with no permission mapping is not gated — treat it as allowed. */
     const canAccessPath = useCallback(
-        (pathname: string) => canPage(permissionForPath(pathname)),
+        (pathname: string) => {
+            const perm = permissionForPath(pathname);
+            if (!perm) return true;
+            return canPage(perm);
+        },
         [canPage],
     );
 

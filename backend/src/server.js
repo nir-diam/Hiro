@@ -180,6 +180,12 @@ app.use('/api/agent', require('./routes/agentRoutes'));
 app.use('/api/public/v1', require('./routes/publicJobsApiRoutes'));
 /** Reference catalog — no staff JWT (also listed in apiGlobalAuthMiddleware allowlist). */
 app.use('/api/cities', cityRoutes);
+/**
+ * Image proxy for proposal branding assets. Mounted ahead of apiGlobalAuthMiddleware because
+ * `<img src>` cannot send an Authorization header; the handler restricts targets to an
+ * allowlist of image hosts. See services/mediaProxyService.js.
+ */
+app.use('/api/media', require('./routes/mediaRoutes'));
 
 app.use('/api', require('./middleware/rejectAgentTokenMiddleware'));
 app.use('/api', require('./middleware/apiGlobalAuthMiddleware'));

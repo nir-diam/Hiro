@@ -42,12 +42,9 @@ import {buildProfileDuplicatePayload,
     hasCandidateFormChanges,
     resolveCandidatePortalPreviewId,
     sanitizeProfileDuplicatePayload,
-    resolveStaffShadowProfile,
     resolveProfileFamilyPrimaryId,
     isCanonicalPrimaryCandidateProfile,
-    isStaffDuplicateProfile,
 } from './utils/candidateProfileDuplicate';
-import { waitForCandidateEnrichment } from './utils/candidateIngestPoll';
 import { useUnsavedChangesGuard } from './hooks/useUnsavedChangesGuard';
 import { confirmLeaveWithoutSave } from './utils/confirmLeaveWithoutSave';
 import PipelineSettingsView from './components/PipelineSettingsView';
@@ -135,6 +132,7 @@ import DocumentsView from './components/DocumentsView';
 import { MessageModalConfig } from './hooks/useUIState';
 import { JobAlertModalConfig } from './components/CreateJobAlertModal';
 import { deriveLocalCandidateId } from './utils/candidateId';
+import HomeRedirect from './components/HomeRedirect';
 import { buildCandidateChatContext } from './utils/candidateChatContext';
 
 interface AppRoutesProps {
@@ -316,13 +314,6 @@ const normalizeCandidatePayload = (payload: any) => {
 const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const params = useParams();
     const location = useLocation();
-    const wantsLiveProfileView = useMemo(() => {
-        try {
-            return new URLSearchParams(location.search || '').get('view') === 'live';
-        } catch {
-            return false;
-        }
-    }, [location.search]);
     const searchHighlightKeywords = useMemo(() => {
         const st = location.state as { matchedTerms?: string[] } | null;
         return Array.isArray(st?.matchedTerms) ? st.matchedTerms.filter(Boolean) : [];
@@ -462,47 +453,6 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             }
 
                                 void loadProfileVersionsForCandidate(payload.id ?? urlId);
-                // Staff default workspace is the shadow copy — never land on live for editing.
-                const opened = {
-                    ...normalized,
-                    backendId: payload.id,
-                    id: payload.id,
-                    staffProfileCopy: payload.staffProfileCopy ?? normalized.staffProfileCopy,
-                    canonicalCandidateId: payload.canonicalCandidateId ?? normalized.canonicalCandidateId,
-                };
-                if (!isStaffDuplicateProfile(opened as Record<string, unknown>) && !wantsLiveProfileView) {
-                    void (async () => {
-                        try {
-                            const candidateKey = String(payload.id ?? urlId);
-                            const loadVersionList = async () => {
-                                const verRes = await fetch(
-                                    `${apiBase}/api/candidates/${encodeURIComponent(candidateKey)}/profile-versions`,
-                                    { headers: { ...authHeaders() }, cache: 'no-store' },
-                                );
-                                const verPayload = verRes.ok ? await verRes.json() : [];
-                                return (Array.isArray(verPayload) ? verPayload : verPayload ? [verPayload] : [])
-                                    .map(normalizeCandidatePayload)
-                                    .map((candidate: any) => ({
-                                        ...candidate,
-                                        backendId: candidate.backendId || candidate.id,
-                                    }));
-                            };
-                            if (payload.ingestPending === true) {
-                                await waitForCandidateEnrichment(apiBase, candidateKey, authHeaders);
-                                void loadProfileVersionsForCandidate(candidateKey);
-                            }
-                            const list = await loadVersionList();
-                            const shadow = resolveStaffShadowProfile(list, opened as Record<string, unknown>);
-                            if (shadow?.backendId || shadow?.id) {
-                                const sid = String(shadow.backendId || shadow.id);
-                                const search = location.search || '';
-                                navigate(`/candidates/${sid}${search}`, { replace: true });
-                            }
-                        } catch {
-                            /* stay on the opened profile */
-                        }
-                    })();
-                }
             } catch (error: any) {
             if (!signal?.aborted) {
                     setCandidateFetchError(error.message || 'תקלה בטעינת המועמד.');
@@ -512,7 +462,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     setIsCandidateLoading(false);
                 }
             }
-    }, [apiBase, authHeaders, loadProfileVersionsForCandidate, location.search, navigate, urlId, wantsLiveProfileView]);
+    }, [apiBase, authHeaders, loadProfileVersionsForCandidate, urlId]);
 
     useEffect(() => {
         setSavedFormBaseline(null);
@@ -1206,7 +1156,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
 export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
     const element = useRoutes([
-        { path: '/', element: <Navigate to="/dashboard" replace /> },
+        { path: '/', element: <HomeRedirect /> },
         { path: '/dashboard', element: <DashboardView /> },
         { path: '/candidates', element: <CandidatesListView openSummaryDrawer={props.openSummaryDrawer} favorites={props.favorites} toggleFavorite={props.toggleFavorite} openMessageModal={props.openMessageModal} /> },
         { path: '/candidates/new', element: <NewCandidateViewV2 /> },
@@ -1388,7 +1338,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                  { path: 'onboarding', element: <CandidateOnboardingChat /> } 
             ]
         },
-        { path: '*', element: <Navigate to="/dashboard" replace /> },
+        { path: '*', element: <HomeRedirect /> },
     ]);
     return element;
 };

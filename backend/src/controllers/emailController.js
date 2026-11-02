@@ -72,15 +72,28 @@ const {
   assessCvParseQuality,
   extractContactFromInboundMessage,
   applyInboundContact,
+  stripSystemContactEmail,
   activeTagCount,
   THIN_RESUME_TEXT_CHARS,
 } = require('../services/cvParseQuality');
+const {
+  isSystemEmail,
+  toCandidateEmail,
+} = require('../utils/systemEmailAddresses');
+const appLogger = require('../utils/appLogger');
 const {
   syncTagsWithRetry,
   stampCvParseQuality,
   stampSavedCandidateQuality,
   stampCvMergedQuality,
 } = require('../services/cvParseQualityService');
+const {
+  logIngestAccepted,
+  logIngestStarted,
+  logIngestCompleted,
+  logIngestSkipped,
+  logIngestFailed,
+} = require('../services/emailIngestLogService');
 const proposalService = require('../services/proposalService');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const cvForwardService = require('../services/cvForwardService');
@@ -198,6 +211,11 @@ const markEmailUploadIngestFailed = async (record, reason) => {
   } catch (err) {
     console.warn('[email] mark ingest failed on upload row', record.id, err?.message || err);
   }
+  // The row is now terminal — record why, so a mail that never produced a candidate is traceable.
+  await logIngestFailed(record, String(reason || 'unknown').slice(0, 300), {
+    level: 'warn',
+    terminal: true,
+  });
 };
 
 const ORG_SYNC_AFTER_EMAIL_DELAY_MS = Math.max(
@@ -490,6 +508,7 @@ const BORING_EMAIL_PREFIX = new Set(['noreply', 'no-reply', 'mailer-daemon', 'do
 /**
  * Heuristic: first plausible contact email in CV body (not the envelope From).
  * Used to split one mail with multiple people’s CVs into separate records + welcome each.
+ * Portal / product-inbox addresses are skipped — they are shared by every applicant.
  */
 const extractFirstEmailFromCvText = (text) => {
   if (!text || typeof text !== 'string') return null;
@@ -501,22 +520,26 @@ const extractFirstEmailFromCvText = (text) => {
     const e = raw.toLowerCase();
     const local = e.split('@')[0];
     if (BORING_EMAIL_PREFIX.has(local) || e.endsWith('@example.com')) continue;
+    if (isSystemEmail(e)) continue;
     return raw;
   }
   return null;
 };
 
-/** Candidate row email if valid, else null. */
+/** Candidate row email if it is a real personal address, else null. */
 const candidateRowEmail = (row) => {
   if (!row) return null;
   const raw = row.get && typeof row.get === 'function' ? row.get('email') : row.email;
-  return raw && String(raw).includes('@') ? String(raw).trim().toLowerCase() : null;
+  return raw && String(raw).includes('@') ? toCandidateEmail(raw) : null;
 };
 
 const normalizeIngestEmail = (raw) => {
   const e = String(raw || '').trim().toLowerCase();
   return e && e.includes('@') ? e : null;
 };
+
+/** True when the address is a job board / product inbox and therefore not a person. */
+const isIngestSystemEmail = (raw) => isSystemEmail(raw);
 
 const normalizeIngestPhone = (raw) => {
   let d = String(raw || '').replace(/\D/g, '');
@@ -551,7 +574,7 @@ const forkEmailIngestCandidateIfIdentityMismatch = async ({
 
   const cvEmail = extractCvContactEmail(textChunks[0], extractFirstEmailFromCvText(textChunks[0]));
   const fromNorm = normalizeIngestEmail(fromEmail);
-  const normCvEmail = normalizeIngestEmail(cvEmail);
+  const normCvEmail = toCandidateEmail(cvEmail);
   if (!normCvEmail || (fromNorm && normCvEmail === fromNorm)) {
     return { candidate, candidateCreatedViaEmailIngest, reusedExistingCandidateByHash, identityForked: false };
   }
@@ -816,6 +839,7 @@ const processEmailUpload = async (record, req = null) => {
     fileKey: record.fileKey,
     jobId: record.jobId,
   });
+  await logIngestStarted(record);
   /** Candidate rows hidden from list until this ingest finishes enrichment. */
   const ingestPendingIds = new Set();
   const markIngestPending = async (candidateId) => {
@@ -881,11 +905,21 @@ const processEmailUpload = async (record, req = null) => {
       (a) => isResumeAttachment(a) && a.content,
     );
     if (!resumeAttachments.length) {
+      const attachments = (parsed.attachments || []).map((att) => ({
+        filename: att.filename || null,
+        contentType: att.contentType || null,
+        size: att.size || (att.content ? att.content.length : 0),
+      }));
       console.warn('[email] no resume attachment found', {
         recordId: record.id,
-        attachments: (parsed.attachments || []).map((att) => att.filename),
+        attachments: attachments.map((a) => a.filename),
       });
       console.warn('[email] no resume attachment found', record.fileKey);
+      await logIngestFailed(record, 'no_resume_attachment', {
+        level: 'warn',
+        attachments,
+        acceptedExtensions: supportedResumeExtensions,
+      });
       await markEmailUploadIngestFailed(record, 'no resume attachment');
       return;
     }
@@ -906,6 +940,10 @@ const processEmailUpload = async (record, req = null) => {
         '[email] duplicate S3 / duplicate notify for same fileKey; linked row, skipping full ingest',
         { recordId: record.id, priorRecordId: priorIngested.id, candidateId: priorIngested.candidateId },
       );
+      await logIngestSkipped(record, 'duplicate_s3_file_key', {
+        priorRecordId: String(priorIngested.id),
+        candidateId: String(priorIngested.candidateId),
+      });
       return;
     }
 
@@ -1138,6 +1176,10 @@ const processEmailUpload = async (record, req = null) => {
         recordId: record.id,
         fileKey: record.fileKey,
         attempted: totalResumes,
+      });
+      await logIngestFailed(record, 'resume_s3_upload_failed', {
+        attempted: totalResumes,
+        candidateId: candidate?.id != null ? String(candidate.id) : null,
       });
       if (candidate?.id) {
         try {
@@ -1597,7 +1639,17 @@ const processEmailUpload = async (record, req = null) => {
       });
       let savedTagCount = 0;
       if (aiFields && Object.keys(aiFields).length) {
-        const safeAi = applyInboundContact({ ...aiFields }, inboundContact);
+        let safeAi = applyInboundContact({ ...aiFields }, inboundContact);
+        // The model sometimes copies the envelope sender / portal footer into `email`.
+        // Drop it: a shared board address must never become this candidate's identity.
+        const stripped = stripSystemContactEmail(safeAi);
+        if (stripped.removedEmail) {
+          console.warn('[email] dropped system email from parsed CV fields', {
+            candidateId: candidate.id,
+            email: stripped.removedEmail,
+          });
+          safeAi = stripped.fields;
+        }
         if (safeAi.email && String(safeAi.email).includes('@')) {
           safeAi.email = String(safeAi.email).trim().toLowerCase();
         } else {
@@ -1610,6 +1662,7 @@ const processEmailUpload = async (record, req = null) => {
             safeAi.email = inboundContact.email;
           }
         }
+        if (safeAi.email === null) delete safeAi.email;
         if (!safeAi.phone && inboundContact.phone) safeAi.phone = inboundContact.phone;
         const profileSafe = keepRecruiterProfileFields(safeAi, candidate);
         Object.assign(safeAi, profileSafe);
@@ -1889,7 +1942,14 @@ const processEmailUpload = async (record, req = null) => {
       let toEmail =
         candidateRowEmail(cand) || extractCvContactEmail(cvText, emailInFirstCv);
       // Direct application: candidate emailed their own CV; envelope From is the contact.
-      if (!toEmail && fromNorm && fromNorm.includes('@') && !matchedRecruitmentSource) {
+      // A job-board / inbox sender is never the candidate, even without a matched source.
+      if (
+        !toEmail
+        && fromNorm
+        && fromNorm.includes('@')
+        && !matchedRecruitmentSource
+        && !isSystemEmail(fromNorm)
+      ) {
         toEmail = fromNorm;
       }
       if (!toEmail) {
@@ -1942,7 +2002,7 @@ const processEmailUpload = async (record, req = null) => {
         extractFirstEmailFromCvText(textChunks[j] || '') ||
         emailInFirstCv ||
         extractFirstEmailFromCvText(textChunks[0] || '');
-      const norm = contactEmail ? String(contactEmail).trim().toLowerCase() : null;
+      const norm = toCandidateEmail(contactEmail);
       if (!identitySplitIndices.has(j) && norm === fromEmail) continue;
 
       let nameGuess =
@@ -2057,7 +2117,15 @@ const processEmailUpload = async (record, req = null) => {
           mimeType: splitAtt?.contentType,
         });
         if (splitAi && Object.keys(splitAi).length) {
-          const safeS = applyInboundContact({ ...splitAi }, inboundContact);
+          let safeS = applyInboundContact({ ...splitAi }, inboundContact);
+          const splitStripped = stripSystemContactEmail(safeS);
+          if (splitStripped.removedEmail) {
+            console.warn('[email] dropped system email from split CV fields', {
+              candidateId: splitCand.id,
+              email: splitStripped.removedEmail,
+            });
+            safeS = splitStripped.fields;
+          }
           if (safeS.email && String(safeS.email).includes('@')) {
             safeS.email = String(safeS.email).trim().toLowerCase();
           } else if (norm && norm !== fromEmail) {
@@ -2241,12 +2309,27 @@ const processEmailUpload = async (record, req = null) => {
 
     const primaryForOrgSync = await candidateService.getById(candidate.id, { forIngest: true });
     scheduleOrganizationsFromExperienceAfterIngest(primaryForOrgSync?.workExperience, candidate.id);
+    await logIngestCompleted(record, {
+      candidateId: candidate?.id != null ? String(candidate.id) : null,
+      merged: Boolean(!candidateCreatedViaEmailIngest),
+      reusedByHash: Boolean(reusedExistingCandidateByHash),
+      attachments: totalResumes,
+      textLength: String(combinedText || '').trim().length,
+      aiParsed: Boolean(stampedCandidateId),
+    });
   } catch (error) {
     console.error('[email][processEmailUpload]', {
       message: error?.message || error,
       stack: error?.stack,
       recordId: record?.id,
       fileKey: record?.fileKey,
+    });
+    // Errors used to leave only a console line; persist them so the mail can be traced in Hiro.
+    await logIngestFailed(record, error?.message || String(error || 'unknown error'), {
+      candidateId: candidate?.id != null ? String(candidate.id) : null,
+      permanent: isPermanentEmailIngestError(error),
+      errorName: error?.name || null,
+      stackTrace: error?.stack ? String(error.stack).slice(0, 4000) : null,
     });
     if (candidate?.id) {
       try {
@@ -3435,6 +3518,7 @@ const upload = async (req, res) => {
         fileKey,
       });
       clearEmailUploadInflight(bucket, fileKey);
+      await logIngestAccepted(record, { dispatch: 'worker' });
       return res.status(202).json({ ...plain, ingestStatus: 'queued' });
     }
 
@@ -3445,11 +3529,18 @@ const upload = async (req, res) => {
           recordId: record?.id,
           fileKey,
         });
+        // Never reject silently: a 202 with no candidate must still leave a trace.
+        void logIngestFailed(record, err?.message || String(err || 'unknown error'), {
+          errorName: err?.name || null,
+          stackTrace: err?.stack ? String(err.stack).slice(0, 4000) : null,
+          phase: 'background',
+        });
       })
       .finally(() => {
         clearEmailUploadInflight(bucket, fileKey);
       });
 
+    await logIngestAccepted(record, { dispatch: 'inline' });
     return res.status(202).json({ ...plain, ingestStatus: 'processing' });
   } catch (error) {
     clearEmailUploadInflight(bucket, fileKey);

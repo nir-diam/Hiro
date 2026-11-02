@@ -2,6 +2,8 @@ const {
   assessCvParseQuality,
   extractContactFromInboundMessage,
   applyInboundContact,
+  stripSystemContactEmail,
+  isUsableContactEmail,
   withCvReviewTags,
   roleTagsFromExperience,
   parsedCvScore,

@@ -1251,6 +1251,8 @@ const LIST_GRID_ATTRIBUTES = [
   'candidatePipelineId',
   'pipelineStageId',
   'candidatePipelineProcesses',
+  'staffProfileCopy',
+  'staffShadowPinned',
   'createdAt',
   'updatedAt',
 ];
@@ -1510,12 +1512,25 @@ const expandInterestRolePhrases = (roleRaw) => {
  * @param {string} trimmedSearch - free text (name / email / phone / summary)
  * @param {object|null} advanced - JSON from GET ?adv= (frontend advanced search panel)
  */
-const buildCandidateListWhere = (trimmedSearch, advanced) => {
+/** @typedef {'primary' | 'staff_shadow_pinned'} CandidateListProfileKind */
+
+/**
+ * @param {CandidateListProfileKind} listProfileKind
+ * - primary: live candidate rows (admin list)
+ * - staff_shadow_pinned: tenant staff list — pinned shadow copy only
+ */
+const buildCandidateListWhere = (trimmedSearch, advanced, listProfileKind = 'primary') => {
   const fragments = [
     '"isDeleted" = false',
-    '"canonicalCandidateId" IS NULL',
     'COALESCE("ingestPending", false) = false',
   ];
+  if (listProfileKind === 'staff_shadow_pinned') {
+    fragments.push('COALESCE("staffProfileCopy", false) = true');
+    fragments.push('COALESCE("staffShadowPinned", false) = true');
+  } else {
+    fragments.push('"canonicalCandidateId" IS NULL');
+    fragments.push('COALESCE("staffProfileCopy", false) = false');
+  }
   const binds = [];
 
   if (trimmedSearch) {
@@ -2337,6 +2352,7 @@ const listPaginatedFromDb = async ({
   blacklistedEmails = [],
   /** Saved-search blacklist: exclude candidates whose phone matches any of these. */
   blacklistedPhones = [],
+  listProfileKind = 'primary',
 } = {}) => {
   const safeLimit = Number.isFinite(limit) ? limit : 100;
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
@@ -2345,7 +2361,7 @@ const listPaginatedFromDb = async ({
   const jid = jobId != null && String(jobId).trim() !== '' ? String(jobId).trim() : '';
   const tid = tagId != null && String(tagId).trim() !== '' ? String(tagId).trim() : '';
 
-  let { whereSql, binds } = buildCandidateListWhere(trimmedSearch, advanced);
+  let { whereSql, binds } = buildCandidateListWhere(trimmedSearch, advanced, listProfileKind);
 
   // Saved-search blacklist: exclude by stable email/phone identifiers.
   if (blacklistedEmails.length > 0) {
@@ -3405,6 +3421,7 @@ const prepareCreatePayload = async (payload) => {
   if (cleanPayload.email) {
     const norm = normalizeEmail(cleanPayload.email);
     if (norm) cleanPayload.email = norm;
+    else delete cleanPayload.email;
   }
 
   if (Array.isArray(cleanPayload.workExperience) && cleanPayload.workExperience.length) {
@@ -3859,6 +3876,18 @@ const update = async (id, payload, options = {}) => {
     else delete cleanPayload.embedding; // avoid invalid/empty vector writes
   }
   const incomingTagDetails = Array.isArray(payload.tagDetails) ? payload.tagDetails : null;
+
+  // A portal / ingest-inbox address must never live in candidates.email: it is shared by every
+  // applicant of that board and would become a duplicate-identity key on the next merge.
+  if (Object.prototype.hasOwnProperty.call(cleanPayload, 'email')) {
+    const rawEmail = String(cleanPayload.email ?? '').trim();
+    if (!rawEmail) {
+      cleanPayload.email = null;
+    } else {
+      const normEmail = normalizeEmail(rawEmail);
+      cleanPayload.email = normEmail;
+    }
+  }
 
   delete cleanPayload.tags;
   delete cleanPayload.sendWelcomeEmail;

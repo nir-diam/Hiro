@@ -74,6 +74,8 @@ const SKIP_PATH_PREFIXES = [
   '/api/inforu',
   '/api/messaging',
   '/api/public/v1',
+  // Binary image stream — the GET cache serializes JSON bodies only.
+  '/api/media',
   '/health',
 ];
 

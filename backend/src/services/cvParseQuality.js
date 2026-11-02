@@ -7,6 +7,7 @@ const {
   isPortalLikePersonName,
 } = require('../utils/personName');
 const { experienceDateLooksCorrupt } = require('../utils/experienceDateSanitize');
+const { isSystemEmail } = require('../utils/systemEmailAddresses');
 
 /** Panel option "Gemini 3 Pro". Used only when a Flash parse fails the quality check. */
 const CV_PARSE_PRO_MODEL = 'gemini-3.1-pro-preview';
@@ -20,7 +21,8 @@ const CV_PARTIAL_TAG = 'פרסור חלקי';
 /** Below this, a PDF text layer is treated as a scan / empty extract and the file goes to the model. */
 const THIN_RESUME_TEXT_CHARS = 400;
 
-const PORTAL_HOST_RE = /(jobmaster|alljobs|drushim|gotfriends|ethosia|linkedin|indeed|glassdoor|careerjet|sql\.co\.il|nisha)/i;
+/** Job boards / our own ingest inbox. Single source of truth: utils/systemEmailAddresses. */
+const PORTAL_HOST_RE = /(jobmaster|alljob|drushim|gotfriends|ethosia|linkedin|indeed|glassdoor|careerjet|sql\.co\.il|nisha)/i;
 const BORING_LOCAL_RE = /^(?:noreply|no-reply|no_reply|donotreply|mailer-daemon|jobs?|cv|resume|mailer)$/i;
 const EMAIL_RE = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
 const PHONE_RE = /(?:\+972[\s\-]?|972[\s\-]?|0)(?:5\d|[23489]\d|7\d)[\s\-]?\d{3}[\s\-]?\d{4}/g;
@@ -218,6 +220,7 @@ function isUsableContactEmail(email) {
   if (!local || !host) return false;
   if (BORING_LOCAL_RE.test(local)) return false;
   if (PORTAL_HOST_RE.test(host)) return false;
+  if (isSystemEmail(e)) return false;
   if (host.endsWith('.example.com') || host === 'example.com') return false;
   return true;
 }
@@ -232,7 +235,7 @@ function normalizeIsraeliPhone(raw) {
 
 /**
  * Contact that was not in the CV file: email body first, then a personal sender.
- * Portal / noreply addresses (JobMaster and similar) are skipped.
+ * Portal / noreply / product-inbox addresses are skipped.
  */
 function extractContactFromInboundMessage({ body, fromEmail, html } = {}) {
   const text = `${String(body || '')}\n${String(html || '').replace(/<[^>]+>/g, ' ')}`;
@@ -260,6 +263,21 @@ function applyInboundContact(fields, inbound) {
   if (!String(out.email || '').includes('@') && inbound.email) out.email = inbound.email;
   if (String(out.phone || '').replace(/\D/g, '').length < 9 && inbound.phone) out.phone = inbound.phone;
   return out;
+}
+
+/**
+ * Strip a system/portal address from a parsed-CV field set. Returns the patch to apply when the
+ * address was removed (so the caller can null out `candidates.email`) plus the cleaned object.
+ * @param {object} fields
+ * @returns {{ fields: object, removedEmail: string|null }}
+ */
+function stripSystemContactEmail(fields) {
+  const out = fields && typeof fields === 'object' ? { ...fields } : {};
+  const raw = String(out.email || '').trim();
+  if (!raw.includes('@')) return { fields: out, removedEmail: null };
+  if (!isSystemEmail(raw)) return { fields: out, removedEmail: null };
+  delete out.email;
+  return { fields: out, removedEmail: raw.toLowerCase() };
 }
 
 function roleTagsFromExperience(workExperience) {
@@ -316,6 +334,7 @@ module.exports = {
   maybeUpgradeParseWithPro,
   extractContactFromInboundMessage,
   applyInboundContact,
+  stripSystemContactEmail,
   isUsableContactEmail,
   roleTagsFromExperience,
   withCvReviewTags,

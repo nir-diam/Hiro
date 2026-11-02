@@ -2166,6 +2166,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         stages: CandidatePipelineStage[];
     } | null>(null);
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    // List rows: platform admin → live primaries; tenant staff → pinned shadow copies (server-side on GET /api/candidates).
     const ownPipelineClientId = user?.clientId ? String(user.clientId) : null;
     const [adminPipelineClientId, setAdminPipelineClientId] = useState<string | null>(
         () => listViewSnapshot?.adminPipelineClientId ?? null,

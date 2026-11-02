@@ -2279,6 +2279,21 @@ const parseCandidateListParams = (req) => {
   };
 };
 
+const resolveCandidateListProfileKind = async (req) => {
+  let role = String(req?.dbUser?.role || '').trim();
+  if (!role && req?.user?.sub) {
+    try {
+      const u = await User.findByPk(req.user.sub, { attributes: ['role'], raw: true });
+      role = String(u?.role || '').trim();
+    } catch {
+      role = '';
+    }
+  }
+  if (role === 'admin' || role === 'super_admin') return 'primary';
+  if (!role) return 'primary';
+  return 'staff_shadow_pinned';
+};
+
 const runCandidateList = async (req, res) => {
   const {
     page,
@@ -2291,6 +2306,7 @@ const runCandidateList = async (req, res) => {
     matchLastJobScores: requestedMatchLastJobScores,
     savedSearchId,
   } = parseCandidateListParams(req);
+  const listProfileKind = await resolveCandidateListProfileKind(req);
 
   // Sync last-job scoring for a full page exceeds gateway time/memory (502/504).
   // Match % is hydrated client-side via POST /api/candidates/match-scores/batch.
@@ -2325,6 +2341,7 @@ const runCandidateList = async (req, res) => {
     matchLastJobScores,
     blacklistedEmails,
     blacklistedPhones,
+    listProfileKind,
   });
   const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
     if (!row || typeof row !== 'object') return row;

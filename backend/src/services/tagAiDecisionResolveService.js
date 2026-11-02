@@ -417,6 +417,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
       // For 'merge': tag may have already been processed/deprecated but candidates still
       // need to be reassigned to the target and the alias must be recorded.
       // Use bypassStatusCheck so resolvePendingFn does the work regardless of tag status.
+      let mergeFailure = null;
       if (action === 'merge' && pendingTag) {
         try {
           const mapped = await mapReviewerAction(action, plain, targetTagId, pendingTag.type);
@@ -430,6 +431,7 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
           decision.resolvedTargetTagId = mapped.targetTagId;
           console.log(`[tagAiDecisionResolve] merged non-pending tag ${plain.pendingTagId} → ${mapped.targetTagId} (bypass)`);
         } catch (mergeErr) {
+          mergeFailure = mergeErr;
           console.warn(`[tagAiDecisionResolve] bypass merge failed for ${plain.pendingTagId}:`, mergeErr?.message);
         }
       } else if (action === 'merge') {
@@ -438,6 +440,9 @@ const applyReviewerActions = async ({ decisionIds = [], action, targetTagId, ali
           decision.resolvedTargetTagId = mapped.targetTagId;
         } catch (_) { /* best-effort */ }
       }
+      // The merge never happened — leave the decision open so the reviewer can retry,
+      // instead of reporting success while the candidate links stayed put.
+      if (mergeFailure) throw mergeFailure;
       decision.reviewStatus = 'overridden';
       decision.reviewerAction = action;
       decision.resolvedAt = new Date();

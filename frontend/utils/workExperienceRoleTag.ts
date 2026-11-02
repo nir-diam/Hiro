@@ -113,9 +113,22 @@ export function resolveExperienceContextTags(
 ): ExperienceContextTag[] {
   if (!exp || typeof exp !== 'object' || !Array.isArray(tagDetails)) return [];
 
-  const explicitIds = Array.isArray(exp.roleTagIds)
-    ? exp.roleTagIds.map((id) => String(id).trim()).filter(Boolean).slice(0, 2)
-    : [];
+  const rowRoleLabel = String(exp.roleTag ?? exp.role_tag ?? '').trim();
+  const primaryTagId = exp.tagId ?? exp.tag_id;
+
+  // A row may store its role tags as `roleTagIds` (new) or as `tagId` alone (parser / legacy rows).
+  // Reading only `roleTagIds` hid the tag on every row that has a single `tagId`.
+  const explicitIds = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(exp.roleTagIds) ? exp.roleTagIds : []),
+        primaryTagId != null ? primaryTagId : null,
+      ]
+        .map((id) => (id == null ? '' : String(id).trim()))
+        .filter(Boolean),
+    ),
+  ).slice(0, 2);
+
   if (explicitIds.length) {
     const out: ExperienceContextTag[] = [];
     const seen = new Set<string>();
@@ -126,7 +139,11 @@ export function resolveExperienceContextTags(
         const detailId = d.tagId ?? d.tag?.id;
         return detailId != null && String(detailId) === tid;
       }) as RoleTagDetailLike | undefined;
-      const label = detail ? detailDisplayName(detail) : '';
+      // The catalog tag may be missing from tagDetails (e.g. it is still `pending`, so its
+      // candidate link is inactive and is filtered out of the payload). The row still stores the
+      // human-readable label in `roleTag` — show that instead of silently showing nothing.
+      const isPrimary = primaryTagId != null && String(primaryTagId).trim() === tid;
+      const label = detail ? detailDisplayName(detail) : isPrimary ? rowRoleLabel : '';
       if (!label) continue;
       const key = `role:${label.toLowerCase()}`;
       if (seen.has(key)) continue;

@@ -254,9 +254,118 @@ const resolveMergeTargetTagId = async (suggestedName, tagType, hybrid = []) => {
   return hit.tagId;
 };
 
+/**
+ * If an ACTIVE catalog tag already owns this pending tag's identity, merge immediately.
+ *
+ * Identity, not opinion: same `tag_key`, or the same (display_name_he, display_name_en) pair.
+ * A detected-type disagreement (`tool` vs `certification`) is exactly the case that used to
+ * fork `forklift_license` into a duplicate pending row, so it must NOT block the merge.
+ *
+ * @returns {Promise<boolean>} true when the pending tag was merged (and no decision is needed).
+ */
+const autoMergeExactIdentityDuplicate = async (pendingTag) => {
+  if (!pendingTag) return false;
+
+  const tagKey = String(pendingTag.tagKey || '').trim().toLowerCase();
+  const he = String(pendingTag.displayNameHe || '').trim().toLowerCase();
+  const en = String(pendingTag.displayNameEn || '').trim().toLowerCase();
+
+  const matches = [];
+  if (tagKey) {
+    matches.push(
+      ...(await Tag.findAll({
+        where: {
+          status: 'active',
+          tagKey: { [Op.iLike]: tagKey },
+          id: { [Op.ne]: pendingTag.id },
+        },
+      })),
+    );
+  }
+  if (he && en) {
+    matches.push(
+      ...(await Tag.findAll({
+        where: {
+          status: 'active',
+          displayNameHe: { [Op.iLike]: he },
+          displayNameEn: { [Op.iLike]: en },
+          id: { [Op.ne]: pendingTag.id },
+        },
+      })),
+    );
+  }
+
+  const canonical = [...new Map(matches.map((row) => [String(row.id), row])).values()]
+    // Most-used tag wins so the surviving identity is the well-established one.
+    .sort((a, b) => (Number(b.usageCount) || 0) - (Number(a.usageCount) || 0))[0];
+  if (!canonical) return false;
+
+  try {
+    // Lazy require to avoid circular dependency (tagController ← tagCorrectionAgentService)
+    const { resolvePendingTags } = require('../controllers/tagController');
+    await resolvePendingTags({
+      ids: [pendingTag.id],
+      action: 'link',
+      targetTagId: canonical.id,
+      aliasPriority: 4,
+      bypassStatusCheck: true,
+    });
+
+    // Close any decision rows that still point at the merged-away tag. The FK is
+    // ON DELETE SET NULL, so the audit rows survive with pending_tag_id = NULL.
+    const staleDecisions = await TagAiDecision.findAll({
+      where: { pendingTagId: pendingTag.id },
+    });
+    for (const decision of staleDecisions) {
+      const before = decision.get ? decision.get({ plain: true }) : { ...decision };
+      await decision.update({
+        reviewStatus: 'approved',
+        reviewerAction: 'auto_merge',
+        resolvedAt: new Date(),
+        resolvedTargetTagId: canonical.id,
+      });
+      await decision.reload();
+      await aiDecisionAuditService.recordTagDecisionAudit(null, before, decision, {
+        actor: 'agent',
+        metadata: { resolveAction: 'auto_merge', reason: 'exact_identity_duplicate' },
+      });
+    }
+
+    console.log(
+      `[tagCorrectionAgent] auto-merged exact duplicate "${pendingTag.displayNameHe || pendingTag.tagKey}" `
+      + `(${pendingTag.type}) → ${canonical.displayNameHe || canonical.tagKey} (${canonical.type}) `
+      + `[${pendingTag.id} → ${canonical.id}]`,
+    );
+    return true;
+  } catch (err) {
+    if (err?.code === 'TAG_PROTECTED') {
+      console.warn(
+        `[tagCorrectionAgent] not auto-merging duplicate "${pendingTag.tagKey}" — target tag is protected`,
+      );
+      return false;
+    }
+    console.warn(
+      `[tagCorrectionAgent] auto-merge exact duplicate failed for ${pendingTag.id}:`,
+      err?.message || err,
+    );
+    return false;
+  }
+};
+
 const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
   const tag = await Tag.findByPk(pendingTagId);
   if (!tag || String(tag.status).toLowerCase() !== 'pending') return null;
+  /**
+   * Deterministic short-circuit: if an ACTIVE tag already owns this exact identity
+   * (same tagKey, or same pair of display names), merge into it without asking the LLM.
+   *
+   * This is what previously produced the `forklift_license` duplicate: the pending row had
+   * type=tool while the active one was certification, the type filter hid the target, the
+   * model answered "create", and the row sat in the queue forever. Identity is a fact, not
+   * an opinion — so decide it here.
+   */
+  const selfMerged = await autoMergeExactIdentityDuplicate(tag);
+  if (selfMerged) return null;
 
   const existing = await TagAiDecision.findOne({
     where: { pendingTagId, reviewStatus: 'pending_review' },
@@ -1019,6 +1128,7 @@ module.exports = {
   scheduleDecisionForPendingTag,
   schedulePendingIfNeeded,
   runDecisionForPendingTag,
+  autoMergeExactIdentityDuplicate,
   listDecisions,
   backfillPendingWithoutDecisions,
   refreshHybridSnapshots,

@@ -32,7 +32,6 @@ import {
     buildLiveProfileProposalFields,
     canShareStaffProfileWithCandidate,
     mergeCandidateProfileIdentity,
-    resolveStaffShadowProfile,
 } from '../utils/candidateProfileDuplicate';
 
 const LIVE_SYNC_FIELD_LABELS_HE: Record<string, string> = {
@@ -834,8 +833,6 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const navigate = useNavigate();
   const location = useLocation();
   const summaryId = useId();
-  const defaultShadowRedirectKeyRef = useRef('');
-
   const handleSmartTagSearch = useCallback(
     (tag: SmartTagData) => {
       if (!isAcademicDegreeCatalogTag(tag.label, tag.tagKey)) return;
@@ -863,6 +860,11 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     activeProfileId ?? candidateData.backendId ?? candidateData.id ?? '',
   ).trim();
   const [fetchedProfiles, setFetchedProfiles] = useState<MultiProfileOption[]>([]);
+  /**
+   * Candidate id whose profile-version list request has settled (success or failure).
+   * Distinct from "loaded": a failed request still settles, so the banner is not hidden forever.
+   */
+  const [profileVersionsSettledForId, setProfileVersionsSettledForId] = useState<string | null>(null);
   const profileList = useMemo(() => {
     const merged = new Map<string, MultiProfileOption>();
     for (const profile of [...profiles, ...fetchedProfiles]) {
@@ -895,6 +897,23 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     () => isCanonicalPrimaryCandidateProfile(profileForSaveDecision),
     [profileForSaveDecision],
   );
+  /**
+   * Show the live-profile banner only when this really is the original (live) profile.
+   *
+   * Identity has two sources: the candidate payload (`staffProfileCopy` / `canonicalCandidateId`,
+   * available immediately) and the profile-version list (arrives async). While that list is still
+   * loading, `activeProfileOption` is missing and `profileForSaveDecision` falls back to an
+   * optimistic "live" identity — which made the banner flash on every shadow profile load.
+   * So: trust an explicit shadow flag, and otherwise wait until the version list resolved.
+   */
+  const payloadSaysShadow = candidateData.staffProfileCopy === true
+    || (candidateData.canonicalCandidateId != null
+      && String(candidateData.canonicalCandidateId) !== String(candidateData.backendId ?? candidateData.id ?? ''));
+  const profileVersionListResolved = profileVersionsSettledForId !== null
+    && profileVersionsSettledForId === String(candidateData.backendId ?? candidateData.id ?? '').trim();
+  const showLiveProfileNotice = !payloadSaysShadow
+    && isViewingOriginalPrimaryProfile
+    && profileVersionListResolved;
   const canShareWithCandidate = useMemo(
     () => canShareStaffProfileWithCandidate(profileForSaveDecision),
     [profileForSaveDecision],
@@ -1674,7 +1693,11 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           `${apiBase}/api/candidates/${encodeURIComponent(String(backendId))}/profile-versions`,
           { signal: controller.signal, headers: authHeaders(), cache: 'no-store' },
         );
-        if (!listRes.ok) return;
+        if (!listRes.ok) {
+          // Still resolved — a non-OK list must not leave the banner permanently hidden.
+          setProfileVersionsSettledForId(String(backendId));
+          return;
+        }
 
         const payload = await listRes.json();
         const list = Array.isArray(payload) ? payload : payload ? [payload] : [];
@@ -1699,38 +1722,19 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           }))
           .filter(Boolean);
         setFetchedProfiles(options);
+        // Mark this candidate's version list as resolved so identity-dependent UI stops guessing.
+        setProfileVersionsSettledForId(String(backendId));
       } catch (err) {
         if ((err as any)?.name === 'AbortError') return;
         console.error('Failed to fetch linked profiles', err);
+        // Resolve anyway: a failed list must not hide the banner forever on a real live profile.
+        setProfileVersionsSettledForId(String(backendId));
       }
     };
 
     loadProfiles();
     return () => controller.abort();
   }, [apiBase, candidateData.backendId, candidateData.id]);
-
-  useEffect(() => {
-    if (!onSwitchProfile || profileList.length === 0) return;
-    const wantsLive = new URLSearchParams(location.search || '').get('view') === 'live';
-    if (wantsLive) return;
-    if (isStaffDuplicateProfile(candidateData as Record<string, unknown>)) {
-      defaultShadowRedirectKeyRef.current = '';
-      return;
-    }
-
-    const shadow = resolveStaffShadowProfile(
-      profileList as Array<Record<string, unknown>>,
-      candidateData as Record<string, unknown>,
-    );
-    const shadowId = String(shadow?.backendId || shadow?.id || '').trim();
-    const currentId = String(candidateData.backendId || candidateData.id || '').trim();
-    if (!shadowId || shadowId === currentId) return;
-
-    const key = `${currentId}->${shadowId}`;
-    if (defaultShadowRedirectKeyRef.current === key) return;
-    defaultShadowRedirectKeyRef.current = key;
-    onSwitchProfile(shadowId);
-  }, [candidateData, location.search, onSwitchProfile, profileList]);
 
   const sourceClientLabel =
     (candidateData as any).source ||
@@ -2883,7 +2887,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             initialCategory={tagSelectorCategory}
         />
 
-        {isViewingOriginalPrimaryProfile ? (
+        {showLiveProfileNotice ? (
           <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50/80 px-3 py-2 text-sm text-emerald-900">
             {liveProfileEditUnlocked
               ? 'עריכת הפרופיל החי פתוחה — ערכו שדות ואז לחצו «שלח לאישור המועמד». הפרופיל יתעדכן רק אחרי אישור.'

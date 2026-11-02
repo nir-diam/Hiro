@@ -29,6 +29,7 @@ const {
   markEmailUploadIngestFailed,
   isEmailUploadIngestTerminal,
 } = require('../src/controllers/emailController');
+const { logIngestFailed } = require('../src/services/emailIngestLogService');
 
 const POLL_MS = Math.max(
   1000,
@@ -139,6 +140,11 @@ async function runOneCycle() {
     console.error('[ingest-worker] processEmailUpload failed', {
       recordId: record.id,
       message: err?.message || err,
+    });
+    await logIngestFailed(record, err?.message || String(err || 'unknown error'), {
+      errorName: err?.name || null,
+      stackTrace: err?.stack ? String(err.stack).slice(0, 4000) : null,
+      phase: 'worker',
     });
     try {
       await record.reload();

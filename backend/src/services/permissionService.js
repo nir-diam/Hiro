@@ -20,7 +20,15 @@ const PAGE_KEYS = [
   'page:hiro_ai',
 ];
 
-/** Admin UI module keys → page keys they gate (all must pass for the module to allow those pages). */
+/**
+ * Admin UI module keys → page keys they gate.
+ *
+ * A page key must be owned by exactly ONE module. It used to be owned by two
+ * (`misc` and `communication` both listed `page:notifications`), so an admin turning off
+ * either module silently removed the notifications bell for every non-admin user, even
+ * though the other module was still on. `page:notifications` is now owned by `misc` only
+ * (the "שונות" card whose description is "דף הבית, התראות וקישורים מהירים").
+ */
 const MODULE_KEY_TO_PAGE_KEYS = {
   candidates: ['page:candidates'],
   candidate_pool: ['page:candidate_pool'],
@@ -31,7 +39,7 @@ const MODULE_KEY_TO_PAGE_KEYS = {
   clients: ['page:clients'],
   finance: ['page:finance'],
   reports: ['page:reports'],
-  communication: ['page:communications', 'page:notifications'],
+  communication: ['page:communications'],
   settings: ['page:settings'],
   ai_parsing: ['page:ai_parsing'],
   hiro_ai: ['page:hiro_ai'],

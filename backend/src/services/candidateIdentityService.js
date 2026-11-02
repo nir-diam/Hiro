@@ -1,11 +1,14 @@
 const { QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const Candidate = require('../models/Candidate');
+const { toCandidateEmail } = require('../utils/systemEmailAddresses');
 
-const normalizeEmail = (raw) => {
-  const e = String(raw || '').trim().toLowerCase();
-  return e && e.includes('@') ? e : null;
-};
+/**
+ * Normalized personal address, or null for portal / product-inbox / noreply senders.
+ * A job-board or ingest-inbox address is shared by hundreds of unrelated applicants, so it can
+ * never be an identity key — see utils/systemEmailAddresses.
+ */
+const normalizeEmail = (raw) => toCandidateEmail(raw);
 
 const normalizePhoneDigits = (raw) => {
   let d = String(raw || '').replace(/\D/g, '');
@@ -20,12 +23,23 @@ const normalizeIdNumber = (raw) => {
   return id.length >= 5 ? id : null;
 };
 
+/**
+ * SQL mirror of utils/systemEmailAddresses — portal / product-inbox / noreply addresses.
+ * Rows carrying such an address are not grouped by email in the list (they fall back to
+ * phone / tz / id), otherwise every applicant of one job board collapses into a single row.
+ */
+const SYSTEM_EMAIL_SQL_GUARD = `
+    AND LOWER(TRIM(email)) !~ '@[^@]*(alljob|jobmaster|drushim|gotfriends|ethosia|linkedin|indeed|glassdoor|careerjet|nisha|sql\\.co\\.il)[^@]*$'
+    AND LOWER(TRIM(email)) !~ '@([a-z0-9-]+\\.)+(hiro|humand)\\.co\\.il$'
+    AND LOWER(TRIM(email)) !~ '^(noreply|no-reply|no_reply|donotreply|do-not-reply|mailer-daemon|postmaster|bounce|bounces|mailer|hiro|humand)@'
+`;
+
 /** SQL expression: stable identity bucket for list deduplication (one row per person). */
 const LIST_IDENTITY_PARTITION_SQL = `
   COALESCE(
     CASE WHEN "userId" IS NOT NULL THEN 'person:' || "userId"::text END,
     CASE WHEN "canonicalCandidateId" IS NOT NULL THEN 'person:' || "canonicalCandidateId"::text END,
-    CASE WHEN NULLIF(LOWER(TRIM(COALESCE(email, ''))), '') IS NOT NULL
+    CASE WHEN NULLIF(LOWER(TRIM(COALESCE(email, ''))), '') IS NOT NULL${SYSTEM_EMAIL_SQL_GUARD}
       THEN 'email:' || LOWER(TRIM(email)) END,
     CASE WHEN LENGTH(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g')) >= 9
       THEN 'phone:' || RIGHT(regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g'), 9) END,
@@ -221,7 +235,13 @@ const buildMergePlan = (duplicateRow, existingRow, identity = {}) => {
   }
 
   const mergeFields = pickCvMergeFields(duplicateRow);
-  if (identity.email) mergeFields.email = normalizeEmail(identity.email);
+  // Only a real personal address may overwrite the survivor's email; a portal / ingest-inbox
+  // address would re-poison the row (and match every other applicant of that board).
+  const identityEmail = normalizeEmail(identity.email);
+  const duplicateEmail = normalizeEmail(duplicateRow?.email);
+  if (identityEmail) mergeFields.email = identityEmail;
+  else if (duplicateEmail) mergeFields.email = duplicateEmail;
+  else delete mergeFields.email;
   if (identity.phone && !mergeFields.phone) mergeFields.phone = identity.phone;
   if (identity.idNumber && !mergeFields.idNumber) mergeFields.idNumber = identity.idNumber;
   if (!existingRow.userId && duplicateRow.userId) mergeFields.userId = duplicateRow.userId;
@@ -239,6 +259,7 @@ module.exports = {
   normalizeEmail,
   normalizePhoneDigits,
   normalizeIdNumber,
+  SYSTEM_EMAIL_SQL_GUARD,
   LIST_IDENTITY_PARTITION_SQL,
   CV_MERGE_FIELDS,
   pickCvMergeFields,

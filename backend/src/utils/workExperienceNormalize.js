@@ -305,14 +305,10 @@ const attachTagIdsToWorkExperience = (workExperience = [], systemTagRows = []) =
   const rows = Array.isArray(workExperience) ? workExperience : [];
   const roles = buildRoleCatalogFromSystemTags(systemTagRows);
   if (!roles.length) {
-    return rows.map((exp) => {
-      if (!exp || typeof exp !== 'object') return exp;
-      if (exp.roleTag == null && exp.tagId == null) return exp;
-      const next = { ...exp };
-      delete next.roleTag;
-      delete next.tagId;
-      return next;
-    });
+    // No role catalog in this payload (every role tag may still be `pending`, so its candidate
+    // link is inactive). The row's own roleTag/tagId still came from the catalog — erasing it here
+    // silently blanked correct tags on read. Leave the rows untouched.
+    return rows;
   }
 
   return rows.map((exp) => {
@@ -338,11 +334,17 @@ const attachTagIdsToWorkExperience = (workExperience = [], systemTagRows = []) =
       if (byId) {
         return { ...exp, tagId: byId.tagId, roleTag: byId.displayNameHe };
       }
+      // The row links a catalog role tag that is not in this candidate's *active* tag rows
+      // (e.g. the catalog tag is still pending, so its system_tags link has is_active=false).
+      // Keep the link untouched — dropping it here silently erased correct row tags on read.
+      return exp;
     }
 
     const needles = [exp.roleTag, exp.title].filter((v) => v != null && String(v).trim());
     const match = matchRoleCatalogLabel(needles, roles);
     if (!match) {
+      // No tagId and nothing in the catalog matches: this is a CV-only label the parser invented
+      // (e.g. a job title), not a catalog role tag. Drop it.
       const next = { ...exp };
       delete next.roleTag;
       delete next.tagId;
