@@ -60,7 +60,14 @@ const redactText = (text, secrets) => {
     if (value.length < 2) continue;
     out = out.split(value).join('');
   }
-  return out.replace(/[ \t]{2,}/g, ' ').trim();
+  return out
+    .replace(/לחברת\s*,\s*/g, 'לחברה ')
+    .replace(/לחברת\s+(?=העוסק|המתמחה|המובילה|בתחום)/g, 'לחברה ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s+([,.:;])/g, '$1')
+    .trim();
 };
 
 const buildCompanyDto = ({ job, publication, agency, org, industry, sizeRange, regionLabel }) => {

@@ -10,6 +10,7 @@ import {
   getJobStatusStyle,
 } from '../utils/candidateLinkedJobs';
 import JobFieldSelector, { type SelectedJobField } from './JobFieldSelector';
+import { fetchJobById } from '../services/jobsApi';
 import FieldInterestJobPickerModal, { type FieldInterestPreviewJob } from './FieldInterestJobPickerModal';
 import { useLanguage } from '../context/LanguageContext';
 
@@ -61,8 +62,6 @@ const CandidateProcessesPanel: React.FC<CandidateProcessesPanelProps> = ({
     selection: SelectedJobField;
     jobs: FieldInterestPreviewJob[];
   } | null>(null);
-  const [jobCatalog, setJobCatalog] = useState<Job[]>([]);
-
   const fieldInterestAuthHeaders = useCallback((): Record<string, string> => {
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
     const h: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
@@ -97,22 +96,6 @@ const CandidateProcessesPanel: React.FC<CandidateProcessesPanelProps> = ({
     const match = jobs.find((job) => job.linkId === initialManageLinkId);
     if (match) setManageJob(match);
   }, [initialManageLinkId, jobs]);
-
-  useEffect(() => {
-    if (!apiBase) return;
-    let active = true;
-    void fetch(`${apiBase}/api/jobs`)
-      .then((r) => (r.ok ? r.json() : []))
-      .then((data) => {
-        if (active) setJobCatalog(Array.isArray(data) ? data : []);
-      })
-      .catch(() => {
-        if (active) setJobCatalog([]);
-      });
-    return () => {
-      active = false;
-    };
-  }, [apiBase]);
 
   const handleOpenProcess = (link: CandidateJobLink) => {
     setManageJob(link);
@@ -157,15 +140,11 @@ const CandidateProcessesPanel: React.FC<CandidateProcessesPanelProps> = ({
 
   const handleOpenJob = (link: CandidateJobLink) => {
     if (!link.jobId) return;
-    const fromCatalog = jobCatalog.find((j) => String(j.id) === String(link.jobId));
-    if (fromCatalog) {
-      setSelectedJob(fromCatalog);
-      setIsDrawerOpen(true);
-      return;
-    }
-    const byTitle = jobCatalog.find((j) => j.title === link.jobTitle);
-    setSelectedJob(byTitle || buildFallbackJob(link));
+    setSelectedJob(buildFallbackJob(link));
     setIsDrawerOpen(true);
+    void fetchJobById(String(link.jobId)).then((full) => {
+      if (full) setSelectedJob(full as unknown as Job);
+    });
   };
 
   const commitFieldInterest = useCallback(

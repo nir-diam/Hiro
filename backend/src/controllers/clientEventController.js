@@ -2,6 +2,11 @@ const { v4: uuidv4 } = require('uuid');
 const clientService = require('../services/clientService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+const {
+  applyCompletedEventLock,
+  completedEventLockedError,
+  isCompletedEvent,
+} = require('../utils/completedEventLock');
 
 /** Coerce incoming `type` (string | string[] | null) into a clean string[]. */
 const normalizeTypes = (raw) => {
@@ -31,6 +36,9 @@ const {
 const {
   parseJournalListQuery,
   filterJournalMappedRows,
+  hasServerJournalFilters,
+  journalListNeedsFullEventsHistory,
+  sortJournalMappedRowsByDueDate,
 } = require('../utils/clientEventJournalQuery');
 
 const displayNameFromUser = (u) => {
@@ -180,6 +188,12 @@ const parsePositiveInt = (raw, fallback, max) => {
   return Math.min(n, max);
 };
 
+const parseNonNegativeInt = (raw, fallback, max) => {
+  const n = parseInt(String(raw ?? ''), 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return Math.min(n, max);
+};
+
 const eventLinkedContactIds = (event) => {
   const ids = [];
   const direct = String(event?.contactId || '').trim();
@@ -208,6 +222,7 @@ const filterEventsByOrganizationScope = async (rows, { organizationId, organizat
     const contacts = await ClientContact.findAll({
       where: { clientId, organizationId: orgId },
       attributes: ['id'],
+      limit: 2000,
     });
     contactIds = new Set(contacts.map((c) => String(c.id)));
   }
@@ -236,22 +251,94 @@ const filterEventsByOrganizationScope = async (rows, { organizationId, organizat
   return rows.filter((e) => eventMatchesOrg(e));
 };
 
+const journalPrefersRecentCache = (journalQuery) =>
+  !journalQuery?.q
+  && !journalQuery?.candidateId
+  && !(journalQuery?.statuses?.size)
+  && !(journalQuery?.companies?.size)
+  && !(journalQuery?.coordinators?.size)
+  && !(journalQuery?.pipelineIds?.size)
+  && !(journalQuery?.stageIds?.size)
+  && !(journalQuery?.editorFilters?.length)
+  && !journalQuery?.dateFrom
+  && !journalQuery?.dateTo
+  && !journalQuery?.dueFrom
+  && !journalQuery?.dueTo;
+
 const list = async (req, res) => {
   try {
+    if (req.query?.openCount === '1' || req.query?.openCount === 'true') {
+      const contactId = req.query?.contactId ? String(req.query.contactId).trim() : '';
+      const openCount = await clientService.countOpenJournalEvents(req.params.id, {
+        contactId,
+        contactName: req.query?.contactName ? String(req.query.contactName).trim() : '',
+        organizationId:
+          !contactId && req.query?.organizationId
+            ? String(req.query.organizationId).trim()
+            : '',
+        organizationTmpId:
+          !contactId && req.query?.organizationTmpId
+            ? String(req.query.organizationTmpId).trim()
+            : '',
+      });
+      return res.json({ openCount });
+    }
     const contactId = req.query?.contactId ? String(req.query.contactId).trim() : '';
-    const client = await clientService.getByIdForJournal(req.params.id, {
-      contactId: contactId || undefined,
-    });
+    const summary = req.query?.summary === '1' || req.query?.summary === 'true';
+    const journalQuery = parseJournalListQuery(req.query, req.dbUser);
+    const paginate = req.query?.paginate === '1' || req.query?.paginate === 'true';
+    const limit = parsePositiveInt(
+      req.query?.limit,
+      paginate ? 10 : 20,
+      paginate ? 100 : 5000,
+    );
+    const offset = parseNonNegativeInt(req.query?.offset, 0, 50000);
+    const needsDeepFilters = journalListNeedsFullEventsHistory(journalQuery);
+    const useSliceLoad =
+      journalQuery.journalFilter
+      || summary
+      || paginate
+      || req.query?.limit != null;
+    const eventsElementCap = useSliceLoad
+      ? clientService.resolveJournalListEventsCap(
+          limit,
+          true,
+          needsDeepFilters,
+          paginate ? offset : 0,
+        )
+      : 0;
+    const activeOnly =
+      journalQuery.journalFilter
+      && journalQuery.activeStates.size === 1
+      && journalQuery.activeStates.has('פעיל');
     const organizationId = req.query?.organizationId
       ? String(req.query.organizationId).trim()
       : null;
     const organizationTmpId = req.query?.organizationTmpId
       ? String(req.query.organizationTmpId).trim()
       : null;
-    const summary = req.query?.summary === '1' || req.query?.summary === 'true';
-    const journalQuery = parseJournalListQuery(req.query, req.dbUser);
-    const limit = parsePositiveInt(req.query?.limit, 20, 5000);
+    const client = await clientService.getByIdForJournal(req.params.id, {
+      contactId: contactId || undefined,
+      organizationId: !contactId && organizationId ? organizationId : undefined,
+      organizationTmpId: !contactId && organizationTmpId ? organizationTmpId : undefined,
+      eventsElementCap,
+      journalLoadHint: useSliceLoad
+        ? {
+            q: journalQuery.q,
+            activeOnly,
+            contactName: req.query?.contactName ? String(req.query.contactName).trim() : '',
+            preferRecentCache: journalPrefersRecentCache(journalQuery),
+          }
+        : null,
+    });
     let rows = Array.isArray(client.events) ? client.events : [];
+    if (
+      journalQuery.journalFilter
+      && journalQuery.activeStates.size === 1
+      && journalQuery.activeStates.has('פעיל')
+    ) {
+      rows = rows.filter((e) => e && e.isActive !== false);
+    }
     if (!contactId) {
       rows = await filterEventsByOrganizationScope(rows, {
         organizationId,
@@ -264,19 +351,51 @@ const list = async (req, res) => {
     const mapped = rows
       .map((e) => mapClientEventToJournalRow(e, clientId, clientName, { summary }))
       .filter(Boolean);
-    try {
-      await attachMissingCandidateEmployers(mapped);
-    } catch (attachErr) {
-      console.warn(
-        '[clientEventController] candidate employer attach failed',
-        String(attachErr && attachErr.message ? attachErr.message : attachErr).slice(0, 160),
-      );
+    const filtered = sortJournalMappedRowsByDueDate(
+      filterJournalMappedRows(mapped, journalQuery),
+      journalQuery.sortDir,
+    );
+    const sliceStart = paginate ? offset : 0;
+    const page = limit > 0 ? filtered.slice(sliceStart, sliceStart + limit) : filtered.slice(sliceStart);
+    if (!paginate && !summary && !useSliceLoad) {
+      try {
+        await attachMissingCandidateEmployers(page);
+      } catch (attachErr) {
+        console.warn(
+          '[clientEventController] candidate employer attach failed',
+          String(attachErr && attachErr.message ? attachErr.message : attachErr).slice(0, 160),
+        );
+      }
     }
-    const filtered = filterJournalMappedRows(mapped, journalQuery);
-    filtered.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
-    res.json(limit > 0 ? filtered.slice(0, limit) : filtered);
+    if (paginate) {
+      const sqlSliceFull = mapped.length >= eventsElementCap && eventsElementCap > 0;
+      const hasMore =
+        filtered.length > sliceStart + page.length
+        || (page.length >= limit && sqlSliceFull);
+      let emptyReason;
+      if (page.length === 0) {
+        if (mapped.length === 0 && !hasServerJournalFilters(journalQuery)) {
+          emptyReason = 'no_events_on_client';
+        } else if (filtered.length === 0) {
+          emptyReason = 'no_events_match_filters';
+        }
+      }
+      return res.json({
+        items: page,
+        offset: sliceStart,
+        limit,
+        hasMore,
+        returned: page.length,
+        ...(emptyReason ? { emptyReason } : {}),
+      });
+    }
+    res.json(limit > 0 && !paginate ? filtered.slice(0, limit) : filtered);
   } catch (err) {
-    const timedOut = err?.parent?.code === '57014' || /statement timeout/i.test(String(err?.message || ''));
+    const timedOut =
+      err?.parent?.code === '57014'
+      || err?.parent?.code === '55P03'
+      || /statement timeout/i.test(String(err?.message || ''))
+      || /lock timeout/i.test(String(err?.message || ''));
     const status = err.status || (timedOut ? 504 : 500);
     res.status(status).json({ message: err.message || 'Failed to list events' });
   }
@@ -287,7 +406,11 @@ const listAll = async (req, res) => {
   try {
     const Client = require('../models/Client');
     const u = req.dbUser;
-    const clientIdFilter = req.query?.clientId ? String(req.query.clientId).trim() : null;
+    const isPlatformAdmin = u && (u.role === 'admin' || u.role === 'super_admin');
+    let clientIdFilter = req.query?.clientId ? String(req.query.clientId).trim() : null;
+    if (isPlatformAdmin) {
+      clientIdFilter = null;
+    }
     const organizationId = req.query?.organizationId
       ? String(req.query.organizationId).trim()
       : null;
@@ -296,36 +419,114 @@ const listAll = async (req, res) => {
       : null;
     const summary = req.query?.summary !== '0' && req.query?.summary !== 'false';
     const journalQuery = parseJournalListQuery(req.query, req.dbUser);
-    const limit = parsePositiveInt(req.query?.limit, 20, 2000);
+    const paginate = req.query?.paginate === '1' || req.query?.paginate === 'true';
+    const limit = parsePositiveInt(
+      req.query?.limit,
+      paginate ? 10 : 20,
+      paginate ? 100 : 2000,
+    );
+    const offset = parseNonNegativeInt(req.query?.offset, 0, 50000);
+    const needsDeepFilters = journalListNeedsFullEventsHistory(journalQuery);
+    const useSliceLoad =
+      journalQuery.journalFilter
+      || summary
+      || paginate
+      || req.query?.limit != null;
+    const eventsElementCap = useSliceLoad
+      ? clientService.resolveJournalListEventsCap(
+          limit,
+          true,
+          needsDeepFilters,
+          paginate ? offset : 0,
+        )
+      : 0;
+    const activeOnly =
+      journalQuery.journalFilter
+      && journalQuery.activeStates.size === 1
+      && journalQuery.activeStates.has('פעיל');
 
     const where = {};
     if (clientIdFilter) {
       where.id = clientIdFilter;
-    } else if (u && u.role !== 'admin' && u.role !== 'super_admin') {
-      if (!u.clientId) return res.json([]);
+    } else if (!isPlatformAdmin) {
+      if (!u?.clientId) {
+        return res.json(paginate ? { items: [], offset: 0, limit, hasMore: false, returned: 0 } : []);
+      }
       where.id = u.clientId;
     }
 
-    const clients = await Client.findAll({
-      where,
-      attributes: ['id', 'name', 'displayName', 'events'],
-      order: [['name', 'ASC']],
-    });
+    let clients;
+    if (isPlatformAdmin && !clientIdFilter) {
+      const idsWithEvents = await clientService.listClientIdsWithJournalEvents();
+      if (!idsWithEvents.length) {
+        clients = [];
+      } else {
+        clients = await Client.findAll({
+          where: { id: idsWithEvents },
+          attributes: ['id', 'name', 'displayName'],
+        });
+        const orderIndex = new Map(idsWithEvents.map((id, i) => [id, i]));
+        clients.sort(
+          (a, b) =>
+            (orderIndex.get(String(a.id)) ?? 999) - (orderIndex.get(String(b.id)) ?? 999),
+        );
+      }
+    } else {
+      clients = await Client.findAll({
+        where,
+        attributes: ['id', 'name', 'displayName'],
+        order: [['name', 'ASC']],
+      });
+    }
 
-    const perClientCap = Math.max(80, Math.ceil(limit / Math.max(clients.length, 1)) + 20);
+    const clientCount = Math.max(clients.length, 1);
+    const perClientCap =
+      eventsElementCap > 0
+        ? (isPlatformAdmin && !clientIdFilter
+          ? eventsElementCap
+          : clients.length === 1
+            ? eventsElementCap
+            : Math.min(
+              eventsElementCap,
+              Math.max(80, Math.ceil((eventsElementCap / clientCount) * 2)),
+            ))
+        : Math.max(80, Math.ceil(limit / clientCount) + 20);
 
     const out = [];
     for (const c of clients) {
       const plain = c.toJSON ? c.toJSON() : c;
       const clientId = String(plain.id);
       const clientName = String(plain.displayName || plain.name || '').trim() || 'לקוח';
-      let rows = Array.isArray(plain.events) ? plain.events : [];
+      let rows;
+      if (useSliceLoad && eventsElementCap > 0) {
+        const loaded = await clientService.getByIdForJournal(clientId, {
+          eventsElementCap: perClientCap,
+          organizationId: organizationId || undefined,
+          organizationTmpId: organizationTmpId || undefined,
+          journalLoadHint: {
+            q: journalQuery.q,
+            activeOnly,
+            preferRecentCache: journalPrefersRecentCache(journalQuery),
+          },
+        });
+        rows = Array.isArray(loaded.events) ? loaded.events : [];
+      } else {
+        const loaded = await clientService.getByIdForJournal(clientId);
+        rows = Array.isArray(loaded.events) ? loaded.events : [];
+      }
+      if (
+        journalQuery.journalFilter
+        && journalQuery.activeStates.size === 1
+        && journalQuery.activeStates.has('פעיל')
+      ) {
+        rows = rows.filter((e) => e && e.isActive !== false);
+      }
       rows = await filterEventsByOrganizationScope(rows, {
         organizationId,
         organizationTmpId,
         clientId,
       });
-      if (rows.length > perClientCap) {
+      if (!useSliceLoad && rows.length > perClientCap) {
         rows = [...rows]
           .sort((a, b) => new Date(b?.date || 0).getTime() - new Date(a?.date || 0).getTime())
           .slice(0, perClientCap);
@@ -336,20 +537,53 @@ const listAll = async (req, res) => {
       }
     }
 
-    try {
-      await attachMissingCandidateEmployers(out);
-    } catch (attachErr) {
-      console.warn(
-        '[clientEventController] candidate employer attach failed',
-        String(attachErr && attachErr.message ? attachErr.message : attachErr).slice(0, 160),
-      );
+    const filtered = sortJournalMappedRowsByDueDate(
+      filterJournalMappedRows(out, journalQuery),
+      journalQuery.sortDir,
+    );
+    const sliceStart = paginate ? offset : 0;
+    const page = limit > 0 ? filtered.slice(sliceStart, sliceStart + limit) : filtered.slice(sliceStart);
+    if (!paginate && !summary && !useSliceLoad) {
+      try {
+        await attachMissingCandidateEmployers(page);
+      } catch (attachErr) {
+        console.warn(
+          '[clientEventController] candidate employer attach failed',
+          String(attachErr && attachErr.message ? attachErr.message : attachErr).slice(0, 160),
+        );
+      }
     }
-
-    const filtered = filterJournalMappedRows(out, journalQuery);
-    filtered.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
-    return res.json(filtered.slice(0, limit));
+    if (paginate) {
+      const sqlSliceFull =
+        useSliceLoad
+        && eventsElementCap > 0
+        && out.length >= perClientCap * Math.max(clients.length, 1);
+      const hasMore =
+        filtered.length > sliceStart + page.length
+        || (page.length >= limit && sqlSliceFull);
+      let emptyReason;
+      if (page.length === 0) {
+        if (out.length === 0) emptyReason = 'no_events_on_client';
+        else if (filtered.length === 0) emptyReason = 'no_events_match_filters';
+      }
+      return res.json({
+        items: page,
+        offset: sliceStart,
+        limit,
+        hasMore,
+        returned: page.length,
+        ...(emptyReason ? { emptyReason } : {}),
+      });
+    }
+    return res.json(limit > 0 && !paginate ? filtered.slice(0, limit) : filtered);
   } catch (err) {
-    return res.status(500).json({ message: err.message || 'Failed to list events' });
+    const timedOut =
+      err?.parent?.code === '57014'
+      || err?.parent?.code === '55P03'
+      || /statement timeout/i.test(String(err?.message || ''))
+      || /lock timeout/i.test(String(err?.message || ''));
+    const status = err.status || (timedOut ? 504 : 500);
+    return res.status(status).json({ message: err.message || 'Failed to list events' });
   }
 };
 
@@ -436,72 +670,102 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const client = await clientService.getByIdForJournal(req.params.id);
-    const prev = Array.isArray(client.events) ? client.events : [];
     const eventId = String(req.params.eventId);
     const payload = req.body || {};
-    const prevEvent = prev.find((e) => String(e.id) === eventId);
-    if (!prevEvent) return res.status(404).json({ message: 'Event not found' });
+    const payloadKeys = Object.keys(payload);
+    const shallowJournalPatch =
+      payloadKeys.length > 0
+      && payloadKeys.every((k) => k === 'updates' || k === 'history')
+      && !Object.prototype.hasOwnProperty.call(payload, 'isActive');
 
-    const merged = { ...payload };
-    if (Object.prototype.hasOwnProperty.call(payload, 'type')) {
-      merged.type = normalizeTypes(payload.type);
-    }
-
-    if (Object.prototype.hasOwnProperty.call(payload, 'isActive')) {
-      const wasActive = prevEvent.isActive !== false;
-      const willActive = payload.isActive !== false;
-      if (wasActive !== willActive) {
-        const actor =
-          (payload.creator != null && String(payload.creator).trim()) ||
-          (payload.coordinator != null && String(payload.coordinator).trim()) ||
-          displayNameFromUser(req.dbUser);
-        const summary = willActive ? EVENT_REOPENED_SUMMARY : EVENT_CLOSED_SUMMARY;
-        const clientSentUpdates = Object.prototype.hasOwnProperty.call(payload, 'updates');
-        const alreadyLogged =
-          clientSentUpdates &&
-          (Array.isArray(payload.updates) ? payload.updates : []).some(
-            (u) =>
-              u &&
-              (u.title === summary ||
-                u.title === EVENT_REOPENED_SUMMARY ||
-                u.title === EVENT_CLOSED_SUMMARY ||
-                u.title === 'הופעל מחדש'),
-          );
-        if (!alreadyLogged) {
-          const baseForHistory = { ...prevEvent, ...merged };
-          if (clientSentUpdates) {
-            baseForHistory.updates = Array.isArray(payload.updates) ? payload.updates : prevEvent.updates;
-          }
-          if (Object.prototype.hasOwnProperty.call(payload, 'history')) {
-            baseForHistory.history = Array.isArray(payload.history)
-              ? payload.history
-              : prevEvent.history;
-          }
-          const withActivity = appendClientEventActivity(baseForHistory, { summary, actor });
-          merged.updates = withActivity.updates;
-          merged.history = withActivity.history;
-        }
+    if (shallowJournalPatch) {
+      let patch = {};
+      if (Object.prototype.hasOwnProperty.call(payload, 'updates')) {
+        patch.updates = payload.updates;
       }
+      if (Object.prototype.hasOwnProperty.call(payload, 'history')) {
+        patch.history = payload.history;
+      }
+      const stored = await clientService.getClientEventFromDb(req.params.id, eventId);
+      if (stored) patch = applyCompletedEventLock(stored, patch);
+      const updatedEvent = await clientService.patchClientEventShallowForApi(
+        req.params.id,
+        eventId,
+        patch,
+      );
+      return res.json(normalizeEventRow(updatedEvent));
     }
 
-    const next = prev.map((e) =>
-      String(e.id) === eventId ? { ...e, ...merged, id: e.id } : e,
+    const updatedEvent = await clientService.patchClientEventForApi(
+      req.params.id,
+      eventId,
+      (prevEvent) => {
+        const merged = { ...payload };
+        if (Object.prototype.hasOwnProperty.call(payload, 'type')) {
+          merged.type = normalizeTypes(payload.type);
+        }
+
+        if (Object.prototype.hasOwnProperty.call(payload, 'isActive')) {
+          const wasActive = prevEvent.isActive !== false;
+          const willActive = payload.isActive !== false;
+          if (wasActive !== willActive) {
+            const actor =
+              (payload.creator != null && String(payload.creator).trim()) ||
+              (payload.coordinator != null && String(payload.coordinator).trim()) ||
+              displayNameFromUser(req.dbUser);
+            const summary = willActive ? EVENT_REOPENED_SUMMARY : EVENT_CLOSED_SUMMARY;
+            const clientSentUpdates = Object.prototype.hasOwnProperty.call(payload, 'updates');
+            const alreadyLogged =
+              clientSentUpdates &&
+              (Array.isArray(payload.updates) ? payload.updates : []).some(
+                (u) =>
+                  u &&
+                  (u.title === summary ||
+                    u.title === EVENT_REOPENED_SUMMARY ||
+                    u.title === EVENT_CLOSED_SUMMARY ||
+                    u.title === 'הופעל מחדש'),
+              );
+            if (!alreadyLogged) {
+              const baseForHistory = { ...prevEvent, ...merged };
+              if (clientSentUpdates) {
+                baseForHistory.updates = Array.isArray(payload.updates)
+                  ? payload.updates
+                  : prevEvent.updates;
+              }
+              if (Object.prototype.hasOwnProperty.call(payload, 'history')) {
+                baseForHistory.history = Array.isArray(payload.history)
+                  ? payload.history
+                  : prevEvent.history;
+              }
+              const withActivity = appendClientEventActivity(baseForHistory, { summary, actor });
+              merged.updates = withActivity.updates;
+              merged.history = withActivity.history;
+            }
+          }
+        }
+
+        return { ...prevEvent, ...applyCompletedEventLock(prevEvent, merged), id: eventId };
+      },
     );
-    await clientService.update(req.params.id, { events: next });
-    const updatedEvent = next.find((e) => String(e.id) === eventId);
-    if (!updatedEvent) return res.status(404).json({ message: 'Event not found' });
     res.json(normalizeEventRow(updatedEvent));
   } catch (err) {
-    res.status(err.status || 400).json({ message: err.message || 'Update failed' });
+    const timedOut =
+      err?.parent?.code === '57014'
+      || err?.parent?.code === '55P03'
+      || /statement timeout/i.test(String(err?.message || ''))
+      || /lock timeout/i.test(String(err?.message || ''));
+    const status = err.status || (timedOut ? 504 : 400);
+    res.status(status).json({ message: err.message || 'Update failed' });
   }
 };
 
 const remove = async (req, res) => {
   try {
+    const eventId = String(req.params.eventId);
+    const stored = await clientService.getClientEventFromDb(req.params.id, eventId);
+    if (isCompletedEvent(stored)) throw completedEventLockedError();
     const client = await clientService.getByIdForJournal(req.params.id);
     const prev = Array.isArray(client.events) ? client.events : [];
-    const eventId = String(req.params.eventId);
     const next = prev.filter((e) => String(e.id) !== eventId);
     await clientService.update(req.params.id, { events: next });
     res.status(204).end();

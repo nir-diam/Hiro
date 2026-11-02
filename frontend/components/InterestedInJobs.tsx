@@ -4,6 +4,7 @@ import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, Informat
 import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDismiss } from './MatchScorePopup';
 import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
 import { fetchCandidate } from '../utils/candidateJobMatchingApi';
+import { fetchJobById } from '../services/jobsApi';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import FieldInterestJobPickerModal, { type FieldInterestPreviewJob } from './FieldInterestJobPickerModal';
 import UpdateStatusModal from './UpdateStatusModal';
@@ -79,9 +80,6 @@ function matchSummaryFromEngine(descPlain: string, bd: Record<string, unknown> |
   }
   if (typeof bd.tags === 'number' && Number.isFinite(bd.tags)) {
     bits.push(`תגיות ${Math.round(bd.tags)}%`);
-  }
-  if (typeof bd.geo === 'number' && Number.isFinite(bd.geo)) {
-    bits.push(`מיקום ${Math.round(bd.geo)}%`);
   }
   const dist = bd.geoDistance;
   if (typeof dist === 'number' && Number.isFinite(dist)) {
@@ -417,35 +415,6 @@ const InterestedInJobs: React.FC<{
     const [searchQuery, setSearchQuery] = useState('');
     const [manageJob, setManageJob] = useState<JobInterest | null>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [jobCatalog, setJobCatalog] = useState<Job[]>([]);
-    const [jobCatalogLoading, setJobCatalogLoading] = useState(false);
-    useEffect(() => {
-        if (!apiBase) {
-            return;
-        }
-        let isActive = true;
-        setJobCatalogLoading(true);
-        (async () => {
-            try {
-                const res = await fetch(`${apiBase}/api/jobs`);
-                if (!res.ok) throw new Error('Failed to load jobs');
-                const data = await res.json();
-                if (isActive) {
-                    setJobCatalog(Array.isArray(data) ? data : []);
-                }
-            } catch (err) {
-                console.error('[InterestedInJobs] failed to fetch jobs', err);
-            } finally {
-                if (isActive) {
-                    setJobCatalogLoading(false);
-                }
-            }
-        })();
-        return () => {
-            isActive = false;
-        };
-    }, [apiBase]);
-
     const fetchLinkedJobsForCandidate = useCallback(
         async (targetId: string, meta?: { candidateId?: string; candidateLabel?: string }) => {
             const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
@@ -934,23 +903,16 @@ const InterestedInJobs: React.FC<{
 
     const handleOpenJobDrawer = (jobId: string) => {
         if (!jobId) return;
-        const jobFromCatalog = jobCatalog.find((j) => String(j.id) === String(jobId));
-        if (jobFromCatalog) {
-            setSelectedJob(jobFromCatalog);
-            setIsDrawerOpen(true);
-            return;
-        }
         const interest = jobs.find((i) => i.jobId === jobId);
         if (interest) {
-            const jobByTitle = jobCatalog.find((j) => j.title === interest.jobTitle);
-            if (jobByTitle) {
-                setSelectedJob(jobByTitle);
-                setIsDrawerOpen(true);
-                return;
-            }
             setSelectedJob(buildFallbackJob(interest));
             setIsDrawerOpen(true);
         }
+        void fetchJobById(String(jobId)).then((full) => {
+            if (!full) return;
+            setSelectedJob(full as unknown as Job);
+            setIsDrawerOpen(true);
+        });
     };
 
     const renderCell = (job: JobInterest, columnId: string) => {

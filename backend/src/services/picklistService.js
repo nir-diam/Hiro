@@ -1,6 +1,7 @@
 const { Op } = require('sequelize');
 const PicklistCategory = require('../models/PicklistCategory');
 const PicklistCategoryValue = require('../models/PicklistCategoryValue');
+const { getCached, bumpPicklistCacheVersion } = require('./picklistCacheService');
 
 /**
  * Sort by numeric `order`, then natural alphanumeric on `label` (1,2,3…10… a,b,c).
@@ -19,51 +20,69 @@ const sortPicklistValues = (rows) => {
   });
 };
 
-const listCategories = async () => {
-  return PicklistCategory.findAll({
+const listCategoriesFromDb = async () =>
+  PicklistCategory.findAll({
     order: [
       ['order', 'ASC'],
       ['name', 'ASC'],
     ],
   });
-};
+
+const listCategories = async () =>
+  getCached({ kind: 'categories' }, listCategoriesFromDb, 'picklists:categories');
 
 const createCategory = async (payload) => {
-  return PicklistCategory.create(payload);
+  const row = await PicklistCategory.create(payload);
+  await bumpPicklistCacheVersion();
+  return row;
 };
 
 const updateCategory = async (id, updates) => {
   const category = await PicklistCategory.findByPk(id);
   if (!category) return null;
-  return category.update(updates);
+  const row = await category.update(updates);
+  await bumpPicklistCacheVersion();
+  return row;
 };
 
 const deleteCategory = async (id) => {
   const category = await PicklistCategory.findByPk(id);
   if (!category) return null;
   await category.destroy();
+  await bumpPicklistCacheVersion();
   return true;
 };
 
-const listSubcategories = async (categoryId) => {
-  return PicklistCategory.findAll({
+const listSubcategoriesFromDb = async (categoryId) =>
+  PicklistCategory.findAll({
     where: { parentId: categoryId },
     order: [
       ['order', 'ASC'],
       ['name', 'ASC'],
     ],
   });
-};
 
-const listCategoryValues = async (categoryId, parentValueId = null) => {
+const listSubcategories = async (categoryId) =>
+  getCached({ kind: 'subcategories', categoryId: String(categoryId) }, () =>
+    listSubcategoriesFromDb(categoryId),
+  'picklists:subcategories');
+
+const listCategoryValuesFromDb = async (categoryId, parentValueId = null) => {
   const where = { categoryId };
   if (parentValueId && parentValueId !== 'all') where.parentValueId = parentValueId;
   const rows = await PicklistCategoryValue.findAll({ where });
   return sortPicklistValues(rows);
 };
 
+const listCategoryValues = async (categoryId, parentValueId = null) =>
+  getCached(
+    { kind: 'values', categoryId: String(categoryId), parentValueId: parentValueId || '' },
+    () => listCategoryValuesFromDb(categoryId, parentValueId),
+    'picklists:values',
+  );
+
 /** Active values for a category identified by `PicklistCategory.key` (e.g. `driving_license`). */
-const listCategoryValuesByKey = async (key) => {
+const listCategoryValuesByKeyFromDb = async (key) => {
   const k = String(key || '').trim();
   if (!k) return [];
   const category = await PicklistCategory.findOne({ where: { key: k } });
@@ -73,6 +92,11 @@ const listCategoryValuesByKey = async (key) => {
   });
   return sortPicklistValues(rows);
 };
+
+const listCategoryValuesByKey = async (key) =>
+  getCached({ kind: 'valuesByKey', key: String(key || '').trim() }, () =>
+    listCategoryValuesByKeyFromDb(key),
+  'picklists:values-by-key');
 
 const formatPicklistRowsForLlmPrompt = (rows, notFoundMessage) => {
   if (!rows.length) return notFoundMessage;
@@ -115,7 +139,9 @@ const formatCategoryValuesForLlmPromptByCategoryId = async (categoryId) => {
 };
 
 const createCategoryValue = async (categoryId, payload) => {
-  return PicklistCategoryValue.create({ categoryId, ...payload });
+  const row = await PicklistCategoryValue.create({ categoryId, ...payload });
+  await bumpPicklistCacheVersion();
+  return row;
 };
 
 const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
@@ -130,58 +156,34 @@ const getMainFieldOptionNames = async () => {
   return (subcategories || []).map((c) => (c.name || '').trim()).filter(Boolean);
 };
 
-const ensureMainFieldCategory = async (label) => {
-  if (!label || !label.trim()) return null;
-  const normalized = label.trim().toLowerCase();
-  const existing = await PicklistCategory.findOne({
-    where: {
-      parentId: BUSINESS_FIELD_CATEGORY_ID,
-      [Op.or]: [
-        { name: { [Op.iLike]: label.trim() } },
-        { key: { [Op.iLike]: normalized } },
-      ],
-    },
-  });
-  if (existing) return existing;
-  const keyBase = normalized.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || `field_${Date.now()}`;
-  return PicklistCategory.create({
-    name: label.trim(),
-    key: `${keyBase}-${Date.now()}`,
-    description: 'Auto-created business field',
-    module: 'general',
-    parentId: BUSINESS_FIELD_CATEGORY_ID,
-    order: 0,
-    isSystem: false,
-  });
-};
-
-const ensureCategoryValueByLabel = async (categoryId, label) => {
-  if (!categoryId || !label || !label.trim()) return null;
-  const normalized = label.trim();
-  const existing = await PicklistCategoryValue.findOne({
-    where: {
-      categoryId,
-      [Op.or]: [
-        { label: { [Op.iLike]: normalized } },
-        { value: { [Op.iLike]: normalized } },
-      ],
-    },
-  });
-  if (existing) return existing;
-  return PicklistCategoryValue.create({
-    categoryId,
-    label: normalized,
-    value: normalized,
-    order: 0,
-    isActive: true,
-    isSystem: false,
-  });
+/**
+ * Business-field taxonomy from the picklist: every mainField with its active subField labels.
+ * @returns {Promise<Array<{ mainField: string, subFields: string[] }>>}
+ */
+const getIndustryTaxonomy = async () => {
+  const subcategories = await listSubcategories(BUSINESS_FIELD_CATEGORY_ID);
+  const out = [];
+  for (const cat of subcategories || []) {
+    const mainField = (cat.name || '').trim();
+    if (!mainField) continue;
+    const values = await listCategoryValues(cat.id);
+    const subFields = [];
+    for (const v of values || []) {
+      if (v.isActive === false) continue;
+      const label = (v.label || v.value || '').trim();
+      if (label && !subFields.includes(label)) subFields.push(label);
+    }
+    out.push({ mainField, subFields });
+  }
+  return out;
 };
 
 const updateCategoryValue = async (valueId, updates) => {
   const value = await PicklistCategoryValue.findByPk(valueId);
   if (!value) return null;
-  return value.update(updates);
+  const row = await value.update(updates);
+  await bumpPicklistCacheVersion();
+  return row;
 };
 
 const deleteCategoryValue = async (valueId, categoryId = null) => {
@@ -190,10 +192,11 @@ const deleteCategoryValue = async (valueId, categoryId = null) => {
   const value = await PicklistCategoryValue.findOne({ where });
   if (!value) return null;
   await value.destroy();
+  await bumpPicklistCacheVersion();
   return true;
 };
 
-const listDomains = async ({ categoryId, subcategoryId, parentValueId }) => {
+const listDomainsFromDb = async ({ categoryId, subcategoryId, parentValueId }) => {
   const where = {
     categoryId: subcategoryId,
     [Op.or]: [
@@ -208,21 +211,22 @@ const listDomains = async ({ categoryId, subcategoryId, parentValueId }) => {
   return sortPicklistValues(rows);
 };
 
+const listDomains = async (params) =>
+  getCached({ kind: 'domains', ...params }, () => listDomainsFromDb(params), 'picklists:domains');
+
 const createDomainValue = async ({ categoryId, subcategoryId, payload }) => {
-  return PicklistCategoryValue.create({
+  const row = await PicklistCategoryValue.create({
     categoryId: subcategoryId,
     parentCategoryId: categoryId,
     ...payload,
   });
+  await bumpPicklistCacheVersion();
+  return row;
 };
 
-const updateDomainValue = async (valueId, updates) => {
-  return updateCategoryValue(valueId, updates);
-};
+const updateDomainValue = async (valueId, updates) => updateCategoryValue(valueId, updates);
 
-const deleteDomainValue = async (valueId) => {
-  return deleteCategoryValue(valueId);
-};
+const deleteDomainValue = async (valueId) => deleteCategoryValue(valueId);
 
 module.exports = {
   listCategories,
@@ -241,9 +245,8 @@ module.exports = {
   createDomainValue,
   updateDomainValue,
   deleteDomainValue,
-  ensureMainFieldCategory,
-  ensureCategoryValueByLabel,
   getMainFieldOptionNames,
+  getIndustryTaxonomy,
   BUSINESS_FIELD_CATEGORY_ID,
   AUTHORIZED_MARKET_DOMAINS_CATEGORY_ID,
 };

@@ -136,8 +136,36 @@ async function stampSavedCandidateQuality(candidateId, meta = {}) {
   });
 }
 
+/**
+ * Log when a CV ingest is merged onto an existing candidate (hash / identity / CV-email).
+ * Does not reassess parse quality — writes stage:merged with candidateId + email S3 key.
+ */
+function stampCvMergedQuality(candidateId, meta = {}) {
+  if (!candidateId) return null;
+  const context = {
+    candidateId: String(candidateId),
+    partial: false,
+    reasons: [],
+    stage: 'merged',
+    sourceName: meta.source || null,
+    emailFileKey: meta.emailFileKey || meta.fileKey || null,
+    mergeReason: meta.mergeReason || null,
+    duplicateCandidateId: meta.duplicateCandidateId
+      ? String(meta.duplicateCandidateId)
+      : null,
+  };
+  console.log('[cv-parse] merged', context);
+  return appLogger.log({
+    level: 'info',
+    source: 'cv_parse_quality',
+    message: 'cv merged to existing candidate',
+    context,
+  });
+}
+
 module.exports = {
   syncTagsWithRetry,
   stampCvParseQuality,
   stampSavedCandidateQuality,
+  stampCvMergedQuality,
 };

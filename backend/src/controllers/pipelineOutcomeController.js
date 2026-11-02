@@ -1,4 +1,5 @@
 const pipelineOutcomeService = require('../services/pipelineOutcomeService');
+const { httpStatusForDbError } = require('../utils/dbHttpError');
 
 const execute = async (req, res) => {
   try {
@@ -18,7 +19,7 @@ const execute = async (req, res) => {
     return res.json(result);
   } catch (err) {
     console.error('[pipelineOutcomeController.execute]', err.message || err);
-    return res.status(err.status || 500).json({ message: err.message || 'Failed to execute outcome' });
+    return res.status(httpStatusForDbError(err)).json({ message: err.message || 'Failed to execute outcome' });
   }
 };
 
@@ -38,7 +39,7 @@ const approveAutomations = async (req, res) => {
     return res.json(result);
   } catch (err) {
     console.error('[pipelineOutcomeController.approveAutomations]', err.message || err);
-    return res.status(err.status || 500).json({ message: err.message || 'Failed to approve automations' });
+    return res.status(httpStatusForDbError(err)).json({ message: err.message || 'Failed to approve automations' });
   }
 };
 

@@ -79,7 +79,11 @@ export type SonarScoreBreakdown = {
     weightedContributions?: Record<string, { score: number; weight: number; points: number }>;
     salaryPenalty?: number;
     ageGapPenalty?: number;
+    roleExperiencePenalty?: number;
+    roleLookbackPenalty?: number;
     generalPenalties?: number;
+    /** Distance points off the final score (region grace / penalty per km, or missing address). */
+    geoPenalty?: number;
     penaltyReasons?: Array<{ label: string; amount: number; key?: string; type?: string }>;
 };
 
@@ -163,13 +167,14 @@ export function pickBreakdownScore(...vals: (number | undefined)[]): number | nu
 }
 
 /**
- * Final-score points lost to distance.
- * The geo layer is already scored with the client's matching template:
- * full score until that region's grace km, then penaltyPerKm off the layer.
- * This converts that layer drop into the same point scale as age and salary penalties,
- * using the template's geo weight. A template with geo weight 0 contributes nothing.
+ * Final-score points lost to distance: full score until the region's grace km,
+ * then penaltyPerKm points per km. Breakdowns cached before `geoPenalty` existed
+ * still carry geo as a weighted layer, so fall back to that layer's lost points.
  */
 export function geoPenaltyPoints(bd: SonarScoreBreakdown | null | undefined): number {
+    if (typeof bd?.geoPenalty === 'number' && Number.isFinite(bd.geoPenalty)) {
+        return Math.max(0, Math.round(bd.geoPenalty));
+    }
     const score = pickBreakdownScore(bd?.geoScore, bd?.geo);
     const geo = bd?.weightedContributions?.geo;
     if (score == null || !geo || !(geo.weight > 0) || score >= 100) return 0;
@@ -219,6 +224,10 @@ export function buildSonarFormulaMetrics(
     }
 
     const wc = bd?.weightedContributions;
+    const totalW = Object.entries(wc || {}).reduce(
+        (sum, [key, part]) => (key === 'geo' ? sum : sum + (Number(part?.weight) || 0)),
+        0,
+    );
     const layerRow = (key: string, labelKey: string, scoreVals: (number | undefined)[]) => {
         const score = pickBreakdownScore(...scoreVals);
         if (score == null) return;
@@ -226,10 +235,9 @@ export function buildSonarFormulaMetrics(
         const w = contrib?.weight;
         // Weight 0 means the template excludes this layer from the final score.
         if (typeof w === 'number' && w <= 0) return;
-        const pts = contrib?.points;
         const value =
-            typeof w === 'number' && typeof pts === 'number'
-                ? `${score}% · ${Math.round(pts)} נק' (משקל ${w}%)`
+            typeof w === 'number' && totalW > 0
+                ? `${score}% · ${Math.round((score * w) / totalW)} נק' (משקל ${Math.round((w * 100) / totalW)}%)`
                 : `${score}%`;
         cells.push({
             label: t(labelKey),
@@ -240,7 +248,6 @@ export function buildSonarFormulaMetrics(
 
     layerRow('vector', 'job.sonar.layer_semantic', [bd?.semanticScore, bd?.vector]);
     layerRow('tags', 'job.sonar.layer_tags', [bd?.tagsScore, bd?.tags]);
-    layerRow('geo', 'job.sonar.layer_geo', [bd?.geoScore, bd?.geo]);
     layerRow('intent', 'job.sonar.layer_intent', [bd?.intentScore, bd?.intent]);
     if (isExperienceLayerActive(bd)) {
         layerRow('experience', 'job.sonar.layer_experience', [bd?.experienceScore, bd?.experience]);
@@ -256,7 +263,12 @@ export function buildSonarFormulaMetrics(
     }
 
     const penaltyTotal =
-        (bd?.generalPenalties ?? 0) + (bd?.salaryPenalty ?? 0) + (bd?.ageGapPenalty ?? 0);
+        (bd?.generalPenalties ?? 0)
+        + (bd?.salaryPenalty ?? 0)
+        + (bd?.ageGapPenalty ?? 0)
+        + (bd?.roleExperiencePenalty ?? 0)
+        + (bd?.roleLookbackPenalty ?? 0)
+        + geoPenaltyPoints(bd);
     const reasons = Array.isArray(bd?.penaltyReasons) ? bd.penaltyReasons : [];
     const listed = reasons.filter((pr) => pr && typeof pr.amount === 'number' && pr.amount > 0).slice(0, 3);
     if (listed.length) {

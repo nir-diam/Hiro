@@ -5,7 +5,14 @@ import { authHeaders } from '../utils/authHeaders';
 import type { MessageModalConfig } from '../hooks/useUIState';
 import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
 
-type ClientOption = { id: string; name: string; organizationId?: string | null };
+type ClientOption = {
+  id: string;
+  name: string;
+  organizationId?: string | null;
+  journalEventCount?: number;
+};
+
+const ADMIN_EVENTS_CLIENT_STORAGE_KEY = 'hiro.eventsManagement.selectedClientId';
 
 type LinkedOrganizationRow = {
   organizationId?: string | null;
@@ -36,7 +43,7 @@ const ClientEventsManagementView: React.FC<Props> = ({ openMessageModal }) => {
     let active = true;
     setLoading(true);
     setError(null);
-    fetch(`${apiBase}/api/clients`, {
+    fetch(`${apiBase}/api/clients?journalCounts=1`, {
       credentials: 'include',
       headers: authHeaders(),
       cache: 'no-store',
@@ -50,9 +57,10 @@ const ClientEventsManagementView: React.FC<Props> = ({ openMessageModal }) => {
         const list = Array.isArray(data) ? data : data?.data ?? [];
         setClients(
           list
-            .map((c: { id?: string; name?: string; displayName?: string }) => ({
+            .map((c: { id?: string; name?: string; displayName?: string; journalEventCount?: number }) => ({
               id: String(c.id || ''),
               name: String(c.displayName || c.name || '').trim() || 'לקוח',
+              journalEventCount: Math.max(0, Number(c.journalEventCount) || 0),
             }))
             .filter((c: ClientOption) => c.id),
         );
@@ -129,7 +137,25 @@ const ClientEventsManagementView: React.FC<Props> = ({ openMessageModal }) => {
     return [];
   }, [isPlatformAdmin, clients, tenantClientId, linkedOrganizations]);
 
-  const defaultClientId = isPlatformAdmin ? clients[0]?.id || null : tenantClientId;
+  const defaultClientId = useMemo(() => {
+    if (!isPlatformAdmin) return tenantClientId;
+    if (typeof sessionStorage !== 'undefined') {
+      try {
+        const saved = String(sessionStorage.getItem(ADMIN_EVENTS_CLIENT_STORAGE_KEY) || '').trim();
+        const savedClient = clients.find((c) => c.id === saved);
+        if (savedClient && (savedClient.journalEventCount ?? 0) > 0) return saved;
+      } catch {
+        // ignore
+      }
+    }
+    const withEvents = clients.filter((c) => (c.journalEventCount ?? 0) > 0);
+    if (withEvents.length) {
+      return withEvents.reduce((best, c) =>
+        (c.journalEventCount ?? 0) > (best.journalEventCount ?? 0) ? c : best,
+      ).id;
+    }
+    return clients[0]?.id || null;
+  }, [isPlatformAdmin, tenantClientId, clients]);
 
   if (!authReady) {
     return <div className="text-center py-16 text-text-muted">טוען...</div>;
@@ -142,7 +168,7 @@ const ClientEventsManagementView: React.FC<Props> = ({ openMessageModal }) => {
           {error}
         </div>
       ) : null}
-      {loading ? (
+      {loading && clientOptions.length === 0 ? (
         <div className="text-center py-16 text-text-muted">טוען...</div>
       ) : (
         <ClientsEventsJournalTab

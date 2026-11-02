@@ -70,7 +70,7 @@ If you choose "merge", you MUST set "target_tag" to the exact case-sensitive str
   "reasoning": "Short concise sentence in Hebrew, max 15 words"
 }
 $prompt$,
-  'gemini-3-flash-preview',
+  'gemini-3.8-flash',
   0.1,
   '[]'::jsonb,
   'analysis',

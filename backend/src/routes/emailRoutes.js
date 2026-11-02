@@ -1,6 +1,7 @@
 const express = require('express');
 const emailController = require('../controllers/emailController');
 const authMiddleware = require('../middleware/authMiddleware');
+const emailUploadSecretMiddleware = require('../middleware/emailUploadSecretMiddleware');
 
 const REQUIRED_HANDLERS = [
   'upload',
@@ -31,7 +32,7 @@ for (const name of REQUIRED_HANDLERS) {
 
 const router = express.Router();
 
-router.post('/email-upload', emailController.upload);
+router.post('/email-upload', emailUploadSecretMiddleware, emailController.upload);
 router.get('/by-candidates', emailController.getByCandidates);
 router.get('/candidate/:candidateId', emailController.getByCandidate);
 

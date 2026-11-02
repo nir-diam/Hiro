@@ -361,7 +361,6 @@ const resetPassword = async (req, res) => {
     }
 
     const activationGuid = crypto.randomUUID();
-    const tempPassword = crypto.randomBytes(32).toString('hex');
 
     let clientName = null;
     const clientId = tenantClientIdOf(user);
@@ -370,10 +369,7 @@ const resetPassword = async (req, res) => {
       if (c) clientName = c.displayName || c.name || null;
     }
 
-    await user.update({
-      password: tempPassword,
-      activationGuid,
-    });
+    await user.update({ activationGuid });
 
     const activationUrl = `${publicAppOrigin()}/activation?guid=${activationGuid}`;
     try {

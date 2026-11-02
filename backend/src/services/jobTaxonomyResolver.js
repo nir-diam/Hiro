@@ -4,6 +4,8 @@ const JobCategory = require('../models/JobCategory');
 const JobCluster = require('../models/JobCluster');
 const JobRole = require('../models/JobRole');
 const redis = require('./redisService');
+const { isReadThroughEnabled } = require('../config/redis');
+const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
 
 const OPEN_JOB_STATUSES = ['פתוחה', 'מוקפאת'];
 const TAXONOMY_REDIS_KEY = 'taxonomy:index';
@@ -57,15 +59,21 @@ function rebuildTaxonomyIndex(plain) {
 async function loadTaxonomyIndex() {
   if (taxonomyCache) return taxonomyCache;
 
-  // Try Redis before hitting the DB
-  try {
-    const cached = await redis.get(TAXONOMY_REDIS_KEY);
-    if (cached) {
-      taxonomyCache = rebuildTaxonomyIndex(cached);
-      return taxonomyCache;
+  if (isReadThroughEnabled()) {
+    try {
+      const cached = await redis.get(TAXONOMY_REDIS_KEY);
+      if (cached) {
+        recordHit('job-taxonomy');
+        taxonomyCache = rebuildTaxonomyIndex(cached);
+        return taxonomyCache;
+      }
+      recordMiss('job-taxonomy');
+    } catch (e) {
+      console.warn('[jobTaxonomyResolver] redis get failed (non-fatal):', e.message);
+      recordMiss('job-taxonomy');
     }
-  } catch (e) {
-    console.warn('[jobTaxonomyResolver] redis get failed (non-fatal):', e.message);
+  } else {
+    recordBypass('job-taxonomy');
   }
 
   const categories = await JobCategory.findAll({

@@ -39,6 +39,7 @@ const corsMiddleware = () => {
       }
       : true,
     credentials: true,
+    exposedHeaders: ['X-App-Cache', 'X-App-Cache-Detail'],
   };
 
   return cors(options);

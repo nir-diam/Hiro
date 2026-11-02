@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { XMarkIcon, PaperAirplaneIcon, CheckCircleIcon } from './Icons';
+import { DEFAULT_CV_PROFILE_KIND, type CvProfileKind } from '../utils/cvProfileKind';
+import CvProfileKindPicker from './CvProfileKindPicker';
 
 export type ReReferContact = {
     id: string;
@@ -12,6 +14,7 @@ export type ReReferSendPayload = {
     notes: string;
     nextStatus: string;
     contacts: ReReferContact[];
+    cvProfileKind?: 'original' | 'shadow';
 };
 
 /** Context needed to load client contacts (by job) and to send screening CV. */
@@ -66,6 +69,7 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
     const [metaHint, setMetaHint] = useState<string | null>(null);
     const [sending, setSending] = useState(false);
     const [sendError, setSendError] = useState<string | null>(null);
+    const [cvProfileKind, setCvProfileKind] = useState<CvProfileKind>(DEFAULT_CV_PROFILE_KIND);
     const [importingListedNote, setImportingListedNote] = useState(false);
     const [importListedNoteError, setImportListedNoteError] = useState<string | null>(null);
     /** Last value we set from referral prop / API — fetch won’t overwrite if the user edited away from this. */
@@ -139,6 +143,7 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
         notesProgrammaticSeedRef.current = propBody;
         setNotes(propBody);
         setNextStatus('נשלחו קו"ח');
+        setCvProfileKind(DEFAULT_CV_PROFILE_KIND);
         setSendError(null);
         setImportListedNoteError(null);
         void loadContacts();
@@ -242,7 +247,7 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
         }
         setSending(true);
         try {
-            await Promise.resolve(onSend({ notes, nextStatus, contacts: selected }));
+            await Promise.resolve(onSend({ notes, nextStatus, contacts: selected, cvProfileKind }));
         } catch (e: unknown) {
             setSendError(e instanceof Error ? e.message : 'השליחה נכשלה');
         } finally {
@@ -275,6 +280,11 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
                         ) : null}
                     </p>
                     <div className="flex flex-col gap-6">
+                        <CvProfileKindPicker
+                            value={cvProfileKind}
+                            onChange={setCvProfileKind}
+                            disabled={sending}
+                        />
                         {(contactsError || metaHint || sendError) && (
                             <div className="space-y-2">
                                 {contactsError && (

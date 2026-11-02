@@ -27,6 +27,25 @@
 { "message": "Invalid or missing site key", "code": "INVALID_SITE_KEY" }
 ```
 
+כל שגיאה מכל נתיב חוזרת באותו מבנה, עם הסטטוס שהשירות קבע (ברירת מחדל 500). ולידציה של הגשה מחזירה **422** עם `code: "VALIDATION"` ושם השדה הבעייתי ב-`field`:
+
+```json
+{ "message": "…", "code": "VALIDATION", "field": "phone" }
+```
+
+| נתיב | `Cache-Control` |
+| --- | --- |
+| `GET /jobs`, `GET /jobs/:slugOrId` | `public, max-age=60` |
+| `GET /jobs/:id/similar`, `GET /companies/:slug` | `public, max-age=120` |
+| `GET /taxonomy`, `GET /sitemap/jobs` | `public, max-age=300` |
+| `GET /health`, `POST …` | ללא |
+
+`GET /health` (בלי מטמון) — שימושי לבדיקת מפתח:
+
+```json
+{ "ok": true, "site": "אתר הקריירה", "mode": "tenant", "environment": "production", "domain": "jobs.example.co.il" }
+```
+
 ---
 
 ## מיפוי שדות — מצב בפועל
@@ -35,22 +54,22 @@
 | --- | --- | --- |
 | `title` | `publicJobTitle`, ואם ריק כותרת המשרה | קיים |
 | `jobNumber` | `publicationCode`, ואם ריק `postingCode` | קיים. זה לא מספר המשרה הפנימי |
-| `slug` | `publicBoard.publicSlug`. נוצר בשמירת פרסום ראשונה מכותרת + עיר + קוד, ולא משתנה אחר כך | חדש, אוטומטי, נשמר |
-| `category` | תחום (`job.field` / `jobFields.fieldType` = `job_clusters`) | קיים. `publicSlug` נשמר וננעל. שינוי שם בעברית לא משנה אותו. `slugAliases` לאיחוד |
-| `cluster` | הקבוצה (`job_categories`, האב של התחום) | קיים, עם אותו מנגנון slug |
+| `slug` | `publicBoard.publicSlug`. נוצר בשמירת פרסום ראשונה מכותרת + עיר + קוד, ולא משתנה אחר כך. `GET /jobs/:slugOrId` מקבל את אותו slug, וגם id, `jobNumber` / `publicationCode` / `postingCode`, ו-`publicBoard.slugAliases` | חדש, אוטומטי, נשמר |
+| `category` | תחום (`job.field` / `jobFields.fieldType` = `job_clusters`) | קיים רק כשיש התאמה לקטלוג. `publicSlug` נשמר וננעל. שינוי שם בעברית לא משנה אותו. `slugAliases` לאיחוד. בלי התאמה השדה `null` — לא נוצר slug מתעתיק חופשי |
+| `cluster` | הקבוצה (`job_categories`, האב של התחום) | קיים, עם אותו מנגנון slug. תווית חופשית כמו "כללי" לא הופכת ל-slug (`klly`). אם יש בקטלוג אשכול יחיד ששמו מכיל "כללי", המשרה משויכת אליו. אחרת `null` |
 | `role` | `job.role` | קיים |
 | `industry` | `organizations.mainField` | קיים כשיש ארגון מקושר. אין קטלוג תעשיות נפרד מעבר לערך הזה |
-| `locations` | עיר המשרה + אזור. lat/lng מקטלוג הערים. רחוב רק אם `showAddress` | קיים חלקית. אין עדיין lat/lng מ"כתובת להגעה" של הלקוח |
+| `locations` | עיר המשרה + אזור. lat/lng מקטלוג הערים: הקטלוג שומר רשת ישראל החדשה (ITM, EPSG:2039, מטרים) והשרת ממיר ל-WGS84 במעלות (`publicJobGeo.js`). ערך שלא נראה כמו נקודה בישראל חוזר `null`. רחוב רק אם `showAddress` | קיים חלקית. אין עדיין lat/lng מ"כתובת להגעה" של הלקוח |
 | `employmentType` | `job.jobType`, ממופה ל-`full_time` / `part_time` / `shifts` / `temporary` / `freelance` | קיים |
-| `workModel` | `publicBoard.workModel`. ברירת מחדל `office` / מהמשרד | שדה חדש אופציונלי |
-| `startDate` | `job.availability` | קיים |
+| `workModel` | `publicBoard.workModel` כשהערך `hybrid` / `remote`. ערך ריק או `office` (ברירת המחדל בטופס) נדרס אם הכותרת, התיאור, המיקום או היקף המשרה אומרים מהבית / היברידי | שדה אופציונלי + גזירה מהטקסט |
+| `startDate` | `job.availability`, גם ברשימה וגם בעמוד | `immediate` למיידי (כולל "🟢 מיידי…"), או `YYYY-MM-DD`. טקסט חופשי אחר חוזר `null` |
 | `urgent` | עדיפות דחופה או קריטית | קיים |
 | `experienceYearsMin` / `noExperience` | `publicBoard` אם מולא, אחרת נגזר מהטקסט (`3 שנות`, `ללא ניסיון`) | נגזר, ניתן לתיקון בשמירת `publicBoard` |
 | `seniority` | נגזר משנות ניסיון + האם התפקיד ניהולי | נגזר. לא שדה הזנה |
 | `skills` | `job.skills` מסוג skill, עד 8, חובה קודם | קיים |
 | `requirements` | תגיות חובה + `job.requirements` + דרישות הפרסום | קיים |
-| `description` | תיאור הפרסום | קיים |
-| `responsibilities` / `niceToHave` / `benefits` | `publicBoard` אחרי שהרכזת שמרה ניסוח | השדות קיימים. כפתור "נסח לפרסום בעזרת AI" עדיין לא נבנה |
+| `description` | תיאור הפרסום | קיים. HTML הופך לטקסט עם ירידות שורה, וכותרות מוכרות ("עיקרי התפקיד:", "דרישות:", "יתרון:", "הטבות:") נשברות לשורה חדשה |
+| `responsibilities` / `niceToHave` / `benefits` | `publicBoard` אם נשמר, אחרת אותו פיצול כותרות מתוך התיאור. `דרישות:` נוספות גם ל-`requirements`. מוחזרים כ**מערך שורות** (`string[]`, בלי שורות ריקות), לא כמחרוזת | גזירה לפי כותרות. כפתור "נסח לפרסום בעזרת AI" עדיין לא נבנה. התיאור המלא נשאר ב-`description` |
 | `teaser` | `publicBoard.teaser` או 180 התווים הראשונים של התיאור | נגזר |
 | `salary` | `salaryMin`/`salaryMax` **רק** כש-`publicBoard.publishSalary === true`. כבוי כברירת מחדל | קיים. המפתחות הפנימיים `salaryMin`/`salaryMax` לא יוצאים החוצה |
 | `suitableFor` | `publicBoard.suitableFor` | חדש, אופציונלי |
@@ -58,11 +77,11 @@
 | רישיון, הסמכות, שפות, השכלה | דרך `requirements` / `skills` | קיים, לא שדות נפרדים |
 | `validThrough` | `openDate` + `validityDays` | קיים |
 | `imageUrl` | `heroImageUrl`. במצב חסוי עם מותג לקוח על התמונה הכתובת לא מוחזרת | קיים |
-| `recruiter` | המילה הראשונה של `job.recruiter`. אין תמונת רכזת על המשרה | חלקי: שם פרטי בלבד, `imageUrl: null` |
+| `recruiter` | המילה הראשונה של `job.recruiter`, בלי פסיק סוגר. "מערכת" / `system` / `admin` לא מוחזרים (`null`). אין תמונת רכזת על המשרה | חלקי: שם פרטי בלבד, `imageUrl: null` |
 | `apply.questions` | `screeningQuestions`. `video` מסומן `completeInPortal` ולא חוסם את הטופס | קיים |
 | `company` | ארגון המעסיק, או מעטפה חסויה. ראו למטה | קיים |
 | `status` | `open` אם הסטטוס מסומן להופיע באתר | ברירת מחדל: `פתוחה`/`פעילה` כן, השאר לא. דריסה ב-`clients.metadata.publicJobStatusVisibility` |
-| `publishedAt` | `publicBoard.publishedAt` או `openDate` | קיים. השם הישן `postedAt` לא מוחזר |
+| `publishedAt` / `updatedAt` | `job.openDate`, ואם אין — `publicBoard.publishedAt`. `updatedAt` מ-`job.updatedAt` | תמיד מחרוזת ISO 8601 או `null`. קיים. חותמת אחידה שנכתבה בטעינה הראשונה ל-`publicBoard.publishedAt` לא דורסת את תאריך הפתיחה. השם הישן `postedAt` לא מוחזר |
 
 Slug של תחום, קבוצה ועיר נוצר פעם אחת מתעתיק לטיני (`buildStableSlug`) ונשמר. שינוי השם בעברית לא משנה אותו. איחוד: לכתוב את ה-slug הישן ל-`slugAliases`. הפילטר והטקסונומיה מכבדים alias. הפניית 301 היא באתר.
 
@@ -77,7 +96,7 @@ Slug של תחום, קבוצה ועיר נוצר פעם אחת מתעתיק לט
 - `choice` — לפי `heroBrandSource` של המשרה
 - עקיפה למשרה: `publicBoard.showClientName: true`
 
-במצב חסוי אין בתשובה שם, id, לוגו או אתר של המעסיק. `googleForJobs.hiringOrganization` הוא הסוכנות המפרסמת. `GET /companies/:slug` מחזיר 404 ללקוח חסוי, וה-slug לא נגזר משמו.
+במצב חסוי אין בתשובה שם, id, לוגו או אתר של המעסיק. `googleForJobs.hiringOrganization` הוא הסוכנות המפרסמת. `GET /companies/:slug` מחזיר 404 ללקוח חסוי, וה-slug לא נגזר משמו. אחרי השמטת השם, "לחברת , העוסקת…" מנוקה ל"לחברה העוסקת…".
 
 ```json
 {
@@ -149,7 +168,8 @@ Slug של תחום, קבוצה ועיר נוצר פעם אחת מתעתיק לט
       "experienceYearsMin": 3,
       "noExperience": false,
       "seniority": { "value": "mid", "label": "בינוני" },
-      "validThrough": "2026-10-31T00:00:00.000Z"
+      "validThrough": "2026-10-31T00:00:00.000Z",
+      "startDate": "immediate"
     }
   ],
   "pagination": { "page": 1, "limit": 20, "total": 1, "totalPages": 1 },
@@ -170,11 +190,13 @@ Slug של תחום, קבוצה ועיר נוצר פעם אחת מתעתיק לט
 
 כש-`publishSalary` דלוק, `salary` הוא `{ "min": 8000, "max": 12000, "currency": "ILS", "period": "month" }`.
 
-Cache: `public, max-age=60`.
+השרת שומר את מאגר המשרות של כל אתר לדקה. שמירת פרסום מנקה את המטמון. כותרת התשובה: `Cache-Control: public, max-age=60`.
 
 ---
 
 ## `GET /jobs/:slugOrId`
+
+המזהה הוא ה-`slug` שחזר ברשימה, `id`, `jobNumber`, קוד פרסום, או alias שנשמר ב-`publicBoard.slugAliases`. אותו חיפוש משמש גם את `POST /jobs/:id/applications`, `POST /jobs/:id/view` ו-`GET /jobs/:id/similar`.
 
 כל שדות הרשימה, ובנוסף:
 
@@ -250,6 +272,8 @@ Cache: `public, max-age=60`.
 
 `count` הוא משרות פתוחות ומפורסמות **למפתח הנוכחי**. תחום עם 0 עדיין חוזר. תוויות ה-enum בעברית מגיעות מהשרת.
 
+אשכול או תחום שלא קיימים בקטלוג לא מקבלים slug מתעתיק. לכן פילטר לא מציג ערך כמו `klly` בלי תווית עברית.
+
 במודל Hiro, `job_categories` הוא ה-cluster (הקבוצה) ו-`job_clusters` הוא ה-category (התחום).
 
 ---
@@ -304,7 +328,7 @@ Cache: `public, max-age=60`.
 
 | סטטוס | קוד |
 | --- | --- |
-| 201 | `{ "applicationId": "…" }` |
+| 201 | `{ "applicationId": "…", "candidateId": "…" }` — `applicationId` הוא מזהה שורת `job_candidates` (השיוך למשרה); `candidateId` הוא מזהה המועמד. פרסור הקו"ח רץ ברקע אחרי ה-201 |
 | 404 | `NOT_FOUND` |
 | 409 | `ALREADY_APPLIED` |
 | 410 | `JOB_CLOSED` |

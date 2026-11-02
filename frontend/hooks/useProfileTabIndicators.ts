@@ -4,10 +4,6 @@ import { authHeaders } from '../utils/authHeaders';
 import { CLIENT_JOURNAL_UPDATED_EVENT } from '../utils/clientJournalEvents';
 import { fetchProposals, PROPOSALS_UPDATED_EVENT } from '../services/proposalsApi';
 import {
-    isOpenJournalEventStatus,
-    rawEventMatchesContactScope,
-} from '../utils/contactEventScope';
-import {
     countIncomingMessagesForScope,
     type InboxTaskScope,
 } from '../utils/inboxLinkedTasks';
@@ -16,6 +12,37 @@ import { fetchNotificationMessageRows } from '../services/notificationMessagesAp
 import { NOTIFICATION_MESSAGES_REFRESH_EVENT } from '../services/notificationInboxCounts';
 
 const apiBase = () => import.meta.env.VITE_API_BASE || '';
+
+const OPEN_EVENT_COUNT_TTL_MS = 60_000;
+const openEventCountCache = new Map<string, { at: number; count: number }>();
+const openEventCountInflight = new Map<string, Promise<number>>();
+
+export function invalidateOpenEventCountCache(): void {
+    openEventCountCache.clear();
+}
+
+async function fetchOpenEventCount(url: string, force = false): Promise<number> {
+    if (!force) {
+        const hit = openEventCountCache.get(url);
+        if (hit && Date.now() - hit.at < OPEN_EVENT_COUNT_TTL_MS) return hit.count;
+        const pending = openEventCountInflight.get(url);
+        if (pending) return pending;
+    }
+
+    const promise = fetchJson(url)
+        .then((body) => {
+            const raw = body && typeof body === 'object' ? (body as { openCount?: unknown }).openCount : 0;
+            const count = Number(raw);
+            const safe = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+            openEventCountCache.set(url, { at: Date.now(), count: safe });
+            return safe;
+        })
+        .finally(() => {
+            if (openEventCountInflight.get(url) === promise) openEventCountInflight.delete(url);
+        });
+    openEventCountInflight.set(url, promise);
+    return promise;
+}
 
 export type OrganizationTabIndicators = {
     tasks: number;
@@ -67,29 +94,6 @@ function orgQuery(organizationId?: string | null, organizationTmpId?: string | n
     return '';
 }
 
-function eventMatchesOrganization(
-    row: Record<string, unknown>,
-    organizationId?: string | null,
-    organizationTmpId?: string | null,
-): boolean {
-    if (organizationTmpId) {
-        const tmp =
-            String(row.organizationTmpId || '').trim()
-            || String(
-                row.metadata
-                    && typeof row.metadata === 'object'
-                    && !Array.isArray(row.metadata)
-                    ? (row.metadata as Record<string, unknown>).organizationTmpId
-                    : '',
-            ).trim();
-        return tmp === String(organizationTmpId);
-    }
-    if (organizationId) {
-        return String(row.organizationId || '').trim() === String(organizationId);
-    }
-    return true;
-}
-
 async function fetchJson(url: string): Promise<unknown> {
     const res = await fetch(url, { headers: authHeaders(true), cache: 'no-store' });
     if (!res.ok) throw new Error('fetch failed');
@@ -97,9 +101,13 @@ async function fetchJson(url: string): Promise<unknown> {
 }
 
 function asList(data: unknown): Record<string, unknown>[] {
-    const list = Array.isArray(data) ? data : (data as { data?: unknown })?.data;
+    if (Array.isArray(data)) {
+        return data.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object');
+    }
+    const row = data as { data?: unknown; items?: unknown } | null;
+    const list = row?.items ?? row?.data;
     if (!Array.isArray(list)) return [];
-    return list.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object');
+    return list.filter((r): r is Record<string, unknown> => !!r && typeof r === 'object');
 }
 
 export async function loadOrganizationTabIndicators(input: {
@@ -107,8 +115,9 @@ export async function loadOrganizationTabIndicators(input: {
     organizationId?: string | null;
     organizationTmpId?: string | null;
     viewer?: NotificationInboxViewer;
+    forceEvents?: boolean;
 }): Promise<OrganizationTabIndicators> {
-    const { clientId, organizationId, organizationTmpId, viewer } = input;
+    const { clientId, organizationId, organizationTmpId, viewer, forceEvents = false } = input;
     const base = apiBase();
     if (!base || !clientId) return emptyOrgIndicators();
 
@@ -123,15 +132,15 @@ export async function loadOrganizationTabIndicators(input: {
         : null;
 
     const eventsParams = new URLSearchParams();
-    eventsParams.set('summary', '1');
-    eventsParams.set('limit', '1200');
+    eventsParams.set('openCount', '1');
     if (organizationId) eventsParams.set('organizationId', organizationId);
     if (organizationTmpId) eventsParams.set('organizationTmpId', organizationTmpId);
 
-    const [contactsRes, eventsRes, docsRes, jobsRes, inboxRes] = await Promise.allSettled([
+    const [contactsRes, eventsCountRes, docsRes, jobsRes, inboxRes] = await Promise.allSettled([
         fetchJson(`${base}/api/clients/${encodeURIComponent(clientId)}/contacts${orgQs}`),
-        fetchJson(
+        fetchOpenEventCount(
             `${base}/api/clients/${encodeURIComponent(clientId)}/events?${eventsParams.toString()}`,
+            forceEvents,
         ),
         fetchJson(`${base}/api/clients/${encodeURIComponent(clientId)}/documents${docQs}`),
         jobsUrl ? fetchJson(jobsUrl) : Promise.resolve([]),
@@ -165,11 +174,8 @@ export async function loadOrganizationTabIndicators(input: {
     }
 
     let events = 0;
-    if (eventsRes.status === 'fulfilled') {
-        events = asList(eventsRes.value)
-            .filter((row) => eventMatchesOrganization(row, organizationId, organizationTmpId))
-            .filter((row) => isOpenJournalEventStatus(row.status))
-            .length;
+    if (eventsCountRes.status === 'fulfilled') {
+        events = eventsCountRes.value;
     }
 
     let documents = 0;
@@ -195,23 +201,25 @@ export async function loadContactTabIndicators(input: {
     organizationId?: string | null;
     organizationTmpId?: string | null;
     viewer?: NotificationInboxViewer;
+    forceEvents?: boolean;
 }): Promise<ContactTabIndicators> {
-    const { clientId, contactId, contactName, organizationId, organizationTmpId, viewer } = input;
+    const { clientId, contactId, contactName, organizationId, organizationTmpId, viewer, forceEvents = false } = input;
     const base = apiBase();
     if (!base || !clientId || !contactId) return emptyContactIndicators();
 
     const scopedName = String(contactName || '').trim();
 
     const contactEventsParams = new URLSearchParams();
-    contactEventsParams.set('summary', '1');
-    contactEventsParams.set('limit', '1200');
+    contactEventsParams.set('openCount', '1');
     contactEventsParams.set('contactId', contactId);
+    if (scopedName) contactEventsParams.set('contactName', scopedName);
     if (organizationId) contactEventsParams.set('organizationId', organizationId);
     if (organizationTmpId) contactEventsParams.set('organizationTmpId', organizationTmpId);
 
-    const [eventsRes, jobsRes, proposalsRes, inboxRes] = await Promise.allSettled([
-        fetchJson(
+    const [eventsCountRes, jobsRes, proposalsRes, inboxRes] = await Promise.allSettled([
+        fetchOpenEventCount(
             `${base}/api/clients/${encodeURIComponent(clientId)}/events?${contactEventsParams.toString()}`,
+            forceEvents,
         ),
         fetchJson(
             `${base}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}/jobs`,
@@ -234,11 +242,8 @@ export async function loadContactTabIndicators(input: {
     }
 
     let events = 0;
-    if (eventsRes.status === 'fulfilled') {
-        events = asList(eventsRes.value)
-            .filter((row) => rawEventMatchesContactScope(row, { contactId, contactName: scopedName }))
-            .filter((row) => isOpenJournalEventStatus(row.status))
-            .length;
+    if (eventsCountRes.status === 'fulfilled') {
+        events = eventsCountRes.value;
     }
 
     let jobs = 0;
@@ -266,7 +271,7 @@ export function useOrganizationProfileTabIndicators(input: {
     const { user } = useAuth();
     const [indicators, setIndicators] = useState<OrganizationTabIndicators>(emptyOrgIndicators);
 
-    const refresh = useCallback(async () => {
+    const refresh = useCallback(async (forceEvents = false) => {
         if (!enabled || !clientId) {
             setIndicators(emptyOrgIndicators());
             return;
@@ -276,6 +281,7 @@ export function useOrganizationProfileTabIndicators(input: {
                 clientId,
                 organizationId,
                 organizationTmpId,
+                forceEvents,
                 viewer: { email: user?.email, name: user?.name, id: user?.id },
             });
             setIndicators(next);
@@ -285,19 +291,23 @@ export function useOrganizationProfileTabIndicators(input: {
     }, [clientId, organizationId, organizationTmpId, enabled, user?.email, user?.name, user?.id]);
 
     useEffect(() => {
-        void refresh();
+        void refresh(false);
     }, [refresh, reloadWhen]);
 
     useEffect(() => {
         if (typeof window === 'undefined' || !enabled) return undefined;
-        const onUpdate = () => {
-            void refresh();
+        const onJournal = () => {
+            invalidateOpenEventCountCache();
+            void refresh(true);
         };
-        window.addEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onUpdate);
-        window.addEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onUpdate);
+        const onInbox = () => {
+            void refresh(false);
+        };
+        window.addEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onJournal);
+        window.addEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onInbox);
         return () => {
-            window.removeEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onUpdate);
-            window.removeEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onUpdate);
+            window.removeEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onJournal);
+            window.removeEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onInbox);
         };
     }, [refresh, enabled]);
 
@@ -325,7 +335,7 @@ export function useContactProfileTabIndicators(input: {
     const { user } = useAuth();
     const [indicators, setIndicators] = useState<ContactTabIndicators>(emptyContactIndicators);
 
-    const refresh = useCallback(async () => {
+    const refresh = useCallback(async (forceEvents = false) => {
         if (!enabled || !clientId || !contactId) {
             setIndicators(emptyContactIndicators());
             return;
@@ -337,6 +347,7 @@ export function useContactProfileTabIndicators(input: {
                 contactName,
                 organizationId,
                 organizationTmpId,
+                forceEvents,
                 viewer: { email: user?.email, name: user?.name, id: user?.id },
             });
             setIndicators(next);
@@ -356,16 +367,17 @@ export function useContactProfileTabIndicators(input: {
     ]);
 
     useEffect(() => {
-        void refresh();
+        void refresh(false);
     }, [refresh, reloadWhen]);
 
     useEffect(() => {
         if (typeof window === 'undefined' || !enabled) return undefined;
         const onJournal = () => {
-            void refresh();
+            invalidateOpenEventCountCache();
+            void refresh(true);
         };
         const onProposals = () => {
-            void refresh();
+            void refresh(false);
         };
         window.addEventListener(CLIENT_JOURNAL_UPDATED_EVENT, onJournal);
         window.addEventListener(PROPOSALS_UPDATED_EVENT, onProposals);

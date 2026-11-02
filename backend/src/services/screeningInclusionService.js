@@ -27,6 +27,7 @@ const {
   candidateTagFiltersMatch,
 } = require('./matchingPenaltyService');
 const { loadTagAliasIndex } = require('./tagAliasIndexService');
+const { resolvePrimaryCandidateIdDeep } = require('./candidateIdentityService');
 
 /** Path 1 = explicit application/link source; Path 3 = included via field/title interest match only (still passes hard rules, etc.). */
 function jcHasExplicitApplicationSource(jc) {
@@ -361,7 +362,9 @@ async function resolveCandidateInternalNotesForScreening(candidateId, candPlain)
 
 async function computeScreeningForCandidate(candidateId, opts = {}) {
   const staffTenantId = opts.tenantClientId ? String(opts.tenantClientId).trim() : '';
-  const candidate = await candidateService.findByPkWithTagsForMatchScore(candidateId);
+  const requestedId = String(candidateId || '').trim();
+  const primaryId = (await resolvePrimaryCandidateIdDeep(requestedId)) || requestedId;
+  const candidate = await candidateService.findByPkWithTagsForMatchScore(primaryId);
   if (!candidate) {
     const err = new Error('Candidate not found');
     err.status = 404;
@@ -369,7 +372,7 @@ async function computeScreeningForCandidate(candidateId, opts = {}) {
   }
 
   const links = await JobCandidate.findAll({
-    where: { candidateId, jobId: { [Op.ne]: null } },
+    where: { candidateId: primaryId, jobId: { [Op.ne]: null } },
     include: [{ model: Job, as: 'job', required: true }],
     order: [['updatedAt', 'DESC']],
   });
@@ -472,7 +475,7 @@ async function computeScreeningForCandidate(candidateId, opts = {}) {
   }
 
   const candidateInternalNotes = await resolveCandidateInternalNotesForScreening(
-    candidateId,
+    primaryId,
     candPlain,
   );
 
@@ -547,7 +550,9 @@ async function computeScreeningForJob(jobId) {
 
 async function precheckManualAdd(jobId, candidateId) {
   const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills'] } });
-  const candidateRow = await candidateService.findByPkWithTagsForMatchScore(candidateId);
+  const requestedId = String(candidateId || '').trim();
+  const primaryId = (await resolvePrimaryCandidateIdDeep(requestedId)) || requestedId;
+  const candidateRow = await candidateService.findByPkWithTagsForMatchScore(primaryId);
   const candidate = candidateRow
     ? candidateService.toPlainCandidateForMatchScore(candidateRow)
     : null;

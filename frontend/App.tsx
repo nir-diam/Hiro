@@ -22,6 +22,7 @@ import { buildBreadcrumbs } from './utils/buildBreadcrumbs';
 import { BreadcrumbProvider, useBreadcrumbContext } from './context/BreadcrumbContext';
 import { NewTaskLinkedProvider, useNewTaskLinkedContext } from './context/NewTaskLinkedContext';
 import StaffPageGate from './components/StaffPageGate';
+import { allocatedDaysFromDueDate } from './utils/taskDueDate';
 
 
 export type PageType = 'list' | 'profile' | 'new' | 'login' | 'jobs' | 'new-job' | 'clients' | 'new-client' | 'notifications' | 'company-settings' | 'coordinators-settings' | 'coordinator-profile' | 'admin-dashboard' | 'admin-client-form' | 'message-templates' | 'event-types-settings' | 'candidate-pool' | 'job-board' | 'finance';
@@ -101,10 +102,13 @@ const AppContentInner: React.FC = () => {
             Array.isArray(taskData.assigneeEmails) && taskData.assigneeEmails.length > 0
                 ? String(taskData.assigneeEmails[0]).trim()
                 : 'אני';
-        const allocatedDays =
+        const allocatedDaysFromPayload =
             taskData.isTask && Number.isFinite(Number(taskData.allocatedDays))
                 ? Number(taskData.allocatedDays)
                 : undefined;
+        const allocatedDays = taskData.isTask
+            ? allocatedDaysFromPayload ?? allocatedDaysFromDueDate(taskData.dueDate) ?? undefined
+            : undefined;
         const newEvent = {
             id: Date.now(),
             type: [taskData.isTask ? 'משימת מערכת' : 'תזכורת'],

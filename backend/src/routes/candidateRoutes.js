@@ -14,6 +14,7 @@ router.patch('/linked-jobs/:jobCandidateId/process-journal/:entryId', authMiddle
 router.patch('/linked-jobs/:jobCandidateId/status', authMiddleware, attachDbUser, candidateController.patchJobLinkStatus);
 
 router.get('/', optionalAuth, candidateController.list);
+router.get('/kanban-board', optionalAuth, candidateController.listKanbanBoard);
 router.get('/by-worked-at-company', candidateController.listByWorkedAtCompany);
 router.get('/by-user/:userId', candidateController.getByUser);
 // Place specific routes BEFORE the generic '/:id' to avoid param capture
@@ -34,6 +35,9 @@ router.get('/:id/screening-pool', authMiddleware, candidateController.getScreeni
 router.get('/:id/screening-precheck', authMiddleware, candidateController.getScreeningPrecheck);
 router.get('/:id/related-candidates', candidateController.listRelatedCandidates);
 router.get('/:id/profile-versions', candidateController.listProfileVersions);
+router.get('/:id/referral-cv-profile', authMiddleware, attachDbUser, candidateController.getReferralCvProfile);
+router.post('/:id/ensure-staff-shadow', authMiddleware, attachDbUser, candidateController.ensureStaffShadow);
+router.post('/:id/pin-staff-shadow', authMiddleware, attachDbUser, candidateController.pinStaffShadow);
 router.get('/:id/linked-jobs', candidateController.listLinkedJobs);
 router.post('/:id/linked-jobs', authMiddleware, candidateController.linkCandidateToJob);
 router.post('/:id/field-interest', authMiddleware, candidateController.addFieldInterest);
@@ -58,8 +62,29 @@ router.post(
   attachDbUser,
   candidateController.shareProfileWithCandidate,
 );
+router.post(
+  '/:id/live-sync/accept',
+  authMiddleware,
+  attachDbUser,
+  candidateController.acceptLiveSyncField,
+);
+router.post(
+  '/:id/live-sync/keep',
+  authMiddleware,
+  attachDbUser,
+  candidateController.keepLiveSyncField,
+);
+router.post(
+  '/:id/propose-profile-edits',
+  authMiddleware,
+  attachDbUser,
+  candidateController.proposeStaffProfileEdits,
+);
+router.get('/:id/staff-profile-proposal', candidateController.getStaffProfileProposal);
+router.post('/:id/resolve-staff-profile-proposal', candidateController.resolveStaffProfileProposal);
 router.post('/:id/approve-profile', candidateController.approveProfileByCandidate);
 
+router.get('/:id/file-url', candidateController.getFileUrl);
 router.get('/:id/documents', candidateDocumentController.list);
 router.post('/:id/documents/upload-url', candidateDocumentController.createUploadUrl);
 router.post('/:id/documents/attach', candidateDocumentController.attach);
@@ -80,6 +105,7 @@ router.delete('/:id', candidateController.remove);
 
 router.post('/:id/upload-url', candidateController.createUploadUrl);
 router.post('/:id/media', candidateController.attachMedia);
+router.post('/:id/reprocess', authMiddleware, attachDbUser, candidateController.reprocessFromResume);
 router.post('/:id/rebuild-embedding', candidateController.rebuildEmbedding);
 router.post('/search/semantic', candidateController.semanticSearch);
 router.post('/semantic-search', candidateController.semanticSearch);

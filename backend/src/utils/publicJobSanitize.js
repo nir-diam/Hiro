@@ -13,6 +13,9 @@ const BLOCKED = new Set([
 
 const sanitizePublicPayload = (value) => {
   if (Array.isArray(value)) return value.map((item) => sanitizePublicPayload(item));
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
   if (!value || typeof value !== 'object') return value;
   const out = {};
   for (const [key, child] of Object.entries(value)) {

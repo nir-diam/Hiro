@@ -3,7 +3,7 @@ const dotenv = require('dotenv');
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config();
-const MODEL = 'gemini-3-flash-preview';
+const MODEL = 'gemini-3.8-flash';
 const fetchImpl = (typeof fetch !== 'undefined') ? fetch : ((...args) => import('node-fetch').then(({ default: f }) => f(...args)));
 const appLogger = require('../utils/appLogger');
 
@@ -13,9 +13,24 @@ const GEMINI_TIMEOUT_MS = Math.max(
   Number(process.env.GEMINI_TIMEOUT_MS || 120000) || 120000,
 );
 
-const geminiFetch = (url, options = {}) => {
+const isGeminiTimeoutError = (err) => {
+  if (!err) return false;
+  const name = String(err.name || '');
+  const msg = String(err.message || err.cause?.message || '');
+  return (
+    name === 'TimeoutError' ||
+    name === 'AbortError' ||
+    /aborted due to timeout/i.test(msg) ||
+    /The operation was aborted/i.test(msg) ||
+    /Gemini request timed out/i.test(msg)
+  );
+};
+
+const geminiFetch = (url, options = {}, timeoutMs = GEMINI_TIMEOUT_MS) => {
+  const ms = Number(timeoutMs);
+  const limit = Number.isFinite(ms) && ms >= 5000 ? ms : GEMINI_TIMEOUT_MS;
   const timeoutSignal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-    ? AbortSignal.timeout(GEMINI_TIMEOUT_MS)
+    ? AbortSignal.timeout(limit)
     : undefined;
   return fetchImpl(url, timeoutSignal ? { ...options, signal: timeoutSignal } : options);
 };
@@ -39,7 +54,10 @@ const extractText = (data) => {
   if (!data?.candidates?.length) return '';
   for (const cand of data.candidates) {
     const parts = cand?.content?.parts || [];
-    const joined = parts.map((p) => (p && typeof p.text === 'string' ? p.text : '')).join('');
+    const textParts = parts.filter((p) => p && typeof p.text === 'string' && p.thought !== true);
+    const joined = (textParts.length ? textParts : parts)
+      .map((p) => (p && typeof p.text === 'string' ? p.text : ''))
+      .join('');
     if (joined) return joined;
   }
   return '';
@@ -79,6 +97,8 @@ const buildContentsFromHistory = (history = [], message = '') => {
  * @param {string} opts.systemPrompt
  * @param {Array<{role:'user'|'model', text:string}>} [opts.history]
  * @param {string} [opts.message]
+ * @param {Array<Object>} [opts.userParts] Extra Gemini user parts (e.g. inlineData PDF).
+ *   Appended as a user turn after history/message. Do not put base64 in llmInputJson.
  * @param {Object} [opts.generationConfig] Optional Gemini generationConfig overrides
  *   (e.g. temperature, maxOutputTokens, topP, topK, candidateCount, stopSequences).
  * @param {string} [opts.responseMimeType] Convenience: shortcut for generationConfig.responseMimeType.
@@ -92,12 +112,14 @@ const sendChat = async ({
   systemPrompt,
   history = [],
   message = '',
+  userParts,
   generationConfig,
   responseMimeType,
   responseSchema,
   promptId,
   llmInputJson,
   model,
+  timeoutMs,
 }) => {
   if (!apiKey) {
     const err = new Error('Gemini API key not configured');
@@ -105,11 +127,22 @@ const sendChat = async ({
     throw err;
   }
 
-  const chosenModel = /^[a-zA-Z0-9._-]+$/.test(String(model || '').trim())
-    ? String(model).trim()
+  const requested = String(model || '').trim() === 'gemini-3-flash-preview'
+    ? MODEL
+    : String(model || '').trim();
+  const chosenModel = /^[a-zA-Z0-9._-]+$/.test(requested)
+    ? requested
     : MODEL;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${chosenModel}:generateContent?key=${apiKey}`;
   const contents = buildContentsFromHistory(history, message);
+  if (Array.isArray(userParts) && userParts.length) {
+    contents.push({ role: 'user', parts: userParts });
+  }
+  if (!contents.length) {
+    const err = new Error('Gemini request has no user contents');
+    err.status = 400;
+    throw err;
+  }
 
   const mergedGenConfig = { ...(generationConfig || {}) };
   if (responseMimeType && !mergedGenConfig.responseMimeType) {
@@ -150,7 +183,7 @@ const sendChat = async ({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
+    }, timeoutMs);
 
     if (!res.ok) {
       const text = await res.text();
@@ -213,6 +246,11 @@ const sendChat = async ({
         outputText: null,
         error: err,
       });
+    }
+    if (isGeminiTimeoutError(err) && !err.status) {
+      const usedMs = Number(timeoutMs) > 0 ? Number(timeoutMs) : GEMINI_TIMEOUT_MS;
+      err.status = 504;
+      err.message = `Gemini request timed out after ${usedMs}ms`;
     }
     throw err;
   }
@@ -526,6 +564,8 @@ module.exports = {
   generateImage,
   generateNanoBananaImage,
   resolveGeminiApiKey,
+  isGeminiTimeoutError,
+  GEMINI_TIMEOUT_MS,
   MODEL,
   IMAGE_MODELS,
   NANO_BANANA_MODELS,

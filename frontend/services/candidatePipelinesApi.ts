@@ -139,7 +139,14 @@ export type PatchCandidatePipelineStageResult = {
 
 export async function patchCandidatePipelineStage(
     candidateId: string,
-    payload: { pipelineId?: string | null; stageId?: string | null },
+    payload: {
+        pipelineId?: string | null;
+        stageId?: string | null;
+        /** Process card (תהליך) being dragged — scopes job-link + journal update. */
+        jobCandidateId?: string | null;
+        /** Visual from-stage on the board (job status mapped to stage). */
+        fromStageId?: string | null;
+    },
 ): Promise<PatchCandidatePipelineStageResult> {
     const apiBase = () => import.meta.env.VITE_API_BASE || '';
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
@@ -161,4 +168,78 @@ export async function patchCandidatePipelineStage(
         throw new Error(msg || 'Request failed');
     }
     return (await res.json()) as PatchCandidatePipelineStageResult;
+}
+
+export type CandidateKanbanBoardRow = {
+    id: string;
+    fullName?: string;
+    title?: string;
+    internalTags?: string[];
+    approveByCandidate?: boolean;
+    consentToJobOffers?: boolean;
+    candidatePipelineId?: string | null;
+    pipelineStageId?: string | null;
+    kanbanJobCandidateId?: string | null;
+    kanbanJobId?: string | null;
+    kanbanJobTitle?: string | null;
+    kanbanJobCompany?: string | null;
+    updatedAt?: string;
+};
+
+export async function fetchCandidateKanbanBoard(opts: {
+    pipelineId: string;
+    search?: string;
+    stageIds?: string[];
+    limit?: number;
+}): Promise<CandidateKanbanBoardRow[]> {
+    const apiBase = () => import.meta.env.VITE_API_BASE || '';
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const h: HeadersInit = { Accept: 'application/json' };
+    if (token) (h as Record<string, string>).Authorization = `Bearer ${token}`;
+    const params = new URLSearchParams({ pipelineId: opts.pipelineId });
+    const search = String(opts.search || '').trim();
+    if (search) params.set('search', search);
+    if (opts.stageIds?.length) params.set('stageIds', opts.stageIds.join(','));
+    if (opts.limit != null) params.set('limit', String(opts.limit));
+    const res = await fetch(`${apiBase()}/api/candidates/kanban-board?${params.toString()}`, {
+        headers: h,
+        cache: 'no-store',
+    });
+    if (!res.ok) {
+        let msg = res.statusText;
+        try {
+            const j = (await res.json()) as { message?: string };
+            msg = j.message || msg;
+        } catch {
+            /* ignore */
+        }
+        throw new Error(msg || 'Request failed');
+    }
+    const json = (await res.json()) as { data?: CandidateKanbanBoardRow[] };
+    return Array.isArray(json.data) ? json.data : [];
+}
+
+export async function patchJobLinkKanbanStatus(jobCandidateId: string, status: string): Promise<void> {
+    const apiBase = () => import.meta.env.VITE_API_BASE || '';
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const h: HeadersInit = { 'Content-Type': 'application/json' };
+    if (token) (h as Record<string, string>).Authorization = `Bearer ${token}`;
+    const res = await fetch(
+        `${apiBase()}/api/candidates/linked-jobs/${encodeURIComponent(jobCandidateId)}/status`,
+        {
+            method: 'PATCH',
+            headers: h,
+            body: JSON.stringify({ status }),
+        },
+    );
+    if (!res.ok) {
+        let msg = res.statusText;
+        try {
+            const j = (await res.json()) as { message?: string };
+            msg = j.message || msg;
+        } catch {
+            /* ignore */
+        }
+        throw new Error(msg || 'Request failed');
+    }
 }

@@ -36,15 +36,18 @@ import QuestionnaireBuilderView from './components/QuestionnaireBuilderView';
 import AgreementTypesSettingsView from './components/AgreementTypesSettingsView'; // New Import
 import { buildCandidateFullName, syncCandidateNameFields } from './utils/candidateName';
 import { buildMissingProfileFieldLabels, resolveProfileDisplayAge } from './utils/candidateProfileDisplayCompleteness';
-import {
-    buildDuplicateProfileName,
-    buildProfileDuplicatePayload,
+import {buildProfileDuplicatePayload,
     buildTagEntriesFromSource,
     buildCandidateSavePayload,
     hasCandidateFormChanges,
     resolveCandidatePortalPreviewId,
     sanitizeProfileDuplicatePayload,
+    resolveStaffShadowProfile,
+    resolveProfileFamilyPrimaryId,
+    isCanonicalPrimaryCandidateProfile,
+    isStaffDuplicateProfile,
 } from './utils/candidateProfileDuplicate';
+import { waitForCandidateEnrichment } from './utils/candidateIngestPoll';
 import { useUnsavedChangesGuard } from './hooks/useUnsavedChangesGuard';
 import { confirmLeaveWithoutSave } from './utils/confirmLeaveWithoutSave';
 import PipelineSettingsView from './components/PipelineSettingsView';
@@ -70,6 +73,7 @@ import CandidateLoginView from './components/CandidateLoginView';
 import CandidateSetPasswordView from './components/CandidateSetPasswordView';
 import CandidateSignup from './components/CandidateSignup';
 import CandidatePublicProfileView from './components/CandidatePublicProfileView';
+import CandidateStaffProfileEditsApprovalView from './components/CandidateStaffProfileEditsApprovalView';
 import CandidateRegistrationWizard from './components/CandidateRegistrationWizard'; 
 import CandidateOnboardingChat from './components/CandidateOnboardingChat';
 import DashboardView from './components/DashboardView';
@@ -251,6 +255,7 @@ const normalizeCandidatePayload = (payload: any) => {
         recruitmentSourceUpdatedAt: payload?.recruitmentSourceUpdatedAt ?? null,
         canonicalCandidateId: payload?.canonicalCandidateId ?? null,
         staffProfileCopy: payload?.staffProfileCopy === true,
+        staffShadowPinned: payload?.staffShadowPinned === true,
         distributionEmail: isBlockedStatus ? false : payload?.distributionEmail !== false,
         distributionSms: isBlockedStatus ? false : payload?.distributionSms !== false,
         distributionWhatsapp: isBlockedStatus ? false : payload?.distributionWhatsapp !== false,
@@ -311,6 +316,13 @@ const normalizeCandidatePayload = (payload: any) => {
 const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const params = useParams();
     const location = useLocation();
+    const wantsLiveProfileView = useMemo(() => {
+        try {
+            return new URLSearchParams(location.search || '').get('view') === 'live';
+        } catch {
+            return false;
+        }
+    }, [location.search]);
     const searchHighlightKeywords = useMemo(() => {
         const st = location.state as { matchedTerms?: string[] } | null;
         return Array.isArray(st?.matchedTerms) ? st.matchedTerms.filter(Boolean) : [];
@@ -362,6 +374,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         try {
             const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(cid)}/profile-versions`, {
                 headers: { ...authHeaders() },
+                cache: 'no-store',
             });
             if (!res.ok) return;
             const payload = await res.json();
@@ -448,7 +461,48 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 setActiveProfileId(payload.id ?? payload.backendId ?? normalized.backendId ?? null);
             }
 
-                void loadProfileVersionsForCandidate(payload.id ?? urlId);
+                                void loadProfileVersionsForCandidate(payload.id ?? urlId);
+                // Staff default workspace is the shadow copy — never land on live for editing.
+                const opened = {
+                    ...normalized,
+                    backendId: payload.id,
+                    id: payload.id,
+                    staffProfileCopy: payload.staffProfileCopy ?? normalized.staffProfileCopy,
+                    canonicalCandidateId: payload.canonicalCandidateId ?? normalized.canonicalCandidateId,
+                };
+                if (!isStaffDuplicateProfile(opened as Record<string, unknown>) && !wantsLiveProfileView) {
+                    void (async () => {
+                        try {
+                            const candidateKey = String(payload.id ?? urlId);
+                            const loadVersionList = async () => {
+                                const verRes = await fetch(
+                                    `${apiBase}/api/candidates/${encodeURIComponent(candidateKey)}/profile-versions`,
+                                    { headers: { ...authHeaders() }, cache: 'no-store' },
+                                );
+                                const verPayload = verRes.ok ? await verRes.json() : [];
+                                return (Array.isArray(verPayload) ? verPayload : verPayload ? [verPayload] : [])
+                                    .map(normalizeCandidatePayload)
+                                    .map((candidate: any) => ({
+                                        ...candidate,
+                                        backendId: candidate.backendId || candidate.id,
+                                    }));
+                            };
+                            if (payload.ingestPending === true) {
+                                await waitForCandidateEnrichment(apiBase, candidateKey, authHeaders);
+                                void loadProfileVersionsForCandidate(candidateKey);
+                            }
+                            const list = await loadVersionList();
+                            const shadow = resolveStaffShadowProfile(list, opened as Record<string, unknown>);
+                            if (shadow?.backendId || shadow?.id) {
+                                const sid = String(shadow.backendId || shadow.id);
+                                const search = location.search || '';
+                                navigate(`/candidates/${sid}${search}`, { replace: true });
+                            }
+                        } catch {
+                            /* stay on the opened profile */
+                        }
+                    })();
+                }
             } catch (error: any) {
             if (!signal?.aborted) {
                     setCandidateFetchError(error.message || 'תקלה בטעינת המועמד.');
@@ -458,7 +512,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     setIsCandidateLoading(false);
                 }
             }
-    }, [apiBase, loadProfileVersionsForCandidate, urlId]);
+    }, [apiBase, authHeaders, loadProfileVersionsForCandidate, location.search, navigate, urlId, wantsLiveProfileView]);
 
     useEffect(() => {
         setSavedFormBaseline(null);
@@ -618,11 +672,21 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
     const handleProfileSwitch = (profileId: string | number) => {
         runIfLeaveAllowed(() => {
-            setActiveProfileId(profileId);
-            const target = profiles.find((profile) => (profile.backendId || profile.id) === profileId);
-            if (target?.backendId) {
-                navigate(`/candidates/${target.backendId}`);
+            const wantedId = String(profileId || '').trim();
+            if (!wantedId) return;
+            setActiveProfileId(wantedId);
+            const target = profiles.find((profile) =>
+                String(profile.backendId || profile.id || '').trim() === wantedId,
+            );
+            const destId = String(target?.backendId || wantedId).trim();
+            const params = new URLSearchParams(location.search || '');
+            if (target && isCanonicalPrimaryCandidateProfile(target as Record<string, unknown>)) {
+                params.set('view', 'live');
+            } else {
+                params.delete('view');
             }
+            const qs = params.toString();
+            navigate(`/candidates/${destId}${qs ? `?${qs}` : ''}`);
         });
     };
 
@@ -673,19 +737,12 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             return;
         }
 
-        const existingNames = profiles.map(
-            (profile) =>
-                profile.profileName ||
-                profile.fullName ||
-                buildCandidateFullName(profile.firstName, profile.lastName) ||
-                '',
-        );
         const baseName =
             formData.profileName ||
             buildCandidateFullName(formData.firstName, formData.lastName) ||
             formData.fullName ||
             'פרופיל';
-        const profileName = buildDuplicateProfileName(baseName, existingNames);
+        const profileName = String(baseName || 'פרופיל').trim() || 'פרופיל';
         const primaryCandidateId = String(formData.canonicalCandidateId || sourceId).trim();
 
         setIsDuplicatingProfile(true);
@@ -947,12 +1004,15 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     };
 
     const renderContent = () => {
+        const familyPrimaryCandidateId =
+            resolveProfileFamilyPrimaryId(formData) ||
+            String(formData.backendId || formData.id || '');
         if (props.isMatchingJobs) {
             return (
                 <JobMatchingView
                     onBack={() => runIfLeaveAllowed(() => props.handleSetActiveView('details'))}
                     candidateName={formData.fullName}
-                    candidateId={String(formData.backendId || formData.id || '')}
+                    candidateId={familyPrimaryCandidateId}
                 />
             );
         }
@@ -960,7 +1020,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             return (
                 <CandidateScreeningView
                     onBack={() => runIfLeaveAllowed(() => props.handleSetActiveView('details'))}
-                    candidateId={formData.backendId || formData.id}
+                    candidateId={familyPrimaryCandidateId}
                     candidate={formData}
                 />
             );
@@ -1323,6 +1383,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                  { path: 'set-password', element: <CandidateSetPasswordView /> },
                  { path: 'signup', element: <CandidateSignup /> }, 
                  { path: 'profile', element: <CandidatePublicProfileView openJobAlertModal={props.openJobAlertModal} /> },
+                 { path: 'approve-profile-edits', element: <CandidateStaffProfileEditsApprovalView /> },
                  { path: 'register', element: <CandidateRegistrationWizard /> },
                  { path: 'onboarding', element: <CandidateOnboardingChat /> } 
             ]

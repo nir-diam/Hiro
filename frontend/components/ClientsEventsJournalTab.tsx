@@ -19,6 +19,7 @@ import {
   MagnifyingGlassIcon,
   InformationCircleIcon,
   TrashIcon,
+  LockClosedIcon,
 } from './Icons';
 import ProcessEventModal, { type ProcessEventSavePayload } from './ProcessEventModal';
 import { FormMultiSelect } from './FormMultiSelect';
@@ -38,6 +39,7 @@ import type { Contact } from './ClientsListView';
 import type { MessageModalConfig } from '../hooks/useUIState';
 import type { Candidate } from './CandidatesListView';
 import { authHeaders } from '../utils/authHeaders';
+import { fetchJsonGetCached } from '../utils/apiGetCache';
 import {
   buildEventsJournalFilterStorageKey,
   clearEventsJournalFilters,
@@ -61,9 +63,22 @@ import {
   type EnrichedPipeline,
   type SystemEventCatalogGroup,
 } from '../utils/processManagementCatalog';
+import {
+  fetchClientJournalEventsList,
+  invalidateClientJournalEventsListCache,
+} from '../utils/clientJournalEventsListFetch';
 
-const JOURNAL_INITIAL_LOAD_LIMIT = 20;
-const JOURNAL_FILTERED_LOAD_LIMIT = 300;
+const JOURNAL_PAGE_SIZE = Math.max(
+  5,
+  Number.parseInt(import.meta.env.VITE_CLIENT_JOURNAL_PAGE_SIZE || '10', 10) || 10,
+);
+const JOURNAL_SEARCH_DEBOUNCE_MS = 400;
+const JOURNAL_LIST_POLL_MS = Math.max(
+  15000,
+  Number.parseInt(import.meta.env.VITE_CLIENT_JOURNAL_LIST_POLL_MS || '60000', 10) || 60000,
+);
+
+const stableSetKey = (values: Set<string>) => [...values].sort().join('\u0001');
 
 type JournalServerFilterSnapshot = {
   entitySearchQuery: string;
@@ -76,18 +91,49 @@ type JournalServerFilterSnapshot = {
   selectedStageOutcomeKeys: string[];
   dateFrom: string;
   dateTo: string;
+  dateSortOrder: 'asc' | 'desc';
   assignToSelf: boolean;
-  loadLimit: number;
+};
+
+const parseJournalListResponse = (
+  body: unknown,
+): {
+  rows: unknown[];
+  hasMore: boolean;
+  offset: number;
+  emptyReason?: 'no_events_on_client' | 'no_events_match_filters';
+} => {
+  if (Array.isArray(body)) {
+    return { rows: body, hasMore: false, offset: 0 };
+  }
+  if (body && typeof body === 'object') {
+    const record = body as Record<string, unknown>;
+    const items = record.items ?? record.data;
+    if (Array.isArray(items)) {
+      const emptyReason = record.emptyReason;
+      return {
+        rows: items,
+        hasMore: Boolean(record.hasMore),
+        offset: Number(record.offset) || 0,
+        ...(emptyReason === 'no_events_on_client' || emptyReason === 'no_events_match_filters'
+          ? { emptyReason }
+          : {}),
+      };
+    }
+  }
+  return { rows: [], hasMore: false, offset: 0 };
 };
 
 const appendServerJournalListQuery = (
   qs: URLSearchParams,
   snap: JournalServerFilterSnapshot,
-  opts: { contactId?: string; candidateId?: string },
+  opts: { contactId?: string; candidateId?: string; offset?: number; pageSize?: number },
 ) => {
   qs.set('summary', '1');
   qs.set('journalFilter', '1');
-  qs.set('limit', String(snap.loadLimit));
+  qs.set('paginate', '1');
+  qs.set('limit', String(opts.pageSize ?? JOURNAL_PAGE_SIZE));
+  qs.set('offset', String(Math.max(0, opts.offset ?? 0)));
   const q = snap.entitySearchQuery.trim();
   if (q) qs.set('q', q);
   if (opts.contactId) qs.set('contactId', opts.contactId);
@@ -108,6 +154,7 @@ const appendServerJournalListQuery = (
   if (stageIds.size) qs.set('stageIds', [...stageIds].join(','));
   if (snap.dateFrom) qs.set('dueFrom', snap.dateFrom);
   if (snap.dateTo) qs.set('dueTo', snap.dateTo);
+  qs.set('sortDir', snap.dateSortOrder === 'asc' ? 'asc' : 'desc');
   if (snap.assignToSelf) qs.set('assignToSelf', '1');
 };
 import { applyOutcomeDueDate, outcomeActionSubtitle, summarizeAutomationResults } from '../utils/processOutcomeSla';
@@ -412,6 +459,63 @@ const formatLinkedContactsActivityLabel = (contacts: EventLinkedContact[]): stri
 
 const normalizeContactLookupName = (name: string | null | undefined): string =>
   String(name || '').trim().toLowerCase();
+
+const CONTACT_LOOKUP_ID_CHUNK = 150;
+
+const chunkIdList = (ids: string[], size: number): string[][] => {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += size) out.push(ids.slice(i, i + size));
+  return out;
+};
+
+const mapApiRowToContactLookupRow = (row: Record<string, unknown>): ContactLookupRow | null => {
+  const form = contactFromApi(row);
+  const phone =
+    primaryPhone(form, 'mobile')
+    || primaryPhone(form, 'office')
+    || String(row.mobilePhone || row.phone || '').trim();
+  const email = primaryEmail(form) || String(row.email || '').trim();
+  const id = String(row.id || '').trim();
+  const name = String(row.name || '').trim();
+  if (!id || !name) return null;
+  return {
+    id,
+    name,
+    organizationId: row.organizationId ? String(row.organizationId) : null,
+    phone,
+    email,
+  };
+};
+
+const mergeContactLookupRows = (
+  prev: ContactLookupRow[],
+  incoming: ContactLookupRow[],
+): ContactLookupRow[] => {
+  if (!incoming.length) return prev;
+  const byId = new Map(prev.map((row) => [row.id, row]));
+  for (const row of incoming) byId.set(row.id, row);
+  return Array.from(byId.values());
+};
+
+const collectJournalEventContactIdsByClient = (
+  events: JournalEvent[],
+): Map<string, Set<string>> => {
+  const byClient = new Map<string, Set<string>>();
+  const add = (clientId: string, contactId: string) => {
+    const cid = String(clientId || '').trim();
+    const id = String(contactId || '').trim();
+    if (!cid || !id) return;
+    if (!byClient.has(cid)) byClient.set(cid, new Set());
+    byClient.get(cid)!.add(id);
+  };
+  for (const event of events) {
+    add(String(event.clientId || ''), String(event.contactId || ''));
+    for (const linked of parseEventLinkedContacts(event)) {
+      add(String(event.clientId || ''), linked.id);
+    }
+  }
+  return byClient;
+};
 
 const buildContactIdLookups = (rows: ContactLookupRow[]) => {
   const byName = new Map<string, string[]>();
@@ -942,6 +1046,17 @@ const syncKanbanFromEventStageChange = async (
 /** Default due-date buckets shown on first load (excludes completed/cancelled). */
 const DEFAULT_JOURNAL_SELECTED_STATUSES = ['עתידי', 'להיום', 'באיחור'] as const;
 
+const ADMIN_EVENTS_CLIENT_STORAGE_KEY = 'hiro.eventsManagement.selectedClientId';
+
+const readPersistedAdminEventsClientId = (): string => {
+  if (typeof sessionStorage === 'undefined') return '';
+  try {
+    return String(sessionStorage.getItem(ADMIN_EVENTS_CLIENT_STORAGE_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+};
+
 const getDynamicStatus = (status: string, dueDateStr: string | null) => {
   if (status === 'הושלם') return { label: 'הושלם', color: 'bg-green-100 text-green-700 border border-green-200' };
   if (status === 'בוטל') return { label: 'בוטל', color: 'bg-gray-100 text-gray-700 border border-gray-200' };
@@ -1064,13 +1179,96 @@ function patchEventFromActionResult(
     actionResult.nextStageName != null ? String(actionResult.nextStageName) : event.stage;
   const nextStageId =
     actionResult.nextStageId != null ? String(actionResult.nextStageId) : event.stageId;
-  if (!nextDueDate && nextStatus === event.status && nextStageId === event.stageId) return null;
+  const closed = actionResult.closed === true;
+  if (!closed && !nextDueDate && nextStatus === event.status && nextStageId === event.stageId) return null;
   return {
     ...event,
     dueDate: nextDueDate || event.dueDate,
     status: nextStatus,
     stage: nextStageName || event.stage,
     stageId: nextStageId || event.stageId,
+    ...(closed ? { isActive: false } : {}),
+  };
+}
+
+function isProcessJournalCard(event: JournalEvent): boolean {
+  return event.metadata?.journalEntry === true || String(event.id).startsWith('initial-');
+}
+
+function applyOutcomeOntoCurrentEvent(
+  event: JournalEvent,
+  draft: PendingOutcomeDraft,
+  actionResult?: Record<string, unknown> | null,
+): JournalEvent {
+  const result = actionResult && typeof actionResult === 'object' ? actionResult : {};
+  const journalEntry =
+    result.journalEntry && typeof result.journalEntry === 'object'
+      ? (result.journalEntry as Record<string, unknown>)
+      : null;
+  const journalUpdates = journalEntry ? mapUpdatesField(journalEntry.updates) : [];
+  const nextStageName = String(
+    result.nextStageName || journalEntry?.status || draft.preview.stage || event.stage || '',
+  ).trim();
+  const previousTitle = String(event.title || event.stage || '').trim();
+  const titleTracksStage =
+    isProcessJournalCard(event)
+    || !previousTitle
+    || previousTitle === String(event.stage || '').trim()
+    || previousTitle === String(event.status || '').trim();
+  const nextTitle = titleTracksStage
+    ? nextStageName || previousTitle || event.title
+    : event.title;
+  const historyTitle =
+    draft.preview.historyTitle.trim()
+    || String(result.note || '').trim();
+  const historyComment = (draft.preview.historyComment || '').trim();
+  const now = new Date().toISOString();
+  const actor = String(event.creator || '').trim() || 'מערכת';
+  const extraUpdates: StatusUpdateRow[] = [];
+  if (historyTitle) {
+    extraUpdates.push({
+      id: `u-${Date.now()}`,
+      title: historyTitle,
+      date: now,
+      creator: actor,
+      ...(historyComment ? { comment: historyComment } : {}),
+    });
+  }
+  if (nextTitle && previousTitle && nextTitle !== previousTitle) {
+    extraUpdates.push({
+      id: `prior-${event.id}`,
+      title: previousTitle,
+      date: String(event.date || now),
+      creator: actor,
+    });
+  }
+  const existingUpdates = event.updates || [];
+  const mergedUpdates = journalUpdates.length
+    ? journalUpdates
+    : [
+        ...extraUpdates.filter(
+          (row) => !existingUpdates.some((existing) => String(existing.title || '').trim() === row.title),
+        ),
+        ...existingUpdates,
+      ];
+
+  return {
+    ...event,
+    title: nextTitle || event.title,
+    stage: nextStageName || event.stage,
+    stageId:
+      result.nextStageId != null
+        ? String(result.nextStageId)
+        : draft.preview.stageId || event.stageId,
+    status: result.nextStatus != null ? String(result.nextStatus) : draft.preview.status || event.status,
+    dueDate:
+      result.nextDueDate != null
+        ? String(result.nextDueDate).slice(0, 10)
+        : result.dueDate != null
+          ? String(result.dueDate).slice(0, 10)
+          : draft.preview.dueDate || event.dueDate,
+    isActive: result.closed === true ? false : event.isActive,
+    updates: mergedUpdates,
   };
 }
 
@@ -1176,6 +1374,16 @@ const statusUpdateTimestamp = (update: StatusUpdateRow): number => {
   const ts = new Date(update.date).getTime();
   return Number.isFinite(ts) ? ts : 0;
 };
+
+/** A completed event is read-only: only new updates/notes may be appended (server enforces it too). */
+const isEventLocked = (event: Pick<JournalEvent, 'status'> | null | undefined): boolean =>
+  String(event?.status || '').trim() === 'הושלם';
+
+const LOCKED_EVENT_TOOLTIP = 'אירוע שהושלם — לקריאה בלבד. אפשר להוסיף עדכון/הערה.';
+
+/** Outcomes that may still run on a completed event (they don't change its locked fields). */
+const isOutcomeAllowedOnLockedEvent = (outcome: ActionOutcome): boolean =>
+  outcome.id === GENERAL_OUTCOME_ID || outcome.actionType === 'close' || outcome.actionType === 'freeze';
 
 const sortStatusUpdatesByDateDesc = (updates: StatusUpdateRow[]): StatusUpdateRow[] =>
   [...updates].sort((a, b) => statusUpdateTimestamp(b) - statusUpdateTimestamp(a));
@@ -2277,7 +2485,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     organizationTmpId: string;
     organizationName: string;
   } | null>(null);
-  const [createClientId, setCreateClientId] = useState<string>(defaultClientId || clientOptions[0]?.id || '');
+  const [createClientId, setCreateClientId] = useState<string>(() => {
+    const persisted = crossClientJournal ? readPersistedAdminEventsClientId() : '';
+    const fromOptions = clientOptions.find((c) => c.id === persisted)?.id;
+    return fromOptions || defaultClientId || clientOptions[0]?.id || '';
+  });
   const [createOrganizationId, setCreateOrganizationId] = useState<string>(
     defaultOrganizationId || scopeOrganizationId || clientOptions[0]?.organizationId || '',
   );
@@ -2286,8 +2498,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   );
 
   useEffect(() => {
+    if (crossClientJournal) return;
     if (defaultClientId) setCreateClientId(String(defaultClientId));
-  }, [defaultClientId]);
+  }, [defaultClientId, crossClientJournal]);
 
   const tenantClientId = user?.clientId ? String(user.clientId) : '';
   const organizationOptions = useMemo(
@@ -2382,6 +2595,25 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     if (user?.clientId) return String(user.clientId);
     return defaultClientId || createClientId || clientOptions[0]?.id || '';
   }, [user?.clientId, defaultClientId, createClientId, clientOptions]);
+
+  /** Client whose journal list API is loaded (picker wins over parent default). */
+  const journalListClientId = useMemo(() => {
+    if (user?.clientId) return String(user.clientId);
+    const picked = String(createClientId || '').trim();
+    if (picked) return picked;
+    return String(defaultClientId || clientOptions[0]?.id || '').trim();
+  }, [user?.clientId, createClientId, defaultClientId, clientOptions]);
+
+  useEffect(() => {
+    if (!crossClientJournal) return;
+    const id = String(createClientId || '').trim();
+    if (!id) return;
+    try {
+      sessionStorage.setItem(ADMIN_EVENTS_CLIENT_STORAGE_KEY, id);
+    } catch {
+      // ignore quota / privacy
+    }
+  }, [crossClientJournal, createClientId]);
 
   const effectiveCreateClientId = useMemo(() => {
     const fromState = String(createClientId || '').trim();
@@ -2644,37 +2876,72 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [entitySearchQuery, setEntitySearchQuery] = useState(
     restoredJournalFilters?.entitySearchQuery ?? '',
   );
+  const [debouncedEntitySearchQuery, setDebouncedEntitySearchQuery] = useState(
+    restoredJournalFilters?.entitySearchQuery ?? '',
+  );
+  const [journalListOffset, setJournalListOffset] = useState(0);
+  const [journalListHasMore, setJournalListHasMore] = useState(false);
+  const [journalListEmptyReason, setJournalListEmptyReason] = useState<
+    'no_events_on_client' | 'no_events_match_filters' | null
+  >(null);
 
   const serverJournalListMode = !embeddedInModal && !hideFilters;
 
-  const journalServerFilterSnapshot = useMemo((): JournalServerFilterSnapshot => {
-    const defaultStatusSet = new Set(initialSelectedStatuses);
-    const isDefaultStatus =
-      selectedStatuses.size === defaultStatusSet.size
-      && [...defaultStatusSet].every((status) => selectedStatuses.has(status));
-    const defaultActiveSet = new Set(initialActiveStates);
-    const isDefaultActive =
-      selectedActiveStates.size === defaultActiveSet.size
-      && [...defaultActiveSet].every((state) => selectedActiveStates.has(state));
-    const hasEditorDateRanges = Object.values(editorDateRanges).some(
-      (range) => Boolean(range?.dateFrom || range?.dateTo),
-    );
-    const q = entitySearchQuery.trim();
-    const usesExpandedLoad =
-      Boolean(q)
-      || !isDefaultStatus
-      || !isDefaultActive
-      || selectedCompanies.size > 0
-      || selectedHandlingCoordinators.size > 0
-      || selectedEditors.size > 0
-      || selectedPipelineIds.size > 0
-      || selectedStageOutcomeKeys.size > 0
-      || selectedSystemEventIds.size > 0
-      || Boolean(dateFrom || dateTo)
-      || hasEditorDateRanges;
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedEntitySearchQuery(entitySearchQuery);
+    }, JOURNAL_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [entitySearchQuery]);
 
+  const selectedStatusesKey = useMemo(
+    () => stableSetKey(selectedStatuses),
+    [selectedStatuses],
+  );
+  const selectedActiveStatesKey = useMemo(
+    () => stableSetKey(selectedActiveStates),
+    [selectedActiveStates],
+  );
+  const selectedCompaniesKey = useMemo(
+    () => stableSetKey(selectedCompanies),
+    [selectedCompanies],
+  );
+  const selectedHandlingCoordinatorsKey = useMemo(
+    () => stableSetKey(selectedHandlingCoordinators),
+    [selectedHandlingCoordinators],
+  );
+  const selectedEditorsKey = useMemo(
+    () => stableSetKey(selectedEditors),
+    [selectedEditors],
+  );
+  const selectedPipelineIdsKey = useMemo(
+    () => stableSetKey(selectedPipelineIds),
+    [selectedPipelineIds],
+  );
+  const selectedStageOutcomeKeysKey = useMemo(
+    () => stableSetKey(selectedStageOutcomeKeys),
+    [selectedStageOutcomeKeys],
+  );
+  const selectedSystemEventIdsKey = useMemo(
+    () => stableSetKey(selectedSystemEventIds),
+    [selectedSystemEventIds],
+  );
+  const editorDateRangesKey = useMemo(
+    () => JSON.stringify(editorDateRanges),
+    [editorDateRanges],
+  );
+  const initialSelectedStatusesKey = useMemo(
+    () => initialSelectedStatuses.join('\u0001'),
+    [initialSelectedStatuses],
+  );
+  const initialActiveStatesKey = useMemo(
+    () => initialActiveStates.join('\u0001'),
+    [initialActiveStates],
+  );
+
+  const journalServerFilterSnapshot = useMemo((): JournalServerFilterSnapshot => {
     return {
-      entitySearchQuery,
+      entitySearchQuery: debouncedEntitySearchQuery,
       selectedStatuses: [...selectedStatuses].sort(),
       selectedActiveStates: [...selectedActiveStates].sort(),
       selectedCompanies: [...selectedCompanies].sort(),
@@ -2684,11 +2951,28 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       selectedStageOutcomeKeys: [...selectedStageOutcomeKeys].sort(),
       dateFrom,
       dateTo,
+      dateSortOrder,
       assignToSelf: !canSelectOtherCoordinators && !scopeContactId && !scopeCandidateId,
-      loadLimit: usesExpandedLoad ? JOURNAL_FILTERED_LOAD_LIMIT : JOURNAL_INITIAL_LOAD_LIMIT,
     };
   }, [
-    entitySearchQuery,
+    debouncedEntitySearchQuery,
+    selectedStatusesKey,
+    selectedActiveStatesKey,
+    selectedCompaniesKey,
+    selectedHandlingCoordinatorsKey,
+    selectedEditorsKey,
+    selectedPipelineIdsKey,
+    selectedStageOutcomeKeysKey,
+    selectedSystemEventIdsKey,
+    editorDateRangesKey,
+    dateFrom,
+    dateTo,
+    dateSortOrder,
+    initialSelectedStatusesKey,
+    initialActiveStatesKey,
+    canSelectOtherCoordinators,
+    scopeContactId,
+    scopeCandidateId,
     selectedStatuses,
     selectedActiveStates,
     selectedCompanies,
@@ -2696,16 +2980,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     selectedEditors,
     selectedPipelineIds,
     selectedStageOutcomeKeys,
-    selectedSystemEventIds,
     editorDateRanges,
-    dateFrom,
-    dateTo,
-    initialSelectedStatuses,
-    initialActiveStates,
-    canSelectOtherCoordinators,
-    scopeContactId,
-    scopeCandidateId,
   ]);
+
+  const journalServerFilterKey = useMemo(
+    () => JSON.stringify(journalServerFilterSnapshot),
+    [journalServerFilterSnapshot],
+  );
 
   const [rescheduleHighlights, setRescheduleHighlights] = useState<
     Record<string, { label: string }>
@@ -2797,6 +3078,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [editorDropdownSearch, setEditorDropdownSearch] = useState('');
   const [isHandlingCoordinatorDropdownOpen, setIsHandlingCoordinatorDropdownOpen] = useState(false);
   const [handlingCoordinatorDropdownSearch, setHandlingCoordinatorDropdownSearch] = useState('');
+  const [assigneeSearchContactNames, setAssigneeSearchContactNames] = useState<string[]>([]);
   const [editorDateRangeModal, setEditorDateRangeModal] = useState<{
     editorName: string;
     dateFrom: string;
@@ -3081,62 +3363,148 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   }, [crossClientJournal, defaultClientId, scopeContactId, scopeOrganizationId, scopeCandidateId]);
 
   const contactsLookupClientId = useMemo(
-    () => String(user?.clientId || defaultClientId || createClientId || clientOptions[0]?.id || '').trim(),
-    [user?.clientId, defaultClientId, createClientId, clientOptions],
+    () => String(defaultClientId || user?.clientId || settingsClientId || '').trim(),
+    [defaultClientId, user?.clientId, settingsClientId],
   );
+
+  useEffect(() => {
+    setContactLookupRows([]);
+  }, [contactsLookupClientId, crossClientJournal, scopeOrganizationId, scopeContactId]);
+
+  const journalEventContactIdsKey = useMemo(() => {
+    const byClient = collectJournalEventContactIdsByClient(allJournalEvents);
+    return [...byClient.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([clientId, ids]) => `${clientId}:${[...ids].sort().join(',')}`)
+      .join('|');
+  }, [allJournalEvents]);
 
   useEffect(() => {
     if (embeddedInModal) return;
     if (!apiBase) return;
+
     let active = true;
-    const url = crossClientJournal
-      ? `${apiBase}/api/clients/all-contacts`
-      : contactsLookupClientId
-        ? `${apiBase}/api/clients/${encodeURIComponent(contactsLookupClientId)}/contacts`
-        : '';
-    if (!url) {
-      setContactLookupRows([]);
-      return;
-    }
-    fetch(url, { credentials: 'include', headers: authHeaders(), cache: 'no-store' })
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('contacts'))))
-      .then((data) => {
-        if (!active) return;
-        const list = Array.isArray(data) ? data : data?.data ?? [];
-        setContactLookupRows(
-          list
-            .map((row: Record<string, unknown>) => {
-              const form = contactFromApi(row);
-              const phone =
-                primaryPhone(form, 'mobile')
-                || primaryPhone(form, 'office')
-                || String(row.mobilePhone || row.phone || '').trim();
-              const email = primaryEmail(form) || String(row.email || '').trim();
-              return {
-                id: String(row.id || ''),
-                name: String(row.name || '').trim(),
-                organizationId: row.organizationId ? String(row.organizationId) : null,
-                phone,
-                email,
-              };
-            })
-            .filter((row: ContactLookupRow) => row.id && row.name),
-        );
-      })
-      .catch(() => {
-        if (active) setContactLookupRows([]);
+
+    const parseLookupList = (data: unknown): ContactLookupRow[] =>
+      (Array.isArray(data) ? data : [])
+        .map((row) => mapApiRowToContactLookupRow(row as Record<string, unknown>))
+        .filter(Boolean) as ContactLookupRow[];
+
+    const fetchClientContactsLookup = async (clientId: string, query: string) => {
+      const url = `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts${query}`;
+      const data = await fetchJsonGetCached(url, {
+        credentials: 'include',
+        headers: authHeaders(),
+        cache: 'no-store',
       });
+      return parseLookupList(data);
+    };
+
+    const fetchAllContactsLookup = async (query: string) => {
+      const url = `${apiBase}/api/clients/all-contacts${query}`;
+      const data = await fetchJsonGetCached(url, {
+        credentials: 'include',
+        headers: authHeaders(),
+        cache: 'no-store',
+      });
+      return parseLookupList(data);
+    };
+
+    void (async () => {
+      try {
+        if (scopeContactId && contactsLookupClientId) {
+          const rows = await fetchClientContactsLookup(
+            contactsLookupClientId,
+            `?lookup=1&ids=${encodeURIComponent(scopeContactId)}`,
+          );
+          if (active && rows.length) {
+            setContactLookupRows((prev) => mergeContactLookupRows(prev, rows));
+          }
+        }
+        if (scopeOrganizationId && contactsLookupClientId) {
+          const rows = await fetchClientContactsLookup(
+            contactsLookupClientId,
+            `?lookup=1&limit=200&organizationId=${encodeURIComponent(scopeOrganizationId)}`,
+          );
+          if (active && rows.length) {
+            setContactLookupRows((prev) => mergeContactLookupRows(prev, rows));
+          }
+        }
+      } catch {
+        /* optional scope preload */
+      }
+    })();
+
     return () => {
       active = false;
     };
-  }, [embeddedInModal, apiBase, crossClientJournal, contactsLookupClientId]);
+  }, [
+    embeddedInModal,
+    apiBase,
+    contactsLookupClientId,
+    scopeOrganizationId,
+    scopeContactId,
+  ]);
+
+  useEffect(() => {
+    if (embeddedInModal) return;
+    if (!apiBase) return;
+    if (!journalEventContactIdsKey) return;
+
+    let active = true;
+
+    const loadContactIdChunk = async (clientId: string, chunk: string[]) => {
+      const query = `?lookup=1&ids=${chunk.map(encodeURIComponent).join(',')}`;
+      const url = crossClientJournal
+        ? `${apiBase}/api/clients/all-contacts${query}`
+        : `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts${query}`;
+      const res = await fetch(url, {
+        credentials: 'include',
+        headers: authHeaders(),
+        cache: 'no-store',
+      });
+      if (!res.ok) return [];
+      const json = await res.json();
+      return (Array.isArray(json) ? json : [])
+        .map((row) => mapApiRowToContactLookupRow(row as Record<string, unknown>))
+        .filter(Boolean) as ContactLookupRow[];
+    };
+
+    void (async () => {
+      try {
+        const byClient = collectJournalEventContactIdsByClient(allJournalEvents);
+        for (const [clientId, idSet] of byClient) {
+          for (const chunk of chunkIdList([...idSet], CONTACT_LOOKUP_ID_CHUNK)) {
+            if (!active) return;
+            const rows = await loadContactIdChunk(clientId, chunk);
+            if (!active || !rows.length) continue;
+            setContactLookupRows((prev) => mergeContactLookupRows(prev, rows));
+          }
+        }
+      } catch {
+        /* journal still works with names stored on events */
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, [embeddedInModal, apiBase, crossClientJournal, journalEventContactIdsKey, allJournalEvents]);
 
   useEffect(() => {
     if (embeddedInModal && !editingDescriptionId) return;
     let active = true;
     const clientId = crossClientJournal ? undefined : contactsLookupClientId || undefined;
-    void fetchStaffUsers(clientId)
-      .then((rows) => {
+    const staffUrl = clientId
+      ? `${apiBase}/api/clients/${encodeURIComponent(clientId)}/staff-users`
+      : `${apiBase}/api/users`;
+    void fetchJsonGetCached(staffUrl, { headers: authHeaders(), cache: 'no-store' })
+      .then((raw) => {
+        const rows = (Array.isArray(raw) ? raw : []) as Array<{
+          id: string;
+          name: string | null;
+          email: string;
+        }>;
         if (!active) return;
         setStaffUserRows(
           rows.map((row) => ({
@@ -3253,12 +3621,18 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     .sort()
     .join(';');
 
-  const load = useCallback(async (opts?: { silent?: boolean }) => {
+  const journalListLoadAbortRef = useRef<AbortController | null>(null);
+
+  const load = useCallback(async (opts?: { silent?: boolean; force?: boolean; offset?: number }) => {
     if (!apiBase) return;
+    const listOffset = Math.max(0, opts?.offset ?? journalListOffset);
     if (!opts?.silent) {
       setLoading(true);
       setError(null);
     }
+    journalListLoadAbortRef.current?.abort();
+    const listAbort = new AbortController();
+    journalListLoadAbortRef.current = listAbort;
     try {
       if (embeddedInModal && scopeJobLinkId) {
         const inflightKey = embeddedModalJournalLoadKey(
@@ -3336,17 +3710,19 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         return;
       }
 
-      const scopedClientId = String(defaultClientId || clientOptions[0]?.id || '').trim();
+      const scopedClientId = journalListClientId;
       const scopedOrganizationId = String(scopeOrganizationId || '').trim();
       const scopedOrganizationTmpId = String(scopeOrganizationTmpId || '').trim();
       const scopedToPerson = Boolean(scopeContactId || scopeCandidateId);
 
-      if (scopedClientId && !crossClientJournal) {
+      if (!crossClientJournal && scopedClientId) {
         const qs = new URLSearchParams();
         if (serverJournalListMode) {
           appendServerJournalListQuery(qs, journalServerFilterSnapshot, {
             contactId: scopeContactId || undefined,
             candidateId: scopeCandidateId || undefined,
+            offset: listOffset,
+            pageSize: JOURNAL_PAGE_SIZE,
           });
         } else {
           qs.set('summary', '1');
@@ -3354,23 +3730,30 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         }
         if (scopedOrganizationId && !scopedToPerson) qs.set('organizationId', scopedOrganizationId);
         if (scopedOrganizationTmpId && !scopedToPerson) qs.set('organizationTmpId', scopedOrganizationTmpId);
-        const res = await fetch(
-          `${apiBase}/api/clients/${encodeURIComponent(scopedClientId)}/events?${qs.toString()}`,
+        const eventsUrl = `${apiBase}/api/clients/${encodeURIComponent(scopedClientId)}/events?${qs.toString()}`;
+        const body = await fetchClientJournalEventsList(
+          eventsUrl,
           {
             credentials: 'include',
             headers: authHeaders(),
             cache: 'no-store',
           },
+          { force: opts?.force, parentSignal: listAbort.signal },
         );
-        if (!res.ok) throw new Error('טעינת אירועים נכשלה');
-        const rows = await res.json();
+        const parsed = serverJournalListMode
+          ? parseJournalListResponse(body)
+          : { rows: Array.isArray(body) ? body : [], hasMore: false, offset: 0 };
+        if (serverJournalListMode) {
+          setJournalListHasMore(parsed.hasMore);
+          setJournalListEmptyReason(parsed.emptyReason ?? null);
+        }
         const clientName =
           scopeOrganizationName
           || clientOptions.find((c) => c.id === scopedClientId)?.name
           || scopeContactName
           || 'לקוח';
         setProcessJournalSupplement([]);
-        setEvents(mapEventsResponse(rows, scopedClientId, clientName));
+        setEvents(mapEventsResponse(parsed.rows, scopedClientId, clientName));
         setEventsLoadSeq((n) => n + 1);
         return;
       }
@@ -3380,31 +3763,46 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         appendServerJournalListQuery(allQs, journalServerFilterSnapshot, {
           contactId: scopeContactId || undefined,
           candidateId: scopeCandidateId || undefined,
+          offset: listOffset,
+          pageSize: JOURNAL_PAGE_SIZE,
         });
       } else {
         allQs.set('summary', '1');
         allQs.set('limit', '800');
       }
-      if (scopedClientId) allQs.set('clientId', scopedClientId);
       if (scopedOrganizationId && !scopedToPerson) allQs.set('organizationId', scopedOrganizationId);
       if (scopedOrganizationTmpId && !scopedToPerson) allQs.set('organizationTmpId', scopedOrganizationTmpId);
-      const res = await fetch(`${apiBase}/api/clients/all-events?${allQs.toString()}`, {
-        credentials: 'include',
-        headers: authHeaders(),
-        cache: 'no-store',
-      });
-      if (!res.ok) throw new Error('טעינת אירועים נכשלה');
-      const rows = await res.json();
+      const allEventsUrl = `${apiBase}/api/clients/all-events?${allQs.toString()}`;
+      const body = await fetchClientJournalEventsList(
+        allEventsUrl,
+        {
+          credentials: 'include',
+          headers: authHeaders(),
+          cache: 'no-store',
+        },
+        { force: opts?.force, parentSignal: listAbort.signal },
+      );
+      const parsed = serverJournalListMode
+        ? parseJournalListResponse(body)
+        : { rows: Array.isArray(body) ? body : [], hasMore: false, offset: 0 };
+      if (serverJournalListMode) {
+        setJournalListHasMore(parsed.hasMore);
+        setJournalListEmptyReason(parsed.emptyReason ?? null);
+      }
       setProcessJournalSupplement([]);
-      setEvents(mapEventsResponse(rows));
+      setEvents(mapEventsResponse(parsed.rows));
       setEventsLoadSeq((n) => n + 1);
     } catch (e) {
+      if ((e as Error)?.name === 'AbortError') return;
       if (!opts?.silent) {
         setError((e as Error)?.message || 'שגיאה בטעינת אירועים');
         setEvents([]);
         setProcessJournalSupplement([]);
       }
     } finally {
+      if (journalListLoadAbortRef.current === listAbort) {
+        journalListLoadAbortRef.current = null;
+      }
       if (!opts?.silent) setLoading(false);
     }
   }, [
@@ -3424,23 +3822,110 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     crossClientJournal,
     serverJournalListMode,
     journalServerFilterSnapshot,
+    journalListOffset,
     hideFilters,
+    journalListClientId,
   ]);
 
   const loadRef = useRef(load);
   loadRef.current = load;
   const embeddedInitialLoadKeyRef = useRef<string | null>(null);
+  /** Prevent refetch storms when filter scope state churns without real filter changes. */
+  const lastJournalListFetchRef = useRef<{ key: string; at: number }>({ key: '', at: 0 });
+  const prevJournalFetchKeyRef = useRef('');
+  const JOURNAL_LIST_MIN_REFETCH_MS = serverJournalListMode ? JOURNAL_LIST_POLL_MS : 2500;
+  const silentJournalReloadAtRef = useRef(0);
+
+  useEffect(() => {
+    if (!serverJournalListMode) return;
+    setJournalListOffset(0);
+  }, [serverJournalListMode, journalServerFilterKey]);
+
+  const journalEventsLoadScopeKey = useMemo(
+    () =>
+      [
+        crossClientJournal ? 'admin-all-events' : (journalListClientId ?? ''),
+        crossClientJournal ? '' : (defaultClientId ?? ''),
+        crossClientJournal ? '' : clientOptionsSignature,
+        crossClientJournal ? '1' : '0',
+        scopeOrganizationId ?? '',
+        scopeOrganizationTmpId ?? '',
+        scopeContactId ?? '',
+        scopeCandidateId ?? '',
+        serverJournalListMode ? String(journalListOffset) : '',
+      ].join('|'),
+    [
+      journalListClientId,
+      defaultClientId,
+      clientOptionsSignature,
+      crossClientJournal,
+      scopeOrganizationId,
+      scopeOrganizationTmpId,
+      scopeContactId,
+      scopeCandidateId,
+      serverJournalListMode,
+      journalListOffset,
+    ],
+  );
 
   useEffect(() => {
     if (embeddedInModal) return;
+    if (!apiBase) return;
+    const fetchKey = `${journalServerFilterKey}|${journalEventsLoadScopeKey}`;
+    const filterChanged = prevJournalFetchKeyRef.current !== fetchKey;
+    prevJournalFetchKeyRef.current = fetchKey;
+    let cancelled = false;
+    const runLoad = (force: boolean) => {
+      if (cancelled) return;
+      const now = Date.now();
+      const last = lastJournalListFetchRef.current;
+      if (
+        !force
+        && last.key === fetchKey
+        && now - last.at < JOURNAL_LIST_MIN_REFETCH_MS
+      ) {
+        return;
+      }
+      lastJournalListFetchRef.current = { key: fetchKey, at: now };
+      void loadRef.current({ force: force || filterChanged });
+    };
     if (serverJournalListMode) {
-      const timer = window.setTimeout(() => {
-        void loadRef.current();
-      }, 350);
-      return () => window.clearTimeout(timer);
+      const timer = window.setTimeout(() => runLoad(filterChanged), 350);
+      return () => {
+        cancelled = true;
+        window.clearTimeout(timer);
+      };
     }
-    void loadRef.current();
-  }, [embeddedInModal, serverJournalListMode, journalServerFilterSnapshot, load]);
+    runLoad(true);
+  }, [
+    embeddedInModal,
+    apiBase,
+    serverJournalListMode,
+    journalServerFilterKey,
+    journalEventsLoadScopeKey,
+    JOURNAL_LIST_MIN_REFETCH_MS,
+  ]);
+
+  useEffect(() => {
+    if (embeddedInModal || !apiBase || !serverJournalListMode) return undefined;
+    const timer = window.setInterval(() => {
+      void loadRef.current({ silent: true, force: true });
+    }, JOURNAL_LIST_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [
+    embeddedInModal,
+    apiBase,
+    serverJournalListMode,
+    journalServerFilterKey,
+    journalEventsLoadScopeKey,
+  ]);
+
+  useEffect(
+    () => () => {
+      journalListLoadAbortRef.current?.abort();
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!embeddedInModal || !scopeJobLinkId) return;
@@ -3453,7 +3938,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const reloadJournal = () => {
-      void load({ silent: true });
+      const now = Date.now();
+      if (now - silentJournalReloadAtRef.current < JOURNAL_LIST_POLL_MS) return;
+      silentJournalReloadAtRef.current = now;
+      void loadRef.current({ silent: true, force: true });
     };
     window.addEventListener('hiro:candidate-profile-approved', reloadJournal);
     window.addEventListener('hiro:candidate-missing-details-completed', reloadJournal);
@@ -3465,33 +3953,31 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       window.removeEventListener('hiro:outbound-message-logged', reloadJournal);
       window.removeEventListener('hiro:candidate-pipeline-stage-moved', reloadJournal);
     };
-  }, [load]);
-
-  const eventClientIdsKey = useMemo(() => {
-    const ids = new Set<string>();
-    for (const ev of events) {
-      if (ev.clientId) ids.add(String(ev.clientId));
-    }
-    return [...ids].sort().join('|');
-  }, [events]);
+  }, []);
 
   const catalogClientIdsKey = useMemo(() => {
     if (embeddedInModal) {
       return String(defaultClientId || settingsClientId || '').trim();
     }
-    const ids = new Set<string>();
-    if (settingsClientId) ids.add(String(settingsClientId));
-    if (defaultClientId) ids.add(String(defaultClientId));
-    if (createClientId) ids.add(String(createClientId));
-    for (const part of clientOptionsSignature.split(';')) {
-      const id = part.split('|')[0]?.trim();
-      if (id) ids.add(id);
+    if (crossClientJournal) {
+      const ids = new Set<string>();
+      if (settingsClientId) ids.add(String(settingsClientId));
+      if (defaultClientId) ids.add(String(defaultClientId));
+      for (const part of clientOptionsSignature.split(';')) {
+        const id = part.split('|')[0]?.trim();
+        if (id) ids.add(id);
+      }
+      return [...ids].sort().join('|');
     }
-    for (const id of eventClientIdsKey.split('|')) {
-      if (id) ids.add(id);
-    }
-    return [...ids].sort().join('|');
-  }, [embeddedInModal, settingsClientId, defaultClientId, createClientId, clientOptionsSignature, eventClientIdsKey]);
+    return String(settingsClientId || defaultClientId || user?.clientId || '').trim();
+  }, [
+    embeddedInModal,
+    crossClientJournal,
+    settingsClientId,
+    defaultClientId,
+    user?.clientId,
+    clientOptionsSignature,
+  ]);
 
   useEffect(() => {
     if (!catalogClientIdsKey) return;
@@ -3503,18 +3989,34 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       embeddedInModal
         ? Promise.resolve([] as { cid: string; rows: PipelineDto[] }[])
         : Promise.all(
-            catalogClientIds.map((cid) =>
-              fetchPipelines(cid)
-                .then((rows) => ({ cid, rows: Array.isArray(rows) ? rows : [] }))
-                .catch(() => ({ cid, rows: [] as PipelineDto[] })),
-            ),
+            catalogClientIds.map(async (cid) => {
+              try {
+                const url = `${apiBase}/api/clients/${encodeURIComponent(cid)}/pipelines`;
+                const json = (await fetchJsonGetCached(url, {
+                  headers: authHeaders(),
+                  cache: 'no-store',
+                })) as { pipelines?: PipelineDto[] };
+                const rows = Array.isArray(json?.pipelines) ? json.pipelines : [];
+                return { cid, rows };
+              } catch {
+                return { cid, rows: [] as PipelineDto[] };
+              }
+            }),
           ),
       Promise.all(
-        catalogClientIds.map((cid) =>
-          fetchCandidatePipelines(cid)
-            .then((rows) => ({ cid, rows: Array.isArray(rows) ? rows : [] }))
-            .catch(() => ({ cid, rows: [] as PipelineDto[] })),
-        ),
+        catalogClientIds.map(async (cid) => {
+          try {
+            const url = `${apiBase}/api/clients/${encodeURIComponent(cid)}/candidate-pipelines`;
+            const json = (await fetchJsonGetCached(url, {
+              headers: authHeaders(),
+              cache: 'no-store',
+            })) as { pipelines?: PipelineDto[] };
+            const rows = Array.isArray(json?.pipelines) ? json.pipelines : [];
+            return { cid, rows };
+          } catch {
+            return { cid, rows: [] as PipelineDto[] };
+          }
+        }),
       ),
       embeddedInModal || !apiBase
         ? Promise.resolve(SYSTEM_EVENT_GROUPS_FALLBACK)
@@ -3591,9 +4093,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   );
 
   useEffect(() => {
+    if (crossClientJournal) return;
     if (defaultClientId) setCreateClientId(defaultClientId);
     else if (!createClientId && clientOptions[0]?.id) setCreateClientId(clientOptions[0].id);
-  }, [defaultClientId, clientOptions, createClientId]);
+  }, [defaultClientId, clientOptions, crossClientJournal]);
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -3775,13 +4278,17 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     );
   }, [actionPipelineContext, selectedStageOutcomeKeys]);
 
+  const selectedEventLocked = isEventLocked(selectedEvent);
   const sidebarOutcomes = useMemo(() => {
+    if (selectedEventLocked) {
+      return [...currentOutcomes.filter(isOutcomeAllowedOnLockedEvent), GENERAL_OUTCOME_ACTION];
+    }
     const hasConfiguredGeneral = currentOutcomes.some(
       (o) => o.title.trim() === GENERAL_OUTCOME_ACTION.title,
     );
     if (hasConfiguredGeneral) return currentOutcomes;
     return [...currentOutcomes, GENERAL_OUTCOME_ACTION];
-  }, [currentOutcomes]);
+  }, [currentOutcomes, selectedEventLocked]);
 
   const currentStageLabel = useMemo(() => {
     if (!actionPipelineContext) return selectedEvent?.stage || '';
@@ -4118,17 +4625,93 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       candidates: [...candidates].sort(sortHe),
     };
   }, [staffEditorNames, events]);
+  const contactNamesFromJournalEvents = useMemo(() => {
+    const names = new Set<string>();
+    for (const event of events) {
+      const label = String(event.contactName || '').trim();
+      if (label) names.add(label);
+      for (const linked of parseEventLinkedContacts(event)) {
+        const linkedName = String(linked.name || '').trim();
+        if (linkedName) names.add(linkedName);
+      }
+    }
+    return [...names];
+  }, [events]);
   const assigneeOptionsForEdit = useMemo(() => {
     if (canSelectOtherCoordinators) {
-      const contactNames = contactLookupRows
-        .map((row) => String(row.name || '').trim())
-        .filter(Boolean);
       const options =
         assigneeOptions.length > 0 ? assigneeOptions : [selfCoordinatorName];
-      return Array.from(new Set([...options, ...contactNames].filter(Boolean)));
+      return Array.from(
+        new Set([
+          ...options,
+          ...contactNamesFromJournalEvents,
+          ...assigneeSearchContactNames,
+        ].filter(Boolean)),
+      );
     }
     return [selfCoordinatorName];
-  }, [canSelectOtherCoordinators, assigneeOptions, selfCoordinatorName, contactLookupRows]);
+  }, [
+    canSelectOtherCoordinators,
+    assigneeOptions,
+    selfCoordinatorName,
+    contactNamesFromJournalEvents,
+    assigneeSearchContactNames,
+  ]);
+  useEffect(() => {
+    if (!canSelectOtherCoordinators) {
+      setAssigneeSearchContactNames([]);
+      return;
+    }
+    const q = handlingCoordinatorDropdownSearch.trim();
+    if (q.length < 2 || !apiBase) {
+      setAssigneeSearchContactNames([]);
+      return;
+    }
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const query = `?lookup=1&limit=30&q=${encodeURIComponent(q)}`;
+          const url = crossClientJournal
+            ? `${apiBase}/api/clients/all-contacts${query}`
+            : contactsLookupClientId
+              ? `${apiBase}/api/clients/${encodeURIComponent(contactsLookupClientId)}/contacts${query}`
+              : '';
+          if (!url) return;
+          const res = await fetch(url, {
+            credentials: 'include',
+            headers: authHeaders(),
+            cache: 'no-store',
+          });
+          if (!active || !res.ok) return;
+          const json = await res.json();
+          const list = Array.isArray(json) ? json : [];
+          const names = list
+            .map((row) => String((row as Record<string, unknown>).name || '').trim())
+            .filter(Boolean);
+          setAssigneeSearchContactNames(names);
+          const rows = list
+            .map((row) => mapApiRowToContactLookupRow(row as Record<string, unknown>))
+            .filter(Boolean) as ContactLookupRow[];
+          if (rows.length) {
+            setContactLookupRows((prev) => mergeContactLookupRows(prev, rows));
+          }
+        } catch {
+          if (active) setAssigneeSearchContactNames([]);
+        }
+      })();
+    }, 300);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [
+    canSelectOtherCoordinators,
+    handlingCoordinatorDropdownSearch,
+    apiBase,
+    crossClientJournal,
+    contactsLookupClientId,
+  ]);
   const filteredHandlingCoordinatorGroups = useMemo(() => {
     const q = handlingCoordinatorDropdownSearch.trim().toLowerCase();
     const filterNames = (names: string[]) =>
@@ -4366,7 +4949,10 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   useEffect(() => {
     if (loading || !defaultActionPipelineId || !apiBase) return;
 
-    setSelectedPipelineIds(new Set([defaultActionPipelineId]));
+    setSelectedPipelineIds((prev) => {
+      if (prev.size === 1 && prev.has(defaultActionPipelineId)) return prev;
+      return new Set([defaultActionPipelineId]);
+    });
 
     const match = findProcessEventForPipeline(
       events,
@@ -4381,6 +4967,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     );
 
     if (!match) return;
+
+    if (expandedEventId && events.some((event) => event.id === expandedEventId)) {
+      lastAutoSelectedPipelineRef.current = `${defaultActionPipelineId}:${expandedEventId}`;
+      return;
+    }
 
     const selectionKey = `${defaultActionPipelineId}:${match.id}`;
     if (lastAutoSelectedPipelineRef.current === selectionKey) return;
@@ -4406,6 +4997,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     scopeOrganizationTmpId,
     scopeOrganizationName,
     apiBase,
+    expandedEventId,
   ]);
 
   useEffect(() => {
@@ -4574,6 +5166,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const handlePreviewOutcome = (outcome: ActionOutcome) => {
     if (!selectedEvent || selectedEvent.isActive === false) return;
+    if (isEventLocked(selectedEvent) && !isOutcomeAllowedOnLockedEvent(outcome)) return;
     const isGeneralNote = outcome.id === GENERAL_OUTCOME_ID;
     if (!actionPipelineContext?.pipeline.id) {
       alert('לא נמצא תהליך לתוצאה זו');
@@ -4675,7 +5268,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         const patchResult = await persistEventPatch(sourceEvent, { updates: nextUpdates, history });
         if (!patchResult.ok) {
           alert('שמירת ההערה נכשלה');
-          void load({ silent: true });
+          invalidateClientJournalEventsListCache();
+          void load({ silent: true, force: true });
           return false;
         }
 
@@ -4690,7 +5284,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           clientEventId: sourceEvent.id,
           clientId: sourceEvent.clientId,
         });
-        void load({ silent: true });
         onEventsChanged?.();
         return true;
       }
@@ -4709,21 +5302,46 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         ...(historyComment ? { historyComment } : {}),
       });
 
-      const patchedFromAction = patchEventFromActionResult(sourceEvent, result.actionResult);
-      const updatedEvent =
-        result.actionResult?.event && typeof result.actionResult.event === 'object'
-          ? normalizeRow({
-              ...(result.actionResult.event as Record<string, unknown>),
-              clientId: sourceEvent.clientId,
-              clientName: sourceEvent.clientName,
-            })
-          : patchedFromAction
-            ? normalizeRow({
-                ...patchedFromAction,
-                clientId: sourceEvent.clientId,
-                clientName: sourceEvent.clientName,
-              })
-            : null;
+      const actionResult =
+        result.actionResult && typeof result.actionResult === 'object'
+          ? (result.actionResult as Record<string, unknown>)
+          : null;
+      const serverEvent =
+        actionResult?.event && typeof actionResult.event === 'object'
+          ? (actionResult.event as Record<string, unknown>)
+          : null;
+      const serverEventSameCard =
+        serverEvent && String(serverEvent.id || '') === String(sourceEvent.id);
+      const patchedFromAction = actionResult
+        ? patchEventFromActionResult(sourceEvent, actionResult)
+        : null;
+      let updatedEvent = applyOutcomeOntoCurrentEvent(sourceEvent, draft, actionResult);
+      if (serverEventSameCard) {
+        updatedEvent = applyOutcomeOntoCurrentEvent(
+          normalizeRow({
+            ...serverEvent,
+            clientId: sourceEvent.clientId,
+            clientName: sourceEvent.clientName,
+          }),
+          draft,
+          actionResult,
+        );
+      } else if (patchedFromAction) {
+        updatedEvent = applyOutcomeOntoCurrentEvent(patchedFromAction, draft, actionResult);
+      }
+
+      if (result.actionResult?.closed === true) {
+        const closedLocal = { ...(updatedEvent || sourceEvent), isActive: false };
+        const isJournalCard =
+          sourceEvent.metadata?.journalEntry === true
+          || String(sourceEvent.id).startsWith('initial-');
+        if (isJournalCard && scopeJobLinkId) {
+          const persisted = await persistEventPatch(sourceEvent, { isActive: false });
+          updatedEvent = persisted.ok ? persisted.row : closedLocal;
+        } else {
+          updatedEvent = closedLocal;
+        }
+      }
 
       const previousDueDate = sourceEvent.dueDate;
       const wasVisible = eventPassesFilters(sourceEvent);
@@ -4792,12 +5410,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         clientEventId: sourceEvent.id,
         clientId: sourceEvent.clientId,
       });
-      void load({ silent: true });
       onEventsChanged?.();
       return true;
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'עדכון הסטטוס נכשלה');
-      void load({ silent: true });
+      invalidateClientJournalEventsListCache();
+      void load({ silent: true, force: true });
       return false;
     } finally {
       setCommittingOutcome(false);
@@ -4840,7 +5458,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     } else if (automationSummary) {
       alert(`הפעולה בוצעה · ${automationSummary}`);
     }
-    await load();
+    invalidateClientJournalEventsListCache();
+    await load({ force: true });
     onEventsChanged?.();
   };
 
@@ -4856,7 +5475,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     const result = await persistEventPatch(event, { isActive: true });
     if (!result.ok) {
       alert('הפעלת האירוע מחדש נכשלה');
-      await load();
+      invalidateClientJournalEventsListCache();
+      await load({ force: true });
       return;
     }
     setEvents((prev) =>
@@ -4897,10 +5517,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           return mapContactRowsToOptions(await res.json());
         };
         let options = orgId
-          ? await fetchContacts(`?organizationId=${encodeURIComponent(orgId)}`)
-          : await fetchContacts();
+          ? await fetchContacts(
+              `?lookup=1&limit=100&organizationId=${encodeURIComponent(orgId)}`,
+            )
+          : await fetchContacts('?lookup=1&limit=100');
         if (orgId && options.length === 0) {
-          options = await fetchContacts();
+          options = await fetchContacts('?lookup=1&limit=100');
         }
         setEditContactOptions(options);
       } catch {
@@ -4940,7 +5562,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   };
 
   const handleEditDescription = (event: JournalEvent) => {
-    if (event.isActive === false) return;
+    if (event.isActive === false || isEventLocked(event)) return;
     const mergedEvent = mergeEventWithPendingOutcome(
       event,
       pendingOutcomeDraft,
@@ -5032,6 +5654,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     update: { id: string; title: string; comment?: string },
   ) => {
     if (event.isActive === false) return;
+    if (isEventLocked(event) && !String(update.id).startsWith('draft-outcome-')) return;
     setEditingStatusUpdateKey(statusUpdateEditKey(event, update.id));
     setStatusUpdateEditDraft({
       title: update.title || '',
@@ -5127,7 +5750,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       const result = await persistEventPatch(event, patch);
       if (!result.ok) {
         alert('שמירת העדכון נכשלה');
-        await load({ silent: true });
+        invalidateClientJournalEventsListCache();
+        await load({ silent: true, force: true });
         return;
       }
       setEvents((prev) =>
@@ -5328,7 +5952,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         );
       } catch (syncErr) {
         alert(syncErr instanceof Error ? syncErr.message : 'עדכון השלב בתהליך נכשל');
-        await load();
+        invalidateClientJournalEventsListCache();
+        await load({ force: true });
         return;
       }
     }
@@ -5336,7 +5961,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     const result = await persistEventPatch(event, patch);
     if (!result.ok) {
       alert('שמירת האירוע נכשלה');
-      await load();
+      invalidateClientJournalEventsListCache();
+      await load({ force: true });
       return;
     }
     setEvents((prev) =>
@@ -5419,7 +6045,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       const err = await res.json().catch(() => ({}));
       throw new Error((err as { message?: string }).message || 'יצירת האירוע נכשלה');
     }
-    await load();
+    invalidateClientJournalEventsListCache();
+    setJournalListOffset(0);
+    await load({ force: true, offset: 0 });
     onEventsChanged?.();
   };
 
@@ -6440,7 +7068,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                 <ClockIcon className="w-5 h-5 text-primary-600" />
                 יומן אירועים מערכתי
                 <span className="text-sm font-normal text-text-muted bg-gray-200 px-2 rounded-full ml-2">
-                  {filteredEvents.length} אירועים
+                  {serverJournalListMode
+                    ? `${displayEvents.length} בעמוד${journalListHasMore ? '+' : ''}`
+                    : `${filteredEvents.length} אירועים`}
                 </span>
               </h3>
               <div className="flex items-center gap-2 flex-wrap">
@@ -6525,10 +7155,17 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               {loading && events.length === 0 ? (
                 <div className="text-center py-12 text-text-muted">טוען אירועים...</div>
               ) : displayEvents.length === 0 ? (
-                <div className="text-center py-12 flex flex-col items-center">
+                <div className="text-center py-12 flex flex-col items-center max-w-md mx-auto">
                   <FunnelIcon className="w-12 h-12 text-gray-300 mb-4" />
                   <h4 className="text-lg font-bold text-gray-700">לא נמצאו אירועים</h4>
-                  <p className="text-gray-500">נסה לשנות את תנאי הסינון כדי לראות תוצאות.</p>
+                  {journalListEmptyReason === 'no_events_on_client' ? (
+                    <p className="text-gray-500 mt-2">
+                      ללקוח שנבחר אין אירועים במערכת (0 בבסיס הנתונים). בחר לקוח אחר מהרשימה למעלה —
+                      למשל הלקוח שבו יש פעילות יומן.
+                    </p>
+                  ) : (
+                    <p className="text-gray-500 mt-2">נסה לשנות את תנאי הסינון כדי לראות תוצאות.</p>
+                  )}
                 </div>
               ) : (
                 <AnimatePresence initial={false} mode="popLayout">
@@ -6553,6 +7190,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                   const isSelected = expandedEventId === event.id;
                   const isExpanded = isSelected;
                   const isInactive = displayEvent.isActive === false;
+                  const isLocked = isEventLocked(event);
                   const hasPendingOutcomeDraft =
                     pendingOutcomeDraft?.eventKey === eventKey;
                   const candidateIdForDrawer = resolveCandidateIdForDrawer(event, scopeCandidateId);
@@ -7044,7 +7682,16 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                               >
                                 {event.description || <span className="text-gray-400 italic">אין תיאור</span>}
                               </p>
-                              {!isInactive ? (
+                              {!isInactive && isLocked ? (
+                                <span
+                                  className="absolute top-3 left-3 w-8 h-8 rounded-full bg-gray-50 flex items-center justify-center border border-gray-200 text-gray-400 shadow-sm z-10 cursor-help"
+                                  title={LOCKED_EVENT_TOOLTIP}
+                                  aria-label={LOCKED_EVENT_TOOLTIP}
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <LockClosedIcon className="w-4 h-4" />
+                                </span>
+                              ) : !isInactive ? (
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -7264,7 +7911,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                             טיוטה
                                           </span>
                                         ) : null}
-                                        {!isInactive || isDraftUpdate ? (
+                                        {(!isInactive && !isLocked) || isDraftUpdate ? (
                                           <button
                                             type="button"
                                             onClick={() => handleStartEditStatusUpdate(event, update)}
@@ -7394,6 +8041,31 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                 })}
                 </AnimatePresence>
               )}
+              {serverJournalListMode && !embeddedInModal ? (
+                <div className="flex items-center justify-between gap-3 pt-4 mt-2 border-t border-border-default">
+                  <button
+                    type="button"
+                    disabled={journalListOffset === 0 || loading}
+                    onClick={() => setJournalListOffset((o) => Math.max(0, o - JOURNAL_PAGE_SIZE))}
+                    className="px-3 py-1.5 rounded-lg text-sm font-semibold border border-border-default bg-white disabled:opacity-40 hover:bg-bg-hover"
+                  >
+                    הקודם
+                  </button>
+                  <span className="text-sm text-text-muted tabular-nums">
+                    עמוד {Math.floor(journalListOffset / JOURNAL_PAGE_SIZE) + 1}
+                    <span className="mx-1">·</span>
+                    {JOURNAL_PAGE_SIZE} לעמוד
+                  </span>
+                  <button
+                    type="button"
+                    disabled={!journalListHasMore || loading}
+                    onClick={() => setJournalListOffset((o) => o + JOURNAL_PAGE_SIZE)}
+                    className="px-3 py-1.5 rounded-lg text-sm font-semibold border border-border-default bg-white disabled:opacity-40 hover:bg-bg-hover"
+                  >
+                    הבא
+                  </button>
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -7552,6 +8224,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                         <InformationCircleIcon className="w-5 h-5 shrink-0" />
                         מה אפשר לעשות בשלב זה?
                       </button>
+                    </div>
+                  ) : null}
+                  {selectedEventLocked ? (
+                    <div className="flex items-start gap-2 px-3 py-2 mb-2 rounded-xl border border-gray-200 bg-gray-50 text-xs text-text-muted">
+                      <LockClosedIcon className="w-4 h-4 shrink-0 mt-0.5 text-gray-400" />
+                      <span>{LOCKED_EVENT_TOOLTIP}</span>
                     </div>
                   ) : null}
                   {sidebarOutcomes.map((outcome) => {

@@ -56,6 +56,8 @@ import {
 import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
 import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferralEvents';
 import { fetchRecruitmentStatuses } from '../services/recruitmentStatusesApi';
+import { DEFAULT_CV_PROFILE_KIND, type CvProfileKind } from '../utils/cvProfileKind';
+import CvProfileKindPicker from './CvProfileKindPicker';
 
 export { buildResumeDataFromCandidate };
 export type { ScreeningJobSkillRow, ScreeningJobLanguageRow };
@@ -1281,6 +1283,8 @@ const CandidateScreeningView: React.FC<{
     const [sendCvSubmitting, setSendCvSubmitting] = useState(false);
     const [sendAttachOriginalCv, setSendAttachOriginalCv] = useState(true);
     const [sendAttachSystemPdf, setSendAttachSystemPdf] = useState(false);
+    const [sendCvProfileKind, setSendCvProfileKind] = useState<CvProfileKind>(DEFAULT_CV_PROFILE_KIND);
+    const [sendCvSourceCandidate, setSendCvSourceCandidate] = useState<Record<string, unknown> | null>(null);
     const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<{
       jobId: number | string;
       x: number;
@@ -2109,6 +2113,8 @@ const CandidateScreeningView: React.FC<{
       setSendCvSubmitting(false);
       setSendAttachOriginalCv(true);
       setSendAttachSystemPdf(false);
+      setSendCvProfileKind(DEFAULT_CV_PROFILE_KIND);
+      setSendCvSourceCandidate(null);
     }, []);
 
     const openSendCvModal = useCallback(() => {
@@ -2117,8 +2123,44 @@ const CandidateScreeningView: React.FC<{
       const hasFile = Boolean(candidateResumeData.resumeUrl);
       setSendAttachOriginalCv(hasFile);
       setSendAttachSystemPdf(!hasFile);
+      setSendCvProfileKind(DEFAULT_CV_PROFILE_KIND);
       setSendCvModalOpen(true);
     }, [selectedJobs, candidateResumeData.resumeUrl]);
+
+    useEffect(() => {
+      if (!sendCvModalOpen || !candidateId || !apiBase) return;
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      if (!token) return;
+      const controller = new AbortController();
+      void (async () => {
+        try {
+          const res = await fetch(
+            `${apiBase}/api/candidates/${encodeURIComponent(String(candidateId))}/referral-cv-profile?kind=${encodeURIComponent(sendCvProfileKind)}`,
+            {
+              signal: controller.signal,
+              headers: { Authorization: `Bearer ${token}` },
+              cache: 'no-store',
+            },
+          );
+          if (!res.ok) return;
+          const data = await res.json();
+          if (data?.candidate && typeof data.candidate === 'object') {
+            setSendCvSourceCandidate(data.candidate as Record<string, unknown>);
+          }
+        } catch (err) {
+          if ((err as { name?: string })?.name === 'AbortError') return;
+        }
+      })();
+      return () => controller.abort();
+    }, [sendCvModalOpen, candidateId, sendCvProfileKind]);
+
+    const sendCvResumeData = useMemo(
+      () =>
+        sendCvSourceCandidate
+          ? buildResumeDataFromCandidate(sendCvSourceCandidate as any, String(sendCvSourceCandidate.id || candidateId || ''))
+          : candidateResumeData,
+      [sendCvSourceCandidate, candidateResumeData, candidateId],
+    );
 
     const toggleSendContact = useCallback((jobId: string, contactId: string) => {
       setSelectedContactsByJob((prev) => ({
@@ -2215,7 +2257,7 @@ const CandidateScreeningView: React.FC<{
         alert('בחרו לפחות סוג קובץ אחד לצירוף.');
         return;
       }
-      if (sendAttachOriginalCv && !candidateResumeData.resumeUrl) {
+      if (sendAttachOriginalCv && !sendCvResumeData.resumeUrl) {
         alert('אין קובץ מקורי למועמד — בטלו את \"קובץ מועמד מקורי\" או סמנו \"קובץ מועמד מערכת\".');
         return;
       }
@@ -2231,16 +2273,16 @@ const CandidateScreeningView: React.FC<{
         let systemCvPdfBase64: string | undefined;
         if (sendAttachSystemPdf) {
           try {
-            const summaryHtml = (candidateResumeData.summary || '').replace(
+            const summaryHtml = (sendCvResumeData.summary || '').replace(
               /עבודה עצמאית/g,
               '<span style="background:rgba(254,240,138,0.55);padding:2px 4px;border-radius:4px;">עבודה עצמאית</span>',
             );
             const pdfHtml = buildParsedScreeningCvHtmlForPdf(
-              candidateResumeData.name,
-              candidateResumeData.contact,
+              sendCvResumeData.name,
+              sendCvResumeData.contact,
               summaryHtml,
-              candidateResumeData.experience,
-              candidateResumeData.education,
+              sendCvResumeData.experience,
+              sendCvResumeData.education,
               {
                 summary: t('section.summary'),
                 work: t('section.work_experience'),
@@ -2293,6 +2335,7 @@ const CandidateScreeningView: React.FC<{
           },
           body: JSON.stringify({
             candidateId,
+            cvProfileKind: sendCvProfileKind,
             attachOriginalCv: sendAttachOriginalCv,
             attachSystemCvPdf: sendAttachSystemPdf,
             systemCvPdfBase64: systemCvPdfBase64 || undefined,
@@ -2327,16 +2370,17 @@ const CandidateScreeningView: React.FC<{
       internalOpinionByJobId,
       getScreeningForJob,
       candidateId,
-      candidateResumeData.name,
-      candidateResumeData.resumeUrl,
-      candidateResumeData.contact,
-      candidateResumeData.summary,
-      candidateResumeData.experience,
-      candidateResumeData.education,
+      sendCvResumeData.name,
+      sendCvResumeData.resumeUrl,
+      sendCvResumeData.contact,
+      sendCvResumeData.summary,
+      sendCvResumeData.experience,
+      sendCvResumeData.education,
       closeSendCvModal,
       apiBase,
       sendAttachOriginalCv,
       sendAttachSystemPdf,
+      sendCvProfileKind,
       t,
     ]);
 
@@ -3114,7 +3158,7 @@ const CandidateScreeningView: React.FC<{
                           <span className="font-bold">{candidateResumeData.name}</span> עבור{' '}
                           <span className="font-bold">{sendModalJobIds.length}</span> משרות, עם חוות הדעת המקצועית
                           שהוזנה. הקבצים המצורפים למייל ייקבעו לפי הבחירה למטה.
-                          {!candidateResumeData.resumeUrl ? (
+                          {!sendCvResumeData.resumeUrl ? (
                             <span className="block mt-2 font-semibold text-primary-900">
                               אין קובץ מקורי שמור למועמד — יוצג קובץ מערכת (PDF) כברירת מחדל.
                             </span>
@@ -3309,6 +3353,13 @@ const CandidateScreeningView: React.FC<{
                         </div>
                       </div>
                       <div className="space-y-3 pt-2 border-t border-border-default/60">
+                        <CvProfileKindPicker
+                          value={sendCvProfileKind}
+                          onChange={setSendCvProfileKind}
+                          disabled={sendCvSubmitting}
+                        />
+                      </div>
+                      <div className="space-y-3 pt-2 border-t border-border-default/60">
                         <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">קבצים מצורפים למייל</h4>
                         <label className="flex items-start gap-3 cursor-pointer text-sm text-text-default">
                           <input
@@ -3316,13 +3367,13 @@ const CandidateScreeningView: React.FC<{
                             className="mt-1 rounded border-border-default"
                             checked={sendAttachOriginalCv}
                             onChange={(e) => setSendAttachOriginalCv(e.target.checked)}
-                            disabled={sendCvSubmitting || !candidateResumeData.resumeUrl}
+                            disabled={sendCvSubmitting || !sendCvResumeData.resumeUrl}
                           />
                           <span>
                             <span className="font-semibold block">קובץ מועמד מקורי</span>
                             <span className="text-text-subtle text-xs">
                               הקובץ כפי שהועלה למערכת (PDF, Word וכו&apos;).
-                              {!candidateResumeData.resumeUrl ? ' — לא זמין למועמד זה.' : ''}
+                              {!sendCvResumeData.resumeUrl ? ' — לא זמין למועמד זה.' : ''}
                             </span>
                           </span>
                         </label>

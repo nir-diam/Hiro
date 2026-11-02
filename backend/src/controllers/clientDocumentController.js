@@ -3,7 +3,8 @@ const { PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 } = require('uuid');
 const clientService = require('../services/clientService');
-const { createS3Client, buildPublicUrl } = require('../services/s3Service');
+const { createS3Client, buildPublicUrl, toStoredS3Url } = require('../services/s3Service');
+const { presignIfOurS3 } = require('../services/candidateMediaUrlService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
@@ -42,7 +43,12 @@ const list = async (req, res) => {
     } else if (organizationId) {
       docs = docs.filter((d) => String(d?.organizationId || '') === organizationId);
     }
-    res.json(docs.map(sanitizeDocumentRow));
+    const signed = await Promise.all(docs.map(async (doc) => {
+      const row = sanitizeDocumentRow(doc);
+      if (!row?.url) return row;
+      return { ...row, url: await presignIfOurS3(row.url) };
+    }));
+    res.json(signed);
   } catch (err) {
     const timedOut = err?.parent?.code === '57014' || /statement timeout/i.test(String(err?.message || ''));
     res.status(err.status || (timedOut ? 504 : 500)).json({
@@ -53,14 +59,20 @@ const list = async (req, res) => {
 
 // Presigned URL flow (frontend uploads directly to S3)
 const createUploadUrl = async (req, res) => {
-  const { fileName, contentType } = req.body || {};
+  const { fileName, contentType, purpose } = req.body || {};
   if (!fileName || !contentType) {
     return res.status(400).json({ message: 'fileName and contentType are required' });
+  }
+  const isLogo = purpose === 'logo';
+  if (isLogo && !String(contentType).startsWith('image/')) {
+    return res.status(400).json({ message: 'Logo must be an image' });
   }
   try {
     const client = createS3Client();
     const safeName = path.basename(fileName);
-    const key = `client-documents/${req.params.id}/${Date.now()}-${safeName}`;
+    // Logos are shown on the public jobs site; only `public-assets/` is publicly readable in the bucket policy.
+    const folder = isLogo ? 'public-assets/client-logos' : 'client-documents';
+    const key = `${folder}/${req.params.id}/${Date.now()}-${safeName}`;
     const command = new PutObjectCommand({
       Bucket: process.env.AWS_S3_BUCKET,
       Key: key,
@@ -89,7 +101,7 @@ const attach = async (req, res) => {
       notes: payload.notes || '',
       fileSize: payload.fileSize || 0,
       key: payload.key,
-      url: payload.url,
+      url: toStoredS3Url(payload.url),
       organizationId: payload.organizationId != null
         ? (String(payload.organizationId).trim() || null)
         : null,
@@ -126,6 +138,7 @@ const update = async (req, res) => {
     const docId = String(req.params.docId);
     const payload = req.body || {};
     const { uploadedBy: _ignoredUploader, ...metadataPatch } = payload;
+    if (metadataPatch.url !== undefined) metadataPatch.url = toStoredS3Url(metadataPatch.url);
     const next = prev.map((d) => (String(d.id) === docId ? { ...d, ...metadataPatch, id: d.id } : d));
     await clientService.update(req.params.id, { documents: next });
     const updatedDoc = next.find((d) => String(d.id) === docId);

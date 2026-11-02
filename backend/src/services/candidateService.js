@@ -17,10 +17,27 @@ const JobCandidate = require('../models/JobCandidate');
 const { resolveEngineConfigForJob } = require('./matchingEngineService');
 const cityService = require('./cityService');
 const { syncCandidateTagDetailsFromPayload } = require('./candidateTagService');
+const { runWithIngestDbYield } = require('../utils/dbPoolYield');
+const { isEmailIngestActive } = require('../utils/ingestContext');
+const { presignCandidateMediaFields } = require('./candidateMediaUrlService');
+const {
+  shouldCacheListPaginated,
+  getCachedListPaginated,
+  bumpCandidateListCacheVersion,
+} = require('./candidateListCacheService');
+const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
+const { canCacheReads } = require('./readThroughCacheService');
+const matchScoreCache = require('./matchScoreCacheService');
+const {
+  deepSanitizeStringsForPostgres,
+  isUnsupportedUnicodeEscapeError,
+} = require('../utils/sanitizePostgresJson');
 const { normalizeOriginalTextHistory } = require('../utils/parsedTextHistory');
+const { normalizeCvProfileKind, pickReferralShadow } = require('../utils/staffShadowReferral');
 const {
   normalizeWorkExperience,
-  ensureRoleTagCoverage,
+  attachTagIdsToWorkExperience,
+  tagDetailsToRoleSystemTagRows,
 } = require('../utils/workExperienceNormalize');
 const {
   stripCvDocumentTitleFromPersonName,
@@ -47,9 +64,10 @@ const {
 const CANDIDATE_KEY = (id) => `candidate:${id}`;
 const CANDIDATE_TTL = 60 * 60; // 1 hour
 
-const cacheSet = async (candidate) => {
+const cacheSet = async (candidate, { bumpListCache = false } = {}) => {
   try {
     if (candidate?.id) await redis.set(CANDIDATE_KEY(candidate.id), candidate, { ttlSeconds: CANDIDATE_TTL });
+    if (bumpListCache) await bumpCandidateListCacheVersion();
   } catch (e) {
     console.warn('[candidateService] redis set failed (non-fatal):', e.message);
   }
@@ -58,6 +76,8 @@ const cacheSet = async (candidate) => {
 const cacheDel = async (id) => {
   try {
     await redis.del(CANDIDATE_KEY(id));
+    await bumpCandidateListCacheVersion();
+    await matchScoreCache.invalidateCandidateMatchScoreCaches(id);
   } catch (e) {
     console.warn('[candidateService] redis del failed (non-fatal):', e.message);
   }
@@ -358,7 +378,7 @@ const includeCandidateTagsForList = [
       {
         model: Tag,
         as: 'tag',
-        attributes: { exclude: TAG_ATTRIBUTES_EXCLUDE_FOR_LIST },
+        attributes: ['id', 'tagKey', 'displayNameHe', 'displayNameEn', 'category', 'type', 'source'],
       },
     ],
   },
@@ -380,7 +400,7 @@ const attachCandidateTagsBulk = async (instances = []) => {
       {
         model: Tag,
         as: 'tag',
-        attributes: { exclude: TAG_ATTRIBUTES_EXCLUDE_FOR_LIST },
+        attributes: ['id', 'tagKey', 'displayNameHe', 'displayNameEn', 'category', 'type', 'source'],
       },
     ],
     order: [['created_at', 'ASC']],
@@ -421,7 +441,16 @@ const runWithConcurrency = async (items, limit, fn) => {
   return results;
 };
 
-const LIST_SCORE_CONCURRENCY = 12;
+const LIST_SCORE_CONCURRENCY = Math.max(
+  1,
+  Math.min(
+    12,
+    Number.parseInt(process.env.LIST_SCORE_CONCURRENCY || '4', 10) || 4,
+  ),
+);
+
+const listScoreConcurrencyNow = () =>
+  (isEmailIngestActive() ? 1 : LIST_SCORE_CONCURRENCY);
 
 // When SystemTag.raw_type is null, derive from Tag.type so frontend gets correct labels (e.g. Skill, Tool).
 const TAG_TYPE_TO_RAW_TYPE = {
@@ -1015,6 +1044,21 @@ const mapCandidateWithTags = (candidate, options = {}) => {
   if (options.stripListHeavyJson) {
     delete payload.workExperience;
     delete payload.experience;
+    delete payload.matchAnalysis;
+    if (Array.isArray(payload.tagDetails)) {
+      payload.tagDetails = payload.tagDetails.map((td) => ({
+        id: td.id,
+        tagId: td.tagId,
+        tagKey: td.tagKey,
+        displayNameHe: td.displayNameHe,
+        displayNameEn: td.displayNameEn,
+        rawType: td.rawType,
+        isCurrent: td.isCurrent,
+        isInSummary: td.isInSummary,
+        category: td.category,
+        mode: td.mode,
+      }));
+    }
   }
 
   return payload;
@@ -1036,12 +1080,44 @@ async function findManyWithTagsForMatchScore(ids, options = {}) {
   const gridAttributes = options.omitExperienceJson
     ? attributes.filter((name) => name !== 'workExperience' && name !== 'experience' && name !== 'companyExperiences')
     : attributes;
-  const rows = await Candidate.findAll({
-    where: { id: { [Op.in]: unique } },
-    attributes: gridAttributes,
-  });
-  await attachCandidateTagsBulk(rows);
-  return rows;
+
+  const fromRedis = [];
+  const missIds = [];
+  if (isReadThroughEnabled()) {
+    for (const cid of unique) {
+      try {
+        const cached = await redis.get(CANDIDATE_KEY(cid));
+        if (cached?.id) {
+          if (!includeEmbedding || (Array.isArray(cached.embedding) && cached.embedding.length)) {
+            recordHit('candidate');
+            fromRedis.push(cached);
+            continue;
+          }
+        }
+      } catch {
+        /* fall through to DB */
+      }
+      missIds.push(cid);
+    }
+  } else {
+    recordBypass('candidate');
+    missIds.push(...unique);
+  }
+
+  let dbRows = [];
+  if (missIds.length) {
+    if (isReadThroughEnabled()) recordMiss('candidate');
+    dbRows = await Candidate.findAll({
+      where: { id: { [Op.in]: missIds } },
+      attributes: gridAttributes,
+    });
+    await attachCandidateTagsBulk(dbRows);
+  }
+
+  const byId = new Map();
+  for (const row of fromRedis) byId.set(String(row.id), row);
+  for (const row of dbRows) byId.set(String(row.id), row);
+  return unique.map((id) => byId.get(id)).filter(Boolean);
 }
 
 /** Plain candidate shaped like scored list rows for computeFullMatchScore. */
@@ -1152,11 +1228,7 @@ const LIST_GRID_ATTRIBUTES = [
   'title',
   'professionalSummary',
   'profilePicture',
-  'resumeUrl',
   'internalTags',
-  /** Used only to derive sector / company size / field when columns are empty; stripped from list JSON. */
-  'workExperience',
-  'experience',
   'languages',
   'salaryMin',
   'salaryMax',
@@ -1164,12 +1236,10 @@ const LIST_GRID_ATTRIBUTES = [
   'lastActivity',
   'lastActive',
   'matchScore',
-  'matchAnalysis',
   'sector',
   'companySize',
   'field',
   'industry',
-  'industryAnalysis',
   'companyExperiences',
   'isArchived',
   'isDeleted',
@@ -1395,8 +1465,10 @@ const applyCandidateCityFromCatalog = async (payload) => {
       payload.location = null;
       return;
     }
-  // eslint-disable-next-line no-console
-    console.log('[candidateService] city resolved:', { input: raw, canonical });
+    if (!isEmailIngestActive()) {
+      // eslint-disable-next-line no-console
+      console.log('[candidateService] city resolved:', { input: raw, canonical });
+    }
     payload.address = canonical;
     payload.location = canonical;
   } catch (err) {
@@ -1874,21 +1946,22 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
 
   const { embedCandidateAndSave } = require('./vectorSearchService');
 
-  const LIST_SCORE_CACHE_TTL = 120; // 2 min — list scores are lightweight; invalidated on profile save
-  const scoreCacheKey = (cid) => `list-score:${jid}:${cid}`;
+  const listScoreTtl = matchScoreCache.LIST_SCORE_TTL_SECONDS;
 
-  await runWithConcurrency(modelRows, LIST_SCORE_CONCURRENCY, async (inst) => {
+  await runWithConcurrency(modelRows, listScoreConcurrencyNow(), async (inst) => {
     const cid = String(inst.id);
     if (opts.scoreDeadline && Date.now() >= opts.scoreDeadline) return;
     let pkg = { matchScore: 0, scoreBreakdown: null, parameterMatches: {} };
 
     // Try Redis cache first
-    if (isRedisAvailable()) {
-      const cached = await redis.get(scoreCacheKey(cid));
+    if (isRedisAvailable() && isReadThroughEnabled()) {
+      const cached = await redis.get(matchScoreCache.listScoreKey(jid, cid));
       if (cached && typeof cached.matchScore === 'number') {
+        recordHit('list-score');
         scores.set(cid, cached);
         return;
       }
+      recordMiss('list-score');
     }
 
     try {
@@ -1913,7 +1986,7 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
     }
     scores.set(cid, pkg);
     if (isRedisAvailable() && typeof pkg.matchScore === 'number') {
-      redis.set(scoreCacheKey(cid), pkg, { ttlSeconds: LIST_SCORE_CACHE_TTL }).catch(() => {});
+      redis.set(matchScoreCache.listScoreKey(jid, cid), pkg, { ttlSeconds: listScoreTtl }).catch(() => {});
     }
   });
 
@@ -1957,27 +2030,13 @@ const BATCH_MATCH_SCORES_MAX_ITEMS = 100;
  * @param {{ candidateId: string, jobId: string }[]} items
  * @returns {Promise<Record<string, { matchScore: number, scoreBreakdown?: object, parameterMatches?: object }>>}
  */
-const scoreCandidateJobPairs = async (items, opts = {}) => {
-  if (!Array.isArray(items) || !items.length) return {};
-
-  const pairs = items
-    .map(({ candidateId, jobId }) => ({
-      candidateId: candidateId != null ? String(candidateId).trim() : '',
-      jobId: jobId != null ? String(jobId).trim() : '',
-    }))
-    .filter((p) => p.candidateId && p.jobId)
-    .slice(0, BATCH_MATCH_SCORES_MAX_ITEMS);
-
+const scoreCandidateJobPairsFromDb = async (pairs, opts = {}) => {
   if (!pairs.length) return {};
 
   const candidateIds = [...new Set(pairs.map((p) => p.candidateId))];
   let heavyRows = [];
   try {
-    heavyRows = await Candidate.findAll({
-      where: { id: { [Op.in]: candidateIds } },
-      include: includeCandidateTagsForList,
-      attributes: [...LIST_GRID_ATTRIBUTES, ...LIST_SCORING_EXTRA_ATTRIBUTES],
-    });
+    heavyRows = await findManyWithTagsForMatchScore(candidateIds, { includeEmbedding: true });
   } catch (err) {
     console.warn('[candidateService.scoreCandidateJobPairs] reload failed', err.message || err);
     return {};
@@ -2020,6 +2079,31 @@ const scoreCandidateJobPairs = async (items, opts = {}) => {
   });
 
   return out;
+};
+
+const scoreCandidateJobPairs = async (items, opts = {}) => {
+  if (!Array.isArray(items) || !items.length) return {};
+
+  const pairs = items
+    .map(({ candidateId, jobId }) => ({
+      candidateId: candidateId != null ? String(candidateId).trim() : '',
+      jobId: jobId != null ? String(jobId).trim() : '',
+    }))
+    .filter((p) => p.candidateId && p.jobId)
+    .slice(0, BATCH_MATCH_SCORES_MAX_ITEMS);
+
+  if (!pairs.length) return {};
+
+  const batchCacheOff =
+    process.env.MATCH_BATCH_SCORE_CACHE === 'false' || process.env.MATCH_BATCH_SCORE_CACHE === '0';
+  if (batchCacheOff || !canCacheReads()) {
+    recordBypass('match-scores:batch');
+    return scoreCandidateJobPairsFromDb(pairs, opts);
+  }
+
+  return matchScoreCache.getBatchScoresOrCompute(pairs, opts.tenantClientId || null, () =>
+    scoreCandidateJobPairsFromDb(pairs, opts),
+  );
 };
 
 /**
@@ -2237,7 +2321,7 @@ const enrichListRowsComplexMatchMetadata = async (mappedRows, advanced) => {
   }
 };
 
-const listPaginated = async ({
+const listPaginatedFromDb = async ({
   page = 1,
   limit = 100,
   search = '',
@@ -2329,7 +2413,12 @@ const listPaginated = async ({
       if (lj?.parameterMatches) m.parameterMatches = lj.parameterMatches;
     }
     await enrichListRowsComplexMatchMetadata(mappedRows, advanced);
-    return { rows: mappedRows, count, page: safePage, limit: safeLimit };
+    return {
+      rows: await Promise.all(mappedRows.map((r) => presignCandidateMediaFields(r, { fields: ['profilePicture'] }))),
+      count,
+      page: safePage,
+      limit: safeLimit,
+    };
   }
   const li = binds.length + 1;
   const oi = binds.length + 2;
@@ -2413,11 +2502,19 @@ const listPaginated = async ({
   await enrichListRowsComplexMatchMetadata(mappedRows, advanced);
 
   return {
-    rows: mappedRows,
+    rows: await Promise.all(mappedRows.map((r) => presignCandidateMediaFields(r, { fields: ['profilePicture'] }))),
     count,
     page: safePage,
     limit: safeLimit,
   };
+};
+
+const listPaginated = async (params = {}) => {
+  if (!shouldCacheListPaginated(params)) {
+    recordBypass('candidates:list');
+    return listPaginatedFromDb(params);
+  }
+  return getCachedListPaginated(params, () => listPaginatedFromDb(params));
 };
 
 /**
@@ -2500,15 +2597,20 @@ const getById = async (id, opts = {}) => {
     try {
       const cached = await redis.get(CANDIDATE_KEY(id));
       if (cached) {
+        recordHit('candidate');
         maybeRepairWorkExperienceRoleTagsOnRead(cached);
         const rows = [cached];
         await enrichMappedRowsWithOrgData(rows);
         await attachCandidatePipelineInfo(rows);
-        return rows[0];
+        return presignCandidateMediaFields(rows[0]);
       }
+      recordMiss('candidate');
     } catch (e) {
       console.warn('[candidateService] redis get failed (non-fatal):', e.message);
+      recordMiss('candidate');
     }
+  } else if (!opts.skipCache) {
+    recordBypass('candidate');
   }
 
   const candidate = await Candidate.findByPk(id, { include: includeCandidateTags });
@@ -2533,9 +2635,9 @@ const getById = async (id, opts = {}) => {
   if (lj?.scoreBreakdown) row.scoreBreakdown = lj.scoreBreakdown;
   if (lj?.parameterMatches) row.parameterMatches = lj.parameterMatches;
 
-  // Populate cache for next request
+  // Populate cache for next request (canonical S3 URLs, not presigned)
   await cacheSet(row);
-  return row;
+  return presignCandidateMediaFields(row);
 };
 
 const findByEmail = async (email) => {
@@ -2626,6 +2728,402 @@ const listProfileVersionsForCandidate = async (candidateId) => {
   return unique.map((r) => mapCandidateWithTags(r));
 };
 
+const SHADOW_CLONE_SKIP_KEYS = new Set([
+  'id',
+  'createdAt',
+  'updatedAt',
+  'isDeleted',
+  'isArchived',
+  'matchScore',
+  'matchAnalysis',
+  'embedding',
+  'searchText',
+  'searchTextSavedAt',
+  'events',
+  'candidateTags',
+  'tagDetails',
+  'tags',
+  'lastActivity',
+  'lastActive',
+  'approveByCandidate',
+  'consentToJobOffers',
+  'allowProfileVersion',
+  'sendWelcomeEmail',
+  'canonicalCandidateId',
+  'staffProfileCopy',
+  'staffShadowPinned',
+  'portalAccessToken',
+  'portalAccessTokenExpiresAt',
+  'shadowFieldOverrides',
+  'pendingStaffProfileProposal',
+  'pendingLiveSync',
+  'ingestPending',
+]);
+
+const tagEntriesFromPrimary = (primary) => {
+  const details = Array.isArray(primary?.tagDetails) ? primary.tagDetails : [];
+  if (details.length) {
+    return details
+      .map((row) => ({
+        tagKey: String(row.tagKey || row.displayNameHe || row.displayNameEn || '').trim(),
+        name: String(row.displayNameHe || row.tagKey || row.displayNameEn || '').trim(),
+        displayNameHe: row.displayNameHe || row.tagKey,
+        raw_type: row.rawType || row.raw_type || 'skill',
+        context: row.context,
+        quote: row.quote || row.evidence || null,
+        tag_reason: row.tagReason || row.tag_reason,
+        raw_type_reason: row.rawTypeReason || row.raw_type_reason,
+        is_current: row.isCurrent ?? row.is_current,
+        is_in_summary: row.isInSummary ?? row.is_in_summary,
+        confidence_score: row.confidenceScore ?? row.confidence_score,
+      }))
+      .filter((row) => row.tagKey);
+  }
+  return (Array.isArray(primary?.tags) ? primary.tags : [])
+    .map((tag) => String(tag || '').trim())
+    .filter(Boolean);
+};
+
+const copyShadowTagsFromPrimary = async (primary, shadowId) => {
+  const sid = String(shadowId || '').trim();
+  if (!sid || !primary) return 0;
+  const entries = tagEntriesFromPrimary(primary);
+  if (!entries.length) return 0;
+  const candidateTagService = require('./candidateTagService');
+  await candidateTagService.syncTagsForCandidate(sid, entries);
+  return entries.length;
+};
+
+/**
+ * Staff always edits a shadow copy. Ensure one exists for the primary candidate.
+ * Safe to call repeatedly (idempotent).
+ */
+/**
+ * Create/refresh the staff shadow after the live profile is ready.
+ * Skip stubs still marked ingestPending unless `force` (enrichment just finished).
+ */
+const ensureStaffShadowAfterReady = async (candidateId, options = {}) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid || options.skipEnsureStaffShadow === true) return null;
+
+  const row = await Candidate.findOne({
+    where: { id: cid },
+    attributes: ['id', 'staffProfileCopy', 'ingestPending', 'isDeleted'],
+    raw: true,
+  });
+  if (!row || row.isDeleted) return null;
+  if (row.staffProfileCopy === true) return null;
+  if (row.ingestPending === true && options.force !== true) return null;
+
+  const result = await ensureStaffShadowCopy(cid, { req: options.req || null });
+  if (result?.created) {
+    try {
+      const { bumpGlobalHttpGetCacheVersion } = require('../middleware/httpGetResponseCacheMiddleware');
+      await bumpGlobalHttpGetCacheVersion();
+    } catch (_) {
+      /* cache bump is best-effort */
+    }
+  }
+  try {
+    const shadowSync = require('./candidateShadowSyncService');
+    await shadowSync.refreshUnoverriddenShadowFieldsFromLive(result.primaryId || cid);
+  } catch (syncErr) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[candidateService] shadow refresh after ensure failed',
+      result?.primaryId || cid,
+      syncErr?.message || syncErr,
+    );
+  }
+  return result;
+};
+
+/** Copy tags from primary onto an existing staff shadow (no new shadow row). */
+const repairStaffShadowTags = async (shadowId) => {
+  const sid = String(shadowId || '').trim();
+  if (!sid) return 0;
+  const row = await fetchInstanceById(sid);
+  if (!row || row.isDeleted || row.staffProfileCopy !== true) return 0;
+  const primaryId = await resolvePrimaryCandidateIdDeep(sid);
+  if (!primaryId) return 0;
+  const primary = await getById(primaryId);
+  if (!primary) return 0;
+  return copyShadowTagsFromPrimary(primary, sid);
+};
+
+/** One in-flight ensure per primary — parallel create/enrich paths must not clone multiple shadows. */
+const staffShadowEnsureInflight = new Map();
+
+const ensureStaffShadowCopyInner = async (candidateId, options = {}) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) {
+    const err = new Error('Candidate id is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const primaryId = await resolvePrimaryCandidateIdDeep(cid);
+  if (!primaryId) {
+    const err = new Error('Candidate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const existingShadows = await Candidate.findAll({
+    where: {
+      isDeleted: false,
+      staffProfileCopy: true,
+      canonicalCandidateId: primaryId,
+    },
+    order: [['createdAt', 'ASC']],
+    limit: 8,
+  });
+  if (existingShadows.length) {
+    const shadowId = existingShadows[0].id;
+    const shadow = await getById(shadowId);
+    const shadowTagCount = Array.isArray(shadow?.tagDetails)
+      ? shadow.tagDetails.length
+      : Array.isArray(shadow?.tags)
+        ? shadow.tags.length
+        : 0;
+    if (!shadowTagCount) {
+      const primaryForTags = await getById(primaryId);
+      if (primaryForTags) {
+        try {
+          await copyShadowTagsFromPrimary(primaryForTags, shadowId);
+        } catch (tagErr) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[candidateService] shadow tag repair failed',
+            shadowId,
+            tagErr?.message || tagErr,
+          );
+        }
+        try {
+          const shadowSync = require('./candidateShadowSyncService');
+          await shadowSync.refreshUnoverriddenShadowFieldsFromLive(primaryId);
+        } catch (syncErr) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[candidateService] shadow field repair failed',
+            shadowId,
+            syncErr?.message || syncErr,
+          );
+        }
+        await ensurePinnedStaffShadowForPrimary(primaryId);
+        return { primaryId, shadow: await getById(shadowId), created: false };
+      }
+    }
+    await ensurePinnedStaffShadowForPrimary(primaryId);
+    return { primaryId, shadow, created: false };
+  }
+
+  const primary = await getById(primaryId);
+  if (!primary) {
+    const err = new Error('Primary candidate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const racedShadows = await Candidate.findAll({
+    where: {
+      isDeleted: false,
+      staffProfileCopy: true,
+      canonicalCandidateId: primaryId,
+    },
+    order: [['createdAt', 'ASC']],
+    limit: 1,
+  });
+  if (racedShadows.length) {
+    const shadow = await getById(racedShadows[0].id);
+    await ensurePinnedStaffShadowForPrimary(primaryId);
+    return { primaryId, shadow, created: false };
+  }
+
+  const clone = {};
+  for (const [key, value] of Object.entries(primary)) {
+    if (SHADOW_CLONE_SKIP_KEYS.has(key)) continue;
+    clone[key] = value;
+  }
+  clone.profileName = primary.profileName || primary.fullName || primary.title || null;
+  clone.title = primary.title || primary.fullName || null;
+  clone.fullName = primary.fullName || primary.title || null;
+  clone.firstName = primary.firstName || null;
+  clone.lastName = primary.lastName || null;
+  clone.canonicalCandidateId = primaryId;
+  clone.staffProfileCopy = true;
+  clone.allowProfileVersion = true;
+  if (primary.userId) clone.userId = primary.userId;
+
+  const createdRow = await create(clone, {
+    allowProfileVersion: true,
+    skipIdentityLink: true,
+    skipEnsureStaffShadow: true,
+    req: options.req || null,
+  });
+  const shadowId = createdRow?.id || createdRow?.backendId;
+  if (shadowId) {
+    try {
+      await copyShadowTagsFromPrimary(primary, shadowId);
+    } catch (tagErr) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[candidateService] shadow tag clone failed',
+        shadowId,
+        tagErr?.message || tagErr,
+      );
+    }
+  }
+  if (shadowId) {
+    await setStaffShadowPinned(String(shadowId), true);
+  }
+  const shadow = shadowId ? await getById(shadowId) : createdRow;
+  return { primaryId, shadow, created: true };
+};
+
+const ensureStaffShadowCopy = async (candidateId, options = {}) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) {
+    const err = new Error('Candidate id is required');
+    err.status = 400;
+    throw err;
+  }
+  const primaryId = await resolvePrimaryCandidateIdDeep(cid);
+  if (!primaryId) {
+    const err = new Error('Candidate not found');
+    err.status = 404;
+    throw err;
+  }
+  const inflight = staffShadowEnsureInflight.get(primaryId);
+  if (inflight) return inflight;
+
+  const work = ensureStaffShadowCopyInner(cid, options).finally(() => {
+    if (staffShadowEnsureInflight.get(primaryId) === work) {
+      staffShadowEnsureInflight.delete(primaryId);
+    }
+  });
+  staffShadowEnsureInflight.set(primaryId, work);
+  return work;
+};
+
+const listStaffShadowsForPrimary = async (primaryId) => {
+  const pid = String(primaryId || '').trim();
+  if (!pid) return [];
+  return Candidate.findAll({
+    where: {
+      isDeleted: false,
+      staffProfileCopy: true,
+      canonicalCandidateId: pid,
+    },
+    order: [['createdAt', 'DESC']],
+  });
+};
+
+const setStaffShadowPinned = async (candidateId, pinned) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) {
+    const err = new Error('Candidate id is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const row = await fetchInstanceById(cid);
+  if (!row || row.isDeleted) {
+    const err = new Error('Candidate not found');
+    err.status = 404;
+    throw err;
+  }
+  if (row.staffProfileCopy !== true) {
+    const err = new Error('ניתן לנעוץ רק עותק צל');
+    err.status = 400;
+    throw err;
+  }
+
+  const primaryId = await resolvePrimaryCandidateIdDeep(cid);
+  const wantPinned = pinned === true;
+  if (wantPinned) {
+    await Candidate.update(
+      { staffShadowPinned: false },
+      {
+        where: {
+          isDeleted: false,
+          staffProfileCopy: true,
+          canonicalCandidateId: primaryId,
+        },
+      },
+    );
+  }
+  await row.update({ staffShadowPinned: wantPinned });
+  await cacheDel(cid);
+  if (primaryId && String(primaryId) !== cid) await cacheDel(primaryId);
+  return getById(cid);
+};
+
+/** If the family has shadows but none pinned, pin the newest shadow (legacy / repair). */
+const ensurePinnedStaffShadowForPrimary = async (primaryId) => {
+  const pid = String(primaryId || '').trim();
+  if (!pid) return;
+  const shadows = await listStaffShadowsForPrimary(pid);
+  if (!shadows.length) return;
+  if (shadows.some((row) => row.staffShadowPinned === true)) return;
+  const newestId = shadows[0]?.id;
+  if (!newestId) return;
+  await setStaffShadowPinned(String(newestId), true);
+};
+
+/** Resolve which profile supplies the CV when referring to a client. */
+const resolveReferralCvSource = async (candidateId, kind) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) {
+    const err = new Error('Candidate id is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const primaryId = await resolvePrimaryCandidateIdDeep(cid);
+  if (!primaryId) {
+    const err = new Error('Candidate not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const normalized = normalizeCvProfileKind(kind);
+  if (normalized === 'original') {
+    const source = await getById(primaryId);
+    if (!source) {
+      const err = new Error('Candidate not found');
+      err.status = 404;
+      throw err;
+    }
+    return { kind: 'original', primaryId, source, pinned: false };
+  }
+
+  let shadows = await listStaffShadowsForPrimary(primaryId);
+  if (!shadows.length) {
+    await ensureStaffShadowCopy(primaryId);
+    shadows = await listStaffShadowsForPrimary(primaryId);
+  }
+  await ensurePinnedStaffShadowForPrimary(primaryId);
+  shadows = await listStaffShadowsForPrimary(primaryId);
+
+  const picked = pickReferralShadow(
+    shadows.map((row) => (typeof row.toJSON === 'function' ? row.toJSON() : row)),
+  );
+  const sourceId = picked?.id || primaryId;
+  const source = await getById(sourceId);
+  if (!source) {
+    const err = new Error('Candidate not found');
+    err.status = 404;
+    throw err;
+  }
+  return {
+    kind: 'shadow',
+    primaryId,
+    source,
+    pinned: Boolean(picked?.staffShadowPinned),
+  };
+};
+
 const DUPLICATE_PROFILE_NAME_SUFFIX_RE = /_duplicate\d*$/i;
 
 const stripDuplicateProfileNameSuffix = (value) =>
@@ -2676,7 +3174,7 @@ const shareStaffProfileWithCandidate = async (candidateId) => {
     throw err;
   }
 
-  const patch = { staffProfileCopy: false };
+  const patch = { staffProfileCopy: false, staffShadowPinned: false };
   if (primary.userId && !row.userId) {
     patch.userId = primary.userId;
   }
@@ -2850,28 +3348,30 @@ const identityHasPortalAccount = async (identity = {}) => {
   return Boolean(existing?.userId);
 };
 
-/** Every persist path gets per-job roleTag (from AI or job title) for ניסיון ↔ תגית linking. */
-const applyWorkExperienceRoleTagsOnPersist = (workExperience) => {
+const applyWorkExperienceShapeOnPersist = (workExperience) => {
   if (!Array.isArray(workExperience) || !workExperience.length) return workExperience;
-  const normalized = normalizeWorkExperience(workExperience);
-  return ensureRoleTagCoverage([], normalized).workExperience;
+  return normalizeWorkExperience(workExperience);
 };
 
-const workExperienceNeedsRoleTagRepair = (workExperience) =>
-  Array.isArray(workExperience) &&
-  workExperience.some(
-    (row) => row && typeof row === 'object' && !String(row.roleTag || '').trim(),
-  );
+const alignWorkExperienceWithCandidateTags = (payload) => {
+  if (!payload || typeof payload !== 'object') return false;
+  const wx = payload.workExperience;
+  if (!Array.isArray(wx) || !wx.length) return false;
+  const pseudoRows = tagDetailsToRoleSystemTagRows(payload.tagDetails);
+  if (!pseudoRows.length) return false;
+  const aligned = attachTagIdsToWorkExperience(wx, pseudoRows);
+  if (JSON.stringify(wx) === JSON.stringify(aligned)) return false;
+  payload.workExperience = aligned;
+  return true;
+};
 
-/** Backfill roleTag on read for rows saved before post-process ran; persist in background. */
+/** Re-link job rows to catalog role tags after tagDetails load; persist when changed. */
 const maybeRepairWorkExperienceRoleTagsOnRead = (payload, options = {}) => {
   if (options.stripListHeavyJson || !payload || typeof payload !== 'object') return;
-  const wx = payload.workExperience;
-  if (!workExperienceNeedsRoleTagRepair(wx)) return;
-  const repaired = applyWorkExperienceRoleTagsOnPersist(wx);
-  payload.workExperience = repaired;
-  if (options.skipRoleTagRepairPersist || !payload.id) return;
+  const changed = alignWorkExperienceWithCandidateTags(payload);
+  if (!changed || options.skipRoleTagRepairPersist || !payload.id) return;
   const cid = String(payload.id);
+  const repaired = payload.workExperience;
   setImmediate(() => {
     update(cid, { workExperience: repaired }, { skipCanonicalSync: true }).catch(() => {});
   });
@@ -2891,6 +3391,7 @@ const prepareCreatePayload = async (payload) => {
   delete cleanPayload.sendWelcomeEmail;
   delete cleanPayload.skipIdentityLink;
   delete cleanPayload.allowProfileVersion;
+  delete cleanPayload.staffShadowPinned;
   if (cleanPayload.profileName != null && String(cleanPayload.profileName).trim()) {
     if (!cleanPayload.title || !String(cleanPayload.title).trim()) {
       cleanPayload.title = String(cleanPayload.profileName).trim();
@@ -2907,7 +3408,7 @@ const prepareCreatePayload = async (payload) => {
   }
 
   if (Array.isArray(cleanPayload.workExperience) && cleanPayload.workExperience.length) {
-    cleanPayload.workExperience = applyWorkExperienceRoleTagsOnPersist(cleanPayload.workExperience);
+    cleanPayload.workExperience = applyWorkExperienceShapeOnPersist(cleanPayload.workExperience);
   }
 
   cleanPayload.companyExperiences = buildCompanyExperiences(
@@ -3060,7 +3561,7 @@ const create = async (payload, options = {}) => {
           cleanPayload.location = null;
           linked = await Candidate.create(cleanPayload);
         }
-        await cacheSet(linked.toJSON ? linked.toJSON() : linked);
+        await cacheSet(linked.toJSON ? linked.toJSON() : linked, { bumpListCache: true });
         const out = await getById(linked.id);
         if (cleanPayload.canonicalCandidateId) {
           try {
@@ -3114,7 +3615,7 @@ const create = async (payload, options = {}) => {
     cleanPayload.location = null;
     created = await Candidate.create(cleanPayload);
   }
-  await cacheSet(created.toJSON ? created.toJSON() : created);
+  await cacheSet(created.toJSON ? created.toJSON() : created, { bumpListCache: true });
 
   if (!allowNewProfileVersion) {
     const reconcile = await mergeIfDuplicateIdentity(created.id, {
@@ -3136,6 +3637,10 @@ const create = async (payload, options = {}) => {
     return getById(created.id);
   }
 
+  const createdPlain = created.toJSON ? created.toJSON() : created;
+  if (createdPlain?.staffProfileCopy === true && createdPlain?.id) {
+    await setStaffShadowPinned(String(createdPlain.id), true);
+  }
   return created;
 };
 
@@ -3307,7 +3812,34 @@ const listMergedEventsForCandidate = async (candidateId) => {
   return mergeCanonicalEventsFromRows(siblings);
 };
 
+/** After email ingest, normalize city once (catalog is in-memory; cheap vs per-update). */
+const finalizeIngestCandidateLocation = async (id) => {
+  const cid = String(id || '').trim();
+  if (!cid) return;
+  await runWithIngestDbYield(async () => {
+    const row = await Candidate.findByPk(cid, {
+      attributes: ['id', 'address', 'location'],
+      raw: true,
+    });
+    if (!row) return;
+    const raw = String(row.address || row.location || '').trim();
+    if (!raw) return;
+    const payload = { address: raw, location: raw };
+    await applyCandidateCityFromCatalog(payload);
+    const canon = String(payload.address || payload.location || '').trim();
+    if (canon && canon !== raw) {
+      await Candidate.update({ address: canon, location: canon }, { where: { id: cid } });
+      await cacheDel(cid);
+    } else if (!canon) {
+      await Candidate.update({ address: null, location: null }, { where: { id: cid } });
+      await cacheDel(cid);
+    }
+  });
+};
+
 const update = async (id, payload, options = {}) => {
+  const forIngest = options.forIngest === true;
+  const runUpdate = async () => {
   const candidate = await fetchInstanceById(id);
   const cleanPayload = { ...payload };
   let canonicalChange = null;
@@ -3333,6 +3865,7 @@ const update = async (id, payload, options = {}) => {
   delete cleanPayload.tagDetails;
   delete cleanPayload.backendId;
   delete cleanPayload.id;
+  delete cleanPayload.staffShadowPinned;
 
   const rowCanon =
     candidate.canonicalCandidateId != null ? String(candidate.canonicalCandidateId).trim() : '';
@@ -3419,7 +3952,7 @@ const update = async (id, payload, options = {}) => {
   normalizePreferredWorkingHoursInPayload(cleanPayload);
 
   if (Array.isArray(cleanPayload.workExperience) && cleanPayload.workExperience.length) {
-    cleanPayload.workExperience = applyWorkExperienceRoleTagsOnPersist(cleanPayload.workExperience);
+    cleanPayload.workExperience = applyWorkExperienceShapeOnPersist(cleanPayload.workExperience);
   }
 
   // Re-derive companyExperiences whenever workExperience changes (or always, cheaply)
@@ -3429,9 +3962,13 @@ const update = async (id, payload, options = {}) => {
   const exForUpdate = 'experience' in cleanPayload
     ? cleanPayload.experience
     : (candidate.experience || candidate.get?.('experience'));
-  cleanPayload.companyExperiences = await enrichCompanyExperiencesArray(
-    buildCompanyExperiences(wxForUpdate, exForUpdate),
-  );
+  if (forIngest) {
+    cleanPayload.companyExperiences = buildCompanyExperiences(wxForUpdate, exForUpdate);
+  } else {
+    cleanPayload.companyExperiences = await enrichCompanyExperiencesArray(
+      buildCompanyExperiences(wxForUpdate, exForUpdate),
+    );
+  }
 
   const rawCityInput = Object.prototype.hasOwnProperty.call(cleanPayload, 'address')
     ? String(cleanPayload.address ?? '').trim()
@@ -3439,43 +3976,75 @@ const update = async (id, payload, options = {}) => {
       ? String(cleanPayload.location ?? '').trim()
       : '';
 
-  await prepareCityFieldsInPayload(cleanPayload);
-  await applyCandidateCityFromCatalog(cleanPayload);
+  if (!forIngest) {
+    await prepareCityFieldsInPayload(cleanPayload);
+    await applyCandidateCityFromCatalog(cleanPayload);
 
-  if (rawCityInput && !String(cleanPayload.address ?? cleanPayload.location ?? '').trim()) {
-    // City was present in input but could not be mapped to the catalog — save other fields without city.
-    // eslint-disable-next-line no-console
-    console.warn('[candidateService] unresolved city skipped (non-fatal):', rawCityInput);
-    cleanPayload.address = null;
-    cleanPayload.location = null;
+    if (rawCityInput && !String(cleanPayload.address ?? cleanPayload.location ?? '').trim()) {
+      // eslint-disable-next-line no-console
+      console.warn('[candidateService] unresolved city skipped (non-fatal):', rawCityInput);
+      cleanPayload.address = null;
+      cleanPayload.location = null;
+    }
   }
 
   syncCandidateNameForUpdate(cleanPayload, candidate);
+
+  if (forIngest) {
+    Object.assign(cleanPayload, deepSanitizeStringsForPostgres(cleanPayload));
+  }
 
   if (incomingTagDetails?.length) {
     await syncCandidateTagDetailsFromPayload(id, incomingTagDetails);
   }
 
+  const previousPlain = candidate.toJSON ? candidate.toJSON() : candidate.get({ plain: true });
+
   try {
     await candidate.update(cleanPayload);
   } catch (err) {
-    if (!isCityValidationError(err)) throw err;
-    cleanPayload.address = null;
-    cleanPayload.location = null;
-    await candidate.update(cleanPayload);
+    if (forIngest && isUnsupportedUnicodeEscapeError(err)) {
+      const retryPayload = deepSanitizeStringsForPostgres({ ...cleanPayload });
+      await candidate.update(retryPayload);
+    } else if (forIngest || !isCityValidationError(err)) {
+      throw err;
+    } else {
+      cleanPayload.address = null;
+      cleanPayload.location = null;
+      await candidate.update(cleanPayload);
+    }
   }
 
-  await propagateCanonicalSharedFields(id, cleanPayload, options);
-  if (Object.prototype.hasOwnProperty.call(cleanPayload, 'events')) {
-    await syncCanonicalEventsAcrossSiblings(id, cleanPayload.events, options);
+  if (!forIngest) {
+    await propagateCanonicalSharedFields(id, cleanPayload, options);
+    if (Object.prototype.hasOwnProperty.call(cleanPayload, 'events')) {
+      await syncCanonicalEventsAcrossSiblings(id, cleanPayload.events, options);
+    }
+    try {
+      const shadowSync = require('./candidateShadowSyncService');
+      const afterRow = await Candidate.findByPk(id);
+      const nextPlain = afterRow?.toJSON ? afterRow.toJSON() : afterRow?.get?.({ plain: true }) || {};
+      if (candidate.staffProfileCopy === true) {
+        await shadowSync.markShadowFieldOverrides(afterRow, previousPlain, nextPlain);
+      } else if (isPrimaryRow) {
+        await shadowSync.syncLiveChangesToStaffShadows(id, previousPlain, nextPlain);
+      }
+    } catch (syncErr) {
+      // eslint-disable-next-line no-console
+      console.warn('[candidateService] shadow sync failed', id, syncErr?.message || syncErr);
+    }
   }
 
   const updated = mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),
   );
-  await enrichMappedRowsWithOrgData([updated]);
-  await attachCandidatePipelineInfo([updated]);
-  await cacheSet(updated);
+  if (!forIngest) {
+    await enrichMappedRowsWithOrgData([updated]);
+    await attachCandidatePipelineInfo([updated]);
+    await cacheSet(updated, { bumpListCache: true });
+  } else {
+    await cacheDel(id);
+  }
   if (canonicalChange) {
     try {
       await recordCanonicalCandidateLinkChange(options.req || null, id, canonicalChange);
@@ -3484,10 +4053,15 @@ const update = async (id, payload, options = {}) => {
       console.warn('[candidateService] canonical link journal failed', err?.message || err);
     }
   }
-  // Profile changed → remove stale scores from every job:*:matches + wipe their opportunities
   invalidateCandidateOpportunities(id).catch(() => {});
   invalidateCandidateInAllJobMatches(id).catch(() => {});
+  const ingestCleared =
+    Object.prototype.hasOwnProperty.call(payload, 'ingestPending') && payload.ingestPending === false;
   return updated;
+  };
+
+  if (forIngest) return runWithIngestDbYield(runUpdate);
+  return runUpdate();
 };
 
 /** Rebuild companyExperiences from work history + organization metadata (after org sync / alias mapping). */
@@ -3694,10 +4268,16 @@ module.exports = {
   listEmbeddingsByIds,
   getVectorEmbeddingStamp,
   getById,
+  finalizeIngestCandidateLocation,
   getDocumentsByCandidateId,
   getByUserId,
   listByUserId,
   listProfileVersionsForCandidate,
+  ensureStaffShadowCopy,
+  ensureStaffShadowAfterReady,
+  repairStaffShadowTags,
+  setStaffShadowPinned,
+  resolveReferralCvSource,
   shareStaffProfileWithCandidate,
   listMergedEventsForCandidate,
   fetchCanonicalSiblingRows,

@@ -12,6 +12,7 @@ import {
 import { fetchLoggedInClientLogoForExport } from '../utils/exportImagePayload';
 import { downloadOriginalDocumentWithLogo } from '../utils/originalDocumentExport';
 import { invalidateStaffCandidateCache } from '../utils/staffCandidateApi';
+import { fetchCandidateFileUrl, filePathFromUrl } from '../services/candidateFileUrl';
 import {
     downloadParsedSearchTextAsDocx,
     parsedSearchTextDocxFilename,
@@ -182,7 +183,9 @@ export const CvFilesVersionsPanel: React.FC<{
         searchTextSavedAt?: string | null;
     } | null>(null);
 
-    const url = String(resumeUrl ?? '').trim();
+    const passedUrl = String(resumeUrl ?? '').trim();
+    const [liveUrl, setLiveUrl] = useState(passedUrl);
+    const url = liveUrl || passedUrl;
     const rawSearchText = String(parsedTextOverride?.searchText ?? searchText ?? '');
     const plainSearch = isRichHtmlContent(rawSearchText)
         ? rawSearchText
@@ -194,6 +197,19 @@ export const CvFilesVersionsPanel: React.FC<{
     }, [candidateId]);
 
     useEffect(() => {
+        setLiveUrl(passedUrl);
+        const id = String(candidateId || '').trim();
+        if (!id || !passedUrl) return;
+        let cancelled = false;
+        void fetchCandidateFileUrl(id, { which: 'resume', storedUrl: passedUrl }).then((fresh) => {
+            if (!cancelled && fresh) setLiveUrl(fresh);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [candidateId, passedUrl]);
+
+    useEffect(() => {
         if (!parsedTextOverride) return;
         if (String(searchText ?? '') === parsedTextOverride.searchText) {
             setParsedTextOverride(null);
@@ -203,9 +219,10 @@ export const CvFilesVersionsPanel: React.FC<{
     const effectiveOriginalText = parsedTextOverride?.originalText ?? originalText;
     const effectiveSearchTextSavedAt =
         parsedTextOverride?.searchTextSavedAt ?? searchTextSavedAt;
-    const isDocx = /\.(doc|docx)$/i.test(url);
+    const filePath = filePathFromUrl(url);
+    const isDocx = /\.(doc|docx)$/i.test(filePath);
     const docxViewerUrl = isDocx ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}` : '';
-    const isImage = /\.(png|jpe?g|gif|webp)$/i.test(url);
+    const isImage = /\.(png|jpe?g|gif|webp)$/i.test(filePath);
 
     const originalDate = formatVersionDate(
         resumeUploadedAt ?? createdAt ?? updatedAt,

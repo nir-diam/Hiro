@@ -1,21 +1,22 @@
 const authService = require('./authService');
 const clientService = require('./clientService');
 const { resolveClientLogoUrl, detectImageType } = require('../utils/clientLogo');
+const { fetchStoredFileBuffer } = require('./s3Service');
 
 async function fetchLogoBytes(logoUrl) {
-  const imageRes = await fetch(logoUrl);
-  if (!imageRes.ok) {
+  const file = await fetchStoredFileBuffer(logoUrl);
+  if (!file) {
     const err = new Error('Logo download failed');
     err.status = 502;
     throw err;
   }
-  const buf = Buffer.from(await imageRes.arrayBuffer());
-  if (!buf.length) {
+  const buf = file.buffer;
+  if (!buf?.length) {
     const err = new Error('Logo empty');
     err.status = 502;
     throw err;
   }
-  const contentType = imageRes.headers.get('content-type') || 'image/png';
+  const contentType = file.contentType || 'image/png';
   return {
     data: buf.toString('base64'),
     type: detectImageType(logoUrl, contentType),

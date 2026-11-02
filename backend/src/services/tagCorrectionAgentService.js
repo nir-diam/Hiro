@@ -17,7 +17,7 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const PROMPT_ID = 'tag_correction_agent';
 
-/** Compact JSON schema — gemini-3-flash-preview thinking tokens otherwise consume maxOutputTokens. */
+/** Compact JSON schema — gemini-3.8-flash thinking tokens otherwise consume maxOutputTokens. */
 const TAG_AGENT_RESPONSE_SCHEMA = {
   type: 'object',
   propertyOrdering: ['action', 'target_tag', 'reasoning', 'hesitation_level', 'dilemma_reasoning'],
@@ -36,7 +36,7 @@ const TAG_AGENT_GENERATION_CONFIG = {
   maxOutputTokens: 512,
   responseMimeType: 'application/json',
   responseSchema: TAG_AGENT_RESPONSE_SCHEMA,
-  thinkingConfig: { thinkingBudget: 0 },
+  thinkingConfig: { thinkingLevel: 'low' },
 };
 
 const TAG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;

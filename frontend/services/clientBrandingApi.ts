@@ -90,6 +90,22 @@ export async function fetchClientBranding(clientId: string): Promise<ClientBrand
   };
 }
 
+/** Agency identity for documents sent to employers (CV header logo, brand color, "הוגש על ידי"). */
+export async function fetchResumeAgencyBranding(
+  clientId: string,
+): Promise<{ name: string | null; logoUrl: string | null; brandColor: string | null }> {
+  const res = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(clientId)}`, {
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error('Failed to load client branding');
+  const data = (await res.json()) as Record<string, unknown>;
+  return {
+    name: trimLogo(data.displayName) || trimLogo(data.name),
+    logoUrl: resolveClientLogoUrl(data),
+    brandColor: trimLogo(data.primaryColor),
+  };
+}
+
 export async function saveClientBranding(
   clientId: string,
   branding: Partial<ClientBranding>,
@@ -133,6 +149,7 @@ export async function uploadClientLogo(clientId: string, file: File): Promise<st
       body: JSON.stringify({
         fileName: file.name,
         contentType: file.type || 'image/png',
+        purpose: 'logo',
       }),
     },
   );

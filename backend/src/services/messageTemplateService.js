@@ -14,6 +14,11 @@ const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const clientNavigationLinks = require('../utils/clientNavigationLinks');
 const User = require('../models/User');
 const userPreferencesService = require('./userPreferencesService');
+const { presignIfOurS3 } = require('./candidateMediaUrlService');
+const { parseS3KeyFromStoredUrl, toStoredS3Url, fetchStoredFileBuffer } = require('./s3Service');
+
+/** Email clients open the CV later. SigV4 max is 7 days; stay under it. */
+const EMAIL_CV_LINK_TTL_SEC = 60 * 60 * 24 * 6;
 
 const ALLOWED_CHANNELS = new Set(['email', 'sms', 'whatsapp']);
 const ALLOWED_RECIPIENT_TYPES = new Set(['candidate', 'client_contact', 'team_member']);
@@ -207,7 +212,9 @@ const removeByIdAny = async (id) => {
 const normalizeAttachmentPayload = (payload) => {
   const out = {};
   if (payload.attachmentUrl !== undefined) {
-    out.attachmentUrl = payload.attachmentUrl ? String(payload.attachmentUrl).trim().slice(0, 2048) : null;
+    out.attachmentUrl = payload.attachmentUrl
+      ? toStoredS3Url(String(payload.attachmentUrl).trim()).slice(0, 2048)
+      : null;
   }
   if (payload.attachmentFileName !== undefined) {
     out.attachmentFileName = payload.attachmentFileName
@@ -648,6 +655,18 @@ function firstContactFromJob(job) {
   };
 }
 
+async function cvLinkForEmail(resumeUrl) {
+  const raw = String(resumeUrl ?? '').trim();
+  if (!raw) return '';
+  if (!parseS3KeyFromStoredUrl(raw)) return raw;
+  try {
+    return await presignIfOurS3(raw, EMAIL_CV_LINK_TTL_SEC);
+  } catch (err) {
+    console.warn('[message-templates] CV link presign failed', err?.message || err);
+    return '';
+  }
+}
+
 function pickRecruiterDisplay(job) {
   if (!job || typeof job !== 'object') return '';
   return (
@@ -768,7 +787,7 @@ async function buildNamedPlaceholdersFromCandidate(cand, ctx = {}) {
     candidate_last_name: lastFromDb || splitDb.last,
     candidate_phone: String(plain.phone ?? '').trim(),
     candidate_email: String(plain.email ?? '').trim(),
-    candidate_cv_link: String(plain.resumeUrl ?? '').trim(),
+    candidate_cv_link: await cvLinkForEmail(plain.resumeUrl),
     /** National ID only — matches UI label "תעודת זהות" (`messageTemplatePlaceholders.ts`). */
     candidate_id: String(plain.idNumber ?? '').trim(),
     job_referrals: jobReferrals,
@@ -935,17 +954,13 @@ const sendScopedTemplateEmail = async ({
   let attachments = null;
   if (plain.attachmentUrl) {
     try {
-      const resp = await fetch(String(plain.attachmentUrl));
-      if (resp.ok) {
-        const arrayBuf = await resp.arrayBuffer();
-        const buffer = Buffer.from(arrayBuf);
-        if (buffer.length) {
-          attachments = [{
-            filename: plain.attachmentFileName || 'attachment',
-            content: buffer,
-            contentType: plain.attachmentContentType || 'application/octet-stream',
-          }];
-        }
+      const file = await fetchStoredFileBuffer(String(plain.attachmentUrl));
+      if (file?.buffer?.length) {
+        attachments = [{
+          filename: plain.attachmentFileName || 'attachment',
+          content: file.buffer,
+          contentType: plain.attachmentContentType || 'application/octet-stream',
+        }];
       }
     } catch (attachErr) {
       console.warn('[message-templates] attachment fetch failed:', attachErr?.message || attachErr);
@@ -1141,8 +1156,21 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
   })();
 };
 
+/** Response-only: replace stored attachment URLs with short-lived signed URLs (bucket is private). */
+const signAttachmentUrls = async (payload) => {
+  const signRow = async (row) => (row && row.attachmentUrl
+    ? { ...row, attachmentUrl: await presignIfOurS3(row.attachmentUrl) }
+    : row);
+  if (Array.isArray(payload)) return Promise.all(payload.map(signRow));
+  if (payload && Array.isArray(payload.templates)) {
+    return { ...payload, templates: await Promise.all(payload.templates.map(signRow)) };
+  }
+  return signRow(payload);
+};
+
 module.exports = {
   normalizeChannels,
+  signAttachmentUrls,
   toRow,
   toCatalogRow,
   listAdmin,

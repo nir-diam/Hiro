@@ -1038,6 +1038,7 @@ function buildPublicApplyEnrichmentTask(
       fileName: payload.cvFileName || null,
       cvBase64Len: String(payload.cvBase64).length,
     });
+    let readyId = candidateId;
     try {
       const enrichedCandidate = await processPublicApplyResume(candidateId, payload, jobRef, {
         isNewCandidate,
@@ -1047,9 +1048,9 @@ function buildPublicApplyEnrichmentTask(
         screeningNote,
         landingBody,
       });
-      const targetId = enrichedCandidate?.id || candidateId;
+      readyId = enrichedCandidate?.id || candidateId;
       console.log('[jobPublicationService] background CV enrich done', {
-        candidateId: targetId,
+        candidateId: readyId,
         jobId: jobRef.id,
         source: enrichedCandidate?.source || null,
         workExperienceCount: Array.isArray(enrichedCandidate?.workExperience)
@@ -1065,9 +1066,12 @@ function buildPublicApplyEnrichmentTask(
       });
     } finally {
       try {
-        await candidateService.update(candidateId, { ingestPending: false });
+        await candidateService.update(readyId, { ingestPending: false });
+        if (String(readyId) !== String(candidateId)) {
+          await candidateService.update(candidateId, { ingestPending: false });
+        }
       } catch (clearErr) {
-        console.warn('[jobPublicationService] clear ingestPending failed', candidateId, clearErr?.message || clearErr);
+        console.warn('[jobPublicationService] clear ingestPending failed', readyId, clearErr?.message || clearErr);
       }
     }
   };
@@ -1605,6 +1609,11 @@ const updatePublicationForJob = async (jobId, payload = {}, options = {}) => {
     } catch (err) {
       console.warn('[publicJobsWebhook] schedule failed', err?.message || err);
     }
+  }
+  try {
+    require('./publicJobsApiService').invalidatePublicJobsCache();
+  } catch (err) {
+    console.warn('[publicJobs] cache invalidate failed', err?.message || err);
   }
   return publicationToResponse(job, publication, options);
 };

@@ -24,6 +24,9 @@ let redisClient = null;
 // Circuit-breaker: skip all Redis calls immediately when known to be down.
 let _isAlive = false;
 let _lastDownLog = 0;
+let _lastError = null;
+
+const getLastRedisError = () => _lastError;
 
 const isRedisAvailable = () => REDIS_ENABLED && _isAlive;
 
@@ -40,13 +43,12 @@ const createRedisClient = () => {
     // 0 = do not retry individual commands; reconnection is handled by retryStrategy.
     maxRetriesPerRequest: 0,
     connectTimeout: 3000,
-    retryStrategy: (times) => {
-      if (times > 5) return null;
-      return Math.min(times * 500, 3000);
-    },
+    // Never give up: returning null would leave Redis off until the next process restart.
+    retryStrategy: (times) => Math.min(times * 500, 10_000),
   });
 
   client.on('error', (err) => {
+    _lastError = { message: err.message, at: new Date().toISOString() };
     if (_isAlive) {
       console.error('[Redis] connection error:', err.message);
     }
@@ -91,6 +93,7 @@ const connectRedis = async () => {
     await redisClient.connect();
     console.log('[Redis] ready');
   } catch (err) {
+    _lastError = { message: err.message, at: new Date().toISOString() };
     console.warn('[Redis] initial connect failed (non-fatal):', err.message);
   }
   return redisClient;
@@ -111,6 +114,9 @@ module.exports = {
   getRedisClient,
   isRedisAvailable,
   isReadThroughEnabled,
+  getLastRedisError,
+  REDIS_HOST,
+  REDIS_TLS,
   REDIS_ENABLED,
   REDIS_READ_THROUGH,
   REDIS_CACHE_WARMUP,

@@ -658,6 +658,7 @@ function mapApiToDrawerCandidate(c: Record<string, unknown>, matchPct: number): 
 
 interface SonarResultRowProps {
     layout: 'cards' | 'list';
+    rank: number;
     row: SonarScanRow;
     job: Record<string, unknown>;
     tagJobModel: JobTagMatchInput;
@@ -675,6 +676,7 @@ interface SonarResultRowProps {
 
 function SonarResultRow({
     layout,
+    rank,
     row,
     job,
     tagJobModel,
@@ -721,6 +723,9 @@ function SonarResultRow({
                 style={rowShadowStyle}
                 onClick={() => openSummaryDrawer(mapApiToDrawerCandidate(row.candidate, row.matchPercentage))}
             >
+                <div className="shrink-0 w-8 text-center text-sm font-bold text-text-muted tabular-nums">
+                    {rank}
+                </div>
                 <div className="flex items-center gap-4 w-full md:w-[25%] shrink-0 ps-4 border-b md:border-b-0 md:border-s border-border-subtle/50 pb-4 md:pb-0">
                     <div className="relative shrink-0">
                         <SonarCandidateAvatar candidate={row.candidate} />
@@ -824,6 +829,7 @@ function SonarResultRow({
             />
             <div className="flex flex-col flex-grow z-10 gap-4">
                 <div className="flex justify-between items-start">
+                    <span className="absolute top-3 start-3 text-xs font-bold text-text-muted tabular-nums">{rank}</span>
                     <SonarScoreRing pct={row.matchPercentage} onClick={(e) => onOpenMatchPopup(e, row)} />
                     <div className="flex flex-col items-end text-right min-w-0 flex-1 ml-8 sm:ml-10">
                         <div className="relative mb-2">
@@ -1471,13 +1477,14 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                 : 'flex flex-col gap-4'
                         }
                     >
-                        {rows.map((row) => {
+                        {rows.map((row, i) => {
                             const rk =
                                 row.candidate.id != null ? String(row.candidate.id) : candidateDisplayName(row.candidate);
                             return (
                                 <React.Fragment key={rk || 'row'}>
                                     <SonarResultRow
                                         layout={resultsLayout}
+                                        rank={i + 1}
                                         row={row}
                                         job={job}
                                         tagJobModel={tagJobModel}

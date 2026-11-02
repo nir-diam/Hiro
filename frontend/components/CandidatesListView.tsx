@@ -58,6 +58,11 @@ import { ComplexQueryBuilder } from './ComplexQueryComponents';
 import { serializeComplexRulesForApi, type ComplexFilterRule } from '../utils/complexQuery';
 import { fetchCandidatesListResponse } from '../utils/candidatesListApi';
 import { authHeaders } from '../utils/authHeaders';
+import {
+    waitForCandidateEnrichment,
+    isCandidateEnrichmentPending,
+} from '../utils/candidateIngestPoll';
+import { fetchJobsForCompose } from '../services/jobsApi';
 import { fetchSavedSearchBlacklist, type EnrichedBlacklistEntry } from '../services/savedSearchesApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
 import {
@@ -67,6 +72,7 @@ import {
 } from '../utils/stickyTableHeader';
 import type { SummaryDrawerOptions } from '../hooks/useUIState';
 import {
+    fetchCandidateKanbanBoard,
     fetchCandidatePipelines,
     patchCandidatePipelineStage,
     type PipelineDto,
@@ -85,6 +91,25 @@ type CandidatePipelineProcessRow = {
     targetOutcomeId?: string | null;
     isActive?: boolean;
 };
+
+function kanbanCardId(c: {
+    backendId?: string;
+    id?: string | number;
+    kanbanJobCandidateId?: string;
+}): string {
+    if (c.kanbanJobCandidateId) return `job:${c.kanbanJobCandidateId}`;
+    return `cand:${c.backendId || c.id || ''}`;
+}
+
+function parseKanbanCardId(cardId: string): { candidateId: string; jobCandidateId?: string } {
+    if (cardId.startsWith('job:')) {
+        return { candidateId: '', jobCandidateId: cardId.slice(4) };
+    }
+    if (cardId.startsWith('cand:')) {
+        return { candidateId: cardId.slice(5) };
+    }
+    return { candidateId: cardId };
+}
 
 function candidateHasPipeline(
     c: { candidatePipelineId?: string; candidatePipelineProcesses?: CandidatePipelineProcessRow[] },
@@ -505,6 +530,11 @@ export interface Candidate {
   candidatePipelineName?: string;
   pipelineStageName?: string;
   pipelineStageColor?: string;
+  /** Job process shown as its own kanban card. */
+  kanbanJobCandidateId?: string;
+  kanbanJobId?: string;
+  kanbanJobTitle?: string;
+  kanbanJobCompany?: string;
   /** Latest explicit job_candidates row (by activity); enriched by list API for grid. */
   lastJobSubmission?: {
     jobId: string;
@@ -1423,8 +1453,27 @@ function isAdvancedSnapshotActive(
     return false;
 }
 
+type ListViewMode = 'table' | 'grid' | 'board';
+type ListSortConfig = {
+    key: keyof Candidate | 'lastSubmissionMatch';
+    direction: 'asc' | 'desc';
+};
+
+function parseSnapshotViewMode(raw: unknown): ListViewMode | null {
+    if (raw === 'table' || raw === 'grid' || raw === 'board') return raw;
+    return null;
+}
+
+function parseSnapshotSortConfig(raw: unknown): ListSortConfig | null {
+    if (!raw || typeof raw !== 'object') return null;
+    const key = String((raw as { key?: unknown }).key || '').trim();
+    const direction = (raw as { direction?: unknown }).direction;
+    if (!key || (direction !== 'asc' && direction !== 'desc')) return null;
+    return { key: key as ListSortConfig['key'], direction };
+}
+
 type ListViewSnapshotV1 = {
-    listSnapshotVersion: 1 | 2 | 3;
+    listSnapshotVersion: 1 | 2 | 3 | 4;
     candidates: Candidate[];
     searchTerm: string;
     debouncedSearchTerm: string;
@@ -1445,6 +1494,10 @@ type ListViewSnapshotV1 = {
     /** Smart / semantic search free-text (purple panel). */
     smartSearchQuery?: string;
     isSmartSearchOpen?: boolean;
+    viewMode?: ListViewMode | null;
+    sortConfig?: ListSortConfig | null;
+    activeCandidatePipelineId?: string;
+    adminPipelineClientId?: string | null;
 };
 
 /** Restore list + advanced search after navigating to a candidate and back. */
@@ -1458,7 +1511,7 @@ function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
 
         const snapVer = saved.listSnapshotVersion;
         const legacySemantic = saved.semanticListActive === true && saved.candidates.length > 0;
-        if (![1, 2, 3].includes(snapVer) && !legacySemantic) return null;
+        if (![1, 2, 3, 4].includes(snapVer) && !legacySemantic) return null;
 
         const debounced =
             typeof saved.debouncedSearchTerm === 'string'
@@ -1499,7 +1552,7 @@ function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
                 : null;
 
         return {
-            listSnapshotVersion: 3,
+            listSnapshotVersion: 4,
             candidates: saved.candidates as Candidate[],
             searchTerm: String(saved.searchTerm || ''),
             debouncedSearchTerm: debounced,
@@ -1517,6 +1570,14 @@ function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
             companyFilters,
             smartSearchQuery: typeof saved.smartSearchQuery === 'string' ? saved.smartSearchQuery : '',
             isSmartSearchOpen: !!saved.isSmartSearchOpen,
+            viewMode: parseSnapshotViewMode(saved.viewMode),
+            sortConfig: parseSnapshotSortConfig(saved.sortConfig),
+            activeCandidatePipelineId:
+                typeof saved.activeCandidatePipelineId === 'string' ? saved.activeCandidatePipelineId : '',
+            adminPipelineClientId:
+                saved.adminPipelineClientId != null && String(saved.adminPipelineClientId).trim()
+                    ? String(saved.adminPipelineClientId).trim()
+                    : null,
         };
     } catch {
         return null;
@@ -1814,8 +1875,11 @@ function engineMatchPercentFromBreakdown(bd: unknown): number | null {
     if (typeof core !== 'number' || !Number.isFinite(core)) return null;
     const salary = Number(o.salaryPenalty) || 0;
     const age = Number(o.ageGapPenalty) || 0;
+    const roleExp = Number(o.roleExperiencePenalty) || 0;
+    const lookback = Number(o.roleLookbackPenalty) || 0;
     const general = Number(o.generalPenalties) || 0;
-    return clampListMatchPercent(Math.max(0, Math.round(core) - salary - age - general));
+    const geo = Number(o.geoPenalty) || 0;
+    return clampListMatchPercent(Math.max(0, Math.round(core) - salary - age - roleExp - lookback - general - geo));
 }
 
 
@@ -1839,7 +1903,7 @@ function rawListRowNeedsMatchHydration(
     return raw.id != null && String(raw.id).trim() !== '';
 }
 
-const BATCH_MATCH_SCORES_CHUNK_SIZE = 25;
+const BATCH_MATCH_SCORES_CHUNK_SIZE = 40;
 const BATCH_MATCH_SCORES_TIMEOUT_MS = 45_000;
 
 async function fetchBatchMatchScores(
@@ -1848,8 +1912,11 @@ async function fetchBatchMatchScores(
 ): Promise<Record<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>> {
     if (!items.length) return {};
     const out: Record<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }> = {};
+    const chunks: { candidateId: string; jobId: string }[][] = [];
     for (let i = 0; i < items.length; i += BATCH_MATCH_SCORES_CHUNK_SIZE) {
-        const chunk = items.slice(i, i + BATCH_MATCH_SCORES_CHUNK_SIZE);
+        chunks.push(items.slice(i, i + BATCH_MATCH_SCORES_CHUNK_SIZE));
+    }
+    const chunkResults = await Promise.all(chunks.map(async (chunk) => {
         try {
             const controller = new AbortController();
             const timer = window.setTimeout(() => controller.abort(), BATCH_MATCH_SCORES_TIMEOUT_MS);
@@ -1860,25 +1927,27 @@ async function fetchBatchMatchScores(
                 signal: controller.signal,
             });
             window.clearTimeout(timer);
-            if (!res.ok) continue;
+            if (!res.ok) return {};
             const data = await res.json();
-            const scores = (data?.scores && typeof data.scores === 'object' ? data.scores : {}) as Record<
+            return (data?.scores && typeof data.scores === 'object' ? data.scores : {}) as Record<
                 string,
                 { matchScore?: unknown; scoreBreakdown?: MatchScoreBreakdownData }
             >;
-            for (const [candidateId, pkg] of Object.entries(scores)) {
-                if (!pkg || typeof pkg !== 'object') continue;
-                const matchScore =
-                    clampListMatchPercent(pkg.matchScore) ?? engineMatchPercentFromBreakdown(pkg.scoreBreakdown);
-                if (matchScore == null) continue;
-                out[candidateId] = {
-                    matchScore,
-                    scoreBreakdown:
-                        pkg.scoreBreakdown && typeof pkg.scoreBreakdown === 'object' ? pkg.scoreBreakdown : null,
-                };
-            }
         } catch {
-            // partial hydration is OK — next poll/page can retry missing rows
+            return {};
+        }
+    }));
+    for (const scores of chunkResults) {
+        for (const [candidateId, pkg] of Object.entries(scores)) {
+            if (!pkg || typeof pkg !== 'object') continue;
+            const matchScore =
+                clampListMatchPercent(pkg.matchScore) ?? engineMatchPercentFromBreakdown(pkg.scoreBreakdown);
+            if (matchScore == null) continue;
+            out[candidateId] = {
+                matchScore,
+                scoreBreakdown:
+                    pkg.scoreBreakdown && typeof pkg.scoreBreakdown === 'object' ? pkg.scoreBreakdown : null,
+            };
         }
     }
     return out;
@@ -1889,6 +1958,9 @@ async function hydrateMissingListMatchScores(
     rawList: Record<string, unknown>[],
     inFlight: Set<string>,
     filterJobId?: string,
+    onPatches?: (
+        patches: Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>,
+    ) => void,
 ): Promise<Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>> {
     const patches = new Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>();
     const jobFilter = String(filterJobId || '').trim();
@@ -1908,14 +1980,27 @@ async function hydrateMissingListMatchScores(
     }
     if (!tasks.length) return patches;
 
-    const batchScores = await fetchBatchMatchScores(
-        apiBase,
-        tasks.map(({ candidateId, jobId }) => ({ candidateId, jobId })),
-    );
-    for (const task of tasks) {
-        inFlight.delete(task.key);
-        const result = batchScores[task.candidateId];
-        if (result) patches.set(task.candidateId, result);
+    try {
+        for (let i = 0; i < tasks.length; i += BATCH_MATCH_SCORES_CHUNK_SIZE) {
+            const chunk = tasks.slice(i, i + BATCH_MATCH_SCORES_CHUNK_SIZE);
+            const batchScores = await fetchBatchMatchScores(
+                apiBase,
+                chunk.map(({ candidateId, jobId }) => ({ candidateId, jobId })),
+            );
+            const chunkPatches = new Map<
+                string,
+                { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }
+            >();
+            for (const task of chunk) {
+                const result = batchScores[task.candidateId];
+                if (!result) continue;
+                patches.set(task.candidateId, result);
+                chunkPatches.set(task.candidateId, result);
+            }
+            if (chunkPatches.size) onPatches?.(chunkPatches);
+        }
+    } finally {
+        for (const task of tasks) inFlight.delete(task.key);
     }
     return patches;
 }
@@ -2041,17 +2126,28 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         defaultVisibleColumns: globalPoolDefaultCols,
         allColumnIds: globalPoolAllColumnIds,
     });
-    /** Kanban is session-only — table/grid stay persisted so users aren't stuck on board after refresh. */
-    const [boardViewActive, setBoardViewActive] = useState(false);
-    const boardPrefResetRef = useRef(false);
-    useEffect(() => {
-        if (boardPrefResetRef.current) return;
-        if (viewMode === 'board') {
-            boardPrefResetRef.current = true;
-            setViewMode('table');
+    const [sessionViewMode, setSessionViewMode] = useState<ListViewMode | null>(
+        () => listViewSnapshot?.viewMode ?? null,
+    );
+    const chooseViewMode = useCallback((mode: ListViewMode) => {
+        setSessionViewMode(mode);
+        setViewMode(mode);
+        if (typeof sessionStorage === 'undefined') return;
+        try {
+            const raw = sessionStorage.getItem(VIEW_STATE_KEY);
+            const prev = raw ? JSON.parse(raw) : {};
+            if (!prev || typeof prev !== 'object') return;
+            sessionStorage.setItem(
+                VIEW_STATE_KEY,
+                JSON.stringify({ ...prev, viewMode: mode, listSnapshotVersion: 4 }),
+            );
+        } catch {
+            /* ignore */
         }
-    }, [viewMode, setViewMode]);
-    const effectiveViewMode: 'table' | 'grid' | 'board' = boardViewActive ? 'board' : viewMode === 'grid' ? 'grid' : 'table';
+    }, [setViewMode]);
+    const effectiveViewMode: ListViewMode =
+        sessionViewMode ?? (viewMode === 'board' || viewMode === 'grid' ? viewMode : 'table');
+    const boardViewActive = effectiveViewMode === 'board';
 
     useEffect(() => {
         if (!isSettingsOpen) persistColumnsNow();
@@ -2059,7 +2155,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [page, setPage] = useState(() => listViewSnapshot?.page ?? 1);
     const [pageSize, setPageSize] = useState(() => listViewSnapshot?.pageSize ?? 100);
     const [candidatePipelines, setCandidatePipelines] = useState<PipelineDto[]>([]);
-    const [activeCandidatePipelineId, setActiveCandidatePipelineId] = useState<string>('');
+    const [activeCandidatePipelineId, setActiveCandidatePipelineId] = useState<string>(
+        () => listViewSnapshot?.activeCandidatePipelineId ?? '',
+    );
     const [kanbanStagePick, setKanbanStagePick] = useState<{
         candidateBackendId: string;
         itemLabel: string;
@@ -2069,7 +2167,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     } | null>(null);
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const ownPipelineClientId = user?.clientId ? String(user.clientId) : null;
-    const [adminPipelineClientId, setAdminPipelineClientId] = useState<string | null>(null);
+    const [adminPipelineClientId, setAdminPipelineClientId] = useState<string | null>(
+        () => listViewSnapshot?.adminPipelineClientId ?? null,
+    );
     const [pipelineClientOptions, setPipelineClientOptions] = useState<Array<{ id: string; label: string }>>([]);
     const [pipelineClientsLoading, setPipelineClientsLoading] = useState(false);
     const pipelinesClientId = isPlatformAdmin ? adminPipelineClientId : ownPipelineClientId;
@@ -2087,6 +2187,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [kanbanColumnQueries, setKanbanColumnQueries] = useState<Record<string, string>>({});
     const [kanbanColumnResults, setKanbanColumnResults] = useState<Record<string, Candidate[]>>({});
     const [kanbanColumnLoading, setKanbanColumnLoading] = useState<Record<string, boolean>>({});
+    const [kanbanPlacements, setKanbanPlacements] = useState<Candidate[]>([]);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
@@ -2194,13 +2295,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [changeSourceOpen, setChangeSourceOpen] = useState(false);
     const [bulkAddEventOpen, setBulkAddEventOpen] = useState(false);
     const [isExportingCandidatesSearch, setIsExportingCandidatesSearch] = useState(false);
+    const [isBulkReprocessing, setIsBulkReprocessing] = useState(false);
 
     const [activeMatchState, setActiveMatchState] = useState<{ id: number, top: number, left: number } | null>(null);
 
-    const [sortConfig, setSortConfig] = useState<{
-        key: keyof Candidate | 'lastSubmissionMatch';
-        direction: 'asc' | 'desc';
-    } | null>(null);
+    const [sortConfig, setSortConfig] = useState<ListSortConfig | null>(
+        () => listViewSnapshot?.sortConfig ?? null,
+    );
     
     const [showNeedsAttention, setShowNeedsAttention] = useState(
         () => listViewSnapshot?.showNeedsAttention ?? false,
@@ -2502,6 +2603,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             c.pipelineStageColor != null && String(c.pipelineStageColor).trim()
                 ? String(c.pipelineStageColor).trim()
                 : undefined,
+        kanbanJobCandidateId:
+            c.kanbanJobCandidateId != null && String(c.kanbanJobCandidateId).trim()
+                ? String(c.kanbanJobCandidateId).trim()
+                : undefined,
+        kanbanJobId:
+            c.kanbanJobId != null && String(c.kanbanJobId).trim()
+                ? String(c.kanbanJobId).trim()
+                : undefined,
+        kanbanJobTitle:
+            c.kanbanJobTitle != null && String(c.kanbanJobTitle).trim()
+                ? String(c.kanbanJobTitle).trim()
+                : undefined,
+        kanbanJobCompany:
+            c.kanbanJobCompany != null && String(c.kanbanJobCompany).trim()
+                ? String(c.kanbanJobCompany).trim()
+                : undefined,
         matchedTerms: Array.isArray(c.matchedTerms) ? c.matchedTerms.map(String) : undefined,
         matchReasons: Array.isArray(c.matchReasons) ? c.matchReasons : undefined,
         lastJobSubmission: ljCandidate
@@ -2597,7 +2714,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         rawRows,
                         listMatchHydrationInFlightRef.current,
                         filterJobId,
-                    ).then((patches) => applyListMatchPatches(patches));
+                        applyListMatchPatches,
+                    );
                 }
                 listFetchLastKeyRef.current = { key: fetchKey, at: Date.now() };
             } catch (e) {
@@ -2681,6 +2799,29 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             cancelled = true;
         };
     }, [pipelinesClientId]);
+
+    useEffect(() => {
+        if (!boardViewActive || !activeCandidatePipelineId || !apiBase) {
+            setKanbanPlacements([]);
+            return;
+        }
+        let cancelled = false;
+        void fetchCandidateKanbanBoard({
+            pipelineId: activeCandidatePipelineId,
+            search: debouncedSearchTerm,
+            limit: 500,
+        })
+            .then((rows) => {
+                if (cancelled) return;
+                setKanbanPlacements(rows.map((row, idx) => mapCandidate(row, idx)));
+            })
+            .catch(() => {
+                if (!cancelled) setKanbanPlacements([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [boardViewActive, activeCandidatePipelineId, apiBase, debouncedSearchTerm, mapCandidate]);
 
     // Ref keeps companyFilters readable inside callbacks without adding it to dep arrays.
     // This prevents resolveAdvancedPayloadForFetch (and therefore fetchCandidates) from
@@ -3033,7 +3174,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         rawRows,
                         listMatchHydrationInFlightRef.current,
                         filterJobId,
-                    ).then((patches) => applyListMatchPatches(patches));
+                        applyListMatchPatches,
+                    );
                 }
             } finally {
                 inFlight = false;
@@ -3144,7 +3286,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                   ? mergeCompanyFiltersIntoAdvancedPayload(null, companyFilters)
                   : null;
         const stateToSave = {
-            listSnapshotVersion: 3,
+            listSnapshotVersion: 4,
             candidates,
             searchTerm,
             debouncedSearchTerm,
@@ -3162,6 +3304,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             semanticBaselineCandidates: suspendListPolling ? semanticBaselineCandidates : null,
             smartSearchQuery,
             isSmartSearchOpen,
+            viewMode: effectiveViewMode,
+            sortConfig,
+            activeCandidatePipelineId,
+            adminPipelineClientId,
         };
         try {
             sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify(stateToSave));
@@ -3187,6 +3333,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         smartSearchQuery,
         isSmartSearchOpen,
         companyFilters,
+        effectiveViewMode,
+        sortConfig,
+        activeCandidatePipelineId,
+        adminPipelineClientId,
     ]);
 
 
@@ -3257,7 +3407,20 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
             direction = 'desc';
         }
-        setSortConfig({ key, direction });
+        const next = { key, direction };
+        setSortConfig(next);
+        if (typeof sessionStorage === 'undefined') return;
+        try {
+            const raw = sessionStorage.getItem(VIEW_STATE_KEY);
+            const prev = raw ? JSON.parse(raw) : {};
+            if (!prev || typeof prev !== 'object') return;
+            sessionStorage.setItem(
+                VIEW_STATE_KEY,
+                JSON.stringify({ ...prev, sortConfig: next, listSnapshotVersion: 4 }),
+            );
+        } catch {
+            /* ignore */
+        }
     };
 
     const toggleSelectionMode = () => {
@@ -3673,6 +3836,95 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         void fetchCandidates();
     }, [bulkSelectedBackendIds, fetchCandidates, t]);
 
+    const handleBulkReprocess = useCallback(async () => {
+        if (!apiBase || isBulkReprocessing) return;
+        const selected = candidates.filter((c) => selectedIds.has(c.id));
+        if (selected.length === 0) return;
+        // Prefer rows that already show a resumeUrl; still allow others — server returns 400 if missing.
+        const preferred = selected.filter((c) => String(c.resumeUrl || '').trim());
+        const queueSource = preferred.length > 0 ? preferred : selected;
+        const confirmed = window.confirm(
+            t('actions.reprocess_confirm', { count: queueSource.length }),
+        );
+        if (!confirmed) return;
+
+        setIsBulkReprocessing(true);
+        setIsBulkActionsMobileOpen(false);
+        setFeedbackMessage(t('actions.reprocess_started', { count: queueSource.length }));
+        let ok = 0;
+        let fail = 0;
+        let emptyParse = 0;
+        let lastFailMessage = '';
+        let lastEmptyExplanation = '';
+        const queue = [...queueSource];
+        const workers = Array.from({ length: Math.min(3, queue.length) }, async () => {
+            while (queue.length) {
+                const c = queue.shift();
+                if (!c) return;
+                const cid = getCandidateRouteId(c);
+                try {
+                    const res = await fetch(
+                        `${apiBase}/api/candidates/${encodeURIComponent(cid)}/reprocess`,
+                        {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                        },
+                    );
+                    const body = await res.json().catch(() => ({}));
+                    if (!res.ok && res.status !== 202) {
+                        throw new Error(
+                            typeof body?.message === 'string' ? body.message : res.statusText,
+                        );
+                    }
+                    let updated: Record<string, unknown> | null = null;
+                    if (isCandidateEnrichmentPending(res.status, body) && queueSource.length === 1) {
+                        updated = await waitForCandidateEnrichment(apiBase, cid, authHeaders);
+                    }
+                    const row = updated || body;
+                    const status = String(row?.status || '');
+                    const exp = Array.isArray(row?.workExperience) ? row.workExperience : null;
+                    if (status === 'נכשל בעיבוד' || (exp && exp.length === 0 && queueSource.length === 1)) {
+                        emptyParse += 1;
+                        lastEmptyExplanation = String(row?.statusExplanation || '').trim();
+                    }
+                    ok += 1;
+                } catch (e) {
+                    fail += 1;
+                    lastFailMessage = e instanceof Error ? e.message : String(e);
+                    console.error('[bulk-reprocess]', cid, e);
+                }
+            }
+        });
+        try {
+            await Promise.all(workers);
+            const skipped = selected.length - queueSource.length;
+            setFeedbackMessage(
+                t('actions.reprocess_done', { ok, fail, skipped }),
+            );
+            if (queueSource.length === 1 && emptyParse > 0) {
+                alert(
+                    lastEmptyExplanation ||
+                        'העיבוד הסתיים אך לא נמצא ניסיון תעסוקתי בקובץ. בדקו שהקובץ אינו ריק והעלו קו"ח מעודכן במידת הצורך.',
+                );
+            } else if (queueSource.length === 1 && fail > 0 && lastFailMessage) {
+                alert(lastFailMessage);
+            }
+            setSelectedIds(new Set());
+            setSuspendListPolling(false);
+            void fetchCandidates();
+        } finally {
+            setIsBulkReprocessing(false);
+        }
+    }, [
+        apiBase,
+        isBulkReprocessing,
+        candidates,
+        selectedIds,
+        getCandidateRouteId,
+        fetchCandidates,
+        t,
+    ]);
+
     useEffect(() => {
         if (feedbackMessage) {
             const timer = setTimeout(() => {
@@ -3833,18 +4085,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 }
             } catch { /* ignore */ }
 
-            const base = (apiBase || '').replace(/\/$/, '');
-            const url = base ? `${base}/api/jobs` : '/api/jobs';
-            const res = await fetch(url, { cache: 'no-store' });
-            if (!res.ok) throw new Error('נכשל בטעינת המשרות');
-            const data = await res.json();
-            const jobList = Array.isArray(data)
-                ? data
-                : Array.isArray(data?.rows)
-                  ? data.rows
-                  : Array.isArray(data?.data)
-                    ? data.data
-                    : [];
+            const jobList = await fetchJobsForCompose();
             const mapped = jobList.map((job: any) => ({
                 id: job.id,
                 title: job.title || job.name || 'ללא שם',
@@ -3945,7 +4186,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     rawRows,
                     listMatchHydrationInFlightRef.current,
                     filterJobId,
-                ).then((patches) => applyListMatchPatches(patches));
+                    applyListMatchPatches,
+                );
             }
             const label = job ? job.title : smartSearchQuery.trim();
             setFeedbackMessage(`מציג ${list.length} מועמדים דומים ל-${label}`);
@@ -4165,17 +4407,31 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [activeCandidatePipeline]);
 
     const boardCandidates = useMemo(() => {
+        if (boardViewActive) return kanbanPlacements;
         if (!activeCandidatePipelineId) return paginatedCandidates;
         return paginatedCandidates.filter((c) => candidateHasPipeline(c, activeCandidatePipelineId));
-    }, [paginatedCandidates, activeCandidatePipelineId]);
+    }, [boardViewActive, kanbanPlacements, paginatedCandidates, activeCandidatePipelineId]);
 
     const findCandidateByDragId = useCallback(
-        (dragId: string) => candidates.find((c) => getCandidateRouteId(c) === dragId),
-        [candidates, getCandidateRouteId],
+        (dragId: string) => {
+            const fromBoard = kanbanPlacements.find((c) => kanbanCardId(c) === dragId);
+            if (fromBoard) return fromBoard;
+            const parsed = parseKanbanCardId(dragId);
+            if (parsed.jobCandidateId) {
+                return kanbanPlacements.find((c) => c.kanbanJobCandidateId === parsed.jobCandidateId);
+            }
+            const candidateId = parsed.candidateId || dragId;
+            return (
+                kanbanPlacements.find((c) => getCandidateRouteId(c) === candidateId) ||
+                candidates.find((c) => getCandidateRouteId(c) === candidateId)
+            );
+        },
+        [kanbanPlacements, candidates, getCandidateRouteId],
     );
 
     const resolveKanbanDragCandidateId = (e: React.DragEvent) =>
-        e.dataTransfer.getData('candidateId')
+        e.dataTransfer.getData('kanbanCardId')
+        || e.dataTransfer.getData('candidateId')
         || e.dataTransfer.getData('text/plain')
         || kanbanDraggedCandidateIdRef.current
         || '';
@@ -4190,11 +4446,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     };
 
     const handleCandidateKanbanDragStart = (e: React.DragEvent, candidate: Candidate) => {
-        const dragId = getCandidateRouteId(candidate);
+        const dragId = kanbanCardId(candidate);
         kanbanDraggedCandidateIdRef.current = dragId;
         kanbanDidDragRef.current = true;
         e.dataTransfer.setData('text/plain', dragId);
-        e.dataTransfer.setData('candidateId', dragId);
+        e.dataTransfer.setData('kanbanCardId', dragId);
+        e.dataTransfer.setData('candidateId', getCandidateRouteId(candidate));
         e.dataTransfer.effectAllowed = 'move';
     };
 
@@ -4212,15 +4469,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         pipelineId: string,
     ) => {
         const prev = findCandidateByDragId(candidateBackendId);
+        const parsedCard = parseKanbanCardId(candidateBackendId);
+        const jobCandidateId = parsedCard.jobCandidateId || prev?.kanbanJobCandidateId;
+        const routeCandidateId = getCandidateRouteId(prev || {}) || parsedCard.candidateId;
         const prevPipelineId = prev?.candidatePipelineId;
-        const prevStageId =
-            candidateStageForPipeline(prev || {}, pipelineId) ||
-            ((!prevPipelineId || prevPipelineId === pipelineId) && kanbanFirstStageId
+        const prevStageId = prev?.pipelineStageId
+            || candidateStageForPipeline(prev || {}, pipelineId)
+            || ((!prevPipelineId || prevPipelineId === pipelineId) && kanbanFirstStageId
                 ? kanbanFirstStageId
                 : undefined);
         if (prevStageId === stageId && (prevPipelineId || pipelineId) === pipelineId) return;
 
-        const matchesDragId = (c: Candidate) => getCandidateRouteId(c) === candidateBackendId;
+        const matchesDragId = (c: Candidate) => kanbanCardId(c) === candidateBackendId
+            || (!jobCandidateId && getCandidateRouteId(c) === routeCandidateId);
         const applyResolvedStage = (resolvedPipelineId: string, resolvedStageId: string) => {
             setCandidates((prevList) =>
                 prevList.map((c) =>
@@ -4244,8 +4505,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         };
 
         applyResolvedStage(pipelineId, stageId);
+        const patchPlacements = (mut: (c: Candidate) => Candidate) => {
+            setKanbanPlacements((prevList) => prevList.map((c) => (matchesDragId(c) ? mut(c) : c)));
+        };
+        patchPlacements((c) => patchCandidatePipelineLocalState(c, pipelineId, stageId));
         try {
-            const result = await patchCandidatePipelineStage(candidateBackendId, { pipelineId, stageId });
+            // Same path as פעולות אפשריות: update existing process event + history (no new event).
+            const result = await patchCandidatePipelineStage(routeCandidateId, {
+                pipelineId,
+                stageId,
+                ...(jobCandidateId ? { jobCandidateId } : {}),
+                ...(prevStageId ? { fromStageId: prevStageId } : {}),
+            });
             const resolvedPipelineId =
                 result.candidatePipelineId != null ? String(result.candidatePipelineId) : pipelineId;
             const resolvedStageId =
@@ -4261,6 +4532,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 return next;
             };
             setCandidates((prevList) =>
+                prevList.map((c) => (matchesDragId(c) ? applyFromApi(c) : c)),
+            );
+            setKanbanPlacements((prevList) =>
                 prevList.map((c) => (matchesDragId(c) ? applyFromApi(c) : c)),
             );
             setKanbanColumnResults((prevResults) => {
@@ -4289,9 +4563,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 window.dispatchEvent(
                     new CustomEvent('hiro:candidate-pipeline-stage-moved', {
                         detail: {
-                            candidateId: candidateBackendId,
+                            candidateId: routeCandidateId,
                             pipelineId: resolvedPipelineId,
                             stageId: resolvedStageId,
+                            ...(jobCandidateId ? { jobCandidateId } : {}),
                         },
                     }),
                 );
@@ -4324,6 +4599,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 }
                 return nextResults;
             });
+            setKanbanPlacements((prevList) =>
+                prevList.map((c) =>
+                    matchesDragId(c)
+                        ? {
+                              ...c,
+                              candidatePipelineId: prevPipelineId,
+                              pipelineStageId: prevStageId,
+                          }
+                        : c,
+                ),
+            );
             setFeedbackMessage(err instanceof Error ? err.message : 'העברת שלב נכשלה');
         }
     };
@@ -4384,27 +4670,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             columnKey: string,
             query: string,
             stageIds: string[],
-            includeUnassigned: boolean,
+            _includeUnassigned: boolean,
         ) => {
             if (!apiBase || !activeCandidatePipelineId || stageIds.length === 0) return;
             setKanbanColumnLoading((prev) => ({ ...prev, [columnKey]: true }));
             try {
-                const res = await fetch(`${apiBase}/api/candidates/search/free`, {
-                    method: 'POST',
-                    headers: authHeaders(true),
-                    body: JSON.stringify({
-                        query,
-                        limit: 50,
+                const mapped = (
+                    await fetchCandidateKanbanBoard({
                         pipelineId: activeCandidatePipelineId,
+                        search: query,
                         stageIds,
-                        includeUnassigned,
-                    }),
-                });
-                if (!res.ok) throw new Error('Search failed');
-                const data = await res.json();
-                const mapped = (Array.isArray(data) ? data : []).map((row: unknown, idx: number) =>
-                    mapCandidate(row, idx),
-                );
+                        limit: 80,
+                    })
+                ).map((row, idx) => mapCandidate(row, idx));
                 setKanbanColumnResults((prev) => ({ ...prev, [columnKey]: mapped }));
                 setCandidates((prev) => mergeKanbanSearchCandidates(prev, mapped));
             } catch {
@@ -5163,7 +5441,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             adv.salaryMax !== d.salaryMax ||
             adv.includeUnknownSalary === false
         ) {
-            const parts = [`${adv.salaryMin.toLocaleString()}–${adv.salaryMax.toLocaleString()} ₪`];
+            const salaryMin = Number.isFinite(Number(adv.salaryMin)) ? Number(adv.salaryMin) : d.salaryMin;
+            const salaryMax = Number.isFinite(Number(adv.salaryMax)) ? Number(adv.salaryMax) : d.salaryMax;
+            const parts = [`${salaryMin.toLocaleString()}–${salaryMax.toLocaleString()} ₪`];
             if (adv.includeUnknownSalary === false) parts.push('ללא שכר לא ידוע');
             chips.push({
                 id: 'salary-range',
@@ -5688,9 +5968,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         <div className="w-px h-8 bg-border-default mx-1 hidden sm:block flex-shrink-0"></div>
 
                          <div className="flex items-center bg-bg-subtle p-1.5 rounded-xl border border-border-default flex-shrink-0 ml-2 sm:ms-0">
-                            <button onClick={() => { setBoardViewActive(false); setViewMode('grid'); }} title={t('candidates.view_grid')} className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
-                            <button onClick={() => { setBoardViewActive(false); setViewMode('table'); }} title={t('candidates.view_list')} className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
-                            <button onClick={() => setBoardViewActive(true)} title="תצוגת לוח (Kanban)" className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'board' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><ChartBarIcon className="w-5 h-5 transform rotate-90"/></button>
+                            <button onClick={() => chooseViewMode('grid')} title={t('candidates.view_grid')} className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                            <button onClick={() => chooseViewMode('table')} title={t('candidates.view_list')} className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                            <button onClick={() => chooseViewMode('board')} title="תצוגת לוח (Kanban)" className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'board' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><ChartBarIcon className="w-5 h-5 transform rotate-90"/></button>
                         </div>
                         {effectiveViewMode === 'board' && isPlatformAdmin && (
                             <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] flex-shrink-0">
@@ -6225,7 +6505,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             )}
                             <button
                                 type="button"
-                                onClick={() => setBoardViewActive(false)}
+                                onClick={() => chooseViewMode('table')}
                                 className="mt-2 text-sm font-semibold text-primary-600 hover:text-primary-700 underline"
                             >
                                 חזור לתצוגת רשימה
@@ -6335,7 +6615,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                                 ) : null}
                                                 {displayItems.map((candidate) => (
                                                     <div
-                                                        key={candidate.backendId || `c-${candidate.id}`}
+                                                        key={kanbanCardId(candidate)}
                                                         draggable
                                                         onDragStart={(e) => handleCandidateKanbanDragStart(e, candidate)}
                                                         onDragEnd={handleCandidateKanbanDragEnd}
@@ -6353,8 +6633,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                                                 handleSelect(candidate.id);
                                                                 return;
                                                             }
-                                                            const search = location.search || '';
-                                                            navigate(`/candidates/${getCandidateRouteId(candidate)}${search}`);
+                                                            openSummaryDrawer(candidate);
                                                         }}
                                                         className={`bg-white border rounded-xl p-3 shadow-sm hover:border-primary-300 cursor-grab active:cursor-grabbing transition select-none ${
                                                             selectedIds.has(candidate.id) ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'
@@ -6366,14 +6645,37 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                                             </div>
                                                             <div className="min-w-0">
                                                                 <h4 className="font-bold text-sm text-text-default truncate inline-flex items-center gap-1.5 max-w-full">
-                                                                    <span className="truncate">{candidate.name}</span>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="truncate text-start hover:text-primary-700 hover:underline cursor-pointer bg-transparent border-0 p-0 font-inherit max-w-full"
+                                                                        title={candidate.name}
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            if (kanbanDidDragRef.current) return;
+                                                                            if (selectionMode) {
+                                                                                handleSelect(candidate.id);
+                                                                                return;
+                                                                            }
+                                                                            const search = location.search || '';
+                                                                            navigate(
+                                                                                `/candidates/${getCandidateRouteId(candidate)}${search}`,
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        {candidate.name}
+                                                                    </button>
                                                                     <CvReviewBadge internalTags={candidate.internalTags} />
                                                                     <CandidateApprovedByCandidateBadge
                                                                         approved={Boolean(candidate.consentToJobOffers || candidate.approveByCandidate)}
                                                                         className="w-3.5 h-3.5"
                                                                     />
                                                                 </h4>
-                                                                <p className="text-xs text-text-muted truncate">{candidate.title || '—'}</p>
+                                                                <p className="text-xs text-text-muted truncate">
+                                                                    {candidate.kanbanJobTitle || candidate.title || '—'}
+                                                                </p>
+                                                                {candidate.kanbanJobCompany ? (
+                                                                    <p className="text-[11px] text-text-subtle truncate">{candidate.kanbanJobCompany}</p>
+                                                                ) : null}
                                                             </div>
                                                         </div>
                                                     </div>
@@ -6547,6 +6849,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             <DocumentArrowDownIcon className="w-5 h-5 shrink-0" />
                                             <span>{t('actions.bulk_download_candidates')}</span>
                                         </button>
+                                        <button
+                                            type="button"
+                                            className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600 disabled:opacity-50 disabled:pointer-events-none"
+                                            disabled={isBulkReprocessing}
+                                            onClick={() => void handleBulkReprocess()}
+                                            title={t('actions.reprocess_tooltip')}
+                                        >
+                                            <SparklesIcon className={`w-5 h-5 shrink-0 ${isBulkReprocessing ? 'animate-pulse' : ''}`} />
+                                            <span>{isBulkReprocessing ? t('actions.reprocessing') : t('actions.reprocess')}</span>
+                                        </button>
                                     </div>
                                 </div>
                             )}
@@ -6595,6 +6907,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openBulkSendWhatsapp}><WhatsappIcon className="w-5 h-5"/>Whatsapp</button>
                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><ArchiveBoxIcon className="w-5 h-5"/>ארכיון</button>
                                             {/* MOBILE DOWNLOAD ACTION */}
+                                            <button
+                                                type="button"
+                                                className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5 disabled:opacity-50"
+                                                disabled={isBulkReprocessing}
+                                                onClick={() => void handleBulkReprocess()}
+                                            >
+                                                <SparklesIcon className="w-5 h-5" />
+                                                {isBulkReprocessing ? t('actions.reprocessing') : t('actions.reprocess')}
+                                            </button>
                                             <button
                                                 type="button"
                                                 className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5 disabled:opacity-50"

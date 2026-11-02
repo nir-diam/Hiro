@@ -11,6 +11,7 @@ const candidateService = require('./candidateService');
 const { createS3Client } = require('./s3Service');
 
 const { POSTING_CODE_FIRST, isPostingCodeValidForMatch } = jobService;
+const { extractPostingCodeFromSubject } = require('../utils/postingCodeFromEmail');
 const DEFAULT_SINCE_YMD = '2026-10-08';
 const TEST_CANDIDATE_ID = '35d41e78-3837-499d-9716-8f2431d01533';
 
@@ -34,18 +35,6 @@ function extractPostingCodeFromFileKey(fileKey = '') {
   if (dashMatch) return dashMatch[1];
   const tailMatch = name.match(/(\d{4,8})(?:\.[^.]+)?$/);
   return tailMatch ? tailMatch[1] : null;
-}
-
-function extractPostingCodeFromSubject(subject = '') {
-  const text = String(subject || '').trim();
-  if (!text) return null;
-  const masMatch = text.match(/מס['\u05F3]?\s*(\d{4,8})/u);
-  if (masMatch) return masMatch[1];
-  const dashMatch = text.match(/[-–—]\s*(\d{4,8})\s*$/);
-  if (dashMatch) return dashMatch[1];
-  const all = [...text.matchAll(/\b(\d{4,8})\b/g)].map((m) => m[1]);
-  if (all.length) return all[all.length - 1];
-  return null;
 }
 
 function isLegacyPostingCode(code) {

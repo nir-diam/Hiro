@@ -34,7 +34,7 @@ export type AuthUser = {
     role?: string;
     phone?: string;
     clientId?: string | null;
-    /** From client usage settings: idle auto-logout after 60 minutes when true */
+    /** From client usage settings: idle auto-logout after 1 day when true */
     autoDisconnect?: boolean;
     dataScope?: unknown;
     permissions?: Record<string, boolean>;
@@ -54,7 +54,7 @@ type AuthContextValue = {
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
-const AUTO_DISCONNECT_IDLE_MS = 60 * 60 * 1000;
+const AUTO_DISCONNECT_IDLE_MS = 24 * 60 * 60 * 1000;
 
 export function clearAuthLocalStorage(): void {
     try {
@@ -90,14 +90,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         try {
             const meUrl = apiBase ? `${apiBase}/api/auth/me` : '/api/auth/me';
-            const res = await fetch(meUrl, {
-                headers: { Authorization: `Bearer ${token}` },
-            });
+            const fetchMe = () =>
+                fetch(meUrl, { headers: { Authorization: `Bearer ${token}` } });
+            let res = await fetchMe();
+            if (!res.ok && res.status === 503) {
+                await new Promise((resolve) => window.setTimeout(resolve, 2000));
+                res = await fetchMe();
+            }
             if (!res.ok) {
                 if (res.status === 401) {
                     redirectToLogin();
                     return;
                 }
+                setUser(readStoredUser());
                 setReady(true);
                 return;
             }
@@ -184,15 +189,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         };
     }, [user?.id]);
 
-    /** Client usage `autoDisconnect`: log out after 60 minutes of idle. */
+    /** Client usage `autoDisconnect`: log out after 1 day of idle. */
     useEffect(() => {
         if (typeof window === 'undefined') return;
         if (!user?.autoDisconnect) return;
         if (!localStorage.getItem('token')) return;
 
         let timeoutId: ReturnType<typeof setTimeout>;
+        let lastSchedule = 0;
 
         const schedule = () => {
+            const now = Date.now();
+            if (timeoutId && now - lastSchedule < 30_000) return;
+            lastSchedule = now;
             window.clearTimeout(timeoutId);
             timeoutId = window.setTimeout(() => redirectToLogin(), AUTO_DISCONNECT_IDLE_MS);
         };
@@ -200,7 +209,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         schedule();
 
         const onActivity = () => schedule();
-        const events: (keyof WindowEventMap)[] = ['mousedown', 'keydown', 'touchstart', 'scroll', 'click', 'wheel'];
+        const events: (keyof WindowEventMap)[] = ['mousedown', 'mousemove', 'keydown', 'touchstart', 'scroll', 'click', 'wheel'];
         const opts: AddEventListenerOptions = { capture: true, passive: true };
         events.forEach((ev) => window.addEventListener(ev, onActivity, opts));
 

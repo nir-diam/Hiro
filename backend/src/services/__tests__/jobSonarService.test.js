@@ -54,7 +54,7 @@ const Job = require('../../models/Job');
 const { searchCandidates } = require('../vectorSearchService');
 const { computeMatchPackage } = require('../matchingScoreService');
 const candidateService = require('../candidateService');
-const { runSonarScan, passesHardFilters, passesDistanceHardFilter } = require('../jobSonarService');
+const { runSonarScan, passesHardFilters, passesDistanceHardFilter, sonarNeedsWorkExperience } = require('../jobSonarService');
 
 describe('jobSonarService', () => {
   const jobPlain = {
@@ -117,6 +117,16 @@ describe('jobSonarService', () => {
     expect(passesDistanceHardFilter({ geoDistance: 21, geoMaxKm: 20, geoMissing: false }, ['distance'])).toBe(false);
     expect(passesDistanceHardFilter({ geoMissing: true, geoDistance: null, geoMaxKm: 15 }, ['distance'])).toBe(false);
     expect(passesDistanceHardFilter({ geoDistance: 80, geoMaxKm: 15 }, [])).toBe(true);
+  });
+
+  it('loads workExperience when the job has role years / look-back even if the experience weight is off', () => {
+    const jobWithRoleYears = {
+      skills: [{ name: 'מנהל/ת חשבונות', tagType: 'role', years_experience: 1, lookback_years: 5 }],
+    };
+    expect(sonarNeedsWorkExperience({ isExperienceEnabled: false }, [], jobWithRoleYears)).toBe(true);
+    expect(sonarNeedsWorkExperience({ isExperienceEnabled: false }, [], { skills: [] })).toBe(false);
+    expect(sonarNeedsWorkExperience({ isExperienceEnabled: true }, [], { skills: [] })).toBe(true);
+    expect(sonarNeedsWorkExperience({ isExperienceEnabled: false }, ['work_experience'], { skills: [] })).toBe(true);
   });
 
   it('runSonarScan returns engine score + parameterMatches from computeMatchPackage', async () => {

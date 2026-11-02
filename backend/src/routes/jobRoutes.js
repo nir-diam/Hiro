@@ -29,8 +29,8 @@ router.post('/:id/record-staff-view', authMiddleware, attachDbUser, jobControlle
 router.get('/:id', optionalAuth, optionalAttachDbUser, jobController.get);
 router.post('/', optionalAuth, optionalAttachDbUser, jobController.create);
 router.post('/ai/analyze', jobController.analyzeDescription);
-router.put('/:id', jobController.update);
-router.delete('/:id', jobController.remove);
+router.put('/:id', authMiddleware, attachDbUser, jobController.update);
+router.delete('/:id', authMiddleware, attachDbUser, jobController.remove);
 
 module.exports = router;
 

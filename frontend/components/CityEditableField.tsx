@@ -17,6 +17,8 @@ type CityEditableFieldProps = {
     compact?: boolean;
     /** When false, skip `/api/cities/resolve` on mount (display-only / candidate portal). */
     validateOnMount?: boolean;
+    /** Live primary lock — no edit until parent unlocks. */
+    readOnly?: boolean;
 };
 
 const CityEditableField: React.FC<CityEditableFieldProps> = ({
@@ -27,6 +29,7 @@ const CityEditableField: React.FC<CityEditableFieldProps> = ({
     icon,
     compact = false,
     validateOnMount = true,
+    readOnly = false,
 }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [query, setQuery] = useState('');
@@ -190,6 +193,7 @@ const CityEditableField: React.FC<CityEditableFieldProps> = ({
     const showEmpty = isEditing && query.trim().length >= 2 && !loading && options.length === 0;
 
     const startEdit = () => {
+        if (readOnly) return;
         setQuery(savedInvalid ? '' : displayValue);
         setIsEditing(true);
     };
@@ -198,7 +202,7 @@ const CityEditableField: React.FC<CityEditableFieldProps> = ({
         <div ref={rootRef} className={`relative group flex items-start gap-2 min-w-0 ${className}`}>
             {icon ? <span className="mt-1 text-text-subtle shrink-0">{icon}</span> : null}
             <div className="flex-grow min-w-0">
-                {isEditing ? (
+                {isEditing && !readOnly ? (
                     <div className="relative z-40">
                         <input
                             ref={inputRef}
@@ -262,12 +266,12 @@ const CityEditableField: React.FC<CityEditableFieldProps> = ({
                         ) : null}
                     </div>
                 ) : (
-                    <div className={`relative ${compact ? '' : 'pr-6'}`}>
+                    <div className={`relative ${compact || readOnly ? '' : 'pr-6'}`}>
                         <div
                             onClick={startEdit}
-                            className={`cursor-pointer hover:bg-bg-hover/50 rounded-md py-0.5 px-1 min-h-[1.5em] ${
-                                savedInvalid ? 'ring-1 ring-amber-300 bg-amber-50/80' : ''
-                            }`}
+                            className={`rounded-md py-0.5 px-1 min-h-[1.5em] ${
+                                readOnly ? 'cursor-default' : 'cursor-pointer hover:bg-bg-hover/50'
+                            } ${savedInvalid ? 'ring-1 ring-amber-300 bg-amber-50/80' : ''}`}
                         >
                             <p className="whitespace-pre-line break-words leading-relaxed">
                                 {displayValue ? (
@@ -284,7 +288,7 @@ const CityEditableField: React.FC<CityEditableFieldProps> = ({
                                 )}
                             </p>
                         </div>
-                        {!compact ? (
+                        {!compact && !readOnly ? (
                             <button
                                 type="button"
                                 onClick={(e) => {

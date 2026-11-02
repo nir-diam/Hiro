@@ -2,12 +2,13 @@
 
 /**
  * Canonical company_enrichment prompt.
- * Runtime placeholders: ${companyNamesJson}, ${mainFieldJson}, ${website}, ${snippet}
+ * Runtime placeholders: ${companyNamesJson}, ${mainFieldJson}, ${industryTaxonomyJson}, ${website}, ${snippet}
  * Legacy DB placeholder also supported: {{company_names_json}}
  */
 function renderCompanyEnrichmentPrompt({
   companyNamesJson,
   mainFieldJson,
+  industryTaxonomyJson = '[]',
   website = '',
   snippet = '',
 }) {
@@ -43,9 +44,12 @@ Use Google Search and your internal knowledge to provide real, accurate data for
    - Do NOT repeat the same value. Do NOT invent values outside the list.
 
 4. *SUBFIELD (CRITICAL):*
-   - 'subField' MUST be an array of one or more Hebrew labels describing the company's occupation sub-domains.
-   - Each value MUST be a realistic sub-industry label under 'mainField' OR any value in 'mainField2'.
-   - Return 1–3 values. If unknown, return [].
+   - 'subField' MUST be an array of 1–3 values copied verbatim from the INDUSTRY TAXONOMY below.
+   - Take them ONLY from the 'subFields' list of the entry whose 'mainField' equals your 'mainField' or one of your 'mainField2' values.
+   - Do NOT invent, translate, rephrase, or merge labels. If nothing in those lists fits, return [].
+
+INDUSTRY TAXONOMY (the only allowed mainField / subField values):
+${industryTaxonomyJson}
 
 5. *MULTI-VALUE PROFILING FIELDS:*
    - 'businessModel' MUST be an array of one or more values copied verbatim from: ['B2B', 'B2C', 'B2G', 'משולב', 'לא ידוע'].
@@ -90,7 +94,7 @@ JSON STRUCTURE:
     "description": "Hebrew description (2 sentences)",
     "mainField": "one value from ${mainFieldJson}",
     "mainField2": ["secondary mainField only — never repeat mainField"],
-    "subField": ["תת-תחום ראשי", "תת-תחום נוסף"],
+    "subField": ["verbatim subFields value from the taxonomy"],
     "secondaryField": "optional Hebrew free text or null",
     "employeeCount": "(Enterprise) +1000",
     "website": "https://example.co.il",
@@ -119,27 +123,63 @@ JSON STRUCTURE:
 function buildCompanyEnrichmentPrompt({
   companyNames = [],
   mainFieldOptions = [],
+  industryTaxonomy = [],
   website = '',
   snippet = '',
 } = {}) {
   return renderCompanyEnrichmentPrompt({
     companyNamesJson: JSON.stringify(companyNames),
     mainFieldJson: JSON.stringify(mainFieldOptions),
+    industryTaxonomyJson: JSON.stringify(industryTaxonomy),
     website,
     snippet,
   });
+}
+
+/**
+ * Fills a stored company_enrichment template. Templates saved before
+ * ${industryTaxonomyJson} existed get the taxonomy appended so subField stays picklist-bound.
+ */
+function fillCompanyEnrichmentTemplate(template, {
+  companyNames = [],
+  mainFieldOptions = [],
+  industryTaxonomy = [],
+  website = '',
+  snippet = '',
+} = {}) {
+  const companyNamesJson = JSON.stringify(companyNames);
+  const taxonomyJson = JSON.stringify(industryTaxonomy);
+  let out = String(template)
+    .split('{{company_names_json}}').join(companyNamesJson)
+    .split('${companyNamesJson}').join(companyNamesJson)
+    .split('${mainFieldJson}').join(JSON.stringify(mainFieldOptions))
+    .split('${website}').join(website)
+    .split('${snippet}').join(snippet);
+  if (out.includes('${industryTaxonomyJson}')) {
+    out = out.split('${industryTaxonomyJson}').join(taxonomyJson);
+  } else {
+    out += `
+
+INDUSTRY TAXONOMY (overrides any earlier mainField / subField instruction):
+- 'mainField' and every 'mainField2' value MUST be a 'mainField' copied verbatim from this list.
+- 'subField' MUST be 1–3 values copied verbatim from the 'subFields' of those same entries. Never invent labels. If nothing fits, return [].
+${taxonomyJson}`;
+  }
+  return out;
 }
 
 /** Seed / DB template — placeholders replaced by buildCompanyPrompt at runtime. */
 const COMPANY_ENRICHMENT_PROMPT_TEMPLATE = renderCompanyEnrichmentPrompt({
   companyNamesJson: '${companyNamesJson}',
   mainFieldJson: '${mainFieldJson}',
+  industryTaxonomyJson: '${industryTaxonomyJson}',
   website: '${website}',
   snippet: '${snippet}',
 });
 
 module.exports = {
   buildCompanyEnrichmentPrompt,
+  fillCompanyEnrichmentTemplate,
   renderCompanyEnrichmentPrompt,
   COMPANY_ENRICHMENT_PROMPT_TEMPLATE,
 };

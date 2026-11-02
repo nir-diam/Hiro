@@ -15,6 +15,16 @@ const {
   assertProtectedTagUpdateAllowed,
   isTagProtectedRow,
 } = require('../utils/tagProtection');
+const { createVersionedNamespaceCache } = require('./versionedNamespaceCache');
+
+const tagListCache = createVersionedNamespaceCache('tags', {
+  ttlSeconds: Number.parseInt(process.env.TAG_LIST_CACHE_TTL || '120', 10) || 120,
+  envFlagName: 'TAG_LIST_CACHE',
+});
+
+const bumpTagListCache = () => {
+  tagListCache.bumpVersion().catch(() => {});
+};
 
 const fireAndForget = (promise) => {
   if (!promise || typeof promise.catch !== 'function') return;
@@ -214,7 +224,7 @@ const cleanupPendingCorrections = async (values = [], options = {}) => {
   });
 };
 
-const list = async (options = {}) => {
+const listFromDb = async (options = {}) => {
   const {
     page = 1,
     limit,
@@ -476,6 +486,9 @@ const list = async (options = {}) => {
   return { rows, total: count, page: normalizedPage, limit: normalizedLimit };
 };
 
+const list = async (options = {}) =>
+  tagListCache.getCached({ kind: 'list', ...options }, () => listFromDb(options), 'tags:list');
+
 const getById = async (id) => {
   const tag = await Tag.findByPk(id);
   if (!tag) {
@@ -626,6 +639,7 @@ const create = async (payload, options = {}) => {
     meta: actorMetaFromOptions(options),
   }));
   fireAndForget(tagEmbeddingService.scheduleTagEmbedding(created));
+  bumpTagListCache();
   return created;
 };
 
@@ -682,6 +696,7 @@ const update = async (id, payload, options = {}) => {
   }
 
   fireAndForget(tagEmbeddingService.scheduleTagEmbedding(tag));
+  bumpTagListCache();
   return tag;
 };
 
@@ -690,6 +705,7 @@ const remove = async (id, options = {}) => {
   assertTagNotProtectedForMutation(tag);
   const transaction = options.transaction;
   await tag.destroy({ transaction });
+  bumpTagListCache();
 };
 
 const normalizeCatalogTerm = (value) => String(value || '').trim();
@@ -853,6 +869,7 @@ const mergeCatalogTags = async (merges = []) => {
       throw err;
     }
   }
+  if (results.length) bumpTagListCache();
   return { success: true, results, skipped };
 };
 

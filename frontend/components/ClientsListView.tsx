@@ -16,6 +16,7 @@ import { useAuth } from '../context/AuthContext';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import ActivityLogModal from './ActivityLogModal';
 import { authHeaders } from '../utils/authHeaders';
+import { fetchJsonGetCached } from '../utils/apiGetCache';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover, { type CompanyFilters, EMPTY_COMPANY_FILTERS, normalizeCompanyFilters } from './CompanyFilterPopover';
 import ContactDrawer from './ContactDrawer';
@@ -29,6 +30,68 @@ import { fetchClientHealthPulse, type OrgHealthPulseDto } from '../services/clie
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
 import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
+
+const CLIENTS_LIST_PAGE_SIZE = 50;
+
+type PaginatedApiList<T> = {
+    items: T[];
+    total: number;
+    offset: number;
+    limit: number;
+    hasMore?: boolean;
+};
+
+function parsePaginatedList<T>(data: unknown): PaginatedApiList<T> | null {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+    const row = data as Record<string, unknown>;
+    if (!Array.isArray(row.items)) return null;
+    const items = row.items as T[];
+    return {
+        items,
+        total: Number(row.total) || items.length,
+        offset: Number(row.offset) || 0,
+        limit: Number(row.limit) || items.length,
+        hasMore: Boolean(row.hasMore),
+    };
+}
+
+function ListPaginationFooter(props: {
+    offset: number;
+    limit: number;
+    total: number;
+    onPrev: () => void;
+    onNext: () => void;
+}) {
+    const { offset, limit, total, onPrev, onNext } = props;
+    if (total <= limit) return null;
+    const from = total === 0 ? 0 : offset + 1;
+    const to = Math.min(offset + limit, total);
+    return (
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-border-default bg-bg-card text-sm">
+            <span className="text-text-muted">
+                {from}–{to} מתוך {total.toLocaleString('he-IL')}
+            </span>
+            <div className="flex items-center gap-2">
+                <button
+                    type="button"
+                    disabled={offset <= 0}
+                    onClick={onPrev}
+                    className="px-3 py-1.5 rounded-lg border border-border-default disabled:opacity-40 hover:bg-bg-hover font-bold"
+                >
+                    הקודם
+                </button>
+                <button
+                    type="button"
+                    disabled={offset + limit >= total}
+                    onClick={onNext}
+                    className="px-3 py-1.5 rounded-lg border border-border-default disabled:opacity-40 hover:bg-bg-hover font-bold"
+                >
+                    הבא
+                </button>
+            </div>
+        </div>
+    );
+}
 
 // --- TYPES ---
 type ClientStatus = 'פעיל' | 'לא פעיל' | 'בהקפאה' | 'ליד חדש';
@@ -1488,6 +1551,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [pipelines, setPipelines] = useState<Pipeline[]>([]);
     const [clients, setClients] = useState<Client[]>(clientsData);
     const [linkedOrganizations, setLinkedOrganizations] = useState<LinkedOrganizationItem[]>([]);
+    const [linkedOrgsTotal, setLinkedOrgsTotal] = useState(0);
+    const [linkedOrgsOffset, setLinkedOrgsOffset] = useState(0);
+    const [contactsTotal, setContactsTotal] = useState(0);
+    const [contactsOffset, setContactsOffset] = useState(0);
     const [orgPulseById, setOrgPulseById] = useState<Record<string, OrgHealthPulseDto>>({});
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -1509,7 +1576,11 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         let active = true;
         setIsLoading(true);
         setError(null);
-        fetch(`${apiBase}/api/clients`)
+        fetch(`${apiBase}/api/clients?journalCounts=1`, {
+            headers: authHeaders(true),
+            credentials: 'include',
+            cache: 'no-store',
+        })
             .then((r) => {
                 if (!r.ok) throw new Error('Failed to load clients');
                 return r.json();
@@ -1570,33 +1641,6 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         }
     };
 
-    useEffect(() => {
-        if (!apiBase || !authReady || !tenantClientId) return;
-        let active = true;
-        setIsLoading(true);
-        setError(null);
-        fetch(`${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations`, {
-            headers: authHeaders(true),
-        })
-            .then((r) => {
-                if (!r.ok) throw new Error('טעינת חברות מקושרות נכשלה');
-                return r.json();
-            })
-            .then((data) => {
-                if (!active) return;
-                const list = Array.isArray(data) ? data : [];
-                setLinkedOrganizations(list.map((row) => normalizeLinkedOrganization(row as Record<string, unknown>)));
-            })
-            .catch((e: any) => {
-                if (!active) return;
-                setError(e?.message || 'טעינת חברות מקושרות נכשלה');
-            })
-            .finally(() => {
-                if (active) setIsLoading(false);
-            });
-        return () => { active = false; };
-    }, [apiBase, authReady, tenantClientId]);
-
     const openOrgDrawer = async (org: LinkedOrganizationItem) => {
         setOrgDrawer({ org, full: null });
         setOrgDrawerLinks([]);
@@ -1653,53 +1697,6 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         await Promise.all([fetchDetails, fetchLinks]);
     };
 
-    useEffect(() => {
-        if (!apiBase || !authReady) return;
-
-        if (!isPlatformAdmin && !tenantClientId) {
-            setContacts([]);
-            setContactsError(null);
-            setContactsLoading(false);
-            return;
-        }
-
-        const contactsUrl = `${apiBase}/api/clients/all-contacts`;
-
-        let active = true;
-        setContactsLoading(true);
-        setContactsError(null);
-        fetch(contactsUrl, { headers: authHeaders(true) })
-            .then((r) => {
-                if (!r.ok) throw new Error('טעינת אנשי קשר נכשלה');
-                return r.json();
-            })
-            .then((data) => {
-                if (!active) return;
-                const list = Array.isArray(data) ? data : [];
-                const byId = new Map<string, Client>(clients.map((c) => [c.id, c]));
-                const orgsById = new Map<string, { name: string; logo?: string }>();
-                for (const org of linkedOrganizations) {
-                    if (org.organizationId) {
-                        orgsById.set(org.organizationId, { name: org.name, logo: org.logo || undefined });
-                    }
-                }
-                setContacts(
-                    list.map((row: any) =>
-                        mapServerContactToListContact(row, byId, pipelines, orgsById),
-                    ),
-                );
-            })
-            .catch((e: any) => {
-                if (active) setContactsError(e?.message || 'טעינת אנשי קשר נכשלה');
-            })
-            .finally(() => {
-                if (active) setContactsLoading(false);
-            });
-        return () => {
-            active = false;
-        };
-    }, [apiBase, clients, authReady, isPlatformAdmin, tenantClientId, pipelines, linkedOrganizations]);
-
     const { viewMode, setViewMode } = useScreenTablePreferences('clients_list', {
         defaultLayoutMode: isTenantUser ? 'cards' : 'list',
         defaultVisibleColumns: [],
@@ -1717,7 +1714,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [isStageModalOpen, setIsStageModalOpen] = useState(false);
 
     useEffect(() => {
-        if (!authReady || !tenantClientId || linkedOrganizations.length === 0) {
+        if (!authReady || !tenantClientId || activeTab !== 'companies') {
             setOrgPulseById({});
             return;
         }
@@ -1736,7 +1733,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 setOrgPulseById({});
             });
         return () => { active = false; };
-    }, [authReady, tenantClientId, linkedOrganizations, activePipelineId, isTenantUser]);
+    }, [authReady, tenantClientId, activeTab, activePipelineId, isTenantUser]);
 
     // --- Contacts Data & State ---
     const [contacts, setContacts] = useState<Contact[]>([]);
@@ -1775,6 +1772,128 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     // --- Filter States ---
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+
+    useEffect(() => {
+        const timer = window.setTimeout(() => setDebouncedSearchTerm(searchTerm), 400);
+        return () => window.clearTimeout(timer);
+    }, [searchTerm]);
+
+    useEffect(() => {
+        setLinkedOrgsOffset(0);
+        setContactsOffset(0);
+    }, [debouncedSearchTerm, activeTab]);
+
+    useEffect(() => {
+        if (!apiBase || !authReady || !tenantClientId) return;
+        if (activeTab !== 'companies' && activeTab !== 'tasks') return;
+        const tasksPickerOnly = activeTab === 'tasks';
+        let active = true;
+        if (!tasksPickerOnly) {
+            setIsLoading(true);
+            setError(null);
+        }
+        const qs = new URLSearchParams();
+        qs.set('paginate', '1');
+        if (tasksPickerOnly) {
+            qs.set('limit', '100');
+            qs.set('offset', '0');
+        } else {
+            qs.set('limit', String(viewMode === 'board' ? 100 : CLIENTS_LIST_PAGE_SIZE));
+            qs.set('offset', String(linkedOrgsOffset));
+            const q = debouncedSearchTerm.trim();
+            if (q) qs.set('q', q);
+            if (viewMode === 'board' && activePipelineId !== 'all') qs.set('pipelineId', activePipelineId);
+            if (viewMode === 'board' && activeStageId !== 'all') qs.set('pipelineStage', activeStageId);
+        }
+        const url = `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations?${qs.toString()}`;
+        fetch(url, { headers: authHeaders(true), cache: 'no-store' })
+            .then((res) => {
+                if (!res.ok) throw new Error('טעינת חברות מקושרות נכשלה');
+                return res.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const page = parsePaginatedList<Record<string, unknown>>(data);
+                if (page) {
+                    setLinkedOrganizations(page.items.map((row) => normalizeLinkedOrganization(row)));
+                    setLinkedOrgsTotal(page.total);
+                    return;
+                }
+                const list = Array.isArray(data) ? data : [];
+                setLinkedOrganizations(list.map((row) => normalizeLinkedOrganization(row as Record<string, unknown>)));
+                setLinkedOrgsTotal(list.length);
+            })
+            .catch((e: unknown) => {
+                if (!active || tasksPickerOnly) return;
+                setError(e instanceof Error ? e.message : 'טעינת חברות מקושרות נכשלה');
+            })
+            .finally(() => {
+                if (active && !tasksPickerOnly) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [
+        apiBase,
+        authReady,
+        tenantClientId,
+        activeTab,
+        linkedOrgsOffset,
+        debouncedSearchTerm,
+        viewMode,
+        activePipelineId,
+        activeStageId,
+    ]);
+
+    useEffect(() => {
+        if (!apiBase || !authReady || activeTab !== 'contacts') return;
+        if (!isPlatformAdmin && !tenantClientId) {
+            setContacts([]);
+            setContactsTotal(0);
+            setContactsError(null);
+            setContactsLoading(false);
+            return;
+        }
+        let active = true;
+        setContactsLoading(true);
+        setContactsError(null);
+        const qs = new URLSearchParams();
+        qs.set('paginate', '1');
+        qs.set('limit', String(CLIENTS_LIST_PAGE_SIZE));
+        qs.set('offset', String(contactsOffset));
+        const q = debouncedSearchTerm.trim();
+        if (q) qs.set('q', q);
+        const contactsUrl = `${apiBase}/api/clients/all-contacts?${qs.toString()}`;
+        fetch(contactsUrl, { headers: authHeaders(true), cache: 'no-store' })
+            .then((r) => {
+                if (!r.ok) throw new Error('טעינת אנשי קשר נכשלה');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const page = parsePaginatedList<Record<string, unknown>>(data);
+                const list = page ? page.items : (Array.isArray(data) ? data : []);
+                const byId = new Map<string, Client>(clients.map((c) => [c.id, c]));
+                setContacts(list.map((row) => mapServerContactToListContact(row, byId, pipelines)));
+                setContactsTotal(page ? page.total : list.length);
+            })
+            .catch((e: unknown) => {
+                if (active) setContactsError(e instanceof Error ? e.message : 'טעינת אנשי קשר נכשלה');
+            })
+            .finally(() => {
+                if (active) setContactsLoading(false);
+            });
+        return () => { active = false; };
+    }, [
+        apiBase,
+        authReady,
+        activeTab,
+        isPlatformAdmin,
+        tenantClientId,
+        clients,
+        pipelines,
+        contactsOffset,
+        debouncedSearchTerm,
+    ]);
     const [filterAccountManager, setFilterAccountManager] = useState<string>('all');
     
     // Use LocationSelector items
@@ -1851,8 +1970,11 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     const filteredLinkedOrganizations = useMemo(() => {
         const q = searchTerm.trim().toLowerCase();
+        const serverSearch = isTenantUser && Boolean(q);
+        const serverPipeline =
+            isTenantUser && viewMode === 'board' && activePipelineId !== 'all';
         return linkedOrganizations.filter((org) => {
-            if (q) {
+            if (q && !serverSearch) {
                 const hay = [
                     org.name,
                     org.mainField,
@@ -1872,7 +1994,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 });
                 if (!matchesLocation) return false;
             }
-            if (activePipelineId !== 'all' && activePipeline) {
+            if (!serverPipeline && activePipelineId !== 'all' && activePipeline) {
                 if (!orgMatchesPipelineFilter(org, activePipeline, activeStageId)) return false;
             }
             const pulse = org.organizationId ? orgPulseById[org.organizationId] : null;
@@ -1900,7 +2022,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 orgColumnDateFilters,
             );
         });
-    }, [linkedOrganizations, searchTerm, companyFilters, selectedLocations, activePipelineId, activeStageId, activePipeline, orgPulseById, orgColumnTextFilters, orgColumnDateFilters]);
+    }, [linkedOrganizations, searchTerm, isTenantUser, viewMode, companyFilters, selectedLocations, activePipelineId, activeStageId, activePipeline, orgPulseById, orgColumnTextFilters, orgColumnDateFilters]);
 
     const sortedLinkedOrganizations = useMemo(() => {
         const rows = [...filteredLinkedOrganizations];
@@ -2068,10 +2190,14 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
 
     const filteredContacts = useMemo(() => {
+        const q = searchTerm.trim();
+        const serverSearch = activeTab === 'contacts' && Boolean(q);
         return contacts.filter(c => {
-            const matchesSearch = c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                                  c.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                                  c.role.toLowerCase().includes(searchTerm.toLowerCase());
+            const matchesSearch = serverSearch || (
+                c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                c.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                c.role.toLowerCase().includes(searchTerm.toLowerCase())
+            );
             
             const matchesRole = filterContactRole === 'all' || c.role === filterContactRole;
             const matchesClient = filterContactClient === 'all' || c.clientName === filterContactClient;
@@ -2122,7 +2248,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 contactColumnDateFilters,
             );
         });
-    }, [contacts, searchTerm, filterContactRole, filterContactClient, filterContactPipeline, filterContactStage, filterContactDateFrom, filterContactDateTo, pipelines, contactColumnTextFilters, contactColumnDateFilters]);
+    }, [contacts, searchTerm, activeTab, filterContactRole, filterContactClient, filterContactPipeline, filterContactStage, filterContactDateFrom, filterContactDateTo, pipelines, contactColumnTextFilters, contactColumnDateFilters]);
 
     // --- Sorting Logic (Contacts) ---
     const sortedContacts = useMemo(() => {
@@ -3641,7 +3767,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 return {
                     visible: !isLoading,
                     filtered: filteredLinkedOrganizations.length,
-                    total: linkedOrganizations.length,
+                    total: linkedOrgsTotal,
                     entityLabel: 'חברות מקושרות',
                 };
             }
@@ -3656,7 +3782,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             return {
                 visible: !contactsLoading && !contactsError,
                 filtered: filteredContacts.length,
-                total: contacts.length,
+                total: contactsTotal,
                 entityLabel: 'אנשי קשר',
             };
         }
@@ -3666,13 +3792,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         isTenantUser,
         isLoading,
         filteredLinkedOrganizations.length,
-        linkedOrganizations.length,
+        linkedOrgsTotal,
         filteredClients.length,
         clients.length,
         contactsLoading,
         contactsError,
         filteredContacts.length,
-        contacts.length,
+        contactsTotal,
     ]);
 
     // --- Render ---
@@ -4195,7 +4321,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  ) : null}
                  {activeTab === 'companies' ? (
                     isTenantUser ? (
-                        viewMode === 'table' ? (
+                        <>
+                        {viewMode === 'table' ? (
                         <div className="overflow-x-auto custom-scrollbar bg-bg-card">
                             <table className="w-full text-sm text-right border-collapse min-w-[600px]">
                                 <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-10 border-b border-border-default">
@@ -4633,7 +4760,23 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                  </div>
                              ) : null}
                          </div>
-                        )
+                        )}
+                        <ListPaginationFooter
+                            offset={linkedOrgsOffset}
+                            limit={viewMode === 'board' ? 100 : CLIENTS_LIST_PAGE_SIZE}
+                            total={linkedOrgsTotal}
+                            onPrev={() =>
+                                setLinkedOrgsOffset((o) =>
+                                    Math.max(0, o - (viewMode === 'board' ? 100 : CLIENTS_LIST_PAGE_SIZE)),
+                                )
+                            }
+                            onNext={() =>
+                                setLinkedOrgsOffset((o) =>
+                                    o + (viewMode === 'board' ? 100 : CLIENTS_LIST_PAGE_SIZE),
+                                )
+                            }
+                        />
+                        </>
                      ) : viewMode === 'table' ? (
                         <div className="overflow-x-auto custom-scrollbar bg-bg-card">
                              <table className="w-full text-sm text-right border-collapse min-w-[900px]">
@@ -4839,8 +4982,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                          </HorizontalScrollArea>
                      )
                  ) : activeTab === 'contacts' ? (
-                     // --- CONTACTS VIEW (API: all-contacts) ---
-                     contactsLoading ? (
+                     <>
+                     {contactsLoading ? (
                         <div className="flex flex-col items-center justify-center py-16 text-text-muted">
                             <UserGroupIcon className="w-12 h-12 mb-3 opacity-30" />
                             <p className="text-sm font-medium">טוען אנשי קשר מכל הלקוחות…</p>
@@ -5142,7 +5285,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                 </div>
                              )}
                          </HorizontalScrollArea>
-                     )
+                     )}
+                     <ListPaginationFooter
+                         offset={contactsOffset}
+                         limit={CLIENTS_LIST_PAGE_SIZE}
+                         total={contactsTotal}
+                         onPrev={() =>
+                             setContactsOffset((o) => Math.max(0, o - CLIENTS_LIST_PAGE_SIZE))
+                         }
+                         onNext={() => setContactsOffset((o) => o + CLIENTS_LIST_PAGE_SIZE)}
+                     />
+                     </>
                  ) : activeTab === 'events' ? (
                     <ClientsEventsJournalTab
                         clientOptions={eventClientOptions}

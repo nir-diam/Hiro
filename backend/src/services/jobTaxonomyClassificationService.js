@@ -82,6 +82,33 @@ function buildClassificationQuery(parsed, rawText = '') {
  * @param {number} [k]
  * @returns {Promise<Array<{ categoryId: string, categoryName: string, similarity: number }>>}
  */
+let categoryEmbeddingCache = null;
+let categoryEmbeddingCacheAt = 0;
+const CATEGORY_EMBEDDING_TTL_MS = 30 * 60 * 1000;
+
+async function loadCategoryEmbeddings() {
+  if (categoryEmbeddingCache && Date.now() - categoryEmbeddingCacheAt < CATEGORY_EMBEDDING_TTL_MS) {
+    return categoryEmbeddingCache;
+  }
+  const categories = await JobCategory.findAll({
+    attributes: ['id', 'name', 'embedding'],
+  });
+  const rows = [];
+  for (const cat of categories) {
+    const plain = cat.get ? cat.get({ plain: true }) : cat;
+    const emb = normalizeEmbedding(plain.embedding);
+    if (!emb?.length) continue;
+    rows.push({
+      categoryId: String(plain.id),
+      categoryName: String(plain.name || '').trim(),
+      embedding: emb,
+    });
+  }
+  categoryEmbeddingCache = rows;
+  categoryEmbeddingCacheAt = Date.now();
+  return rows;
+}
+
 async function getTopKCategories(queryText, k = TOP_K_CATEGORIES) {
   const trimmed = String(queryText || '').trim();
   if (!trimmed) return [];
@@ -95,19 +122,14 @@ async function getTopKCategories(queryText, k = TOP_K_CATEGORIES) {
   }
   if (!queryEmb?.length) return [];
 
-  const categories = await JobCategory.findAll({
-    attributes: ['id', 'name', 'embedding'],
-  });
+  const categories = await loadCategoryEmbeddings();
 
   const scored = [];
   for (const cat of categories) {
-    const plain = cat.get ? cat.get({ plain: true }) : cat;
-    const emb = normalizeEmbedding(plain.embedding);
-    if (!emb?.length) continue;
     scored.push({
-      categoryId: String(plain.id),
-      categoryName: String(plain.name || '').trim(),
-      similarity: cosineSimilarity(queryEmb, emb),
+      categoryId: cat.categoryId,
+      categoryName: cat.categoryName,
+      similarity: cosineSimilarity(queryEmb, cat.embedding),
     });
   }
 
@@ -275,7 +297,7 @@ function applyMappingDecision(mappingDecision, availablePaths) {
  * @param {Record<string, unknown>} parsed – analyze JSON (title, skills, description)
  * @param {string} [rawText]
  */
-async function classifyJobTaxonomyForAnalyze(parsed, rawText = '') {
+async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {}) {
   const queryText = buildClassificationQuery(parsed, rawText);
   if (!queryText.trim()) {
     return buildFallbackResult('חסרה כותרת או תוכן לסיווג');
@@ -302,8 +324,13 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '') {
   }
 
   const promptRow = await promptService.ensureById(PROMPT_ID);
-  if (!promptRow?.template) {
-    console.warn('[jobTaxonomyClassification] prompt missing — using vector top match only');
+  const skipLlm = options.skipLlm === true;
+  if (skipLlm || !promptRow?.template) {
+    console.warn(
+      skipLlm
+        ? '[jobTaxonomyClassification] skipping second model call — using vector top match'
+        : '[jobTaxonomyClassification] prompt missing — using vector top match only',
+    );
     const best = availablePaths[0];
     if (!best) return buildFallbackResult('פרומפט סיווג חסר');
     const jobField = pathToJobField(best);
@@ -343,8 +370,10 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '') {
       responseMimeType: 'application/json',
       generationConfig: {
         temperature: promptRow.temperature ?? 0.1,
-        maxOutputTokens: 4096,
+        maxOutputTokens: 2048,
+        thinkingConfig: { thinkingLevel: 'low' },
       },
+      timeoutMs: 18000,
       promptId: PROMPT_ID,
       llmInputJson: {
         jobTitle,

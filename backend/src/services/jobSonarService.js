@@ -22,6 +22,7 @@ const {
   jobHasNegativeSkills,
 } = require('./matchingPenaltyService');
 const { loadTagAliasIndex } = require('./tagAliasIndexService');
+const { evaluateRoleExperience, jobRoleExperienceRequirements } = require('./roleExperienceRequirementService');
 const { resolveEngineConfigForJob } = require('./matchingEngineService');
 
 function cosineToMatchPercent(score) {
@@ -59,6 +60,13 @@ function buildJobSonarQuery(job) {
   return parts.join('\n');
 }
 
+/** Role-tag ניסיון/אחורה scoring needs workExperience even when the old experience weight is off. */
+function sonarNeedsWorkExperience(engineConfig, filterKeys, jobPlain) {
+  if (engineConfig?.isExperienceEnabled === true) return true;
+  if (Array.isArray(filterKeys) && filterKeys.includes('work_experience')) return true;
+  return jobRoleExperienceRequirements(jobPlain).length > 0;
+}
+
 const FILTER_TO_PARAM = {
   gender: 'gender',
   mobility: 'mobility',
@@ -71,8 +79,8 @@ const FILTER_TO_PARAM = {
   negative_skill: 'negative_skill',
 };
 
-/** Skill hard-filters need tagDetails — vector pre-filter rows are slim and lack them. */
-const TAG_DEPENDENT_HARD_FILTERS = new Set(['mandatory_skill', 'negative_skill']);
+/** Need tagDetails / workExperience — vector pre-filter rows are slim and lack them. */
+const TAG_DEPENDENT_HARD_FILTERS = new Set(['mandatory_skill', 'negative_skill', 'work_experience']);
 
 function splitHardFilters(filterKeys) {
   const all = Array.isArray(filterKeys) ? filterKeys : [];
@@ -101,6 +109,7 @@ function passesHardFilters(candPlain, jobPlain, filterKeys, settings, aliasIndex
   if (keys.has('negative_skill') && jobHasNegativeSkills(jobPlain)) {
     if (pm.negative_skill !== 'match') return false;
   }
+  if (keys.has('work_experience') && !evaluateRoleExperience(candPlain, jobPlain).ok) return false;
 
   for (const [filterKey, paramKey] of Object.entries(FILTER_TO_PARAM)) {
     const st = pm[paramKey];
@@ -366,7 +375,7 @@ async function runSonarScan(jobId, body = {}, options = {}) {
     const [heavyRows, intentByCandidate] = await Promise.all([
       candidateService.findManyWithTagsForMatchScore(scoreIds, {
         includeEmbedding: distanceRestricted,
-        omitExperienceJson: engineConfig?.isExperienceEnabled !== true,
+        omitExperienceJson: !sonarNeedsWorkExperience(engineConfig, filterKeys, jobPlain),
       }),
       buildIntentOptionsByCandidateIds(scoreIds),
     ]);
@@ -503,6 +512,7 @@ async function runSonarScan(jobId, body = {}, options = {}) {
     engineConfig: engineConfig
       ? {
           mainWeights: engineConfig.mainWeights,
+          preset: engineConfig.preset || null,
           isExperienceEnabled: engineConfig.isExperienceEnabled !== false,
           geoMaxKm: geoScope?.maxValidKm ?? null,
           geoRegion: geoScope?.regionLabel || null,
@@ -600,6 +610,7 @@ module.exports = {
   passesHardFilters,
   passesAffinityLevel,
   passesDistanceHardFilter,
+  sonarNeedsWorkExperience,
   listSonarIgnores,
   clearSonarIgnore,
 };

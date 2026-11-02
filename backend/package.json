@@ -5,6 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "ingest-worker": "node scripts/email-ingest-worker.js",
     "dev": "nodemon src/server.js",
     "test": "jest"
   },

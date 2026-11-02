@@ -1,5 +1,8 @@
 const { Op, QueryTypes } = require('sequelize');
 const redis = require('./redisService');
+const { isReadThroughEnabled } = require('../config/redis');
+const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
+const { getCached: getCachedJobList, bumpJobListCacheVersion } = require('./jobListCacheService');
 const { invalidateJobMatches, invalidateJobInAllCandidateOpportunities } = require('./matchingCacheService');
 const Job = require('../models/Job');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
@@ -337,6 +340,18 @@ const JOB_ANALYZE_SKILL_QUOTE_APPENDIX = `
   * "quote" is REQUIRED on every skill object and is in ADDITION to "tag_reason".
 `;
 
+const JOB_ANALYZE_SKILL_YEARS_APPENDIX = `
+--- years_experience vs lookback_years on skills (role / skill / industry only) ---
+- years_experience = minimum tenure stated for THAT tag. "לפחות 5 שנים" / "5+ שנים" / "ניסיון של 5 שנים" → 5.
+- lookback_years = only when the text limits how RECENT the experience must be
+  ("ב-3 השנים האחרונות", "ניסיון עדכני מהשנתיים האחרונות") → that number.
+- NEVER put the tenure number into lookback_years. Example:
+  "ניסיון של לפחות 5 שנים בתחום הנהלת החשבונות - חובה"
+  → years_experience: 5, lookback_years: null
+  (the product will default lookback to 1 when years_experience > 0 and lookback was not stated).
+- If years_experience is 0, lookback_years must be 0.
+`;
+
 const JOB_KEY = (id) => `job:${id}`;
 const JOB_TTL = 60 * 60; // 1 hour
 
@@ -352,6 +367,7 @@ const jobCacheSet = async (job) => {
 const jobCacheDel = async (id) => {
   try {
     await redis.del(JOB_KEY(id));
+    await bumpJobListCacheVersion();
   } catch (e) {
     console.warn('[jobService] redis del failed (non-fatal):', e.message);
   }
@@ -422,6 +438,10 @@ const JOB_LIST_API_EXCLUDE_ATTRIBUTES = [
   'listNotesHistory',
   'skills',
   'languages',
+  'description',
+  'PublicDescription',
+  'requirements',
+  'internalNotes',
 ];
 
 const JOB_LIST_FIND_ATTRIBUTES = {
@@ -430,7 +450,7 @@ const JOB_LIST_FIND_ATTRIBUTES = {
   )],
 };
 
-const JOB_COMPOSE_FIND_ATTRIBUTES = ['id', 'title', 'client', 'postingCode'];
+const JOB_COMPOSE_FIND_ATTRIBUTES = ['id', 'title', 'client', 'postingCode', 'status'];
 
 function staffActorLabel(actor) {
   if (!actor) return null;
@@ -478,6 +498,7 @@ const toApiJobComposeRow = (job) => {
     title: plain.title,
     client: plain.client,
     postingCode: plain.postingCode ?? null,
+    status: plain.status ?? null,
   };
 };
 
@@ -830,7 +851,7 @@ const findJobsScopedToClient = async (clientId, { attributes = JOB_LIST_FIND_ATT
   });
 };
 
-const list = async ({ tagId = null } = {}) => {
+const listFromDb = async ({ tagId = null } = {}) => {
   const tid = tagId != null && String(tagId).trim() !== '' ? String(tagId).trim() : '';
   if (tid) {
     const ids = await listJobIdsByTag(tid);
@@ -855,7 +876,32 @@ const list = async ({ tagId = null } = {}) => {
   return rows.map(toApiJobListRow);
 };
 
-const listForTenantGrid = async (clientId) => {
+/**
+ * Compact catalog shapes for screens that need every job but few fields.
+ * `skills` is excluded from the full list, so the job-tags admin screens need their own view.
+ */
+const JOB_COMPACT_VIEWS = {
+  picker: ['id', 'title', 'client', 'city', 'status', 'postingCode'],
+  skills: ['id', 'title', 'client', 'status', 'createdAt', 'skills'],
+};
+
+const listCompactFromDb = async (view) => {
+  const rows = await Job.findAll({
+    attributes: JOB_COMPACT_VIEWS[view],
+    order: [['openDate', 'DESC']],
+  });
+  return rows.map((r) => (r.get ? r.get({ plain: true }) : r));
+};
+
+const list = async ({ tagId = null, view = null } = {}) => {
+  if (view && JOB_COMPACT_VIEWS[view]) {
+    return getCachedJobList(`view:${view}`, { view }, () => listCompactFromDb(view));
+  }
+  const tid = tagId != null && String(tagId).trim() !== '' ? String(tagId).trim() : '';
+  return getCachedJobList('all', { tagId: tid || '_none_' }, () => listFromDb({ tagId: tid }));
+};
+
+const listForTenantGridFromDb = async (clientId) => {
   const rows = await findJobsScopedToClient(clientId, { attributes: JOB_LIST_FIND_ATTRIBUTES });
   await Promise.all([
     enrichJobsWithCandidateCounts(rows),
@@ -864,7 +910,12 @@ const listForTenantGrid = async (clientId) => {
   return rows.map(toApiJobListRow);
 };
 
-const listForComposePicker = async ({ clientId, platformAdmin }) => {
+const listForTenantGrid = async (clientId) => {
+  const cid = String(clientId || '').trim() || '_none_';
+  return getCachedJobList('grid', { clientId: cid }, () => listForTenantGridFromDb(clientId));
+};
+
+const listForComposePickerFromDb = async ({ clientId, platformAdmin }) => {
   if (platformAdmin) {
     const rows = await Job.findAll({
       attributes: JOB_COMPOSE_FIND_ATTRIBUTES,
@@ -875,6 +926,16 @@ const listForComposePicker = async ({ clientId, platformAdmin }) => {
   if (!clientId) return [];
   const rows = await findJobsScopedToClient(clientId, { attributes: JOB_COMPOSE_FIND_ATTRIBUTES });
   return rows.map(toApiJobComposeRow);
+};
+
+const listForComposePicker = async (opts = {}) => {
+  const clientId = opts.clientId ? String(opts.clientId).trim() : '';
+  const platformAdmin = Boolean(opts.platformAdmin);
+  return getCachedJobList(
+    'compose',
+    { clientId: clientId || '_none_', platformAdmin },
+    () => listForComposePickerFromDb({ clientId, platformAdmin }),
+  );
 };
 
 /**
@@ -1003,7 +1064,7 @@ const mapJobPickerRows = async (rows) => {
 };
 
 /** Staff job picker — tenant-scoped; platform admins see all jobs. */
-const listForPicker = async ({ clientId, platformAdmin } = {}) => {
+const listForPickerFromDb = async ({ clientId, platformAdmin } = {}) => {
   let rows;
   if (platformAdmin) {
     rows = await Job.findAll({
@@ -1018,17 +1079,32 @@ const listForPicker = async ({ clientId, platformAdmin } = {}) => {
   return mapJobPickerRows(rows);
 };
 
+const listForPicker = async (opts = {}) => {
+  const clientId = opts.clientId ? String(opts.clientId).trim() : '';
+  const platformAdmin = Boolean(opts.platformAdmin);
+  return getCachedJobList(
+    'picker',
+    { clientId: clientId || '_none_', platformAdmin },
+    () => listForPickerFromDb({ clientId, platformAdmin }),
+  );
+};
+
 const getById = async (id, { skipCache = false } = {}) => {
-  if (!skipCache) {
+  if (!skipCache && isReadThroughEnabled()) {
     try {
       const cached = await redis.get(JOB_KEY(id));
       if (cached) {
+        recordHit('job');
         const [enriched] = await enrichJobsWithCandidateCounts([cached]);
         return enriched;
       }
+      recordMiss('job');
     } catch (e) {
       console.warn('[jobService] redis get failed (non-fatal):', e.message);
+      recordMiss('job');
     }
+  } else if (!skipCache) {
+    recordBypass('job');
   }
 
   const job = await Job.findByPk(id, {
@@ -1073,8 +1149,14 @@ const bindExplicitJobOrganization = async (data, { requireClientLink = false } =
   }
 };
 
+const sanitizeJobRegionField = async (data) => {
+  if (!data || !Object.prototype.hasOwnProperty.call(data, 'region')) return;
+  data.region = await cityService.resolveRegionForJob(data.region);
+};
+
 const create = async (payload) => {
   const { data, skills } = stripSkillsFromPayload(prepareCvForwardSettingsForSave(payload));
+  await sanitizeJobRegionField(data);
   await bindExplicitJobOrganization(data, { requireClientLink: true });
   if (!data.organizationId) {
     const resolved = await resolveOrganizationIdForJob({
@@ -1090,6 +1172,7 @@ const create = async (payload) => {
   }
   await hydrateJobSkills(job);
   await jobCacheSet(job);
+  await bumpJobListCacheVersion();
   // Compute and persist embedding in the background (non-blocking)
   _computeAndSaveJobEmbedding(job).catch(() => {});
   return job;
@@ -1103,6 +1186,7 @@ const update = async (id, payload) => {
     throw err;
   }
   const { data, skills, hasSkills } = stripSkillsFromPayload(prepareCvForwardSettingsForSave(payload));
+  await sanitizeJobRegionField(data);
   for (const key of ['city', 'location', 'region']) {
     if (Object.prototype.hasOwnProperty.call(data, key) && !String(data[key] ?? '').trim()) {
       data[key] = null;
@@ -1127,7 +1211,11 @@ const update = async (id, payload) => {
   }
   await hydrateJobSkills(existing);
   await jobCacheSet(existing);
+  await bumpJobListCacheVersion();
   // Job changed → wipe its candidate matches + remove it from every candidate's opportunities
+  if (data.matchingEnginePresetId !== undefined || data.clientId !== undefined) {
+    require('./matchingEngineService').invalidateEngineConfigCache(id);
+  }
   invalidateJobMatches(id).catch(() => {});
   invalidateJobInAllCandidateOpportunities(id).catch(() => {});
   // Recompute embedding in the background whenever job content changes
@@ -1275,23 +1363,70 @@ const analyzeRawDescription = async (rawText, options = {}) => {
     err.status = 500;
     throw err;
   }
-  const systemPrompt = `${promptRow.template.trim()}\n${JOB_ANALYZE_FIELDS_APPENDIX}\n${JOB_ANALYZE_PREFERRED_HOURS_APPENDIX}\n${JOB_ANALYZE_SKILL_QUOTE_APPENDIX}`;
+  const systemPrompt = `${promptRow.template.trim()}\n${JOB_ANALYZE_FIELDS_APPENDIX}\n${JOB_ANALYZE_PREFERRED_HOURS_APPENDIX}\n${JOB_ANALYZE_SKILL_QUOTE_APPENDIX}\n${JOB_ANALYZE_SKILL_YEARS_APPENDIX}`;
 
   // eslint-disable-next-line no-console
   console.log('[jobService.analyzeRawDescription] calling sendChat with prompt length', systemPrompt.length);
 
-  const rawResponse = await sendChat({
-    apiKey,
-    systemPrompt,
-    history: [],
-    message: String(rawText),
-    promptId: 'create_new_job',
-    responseMimeType: 'application/json',
-    llmInputJson: {
-      rawDescriptionLength: String(rawText).length,
-      rawDescriptionPreview: String(rawText).slice(0, 4000),
-    },
-  });
+  const analyzeStartedAt = Date.now();
+  // gemini-3.8-flash thinking can exceed a tight abort; keep under typical ~120s proxy
+  // budgets. Override with GEMINI_JOB_ANALYZE_TIMEOUT_MS if needed.
+  const { isGeminiTimeoutError, GEMINI_TIMEOUT_MS } = require('./geminiService');
+  const analyzeTimeoutMs = Math.max(
+    30000,
+    Math.min(
+      GEMINI_TIMEOUT_MS,
+      Number(process.env.GEMINI_JOB_ANALYZE_TIMEOUT_MS || 90000) || 90000,
+    ),
+  );
+
+  const sendAnalyzeChat = (generationConfig) =>
+    sendChat({
+      apiKey,
+      systemPrompt,
+      history: [],
+      message: String(rawText),
+      promptId: 'create_new_job',
+      responseMimeType: 'application/json',
+      timeoutMs: analyzeTimeoutMs,
+      generationConfig,
+      llmInputJson: {
+        rawDescriptionLength: String(rawText).length,
+        rawDescriptionPreview: String(rawText).slice(0, 4000),
+      },
+    });
+
+  let rawResponse;
+  try {
+    rawResponse = await sendAnalyzeChat({
+      maxOutputTokens: 8192,
+      thinkingConfig: { thinkingLevel: 'low' },
+    });
+  } catch (firstErr) {
+    if (!isGeminiTimeoutError(firstErr)) throw firstErr;
+    // eslint-disable-next-line no-console
+    console.warn('[jobService.analyzeRawDescription] Gemini timed out; retrying with minimal thinking', {
+      timeoutMs: analyzeTimeoutMs,
+      elapsedMs: Date.now() - analyzeStartedAt,
+    });
+    try {
+      rawResponse = await sendAnalyzeChat({
+        maxOutputTokens: 8192,
+        // Disable / minimize thinking on retry so JSON starts sooner.
+        thinkingConfig: { thinkingBudget: 0 },
+      });
+    } catch (retryErr) {
+      if (isGeminiTimeoutError(retryErr)) {
+        const err = new Error(
+          'ניתוח המשרה ארך יותר מדי (timeout מול Gemini). נסו שוב או קצרו את תיאור המשרה.',
+        );
+        err.status = 504;
+        err.cause = retryErr;
+        throw err;
+      }
+      throw retryErr;
+    }
+  }
 
   // eslint-disable-next-line no-console
   console.log('[jobService.analyzeRawDescription] received raw AI response length', String(rawResponse || '').length);
@@ -1326,7 +1461,10 @@ const analyzeRawDescription = async (rawText, options = {}) => {
   delete parsed.role;
 
   try {
-    const taxonomy = await classifyJobTaxonomyForAnalyze(parsed, rawText);
+    const elapsedMs = Date.now() - analyzeStartedAt;
+    const taxonomy = await classifyJobTaxonomyForAnalyze(parsed, rawText, {
+      skipLlm: elapsedMs > 38000,
+    });
     Object.assign(parsed, taxonomy);
     if (aiSuggestedField || aiSuggestedRole) {
       parsed.aiSuggestedField = aiSuggestedField ?? null;
@@ -1352,6 +1490,12 @@ const analyzeRawDescription = async (rawText, options = {}) => {
       parsed.city = null;
       parsed.location = null;
     }
+  }
+
+  if (parsed.region != null && String(parsed.region).trim()) {
+    parsed.region = await cityService.resolveRegionForJob(String(parsed.region).trim());
+  } else {
+    parsed.region = null;
   }
 
   const hiringCompany = pickHiringCompanyName(parsed);

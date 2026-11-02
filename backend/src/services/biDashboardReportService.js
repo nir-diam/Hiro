@@ -5,6 +5,7 @@
 const { QueryTypes, Op } = require('sequelize');
 const { sequelize } = require('../config/db');
 const User = require('../models/User');
+const { getCachedBiDashboard } = require('./reportsCacheService');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const STAFF_ROLES = ['manager', 'recruiter'];
@@ -498,49 +499,38 @@ async function buildSeries({ metricId, start, endExclusive, clientId, recruiterI
 async function buildSparklineBuckets({ start, endExclusive, clientId, recruiterIds, buckets = 7 }) {
   const ms = endExclusive.getTime() - start.getTime();
   const step = Math.max(Math.floor(ms / buckets), 1);
-  const out = [];
-  for (let i = 0; i < buckets; i++) {
+  return Promise.all(Array.from({ length: buckets }, (_, i) => {
     const bStart = new Date(start.getTime() + i * step);
     const bEnd = i === buckets - 1 ? endExclusive : new Date(start.getTime() + (i + 1) * step);
-    out.push(
-      await computePeriodMetrics({
-        start: bStart,
-        endExclusive: bEnd,
-        clientId,
-        recruiterIds,
-      }),
-    );
-  }
-  return out;
+    return computePeriodMetrics({
+      start: bStart,
+      endExclusive: bEnd,
+      clientId,
+      recruiterIds,
+    });
+  }));
 }
 
 async function buildHeatmap({ start, endExclusive, clientId, recruiters }) {
-  const rows = [];
-  const chunkSize = 5;
-  for (let i = 0; i < recruiters.length; i += chunkSize) {
-    const chunk = recruiters.slice(i, i + chunkSize);
-    const part = await Promise.all(
-      chunk.map(async (r) => {
-        const metrics = await computePeriodMetrics({
-          start,
-          endExclusive,
-          clientId,
-          recruiterIds: [r.id],
-        });
-        return {
-          recruiterId: r.id,
-          name: r.name,
-          ...emptyMetrics(),
-          ...Object.fromEntries(HEATMAP_METRIC_IDS.map((id) => [id, Number(metrics[id]) || 0])),
-        };
-      }),
-    );
-    rows.push(...part);
-  }
-  return rows;
+  return Promise.all(
+    (recruiters || []).map(async (r) => {
+      const metrics = await computePeriodMetrics({
+        start,
+        endExclusive,
+        clientId,
+        recruiterIds: [r.id],
+      });
+      return {
+        recruiterId: r.id,
+        name: r.name,
+        ...emptyMetrics(),
+        ...Object.fromEntries(HEATMAP_METRIC_IDS.map((id) => [id, Number(metrics[id]) || 0])),
+      };
+    }),
+  );
 }
 
-async function getBiDashboard(opts = {}) {
+async function getBiDashboardFromDb(opts = {}) {
   const { start, endExclusive } = resolveDateWindow(opts);
   const prev = previousWindow(start, endExclusive);
 
@@ -555,8 +545,11 @@ async function getBiDashboard(opts = {}) {
 
   const recruiters = await loadRecruiters({ clientId });
   const recruiterIds = recruiterId ? [recruiterId] : null;
+  const heatmapRecruiters = recruiterId
+    ? recruiters.filter((r) => r.id === recruiterId)
+    : recruiters;
 
-  const [currentMetrics, previousMetrics, seriesPoints, sparkBuckets] = await Promise.all([
+  const [currentMetrics, previousMetrics, seriesPoints, sparkBuckets, heatmap] = await Promise.all([
     computePeriodMetrics({ start, endExclusive, clientId, recruiterIds }),
     computePeriodMetrics({
       start: prev.start,
@@ -566,6 +559,12 @@ async function getBiDashboard(opts = {}) {
     }),
     buildSeries({ metricId, start, endExclusive, clientId, recruiterIds, granularity }),
     buildSparklineBuckets({ start, endExclusive, clientId, recruiterIds, buckets: 7 }),
+    buildHeatmap({
+      start,
+      endExclusive,
+      clientId,
+      recruiters: heatmapRecruiters,
+    }),
   ]);
 
   const kpis = KPI_IDS.map((id) => {
@@ -585,17 +584,6 @@ async function getBiDashboard(opts = {}) {
       changePct: changePct(current, previous),
       sparkline: sparkBuckets.map((b) => Number(b[id]) || 0),
     };
-  });
-
-  const heatmapRecruiters = recruiterId
-    ? recruiters.filter((r) => r.id === recruiterId)
-    : recruiters;
-
-  const heatmap = await buildHeatmap({
-    start,
-    endExclusive,
-    clientId,
-    recruiters: heatmapRecruiters,
   });
 
   const hireValues = heatmap.map((h) => h.moved_to_hired || 0);
@@ -641,8 +629,12 @@ async function getBiDashboard(opts = {}) {
   };
 }
 
+const getBiDashboard = async (opts = {}) =>
+  getCachedBiDashboard(opts, () => getBiDashboardFromDb(opts));
+
 module.exports = {
   getBiDashboard,
+  getBiDashboardFromDb,
   resolveDateWindow,
   previousWindow,
   changePct,

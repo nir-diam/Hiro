@@ -442,6 +442,13 @@ const upsert = async (clientId, body) => {
   } else {
     row = await ClientUsageSetting.create(payload);
   }
+  const prevPresetId = prevPlain.matchingEnginePresetId != null ? Number(prevPlain.matchingEnginePresetId) : null;
+  if (prevPresetId !== matchingEnginePresetId) {
+    const { invalidateEngineConfigCache } = require('./matchingEngineService');
+    const { invalidateAllMatchCaches } = require('./matchingCacheService');
+    invalidateEngineConfigCache();
+    invalidateAllMatchCaches().catch(() => {});
+  }
   return { clientId, ...toDto(row) };
 };
 

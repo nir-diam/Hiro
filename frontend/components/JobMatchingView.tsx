@@ -12,6 +12,7 @@ import {
   type JobFilterSaveOptions,
 } from '../utils/candidateJobFilterApi';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
+import FieldInterestJobPickerModal, { type FieldInterestPreviewJob } from './FieldInterestJobPickerModal';
 import AIFeedbackModal from './AIFeedbackModal';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import JobMatchDeepInsightModal from './JobMatchDeepInsightModal';
@@ -19,11 +20,16 @@ import { MatchScorePopup, matchScorePopupPositionFromEvent, useMatchScorePopupDi
 import type { MatchScoreBreakdownData } from './MatchScoreBreakdownPanel';
 import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
 import {
-  fetchJobMatches, fetchJobMatchesPage, assignCandidateToJob, fetchCandidate, fetchClientOptions, fetchCityOptions,
+  fetchJobMatches, fetchJobMatchesPage, assignCandidateToJob, fetchCandidate, fetchClientOptions,
   ignoreJobMatch, fetchJobMatchIgnores, clearJobMatchIgnore,
   type JobMatchResult, type JobMatchIgnoreItem,
 } from '../utils/candidateJobMatchingApi';
 import { buildJobTagMatchCategories, type JobTagMatchInput } from '../utils/jobTagMatchCategories';
+import LocationSelector, { type LocationGroup, type LocationItem } from './LocationSelector';
+import { fetchAllCityGroups } from '../utils/citySearchApi';
+
+const cityKey = (name: string | null | undefined): string =>
+  String(name || '').replace(/[\s\-–"'״׳]+/g, '').toLowerCase();
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { authHeaders } from '../utils/authHeaders';
 import { useLanguage } from '../context/LanguageContext';
@@ -106,7 +112,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const [affinityLevel, setAffinityLevel] = useState<AffinityLevel>(DEFAULT_AFFINITY_LEVEL);
   const [error, setError] = useState<string | null>(null);
   const [clientOptions, setClientOptions] = useState<string[]>([]);
-  const [cityOptions, setCityOptions] = useState<string[]>([]);
+  const [cityGroups, setCityGroups] = useState<LocationGroup[]>([]);
 
   // ── ui ──
   const [searchTerm, setSearchTerm] = useState('');
@@ -137,6 +143,11 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   // ── modals ──
   const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
   const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
+  const [fieldInterestSaving, setFieldInterestSaving] = useState(false);
+  const [fieldInterestPreview, setFieldInterestPreview] = useState<{
+    selection: SelectedJobField;
+    jobs: FieldInterestPreviewJob[];
+  } | null>(null);
 
   // ── blacklist (job_match_ignore) ──
   const [ignoreOpen, setIgnoreOpen] = useState(false);
@@ -234,7 +245,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     jobType: 'הכל',
     status: 'הכל',
     client: 'הכל',
-    city: 'הכל',
+    locations: [] as LocationItem[],
   });
 
   // ─── load ──────────────────────────────────────────────────────────────────
@@ -346,10 +357,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   }, [ignoreOpen]);
 
   useEffect(() => {
-    Promise.all([fetchClientOptions(), fetchCityOptions()]).then(([clients, cities]) => {
-      setClientOptions(clients);
-      setCityOptions(cities);
-    }).catch(() => {});
+    fetchClientOptions().then(setClientOptions).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -522,10 +530,112 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     }
   };
 
-  const handleFieldSelected = (selectedField: SelectedJobField) => {
-    setIsJobFieldSelectorOpen(false);
-    // Just reload to pick up any new jobs or re-run matching
-    console.info('[JobMatchingView] field selected:', selectedField.role);
+  const buildFieldInterestBody = (selection: SelectedJobField, extra?: Record<string, unknown>) => ({
+    category: selection.category,
+    fieldType: selection.fieldType,
+    role: selection.role,
+    categoryId: selection.categoryId,
+    clusterId: selection.clusterId,
+    roleId: selection.roleId,
+    ...extra,
+  });
+
+  const commitFieldInterest = useCallback(
+    async (selection: SelectedJobField, jobIds?: string[]) => {
+      const id = String(candidateId || '').trim();
+      if (!apiBase || !id) throw new Error(t('interested_jobs.no_candidate') || 'לא נבחר מועמד');
+      const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/field-interest`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: authHeaders(true),
+        body: JSON.stringify(
+          buildFieldInterestBody(selection, {
+            maxJobs: 50,
+            ...(jobIds !== undefined ? { jobIds } : {}),
+          }),
+        ),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error((errBody as { message?: string }).message || 'שמירת התעניינות בתחום נכשלה');
+      }
+      await res.json().catch(() => null);
+      setFeedback('המשרות מהתחום נוספו. מרענן התאמות…');
+      void loadJobsCore();
+      setTimeout(() => setFeedback(null), 4000);
+    },
+    [apiBase, candidateId, t, loadJobsCore],
+  );
+
+  const handleFieldSelected = async (selectedField: SelectedJobField | null) => {
+    if (!selectedField) {
+      setIsJobFieldSelectorOpen(false);
+      return;
+    }
+    const id = String(candidateId || '').trim();
+    if (!apiBase || !id) {
+      setAssignError(t('interested_jobs.no_candidate') || 'לא נבחר מועמד');
+      setIsJobFieldSelectorOpen(false);
+      return;
+    }
+    setFieldInterestSaving(true);
+    setAssignError(null);
+    try {
+      const previewRes = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/field-interest`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: authHeaders(true),
+        body: JSON.stringify(buildFieldInterestBody(selectedField, { preview: true, maxJobs: 50 })),
+      });
+      if (!previewRes.ok) {
+        const errBody = await previewRes.json().catch(() => ({}));
+        throw new Error((errBody as { message?: string }).message || 'טעינת משרות מתאימות נכשלה');
+      }
+      const previewPayload = (await previewRes.json()) as {
+        mode?: string;
+        jobs?: Array<{ jobId?: string; matchScore?: number | null; job?: FieldInterestPreviewJob['job'] }>;
+      };
+      const previewJobs = (Array.isArray(previewPayload.jobs) ? previewPayload.jobs : []).filter(
+        (row) => row.jobId != null && String(row.jobId).trim() !== '',
+      );
+
+      if (previewJobs.length === 0) {
+        await commitFieldInterest(selectedField);
+        setIsJobFieldSelectorOpen(false);
+        return;
+      }
+
+      setFieldInterestPreview({
+        selection: selectedField,
+        jobs: previewJobs.map((row) => ({
+          jobId: String(row.jobId),
+          matchScore: row.matchScore,
+          job: row.job as FieldInterestPreviewJob['job'],
+        })),
+      });
+      setIsJobFieldSelectorOpen(false);
+    } catch (err: unknown) {
+      setAssignError(err instanceof Error ? err.message : 'הוספת התחום נכשלה');
+      setTimeout(() => setAssignError(null), 5000);
+      setIsJobFieldSelectorOpen(false);
+    } finally {
+      setFieldInterestSaving(false);
+    }
+  };
+
+  const handleFieldInterestPickerConfirm = async (selectedJobIds: string[]) => {
+    if (!fieldInterestPreview) return;
+    setFieldInterestSaving(true);
+    setAssignError(null);
+    try {
+      await commitFieldInterest(fieldInterestPreview.selection, selectedJobIds);
+      setFieldInterestPreview(null);
+    } catch (err: unknown) {
+      setAssignError(err instanceof Error ? err.message : 'הוספת המשרות נכשלה');
+      setTimeout(() => setAssignError(null), 5000);
+    } finally {
+      setFieldInterestSaving(false);
+    }
   };
 
   const handleAdvancedFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -549,9 +659,31 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       jobType: 'הכל',
       status: 'הכל',
       client: 'הכל',
-      city: 'הכל',
+      locations: [],
     });
   };
+
+  const hasRegionFilter = advancedFilters.locations.some((loc) => loc.type === 'region');
+  useEffect(() => {
+    if (!hasRegionFilter || cityGroups.length) return;
+    fetchAllCityGroups().then(setCityGroups).catch(() => {});
+  }, [hasRegionFilter, cityGroups.length]);
+
+  /** Normalized city names allowed by the location filter, or null when it is off. */
+  const allowedCityKeys = useMemo(() => {
+    const locs = advancedFilters.locations;
+    if (!locs.length) return null;
+    const keys = new Set<string>();
+    for (const loc of locs) {
+      if (loc.type === 'region') {
+        const group = cityGroups.find((g) => g.region === loc.value);
+        group?.cities.forEach((c) => keys.add(cityKey(c)));
+      } else {
+        keys.add(cityKey(loc.value));
+      }
+    }
+    return keys;
+  }, [advancedFilters.locations, cityGroups]);
 
   // ─── filtering (local) ─────────────────────────────────────────────────────
 
@@ -572,8 +704,8 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       .filter((j) => advancedFilters.jobType === 'הכל' || j.jobType.includes(advancedFilters.jobType))
       .filter((j) => advancedFilters.status === 'הכל' || j.status === advancedFilters.status)
       .filter((j) => advancedFilters.client === 'הכל' || j.client === advancedFilters.client)
-      .filter((j) => advancedFilters.city === 'הכל' || j.city === advancedFilters.city);
-  }, [jobs, searchTerm, advancedFilters]);
+      .filter((j) => !allowedCityKeys || allowedCityKeys.has(cityKey(j.city)));
+  }, [jobs, searchTerm, advancedFilters, allowedCityKeys]);
 
   const sortedJobs = useMemo(() => {
     if (!sortKey) return filteredJobs;
@@ -783,7 +915,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
 
   // ─── card view ────────────────────────────────────────────────────────────
 
-  const JobCard: React.FC<{ job: JobMatchResult }> = ({ job }) => {
+  const JobCard: React.FC<{ job: JobMatchResult; rank: number }> = ({ job, rank }) => {
     const isExpanded = expandedJobId === job.id;
     return (
       <div className="bg-bg-card border border-border-default rounded-xl hover:shadow-lg transition-shadow duration-300">
@@ -803,7 +935,9 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               </p>
             </div>
             <div className="text-right">
-              <button
+              <div className="flex items-center justify-end gap-2">
+                <span className="text-xs font-bold text-text-muted tabular-nums">{rank}</span>
+                <button
                 type="button"
                 onClick={() => void openJobDrawer(job)}
                 className="font-bold text-text-default text-base text-right hover:text-primary-600 hover:underline transition-colors"
@@ -811,6 +945,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               >
                 {job.title}
               </button>
+              </div>
               <p className="text-sm text-text-muted flex items-center justify-end gap-2 flex-wrap">
                 <span>{job.client}</span>
                 {job.matchType === 'ai' && (
@@ -853,7 +988,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
 
   // ─── table row ────────────────────────────────────────────────────────────
 
-  const JobRow: React.FC<{ job: JobMatchResult }> = ({ job }) => {
+  const JobRow: React.FC<{ job: JobMatchResult; rank: number }> = ({ job, rank }) => {
     const isExpanded = expandedJobId === job.id;
     const toggleExpand = () => setExpandedJobId(isExpanded ? null : job.id);
     const vectorPct = jobVectorPct(job);
@@ -861,6 +996,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     return (
       <>
         <tr onClick={toggleExpand} className="bg-bg-card hover:bg-bg-hover transition-colors cursor-pointer">
+          <td className="p-4 text-text-muted text-sm font-semibold tabular-nums w-12">{rank}</td>
           <td className="p-4">
             <button
               type="button"
@@ -931,7 +1067,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         </tr>
         {isExpanded && (
           <tr className="bg-bg-subtle/50">
-            <td colSpan={7}><JobMatchDetails job={job} /></td>
+            <td colSpan={8}><JobMatchDetails job={job} /></td>
           </tr>
         )}
       </>
@@ -975,10 +1111,11 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           <div className="flex items-center gap-2">
             <button
               onClick={() => setIsJobFieldSelectorOpen(true)}
-              className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm"
+              disabled={fieldInterestSaving}
+              className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm disabled:opacity-60 disabled:pointer-events-none"
             >
               <PlusIcon className="w-5 h-5" />
-              <span>הוספת תפקיד</span>
+              <span>{fieldInterestSaving ? t('interested_jobs.saving_field') : 'הוספת תפקיד'}</span>
             </button>
             <button
               onClick={refreshJobs}
@@ -1140,10 +1277,12 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-text-muted mb-1">עיר</label>
-                  <select name="city" value={advancedFilters.city} onChange={handleAdvancedFilterChange} className="w-full p-2 border border-border-default rounded-lg text-sm bg-bg-input focus:ring-primary-500">
-                    <option value="הכל">הכל</option>
-                    {cityOptions.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                  <LocationSelector
+                    selectedLocations={advancedFilters.locations}
+                    onChange={(locations) => setAdvancedFilters((prev) => ({ ...prev, locations }))}
+                    placeholder="הכל"
+                    className="w-full"
+                  />
                 </div>
                 <div className="flex items-end">
                   <button onClick={handleResetAdvancedFilters} className="text-sm font-semibold text-text-muted hover:text-primary-600 py-2 px-4 rounded-lg hover:bg-bg-hover transition w-full text-center">
@@ -1185,13 +1324,14 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         {!loading && !error && filteredJobs.length > 0 && (
           viewMode === 'grid' ? (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              {sortedJobs.map((job) => <JobCard key={job.id} job={job} />)}
+              {sortedJobs.map((job, i) => <JobCard key={job.id} job={job} rank={i + 1} />)}
             </div>
           ) : (
             <div className="bg-bg-card rounded-lg border border-border-default">
               <table className="w-full text-sm text-right">
                 <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
                   <tr>
+                    <th className="p-4 text-right w-12">#</th>
                     {([
                       ['title', 'משרה'],
                       ['match', 'ציון התאמה'],
@@ -1223,7 +1363,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
-                  {sortedJobs.map((job) => <JobRow key={job.id} job={job} />)}
+                  {sortedJobs.map((job, i) => <JobRow key={job.id} job={job} rank={i + 1} />)}
                 </tbody>
               </table>
             </div>
@@ -1279,6 +1419,34 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         onChange={handleFieldSelected}
         isModalOpen={isJobFieldSelectorOpen}
         setIsModalOpen={setIsJobFieldSelectorOpen}
+      />
+      <FieldInterestJobPickerModal
+        isOpen={fieldInterestPreview != null}
+        roleLabel={
+          fieldInterestPreview
+            ? `${fieldInterestPreview.selection.category} › ${fieldInterestPreview.selection.role}`
+            : ''
+        }
+        jobs={fieldInterestPreview?.jobs ?? []}
+        saving={fieldInterestSaving}
+        onClose={() => {
+          if (!fieldInterestSaving) setFieldInterestPreview(null);
+        }}
+        onConfirm={handleFieldInterestPickerConfirm}
+        labels={{
+          title: t('interested_jobs.picker_title'),
+          subtitle: t('interested_jobs.picker_subtitle'),
+          colJob: t('interested_jobs.col_jobTitle'),
+          colCompany: t('interested_jobs.col_company'),
+          colLocation: t('interested_jobs.col_location'),
+          colMatch: t('interested_jobs.col_matchScore'),
+          selectAll: t('interested_jobs.picker_select_all'),
+          clearAll: t('interested_jobs.picker_clear_all'),
+          cancel: t('interested_jobs.picker_cancel'),
+          confirm: t('interested_jobs.picker_confirm'),
+          confirmCount: t('interested_jobs.picker_selected_count'),
+          empty: t('interested_jobs.picker_empty'),
+        }}
       />
 
       <AIFeedbackModal

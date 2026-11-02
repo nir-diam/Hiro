@@ -12,7 +12,7 @@
  * Final formula (mirrors the admin panel simulation):
  *   TotalW = vW + tW + gW + eW + iW
  *   S_core = Σ(scoreᵢ × weightᵢ) / TotalW
- *   FinalScore = max(0, S_core − Penalty_salary − Penalty_age − Penalty_general)
+ *   FinalScore = max(0, S_core − Penalty_salary − Penalty_age − Penalty_role_exp − Penalty_lookback − Penalty_general − Penalty_distance)
  */
 
 const { cosineSimilarity, normalizeEmbedding } = require('./vectorSearchService');
@@ -21,10 +21,12 @@ const {
   computeParameterMatches,
   buildSalaryPenaltyReasons,
   buildAgePenaltyReasons,
+  buildGeoPenaltyReasons,
   enrichBreakdownForApi,
   parseCandidateAge,
   jobRequiresAge,
 } = require('./matchingPenaltyService');
+const { computeRoleExperiencePenalties } = require('./roleExperienceRequirementService');
 const { embedText } = require('./embeddingService');
 const City = require('../models/City');
 const { getLocationSearchTerms } = require('../utils/locationSearchTerms');
@@ -298,15 +300,75 @@ function buildCandidateTagMap(candidate, aliasIndex = null) {
 }
 
 /** True when any job skill in the category matches a candidate tag (same category, aliases/synonyms). */
+const TAG_TOKEN_STOP_EN = new Set([
+  'manager',
+  'senior',
+  'junior',
+  'team',
+  'head',
+  'lead',
+  'and',
+  'the',
+  'with',
+  'coordinator',
+  'assistant',
+  'officer',
+  'specialist',
+]);
+const TAG_TOKEN_STOP_HE = new Set([
+  'מנהל',
+  'מנהלת',
+  'רכז',
+  'רכזת',
+  'אחראי',
+  'אחראית',
+  'בכיר',
+  'בכירה',
+]);
+
+function meaningfulTagTokens(raw) {
+  const parts = String(raw || '')
+    .split(/[^a-zA-Z\u0590-\u05FF0-9]+/)
+    .filter(Boolean);
+  const out = [];
+  for (const part of parts) {
+    const en = part.toLowerCase();
+    if (TAG_TOKEN_STOP_HE.has(part) || TAG_TOKEN_STOP_EN.has(en)) continue;
+    const hebrew = /[\u0590-\u05FF]/.test(part);
+    if (hebrew && part.length >= 4) out.push(part);
+    else if (!hebrew && en.length >= 5) out.push(en);
+  }
+  return out;
+}
+
+function tagTokensOverlap(jobKey, candKey) {
+  const jobTokens = meaningfulTagTokens(jobKey);
+  if (!jobTokens.length) return false;
+  const candTokens = new Set(meaningfulTagTokens(candKey));
+  return jobTokens.some((token) => candTokens.has(token));
+}
+
 function categoryHasTagMatch(categorySet, jobSkills, aliasIndex) {
   if (!categorySet?.size || !jobSkills?.length) return false;
   for (const skill of jobSkills) {
-    const jobKey = norm(skill.key || skill.name || '');
-    if (!jobKey) continue;
-    const jobCanon = resolveCanonicalTagKey(jobKey, aliasIndex);
-    if (categorySet.has(jobKey) || (jobCanon && categorySet.has(jobCanon))) return true;
+    const jobKeys = [skill.key, skill.name]
+      .map((value) => norm(value))
+      .filter(Boolean);
+    if (!jobKeys.length) continue;
+    const jobCanons = jobKeys
+      .map((key) => resolveCanonicalTagKey(key, aliasIndex))
+      .filter(Boolean);
+    for (const jobKey of [...jobKeys, ...jobCanons]) {
+      if (categorySet.has(jobKey)) return true;
+    }
     for (const candKey of categorySet) {
-      if (tagKeysEquivalent(jobKey, candKey, aliasIndex)) return true;
+      for (const jobKey of jobKeys) {
+        if (tagKeysEquivalent(jobKey, candKey, aliasIndex)) return true;
+        if (tagTokensOverlap(jobKey, candKey)) return true;
+      }
+      for (const jobCanon of jobCanons) {
+        if (tagTokensOverlap(jobCanon, candKey)) return true;
+      }
     }
   }
   return false;
@@ -703,6 +765,30 @@ function _findRegionCfg(geoRegionsCfg, regionId) {
 }
 
 /**
+ * Distance penalty for the final score: (km − grace) × penaltyPerKm, capped.
+ * Unlike `100 − geoScore`, this cannot wipe a strong core score on long commutes.
+ */
+function computeGeoPenaltyPoints(geoResult, config = {}) {
+  if (!geoResult || geoResult.missing) {
+    return Math.max(0, Number(config.missingGeoPenalty) || 0);
+  }
+  const km = Number(geoResult.distance);
+  if (!Number.isFinite(km)) {
+    return Math.max(0, Math.round(100 - Number(geoResult.score || 0)));
+  }
+  const grace = Number.isFinite(Number(geoResult.maxValidKm))
+    ? Number(geoResult.maxValidKm)
+    : 15;
+  const perKm = Number.isFinite(Number(geoResult.penaltyPerKm))
+    ? Number(geoResult.penaltyPerKm)
+    : 2;
+  const raw = Math.max(0, (km - grace) * perKm);
+  const cap = Number(config.maxGeoPenalty);
+  const maxPts = Number.isFinite(cap) && cap > 0 ? cap : 30;
+  return Math.min(maxPts, Math.round(raw));
+}
+
+/**
  * Distance-based scoring backed by the cities table.
  *
  * Resolution order:
@@ -733,12 +819,15 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
     .replace(/&nbsp;/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!jobCityText && !jobLocationText) {
-    return { score: 100, missing: false, distance: null, maxValidKm: null };
+  // Commute-catalog dumps (dozens of settlement names) are not a workplace address.
+  const locationParts = jobLocationText.split(/[,،;]/).map((part) => part.trim()).filter(Boolean);
+  const jobLocationForGeo = locationParts.length > 8 ? '' : jobLocationText;
+  if (!jobCityText && !jobLocationForGeo) {
+    return { score: 100, missing: false, distance: null, maxValidKm: null, penaltyPerKm: 0 };
   }
 
   if (!candidateAddrN && !candidateCityN) {
-    return { score: missingGeoScore, missing: true, distance: null, maxValidKm: null };
+    return { score: missingGeoScore, missing: true, distance: null, maxValidKm: null, penaltyPerKm: 0 };
   }
 
   const candHints = _locationHintStrings(
@@ -746,7 +835,7 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
     candidateAddrRaw,
     String(candidate.location || '').trim(),
   );
-  const jobHints = _locationHintStrings(jobCityText, jobLocationText);
+  const jobHints = _locationHintStrings(jobCityText, jobLocationForGeo);
 
   // Resolve both sides via the cities table (try multiple fragments per side).
   const [candCity, jobCity] = await Promise.all([
@@ -764,6 +853,8 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
   const candRegionId  = resolveGeoRegionId(candRegionRaw);
   const regionCfg     = _findRegionCfg(geoRegionsCfg, jobRegionRaw);
   const maxValidKm    = Number(regionCfg.grace);
+  const penaltyPerKm  = Number(regionCfg.penaltyPerKm) || 0;
+  const withGeoMeta = (payload) => ({ penaltyPerKm, maxValidKm, ...payload });
 
   // 2. Same canonical city
   if (candCity && jobCity) {
@@ -771,7 +862,7 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
       norm(candCity.cityName) === norm(jobCity.cityName) ||
       norm(candCity.city)     === norm(jobCity.city);
     if (sameCity) {
-      return { score: 100, missing: false, distance: 0, maxValidKm };
+      return withGeoMeta({ score: 100, missing: false, distance: 0 });
     }
   }
 
@@ -780,12 +871,12 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
   if (Number.isFinite(km)) {
     const excess = Math.max(0, km - regionCfg.grace);
     const score  = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
-    return { score, missing: false, distance: Math.round(km), maxValidKm };
+    return withGeoMeta({ score, missing: false, distance: Math.round(km) });
   }
 
   // 4. Same region but no coords on one side
   if (jobRegionId && candRegionId && jobRegionId === candRegionId) {
-    return { score: 85, missing: false, distance: Math.round(regionCfg.grace), maxValidKm };
+    return withGeoMeta({ score: 85, missing: false, distance: Math.round(regionCfg.grace) });
   }
 
   // 5. Different known regions (estimate ~80 km between regions)
@@ -793,7 +884,7 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
     const estimatedKm = 80;
     const excess      = Math.max(0, estimatedKm - regionCfg.grace);
     const score       = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
-    return { score, missing: false, distance: estimatedKm, maxValidKm };
+    return withGeoMeta({ score, missing: false, distance: estimatedKm });
   }
 
   // 6. Legacy string fallback — job's region keyword appears inside candidate address
@@ -801,16 +892,17 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
     const estimatedKm = regionCfg.grace / 2;
     const excess      = Math.max(0, estimatedKm - regionCfg.grace);
     const score       = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
-    return { score, missing: false, distance: Math.round(estimatedKm), maxValidKm };
+    return withGeoMeta({ score, missing: false, distance: Math.round(estimatedKm) });
   }
 
   // Sonar scores a batch. Open-Meteo here is sequential HTTP per candidate and blows the time budget.
   // Unresolved places stay "missing" so the distance hard filter can drop them without a network call.
   if (options?.skipRemoteGeocode) {
-    return { score: missingGeoScore, missing: true, distance: null, maxValidKm };
+    return withGeoMeta({ score: missingGeoScore, missing: true, distance: null });
   }
 
   // 6b. Geocoding fallback (Israel-biased) — still real km, not random UI placeholders
+  const jobGeoText = [jobCityText, jobLocationForGeo].filter(Boolean).join(', ');
   const webKm = await _distanceKmViaGeocoding(
     candHints,
     jobHints,
@@ -820,7 +912,7 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
   if (Number.isFinite(webKm)) {
     const excess = Math.max(0, webKm - regionCfg.grace);
     const score  = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
-    return { score, missing: false, distance: Math.round(webKm), maxValidKm };
+    return withGeoMeta({ score, missing: false, distance: Math.round(webKm) });
   }
 
   // 6c. Geocode short place strings (candidate ↔ job workplace) — catches hint-order / parallel edge cases
@@ -833,11 +925,11 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore, o
   if (Number.isFinite(looseKm)) {
     const excess = Math.max(0, looseKm - regionCfg.grace);
     const score  = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
-    return { score, missing: false, distance: Math.round(looseKm), maxValidKm };
+    return withGeoMeta({ score, missing: false, distance: Math.round(looseKm) });
   }
 
   // 7. Nothing resolvable
-  return { score: missingGeoScore, missing: true, distance: null, maxValidKm };
+  return withGeoMeta({ score: missingGeoScore, missing: true, distance: null });
 }
 
 /**
@@ -884,6 +976,19 @@ async function resolveJobGeoScope(job, engineConfig) {
 
 // ─── 4. Experience Score ──────────────────────────────────────────────────────
 
+function yearFromExpDate(raw) {
+  const s = String(raw ?? '').trim();
+  const m = s.match(/^(\d{4})/);
+  return m ? Number(m[1]) : NaN;
+}
+
+function monthFromExpDate(raw, fallback) {
+  const s = String(raw ?? '').trim();
+  const ym = s.match(/^\d{4}-(\d{2})/);
+  if (ym) return Number(ym[1]);
+  return fallback;
+}
+
 /** Extract total years of experience from workExperience[] */
 function extractCandidateYears(candidate) {
   const workExp = Array.isArray(candidate.workExperience) ? candidate.workExperience : [];
@@ -892,17 +997,23 @@ function extractCandidateYears(candidate) {
 
   for (const exp of workExp) {
     if (!exp || typeof exp !== 'object') continue;
-    const sy = parseInt(String(exp.startYear  || exp.start_year  || ''), 10);
-    const sm = parseInt(String(exp.startMonth || exp.start_month || '1'), 10);
-    const ey = parseInt(String(exp.endYear    || exp.end_year    || ''), 10);
-    const em = parseInt(String(exp.endMonth   || exp.end_month   || '12'), 10);
+    const sy = parseInt(String(exp.startYear ?? exp.start_year ?? ''), 10) || yearFromExpDate(exp.startDate ?? exp.start_date);
+    const smRaw = parseInt(String(exp.startMonth ?? exp.start_month ?? ''), 10);
+    const sm = Number.isFinite(smRaw) && smRaw >= 1 && smRaw <= 12
+      ? smRaw
+      : monthFromExpDate(exp.startDate ?? exp.start_date, 1);
+    const ey = parseInt(String(exp.endYear ?? exp.end_year ?? ''), 10) || yearFromExpDate(exp.endDate ?? exp.end_date);
+    const emRaw = parseInt(String(exp.endMonth ?? exp.end_month ?? ''), 10);
+    const em = Number.isFinite(emRaw) && emRaw >= 1 && emRaw <= 12
+      ? emRaw
+      : monthFromExpDate(exp.endDate ?? exp.end_date, 12);
     const isCurrent = exp.current || exp.isCurrent || exp.is_current;
 
     if (!sy || isNaN(sy)) continue;
-    const start = new Date(sy, (isNaN(sm) ? 1 : sm) - 1);
+    const start = new Date(sy, (sm || 1) - 1);
     const end   = isCurrent || !ey || isNaN(ey)
       ? now
-      : new Date(ey, (isNaN(em) ? 12 : em) - 1);
+      : new Date(ey, (em || 12) - 1);
 
     if (end > start) {
       totalMonths += (end.getFullYear() - start.getFullYear()) * 12 +
@@ -1122,12 +1233,42 @@ function computeIntentScore(candidate, job, linkedInfo, intentWeights, options =
     if (lt) tiers.push(compareTaxonomyToTargets(lt, targetTaxes, intentWeights));
   }
 
+  // Roles the candidate already applied / was linked to. When present, "exact"
+  // (אותו תפקיד) must mean those roles — not every historical CV role tag.
+  const linkedRoleIds = new Set(
+    linkedJobs
+      .map((lj) => {
+        const tax =
+          lj?.taxonomy ||
+          (index
+            ? resolveJobTaxonomy(
+                { id: lj?.jobId, field: lj?.field, role: lj?.role },
+                index,
+              )
+            : null);
+        return tax?.roleId;
+      })
+      .filter(Boolean)
+      .map(String),
+  );
+
   const profileTaxes = Array.isArray(options.candidateTaxonomies)
     ? options.candidateTaxonomies
     : (index ? taxonomiesFromCandidateProfile(candidate, index) : []);
   for (const pt of profileTaxes) {
     if (!pt) continue;
-    tiers.push(compareTaxonomyToTargets(pt, targetTaxes, intentWeights));
+    const tier = compareTaxonomyToTargets(pt, targetTaxes, intentWeights);
+    // With active process links, CV-only role matches demote from exact → role
+    // so affinity "אותו תפקיד" does not surface unrelated catalog roles.
+    if (
+      tier.intentType === 'exact' &&
+      linkedRoleIds.size > 0 &&
+      !(pt.roleId && linkedRoleIds.has(String(pt.roleId)))
+    ) {
+      tiers.push({ intentType: 'role', score: w('role') });
+      continue;
+    }
+    tiers.push(tier);
   }
 
   if (tiers.length) {
@@ -1182,10 +1323,12 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
   const {
     mainWeights        = {},
     missingGeoScore    = 50,
+    missingGeoPenalty  = 10,
     missingSalaryScore = 0,
     salaryDiffThreshold = 10,
     salaryPenalty      = 5,
     ageGapPenalty      = 2,
+    maxAgeGapPenalty   = 25,
     isExperienceEnabled = true,
   } = config;
 
@@ -1198,10 +1341,9 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
   // Main weights (raw numbers from DB – already 0-100 scale)
   const vW = mainWeights.vector     ?? 20;
   const tW = mainWeights.tags       ?? 35;
-  const gW = mainWeights.geo        ?? 20;
   const eW = isExperienceEnabled ? (mainWeights.experience ?? 15) : 0;
   const iW = mainWeights.intent     ?? 10;
-  const totalW = vW + tW + gW + eW + iW;
+  const totalW = vW + tW + eW + iW;
 
   // ── 1. Vector ───────────────────────────────────────────────────────────────
   // Sonar already ranked by cosine. Reuse that percent so this pass does not
@@ -1216,11 +1358,15 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
   const tagResult  = await computeTagScore(candidate, job, tagWeights, sourceWeights, aliasIndex);
   const tagsScore  = tagResult.score;
 
-  // ── 3. Geo ──────────────────────────────────────────────────────────────────
+  // ── 3. Geo (distance penalty, not a weighted layer) ─────────────────────────
   const geoResult  = await computeGeoScore(candidate, job, geoRegions, missingGeoScore, {
     skipRemoteGeocode: options.skipRemoteGeocode === true,
   });
   const geoScore   = geoResult.score;
+  const geoPenaltyPoints = computeGeoPenaltyPoints(geoResult, {
+    missingGeoPenalty,
+    maxGeoPenalty: config.maxGeoPenalty,
+  });
 
   // ── 4. Experience ────────────────────────────────────────────────────────────
   const expResult  = isExperienceEnabled
@@ -1256,7 +1402,7 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
 
   // ── Core weighted score ──────────────────────────────────────────────────────
   const coreScore = totalW > 0
-    ? (vectorScore * vW + tagsScore * tW + geoScore * gW + expScore * eW + intentScore * iW) / totalW
+    ? (vectorScore * vW + tagsScore * tW + expScore * eW + intentScore * iW) / totalW
     : 0;
 
   // ── Salary penalty ───────────────────────────────────────────────────────────
@@ -1288,8 +1434,17 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
       } else if (Number.isFinite(amax) && age > amax) {
         ageGapPenaltyPoints = (age - amax) * ageGapPenalty;
       }
+      const ageCap = Number(maxAgeGapPenalty);
+      if (Number.isFinite(ageCap) && ageCap > 0 && ageGapPenaltyPoints > ageCap) {
+        ageGapPenaltyPoints = ageCap;
+      }
     }
   }
+
+  // ── Role-tag ניסיון / אחורה penalties ───────────────────────────────────────
+  const rolePenalties = computeRoleExperiencePenalties(candidate, job, config);
+  const roleExperiencePenaltyPoints = rolePenalties.roleExperiencePenalty;
+  const roleLookbackPenaltyPoints = rolePenalties.roleLookbackPenalty;
 
   // ── General penalties (gender, mobility, scope, license, hours, availability) ─
   // availability: compares jobs.availability vs candidates.availability (matchingPenaltyService)
@@ -1302,11 +1457,19 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
     ...buildAgePenaltyReasons(ageGapPenaltyPoints, {
       missing: jobRequiresAge(job) && parseCandidateAge(candidate) == null,
     }),
+    ...rolePenalties.reasons,
+    ...buildGeoPenaltyReasons(geoPenaltyPoints, geoResult),
   ];
 
   const finalScore = Math.max(
     0,
-    Math.round(coreScore) - salaryPenaltyPoints - ageGapPenaltyPoints - generalPenaltyPoints,
+    Math.round(coreScore)
+      - salaryPenaltyPoints
+      - ageGapPenaltyPoints
+      - roleExperiencePenaltyPoints
+      - roleLookbackPenaltyPoints
+      - generalPenaltyPoints
+      - geoPenaltyPoints,
   );
 
   const roundedCore = Math.round(coreScore);
@@ -1327,12 +1490,14 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
     coreScore:         roundedCore,
     salaryPenalty:     salaryPenaltyPoints,
     ageGapPenalty:     ageGapPenaltyPoints,
+    roleExperiencePenalty: roleExperiencePenaltyPoints,
+    roleLookbackPenalty:   roleLookbackPenaltyPoints,
     generalPenalties:  generalPenaltyPoints,
-    weights:           { vW, tW, gW, eW, iW, totalW },
+    geoPenalty:        geoPenaltyPoints,
+    weights:           { vW, tW, eW, iW, totalW },
     weightedContributions: {
       vector:     { score: roundedVector, weight: vW, points: (roundedVector * vW) / totalW },
       tags:       { score: roundedTags,   weight: tW, points: (roundedTags * tW) / totalW },
-      geo:        { score: roundedGeo,    weight: gW, points: (roundedGeo * gW) / totalW },
       experience: { score: roundedExp,    weight: eW, points: (roundedExp * eW) / totalW },
       intent:     { score: roundedIntent, weight: iW, points: (roundedIntent * iW) / totalW },
     },
@@ -1458,6 +1623,7 @@ module.exports = {
   computeTagScore,
   normalizeTagCategory,
   computeGeoScore,
+  computeGeoPenaltyPoints,
   resolveJobGeoScope,
   resolveGeoRegionId,
   computeExperienceScore,

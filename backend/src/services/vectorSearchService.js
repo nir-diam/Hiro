@@ -27,6 +27,18 @@ function releaseVectorSearchSlot() {
   if (next) next();
 }
 
+/**
+ * Serializes heavy candidate-list pulls. Separate from the search slot: searchCandidates
+ * holds that slot while it awaits the list, so sharing it deadlocks.
+ */
+let _listLoadChain = Promise.resolve();
+
+function withListLoadLock(fn) {
+  const run = _listLoadChain.then(fn, fn);
+  _listLoadChain = run.catch(() => {});
+  return run;
+}
+
 let _coreCache = null;
 let _coreCacheAt = 0;
 let _kwCache = null;
@@ -191,23 +203,13 @@ async function tryLoadCoreCacheFromDisk({ allowStale = false } = {}) {
 }
 
 async function loadCandidateList(includeSearchText) {
-  await acquireVectorSearchSlot();
-  let listPromise;
-  try {
-    listPromise = candidateService.listSlimForVectorSearch({ includeSearchText });
-  } catch (err) {
-    releaseVectorSearchSlot();
-    throw err;
-  }
+  const t0 = Date.now();
+  console.log(`[vectorSearch] loading candidate list from DB (searchText=${Boolean(includeSearchText)})`);
   const stampPromise = includeSearchText
     ? null
     : candidateService.getVectorEmbeddingStamp().catch(() => null);
-  let list;
-  try {
-    list = await listPromise;
-  } finally {
-    releaseVectorSearchSlot();
-  }
+  const list = await withListLoadLock(() => candidateService.listSlimForVectorSearch({ includeSearchText }));
+  console.log(`[vectorSearch] candidate list loaded (${list.length}) in ${Date.now() - t0}ms`);
   const compact = list.map(compactVectorRow);
   const now = Date.now();
   if (includeSearchText) {

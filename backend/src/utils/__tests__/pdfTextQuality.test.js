@@ -2,6 +2,7 @@ const {
   scoreResumeTextExtract,
   pickBestResumeTextExtract,
   resumeTextLooksOcrGarbled,
+  resumeTextHasPdfFontEncodingNoise,
 } = require('../pdfTextQuality');
 
 describe('pdfTextQuality', () => {
@@ -26,6 +27,13 @@ describe('pdfTextQuality', () => {
     expect(scoreResumeTextExtract(clean)).toBeGreaterThan(scoreResumeTextExtract(ocr));
     expect(resumeTextLooksOcrGarbled(ocr)).toBe(true);
     expect(resumeTextLooksOcrGarbled(clean)).toBe(false);
+  });
+
+  it('detects PDF font encoding noise (eth characters in Hebrew)', () => {
+    const noisy = 'רואה חשב ðות וחשב שכר ðהל חשבוðי, מðסביון ברזא';
+    expect(resumeTextHasPdfFontEncodingNoise(noisy)).toBe(true);
+    const clean = 'קורות חיים — סביון ברזני, רואה חשב ושכר';
+    expect(resumeTextHasPdfFontEncodingNoise(clean)).toBe(false);
   });
 
   it('prefers pdftotext over garbled OCR when both present', () => {

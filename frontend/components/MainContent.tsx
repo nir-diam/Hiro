@@ -34,6 +34,10 @@ import {
 import { WorkingHoursInput } from './WorkingHoursInput';
 import CityEditableField from './CityEditableField';
 import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
+import {
+    mergeTagDetailsAfterWorkExperienceChange,
+    normalizeWorkExperienceRoleFields,
+} from '../utils/workExperienceRoleTagSync';
 
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; required?: boolean; type?: string; icon?: React.ReactNode }> = ({ label, name, value, onChange, required, type = "text", icon }) => {
     const id = useId();
@@ -248,12 +252,18 @@ const MainContent: React.FC<MainContentProps> = ({
     const drivingLicenseCurrent = formData.drivingLicense != null ? String(formData.drivingLicense) : '';
 
     const genderValueSet = useMemo(() => new Set(genderOptions.map((o) => o.value)), [genderOptions]);
-    const genderCurrent = formData.gender != null ? String(formData.gender) : '';
+    const genderStored = formData.gender != null ? String(formData.gender).trim() : '';
+    const genderCurrent = genderStored === 'זכר' ? 'male' : genderStored === 'נקבה' ? 'female' : genderStored;
     const genderUnknown = genderCurrent !== '' && !genderValueSet.has(genderCurrent);
 
     const mobilityValueSet = useMemo(() => new Set(mobilityOptions.map((o) => o.value)), [mobilityOptions]);
-    const mobilityCurrent = formData.mobility != null ? String(formData.mobility) : '';
-    const mobilityUnknown = mobilityCurrent !== '' && !mobilityValueSet.has(mobilityCurrent);
+    const mobilityStored = formData.mobility != null ? String(formData.mobility).trim() : '';
+    const mobilityCurrent = mobilityStored === 'true' || mobilityStored === 'yes' || mobilityStored === 'כן'
+        ? 'car_owner'
+        : mobilityStored === 'false' || mobilityStored === 'no' || mobilityStored === 'לא'
+          ? 'not_mobile'
+          : mobilityStored;
+    const mobilityUnknown = mobilityCurrent !== '' && mobilityCurrent !== '-' && !mobilityValueSet.has(mobilityCurrent);
 
     const birthYearChoices = useMemo(() => {
         const y = new Date().getFullYear();
@@ -279,7 +289,7 @@ const MainContent: React.FC<MainContentProps> = ({
         [formData.birthYear, formData.birthMonth, formData.birthDay],
     );
     const ageDisplayValue =
-        formData.age != null && String(formData.age).trim() !== '' ? String(formData.age) : computedAge;
+        computedAge || (formData.age != null ? String(formData.age).trim() : '');
 
     // States for new item inputs
     const [newLanguageName, setNewLanguageName] = useState('');
@@ -537,7 +547,14 @@ const MainContent: React.FC<MainContentProps> = ({
     };
     
     const handleWorkExperienceChange = (newExperience: any) => {
-        onFormChange({ ...formData, workExperience: newExperience });
+        const tagDetails = Array.isArray(formData.tagDetails) ? formData.tagDetails : [];
+        const normalizedWx = normalizeWorkExperienceRoleFields(newExperience, tagDetails);
+        const nextTagDetails = mergeTagDetailsAfterWorkExperienceChange(normalizedWx, tagDetails);
+        onFormChange({
+            ...formData,
+            workExperience: normalizedWx,
+            tagDetails: nextTagDetails,
+        });
     };
 
 
@@ -676,6 +693,7 @@ const MainContent: React.FC<MainContentProps> = ({
                             onChange={handleInputChange}
                         >
                             <option value="-"></option>
+                            {mobilityUnknown && <option value={mobilityCurrent}>{mobilityCurrent}</option>}
                             {mobilityOptions.map((v) => (
                                 <option key={v.id || v.value} value={v.value}>
                                     {(v.displayName || v.label).trim() || v.value}
@@ -821,9 +839,11 @@ const MainContent: React.FC<MainContentProps> = ({
 
             <div id="work-experience">
                 <AccordionSection title={t('section.work_experience')} icon={<BriefcaseIcon className="w-5 h-5"/>} defaultOpen>
-                    <WorkExperienceSection 
+                    <WorkExperienceSection
                         experience={Array.isArray(formData.workExperience) ? formData.workExperience : []}
                         onExperienceChange={handleWorkExperienceChange}
+                        tagDetails={Array.isArray(formData.tagDetails) ? formData.tagDetails : []}
+                        candidateId={formData.backendId ? String(formData.backendId) : undefined}
                     />
                 </AccordionSection>
             </div>

@@ -9,6 +9,7 @@ import {
     PaperAirplaneIcon, ChevronLeftIcon, ChevronRightIcon
 } from './Icons';
 import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
+import { fetchCandidateFileUrl } from '../services/candidateFileUrl';
 import type { Candidate } from './CandidatesListView';
 interface CandidateWithExtras extends Omit<Candidate, 'age' | 'skills' | 'tagDetails'> {
   age?: string | number;
@@ -629,11 +630,14 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
   const displayAddress = displayCandidate.address || '';
 
   const handleDownloadResume = () => {
-    if (resumeUrl) {
-      window.open(resumeUrl, '_blank');
-    } else {
+    if (!resumeUrl) {
       alert('אין קובץ קורות חיים להורדה כרגע.');
+      return;
     }
+    const id = String(mergedCandidate.backendId || mergedCandidate.id || '').trim();
+    void fetchCandidateFileUrl(id, { which: 'resume', storedUrl: resumeUrl }).then((fresh) => {
+      if (fresh) window.open(fresh, '_blank');
+    });
   };
 
   const handleUploadResume = async (file: File) => {

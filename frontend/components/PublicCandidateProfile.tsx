@@ -10,6 +10,7 @@ import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
 import { buildCandidateFullName } from '../utils/candidateName';
 import { useAuth } from '../context/AuthContext';
+import { fetchCandidateFileUrl } from '../services/candidateFileUrl';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -326,15 +327,21 @@ const PublicCandidateProfile: React.FC = () => {
                                 </a>
                             </div>
                             {candidateData.resumeUrl ? (
-                                <a
-                                    href={candidateData.resumeUrl}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        void fetchCandidateFileUrl(candidateData.id, {
+                                            which: 'resume',
+                                            storedUrl: candidateData.resumeUrl,
+                                        }).then((fresh) => {
+                                            if (fresh) window.open(fresh, '_blank', 'noopener,noreferrer');
+                                        });
+                                    }}
                                     className="w-full mt-6 bg-primary-600 text-white font-bold py-3 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 flex items-center justify-center gap-2"
                                 >
                                     <ArrowDownTrayIcon className="w-5 h-5" />
                                     הורד קורות חיים
-                                </a>
+                                </button>
                             ) : (
                                 <button
                                     type="button"

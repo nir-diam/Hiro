@@ -19,6 +19,19 @@ const CV_DOC_TITLE_TOKEN_RE =
 
 const PLACEHOLDER_NAMES = new Set(['מועמד חדש', 'candidate', 'ללא שם']);
 
+/** Job-board envelope / source labels — not a person's name. */
+const PORTAL_PERSON_NAME_RE =
+  /^(?:jobmaster|job\s*master|alljobs|all\s*jobs|drushim|gotfriends|ethosia|linkedin|indeed|glassdoor|careerjet|דרושים)$/iu;
+
+function isPortalLikePersonName(name) {
+  const s = collapseNameWs(stripCvDocumentTitleFromPersonName(name));
+  if (!s) return false;
+  if (PORTAL_PERSON_NAME_RE.test(s)) return true;
+  const tokens = s.split(/\s+/).filter(Boolean);
+  if (tokens.length === 1 && PORTAL_PERSON_NAME_RE.test(tokens[0])) return true;
+  return false;
+}
+
 function collapseNameWs(s) {
   return String(s || '')
     .replace(/\s+/g, ' ')
@@ -154,4 +167,6 @@ module.exports = {
   sanitizePersonNameFields,
   isPlaceholderPersonName,
   isSplitCvDocumentTitle,
+  isPortalLikePersonName,
+  PORTAL_PERSON_NAME_RE,
 };

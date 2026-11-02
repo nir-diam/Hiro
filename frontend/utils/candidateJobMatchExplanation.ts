@@ -16,7 +16,7 @@ export type CandidateMatchPresentation = {
   tierLabel: string;
   score: number;
   explanation: string;
-  dominantFactor: 'role' | 'tags' | 'geo' | 'experience';
+  dominantFactor: 'role' | 'tags' | 'experience';
 };
 
 const TIER_LABELS: Record<CandidateMatchTier, string> = {
@@ -103,7 +103,6 @@ function resolveJobLocation(job: JobMatchResult): string {
 type LayerContributions = {
   role: number;
   tags: number;
-  geo: number;
   experience: number;
 };
 
@@ -112,7 +111,6 @@ function computeLayerContributions(job: JobMatchResult): LayerContributions {
   const intent = pickBreakdownScore(bd?.intentScore, bd?.intent) ?? 0;
   const vector = pickBreakdownScore(bd?.semanticScore, bd?.vector) ?? 0;
   const tags = pickBreakdownScore(bd?.tagsScore, bd?.tags) ?? 0;
-  const geo = pickBreakdownScore(bd?.geoScore, bd?.geo) ?? 0;
   const experience = pickBreakdownScore(bd?.experienceScore, bd?.experience) ?? 0;
 
   const roleScore = Math.max(intent, vector * 0.85 + intent * 0.15);
@@ -120,7 +118,6 @@ function computeLayerContributions(job: JobMatchResult): LayerContributions {
   return {
     role: (roleScore / 100) * 40,
     tags: (tags / 100) * 35,
-    geo: (geo / 100) * 15,
     experience: (experience / 100) * 10,
   };
 }
@@ -143,28 +140,11 @@ function buildExactExplanation(
   return `זיהינו התאמה מדוייקת לדרישות המשרה, במיוחד בזכות הניסיון שלך ב${candidateRole}${tagPart}. בנוסף, המשרה נמצאת ב${jobLocation}, התואם את אזור מגוריך.`;
 }
 
-function buildHighExplanation(
-  dominant: keyof LayerContributions,
-  profile: CandidateProfileMatchContext,
-  job: JobMatchResult,
-  jobDomain: string,
-  jobLocation: string,
-): string {
-  const highlightTag = resolveHighlightTag(profile, job);
-  if (dominant === 'geo') {
-    return `הרקע שלך ב${jobDomain} תואם היטב לפרופיל המחופש, עם דגש על הידע שלך ב${highlightTag || 'כישורים רלוונטיים'}. שימ/י לב שהמשרה ממוקמת ב${jobLocation}.`;
-  }
+function buildHighExplanation(jobDomain: string): string {
   return `פרופיל הניסיון שלך מראה זיקה גבוהה לתפקידי ${jobDomain}, נראה שאת/ה עונה על רוב דרישות הליבה של החברה.`;
 }
 
-function buildMediumExplanation(
-  dominant: keyof LayerContributions,
-  jobDomain: string,
-  jobLocation: string,
-): string {
-  if (dominant === 'geo') {
-    return `המשרה נמצאת באזור ${jobLocation} ומשיקה לתחומי ה${jobDomain}, ויכולה להתאים אם את/ה מחפש/ת אתגר קרוב לבית.`;
-  }
+function buildMediumExplanation(jobDomain: string): string {
   return `ישנה השקה בין הניסיון שלך לבין דרישות החברה ב${jobDomain}. ייתכן והתפקיד דורש העמקה במיומנויות ספציפיות מעבר לפרופיל הנוכחי שלך.`;
 }
 
@@ -199,9 +179,9 @@ export function buildCandidateMatchPresentation(
   if (tier === 'exact') {
     explanation = buildExactExplanation(profile, job, jobDomain, jobLocation);
   } else if (tier === 'high') {
-    explanation = buildHighExplanation(dominant, profile, job, jobDomain, jobLocation);
+    explanation = buildHighExplanation(jobDomain);
   } else if (tier === 'medium') {
-    explanation = buildMediumExplanation(dominant, jobDomain, jobLocation);
+    explanation = buildMediumExplanation(jobDomain);
   } else {
     explanation = buildLowExplanation(jobDomain);
   }

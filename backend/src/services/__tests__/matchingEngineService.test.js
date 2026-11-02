@@ -8,8 +8,13 @@ describe('resolveMainWeights', () => {
   });
 
   it('keeps custom balanced weights', () => {
-    const custom = { vector: 30, tags: 30, geo: 20, experience: 10, intent: 10 };
+    const custom = { vector: 30, tags: 30, geo: 0, experience: 10, intent: 10 };
     expect(resolveMainWeights(custom)).toEqual(custom);
+  });
+
+  it('drops a legacy geo weight (distance is a penalty)', () => {
+    const legacy = { vector: 30, tags: 30, geo: 20, experience: 10, intent: 10 };
+    expect(resolveMainWeights(legacy)).toEqual({ ...legacy, geo: 0 });
   });
 
   it('keeps vector-only weights when preset allows it', () => {
@@ -23,6 +28,8 @@ describe('normalizeEngineConfig', () => {
     const norm = normalizeEngineConfig({ mainWeights: { vector: 40, tags: 30, geo: 20, experience: 5, intent: 5 } });
     expect(norm.missingAgeScore).toBe(DEFAULT_CONFIG.missingAgeScore);
     expect(norm.missingGeoScore).toBe(DEFAULT_CONFIG.missingGeoScore);
+    expect(norm.roleExperiencePenalty).toBe(DEFAULT_CONFIG.roleExperiencePenalty);
+    expect(norm.roleLookbackPenalty).toBe(DEFAULT_CONFIG.roleLookbackPenalty);
     expect(norm.penaltyPolicies.mobility.missing).toBe(DEFAULT_CONFIG.penaltyPolicies.mobility.missing);
   });
 });

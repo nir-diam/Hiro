@@ -5,6 +5,7 @@
  */
 const { QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
+const { getCachedRecruitmentSourcesReport } = require('./reportsCacheService');
 
 const UNDEFINED_SOURCE = '(לא מוגדר)';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -63,7 +64,7 @@ async function loadReferralCandidateIds(candidateIds, clientId = null) {
  * @param {string} [opts.source] exact source name, or empty / "הכל" for all
  * @param {string|null} [opts.clientId] UUID — null = all clients (admin only)
  */
-async function getRecruitmentSourcesReport(opts = {}) {
+async function getRecruitmentSourcesReportFromDb(opts = {}) {
   const startAt = parseDayStart(opts.startDate);
   const endAt = parseDayEndExclusive(opts.endDate);
   if (!startAt || !endAt) {
@@ -311,7 +312,11 @@ async function getRecruitmentSourcesReport(opts = {}) {
   };
 }
 
+const getRecruitmentSourcesReport = async (opts = {}) =>
+  getCachedRecruitmentSourcesReport(opts, () => getRecruitmentSourcesReportFromDb(opts));
+
 module.exports = {
   getRecruitmentSourcesReport,
+  getRecruitmentSourcesReportFromDb,
   UNDEFINED_SOURCE,
 };

@@ -22,6 +22,7 @@ import {
     PlusIcon,
     PencilIcon,
     ClipboardDocumentIcon,
+    ClockIcon,
 } from './Icons';
 
 interface WeightSetting {
@@ -106,6 +107,34 @@ function normalizePenaltyPoliciesFromCfg(cfg: Record<string, unknown> | undefine
     return out;
 }
 
+const CORE_WEIGHT_IDS = ['vector', 'tags', 'experience', 'intent'] as const;
+
+/**
+ * Distance is the region penalty, not a weighted layer. Configs saved with a
+ * `geo` weight get the other layers scaled back up to a 100 total.
+ */
+function mainWeightsWithoutGeo(mw: Record<string, number>): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const id of CORE_WEIGHT_IDS) {
+        if (id in mw) out[id] = Number(mw[id]) || 0;
+    }
+    const geo = Number(mw.geo) || 0;
+    const sum = Object.values(out).reduce((s, v) => s + v, 0);
+    if (geo <= 0 || sum <= 0) return out;
+    const scaled = Object.entries(out).map(([id, v]) => ({ id, exact: (v * 100) / sum }));
+    const rounded = scaled.map((s) => ({ ...s, value: Math.floor(s.exact) }));
+    let rest = 100 - rounded.reduce((s, r) => s + r.value, 0);
+    [...rounded]
+        .sort((a, b) => (b.exact - b.value) - (a.exact - a.value))
+        .forEach((r) => {
+            if (rest > 0) {
+                r.value += 1;
+                rest -= 1;
+            }
+        });
+    return Object.fromEntries(rounded.map((r) => [r.id, r.value]));
+}
+
 export type AdminMatchingEngineViewProps = {
     /** When set, load/save presets via `/api/clients/:id/matching-engine-configs` (Company Settings). */
     tenantClientId?: string | null;
@@ -135,35 +164,28 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
         { 
             id: 'vector', 
             label: 'חיפוש סמנטי (Vector)', 
-            value: 20, 
+            value: 25, 
             icon: <SparklesIcon className="w-5 h-5 text-purple-500" />,
             description: 'הבנת הקשר ומשמעות מעבר למילות מפתח מדויקות'
         },
         { 
             id: 'tags', 
             label: 'שכבת תגיות (Tags)', 
-            value: 35, 
+            value: 45, 
             icon: <TagIcon className="w-5 h-5 text-blue-500" />,
             description: 'דיוק לפי 9 קטגוריות הליבה המובנות'
         },
         { 
-            id: 'geo', 
-            label: 'גיאוגרפיה (Geo)', 
-            value: 20, 
-            icon: <GlobeAmericasIcon className="w-5 h-5 text-emerald-500" />,
-            description: 'קרבה פיזית בין המועמד למשרה'
-        },
-        { 
             id: 'experience', 
             label: 'ניסיון וחברות (Exp)', 
-            value: 15, 
+            value: 18, 
             icon: <BriefcaseIcon className="w-5 h-5 text-orange-500" />,
             description: 'איכות המעסיקים הקודמים והתאמה לתעשייה'
         },
         { 
             id: 'intent', 
             label: 'זיקה למשרה (Intent)', 
-            value: 10, 
+            value: 12, 
             icon: <UserGroupIcon className="w-5 h-5 text-rose-500" />,
             description: 'הגשה ספציפית למשרה או התעניינות בתחום משיק'
         },
@@ -205,7 +227,7 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
         { id: 'south', label: 'דרום', grace: 30, penaltyPerKm: 1 },
     ]);
 
-    const [missingGeoScore, setMissingGeoScore] = useState(50);
+    const [missingGeoPenalty, setMissingGeoPenalty] = useState(10);
     const [missingSalaryScore, setMissingSalaryScore] = useState(0);
 
     // Salary Penalty Settings
@@ -215,6 +237,10 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
     // Age Gap Penalty Settings
     const [ageGapPenalty, setAgeGapPenalty] = useState(2);
     const [missingAgeScore, setMissingAgeScore] = useState(6);
+
+    // Role-tag ניסיון / אחורה penalty rates (points per year)
+    const [roleExperiencePenalty, setRoleExperiencePenalty] = useState(2);
+    const [roleLookbackPenalty, setRoleLookbackPenalty] = useState(2);
 
     const [isExperienceEnabled, setIsExperienceEnabled] = useState(true);
 
@@ -408,8 +434,10 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                     if (!res.ok) return;
                     const cfg = await res.json();
 
-                    if (cfg.mainWeights)
-                        setMainWeights(prev => prev.map(w => ({ ...w, value: cfg.mainWeights[w.id] ?? w.value })));
+                    if (cfg.mainWeights) {
+                        const mw = mainWeightsWithoutGeo(cfg.mainWeights);
+                        setMainWeights(prev => prev.map(w => ({ ...w, value: mw[w.id] ?? w.value })));
+                    }
                     if (cfg.intentWeights)
                         setIntentWeights(prev => prev.map(w => ({ ...w, value: cfg.intentWeights[w.id] ?? w.value })));
                     if (cfg.tagWeights)
@@ -421,12 +449,14 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                             ? { ...r, grace: cfg.geoRegions[r.id].grace, penaltyPerKm: cfg.geoRegions[r.id].penaltyPerKm }
                             : r
                         ));
-                    if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(cfg.missingGeoScore);
+                    if (cfg.missingGeoPenalty     !== undefined) setMissingGeoPenalty(cfg.missingGeoPenalty);
                     if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(cfg.missingSalaryScore);
                     if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold);
                     if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty);
                     if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty);
                     if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
+                    if (cfg.roleExperiencePenalty !== undefined) setRoleExperiencePenalty(Number(cfg.roleExperiencePenalty));
+                    if (cfg.roleLookbackPenalty   !== undefined) setRoleLookbackPenalty(Number(cfg.roleLookbackPenalty));
                     if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled);
                     setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg as Record<string, unknown>));
                 } catch {
@@ -446,7 +476,8 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                             (urlId != null ? presets.find((p) => p.id === urlId) : undefined) || presets[0];
                         setActivePresetId(initial.id);
                         const cfg = initial.config as Record<string, unknown>;
-                        const mw = cfg.mainWeights as Record<string, number> | undefined;
+                        const rawMw = cfg.mainWeights as Record<string, number> | undefined;
+                        const mw = rawMw ? mainWeightsWithoutGeo(rawMw) : undefined;
                         const tw = cfg.tagWeights as Record<string, number> | undefined;
                         const iw = cfg.intentWeights as Record<string, number> | undefined;
                         const sw = cfg.sourceWeights as Record<string, number> | undefined;
@@ -458,7 +489,7 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                         if (iw) setIntentWeights((prev) => prev.map((w) => ({ ...w, value: iw[w.id] ?? w.value })));
                         if (sw) setSourceWeights((prev) => prev.map((w) => ({ ...w, value: sw[w.id] ?? w.value })));
                         if (gr) setGeoRegions((prev) => prev.map((r) => (gr[r.id] ? { ...r, ...gr[r.id] } : r)));
-                        if (cfg.missingGeoScore !== undefined) setMissingGeoScore(cfg.missingGeoScore as number);
+                        if (cfg.missingGeoPenalty !== undefined) setMissingGeoPenalty(cfg.missingGeoPenalty as number);
                         if (cfg.missingSalaryScore !== undefined) {
                             setMissingSalaryScore(cfg.missingSalaryScore as number);
                         }
@@ -468,6 +499,8 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                         if (cfg.salaryPenalty !== undefined) setSalaryPenalty(cfg.salaryPenalty as number);
                         if (cfg.ageGapPenalty !== undefined) setAgeGapPenalty(cfg.ageGapPenalty as number);
                         if (cfg.missingAgeScore !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
+                        if (cfg.roleExperiencePenalty !== undefined) setRoleExperiencePenalty(Number(cfg.roleExperiencePenalty));
+                        if (cfg.roleLookbackPenalty !== undefined) setRoleLookbackPenalty(Number(cfg.roleLookbackPenalty));
                         if (cfg.isExperienceEnabled !== undefined) {
                             setIsExperienceEnabled(cfg.isExperienceEnabled as boolean);
                         }
@@ -567,20 +600,22 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
 
     // ── build payload for save ────────────────────────────────────────────────
     const buildPayload = useCallback(() => ({
-        mainWeights:        mainWeights.reduce((acc, w)  => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
+        mainWeights:        mainWeights.reduce((acc, w)  => ({ ...acc, [w.id]: w.value }), { geo: 0 } as Record<string, number>),
         intentWeights:      intentWeights.reduce((acc, w) => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
         tagWeights:         tagWeights.reduce((acc, w)   => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
         sourceWeights:      sourceWeights.reduce((acc, w) => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
         geoRegions:         geoRegions.reduce((acc, r)   => ({ ...acc, [r.id]: { grace: r.grace, penaltyPerKm: r.penaltyPerKm } }), {} as Record<string, { grace: number; penaltyPerKm: number }>),
-        missingGeoScore,
+        missingGeoPenalty,
         missingSalaryScore,
         salaryDiffThreshold,
         salaryPenalty,
         ageGapPenalty,
         missingAgeScore,
+        roleExperiencePenalty,
+        roleLookbackPenalty,
         isExperienceEnabled,
         penaltyPolicies,
-    }), [mainWeights, intentWeights, tagWeights, sourceWeights, geoRegions, missingGeoScore, missingSalaryScore, salaryDiffThreshold, salaryPenalty, ageGapPenalty, missingAgeScore, isExperienceEnabled, penaltyPolicies]);
+    }), [mainWeights, intentWeights, tagWeights, sourceWeights, geoRegions, missingGeoPenalty, missingSalaryScore, salaryDiffThreshold, salaryPenalty, ageGapPenalty, missingAgeScore, roleExperiencePenalty, roleLookbackPenalty, isExperienceEnabled, penaltyPolicies]);
 
     const handleSaveAsNewPresetClick = () => {
         setNewPresetName('');
@@ -702,7 +737,8 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
     };
 
     const applyDbPreset = useCallback((cfg: Record<string, unknown>) => {
-        const mw = cfg.mainWeights   as Record<string, number> | undefined;
+        const rawMw = cfg.mainWeights as Record<string, number> | undefined;
+        const mw = rawMw ? mainWeightsWithoutGeo(rawMw) : undefined;
         const tw = cfg.tagWeights    as Record<string, number> | undefined;
         const iw = cfg.intentWeights as Record<string, number> | undefined;
         const sw = cfg.sourceWeights as Record<string, number> | undefined;
@@ -714,12 +750,14 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
         if (iw) setIntentWeights(prev => prev.map(w => ({ ...w, value: w.id in iw ? Number(iw[w.id]) : w.value })));
         if (sw) setSourceWeights(prev => prev.map(w => ({ ...w, value: w.id in sw ? Number(sw[w.id]) : w.value })));
         if (gr) setGeoRegions(prev    => prev.map(r => r.id in gr ? { ...r, grace: Number(gr[r.id].grace), penaltyPerKm: Number(gr[r.id].penaltyPerKm) } : r));
-        if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(Number(cfg.missingGeoScore));
+        if (cfg.missingGeoPenalty     !== undefined) setMissingGeoPenalty(Number(cfg.missingGeoPenalty));
         if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(Number(cfg.missingSalaryScore));
         if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(Number(cfg.salaryDiffThreshold));
         if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(Number(cfg.salaryPenalty));
         if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(Number(cfg.ageGapPenalty));
         if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
+        if (cfg.roleExperiencePenalty !== undefined) setRoleExperiencePenalty(Number(cfg.roleExperiencePenalty));
+        if (cfg.roleLookbackPenalty   !== undefined) setRoleLookbackPenalty(Number(cfg.roleLookbackPenalty));
         if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(Boolean(cfg.isExperienceEnabled));
         setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg));
     }, []);
@@ -1008,7 +1046,6 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                 const keys = [
                                     { id: 'vector', color: 'bg-purple-400', label: 'V' },
                                     { id: 'tags',   color: 'bg-blue-400',   label: 'T' },
-                                    { id: 'geo',    color: 'bg-emerald-400', label: 'G' },
                                     { id: 'experience', color: 'bg-orange-400', label: 'E' },
                                     { id: 'intent', color: 'bg-rose-400',   label: 'I' },
                                 ];
@@ -1327,6 +1364,7 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                         </div>
                     </div>
 
+                    <div className="flex flex-col gap-6 min-w-0">
                     <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm min-w-0">
                         <h3 className="text-base font-bold text-text-default mb-6 flex items-center gap-2 leading-snug">
                             <UserGroupIcon className="w-5 h-5 shrink-0 text-primary-500" />
@@ -1367,30 +1405,93 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
 
                     <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm min-w-0">
                         <h3 className="text-base font-bold text-text-default mb-6 flex items-center gap-2 leading-snug">
+                            <BriefcaseIcon className="w-5 h-5 shrink-0 text-primary-500" />
+                            קנס על ניסיון בתפקיד (תגיות תפקיד)
+                        </h3>
+
+                        <div className="space-y-6">
+                            <div className="p-4 bg-orange-50 rounded-xl border border-orange-100">
+                                <div className="flex items-center justify-between mb-4">
+                                    <div className="font-bold text-text-default">ניסיון — נקודות לכל שנת חוסר</div>
+                                    <span className="text-2xl font-black text-orange-600">-{roleExperiencePenalty}</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max="10"
+                                    value={roleExperiencePenalty}
+                                    onChange={(e) => setRoleExperiencePenalty(parseInt(e.target.value, 10))}
+                                    className="w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-orange-500"
+                                />
+                                <div className="flex justify-between text-[10px] text-text-muted mt-2 font-bold uppercase tracking-wider">
+                                    <span>0 נק'</span>
+                                    <span>5 נק'</span>
+                                    <span>10 נק'</span>
+                                </div>
+                            </div>
+
+                            <div className="p-4 bg-amber-50 rounded-xl border border-amber-100">
+                                <div className="flex items-center justify-between mb-4">
+                                    <div className="font-bold text-text-default flex items-center gap-1.5">
+                                        <ClockIcon className="w-4 h-4 text-amber-600" />
+                                        אחורה — נקודות לכל שנה מחוץ לטווח
+                                    </div>
+                                    <span className="text-2xl font-black text-amber-700">-{roleLookbackPenalty}</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min="0"
+                                    max="10"
+                                    value={roleLookbackPenalty}
+                                    onChange={(e) => setRoleLookbackPenalty(parseInt(e.target.value, 10))}
+                                    className="w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-amber-500"
+                                />
+                                <div className="flex justify-between text-[10px] text-text-muted mt-2 font-bold uppercase tracking-wider">
+                                    <span>0 נק'</span>
+                                    <span>5 נק'</span>
+                                    <span>10 נק'</span>
+                                </div>
+                            </div>
+
+                            <div className="text-xs text-text-muted leading-relaxed">
+                                <p className="font-bold text-text-default mb-1">איך זה עובד?</p>
+                                נספר לפי תגיות <span className="font-medium text-text-default">תפקיד</span> במשרה שיש בהן ערך ניסיון / אחורה.
+                                <br />
+                                <span className="font-medium text-text-default">ניסיון:</span> אם נדרשות 5 שנים ויש 3 בטווח — יופחתו {roleExperiencePenalty} נקודות על כל שנת חוסר.
+                                <br />
+                                <span className="font-medium text-text-default">אחורה:</span> נבדק רק אם אין כבר חוסר בניסיון. אם הטווח הוא 5 שנים והתפקיד האחרון הסתיים לפני 10 שנים — יופחתו {roleLookbackPenalty} נקודות על כל שנה מחוץ לטווח.
+                                <br />
+                                בציון מוצג קנס אחד משולב.
+                                <br />
+                            </div>
+                        </div>
+                    </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm min-w-0">
+                        <h3 className="text-base font-bold text-text-default mb-6 flex items-center gap-2 leading-snug">
                             <InformationCircleIcon className="w-5 h-5 shrink-0 text-primary-500" />
                             מדיניות מידע חסר
                         </h3>
 
                         <div className="space-y-4 max-h-[min(500px,70vh)] overflow-y-auto pr-2 custom-scrollbar">
-                            <div className="p-4 bg-primary-50 rounded-xl border border-primary-100">
+                            <div className="p-4 rounded-xl border bg-rose-50 border-rose-100">
                                 <div className="flex items-center justify-between mb-4">
-                                    <div className="font-bold text-text-default">ציון ברירת מחדל ללא כתובת</div>
-                                    <span className="text-2xl font-black text-primary-600">{missingGeoScore}</span>
+                                    <div className="font-bold text-text-default">קנס ברירת מחדל ללא כתובת</div>
+                                    <span className="text-2xl font-black text-rose-600">-{missingGeoPenalty}</span>
                                 </div>
-                                
-                                <input 
-                                    type="range" 
-                                    min="0" 
-                                    max="100" 
-                                    value={missingGeoScore}
-                                    onChange={(e) => setMissingGeoScore(parseInt(e.target.value))}
-                                    className="w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-primary-500"
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={50}
+                                    value={missingGeoPenalty}
+                                    onChange={(e) => setMissingGeoPenalty(parseInt(e.target.value, 10))}
+                                    className="w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-rose-500"
                                 />
-                                
                                 <div className="flex justify-between text-[10px] text-text-muted mt-2 font-bold uppercase tracking-wider">
-                                    <span>קנס מלא (0)</span>
-                                    <span>נייטרלי (50)</span>
-                                    <span>בונוס (100)</span>
+                                    <span>0 נק&apos;</span>
+                                    <span>25 נק&apos;</span>
+                                    <span>50 נק&apos;</span>
                                 </div>
                             </div>
 
@@ -1418,7 +1519,7 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
 
                             <div className="text-xs text-text-muted leading-relaxed mt-4">
                                 <p className="font-bold text-text-default mb-1">איך זה עובד?</p>
-                                כתובת וגיל מטופלים כאן כשכבות ציון / קנס ייעודיים. ניידות, היקף משרה, רישיון, שעות וזמינות — ב
+                                כתובת וגיל מטופלים כאן כקנסות ייעודיים. ניידות, היקף משרה, רישיון, שעות וזמינות — ב
                                 <span className="font-medium text-text-default"> מדיניות קנסות כלליים </span>
                                 (מידע חסר / חוסר התאמה).
                             </div>
@@ -1543,7 +1644,7 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                             />
                                         </div>
                                         <div className="space-y-1">
-                                            <div className="text-[10px] text-red-600 font-bold uppercase">קנס לכל ק"מ חריגה (%)</div>
+                                            <div className="text-[10px] text-red-600 font-bold uppercase">קנס לכל ק"מ חריגה (נק')</div>
                                             <input 
                                                 type="number" 
                                                 step="0.5"
@@ -1557,7 +1658,7 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                         </div>
                                     </div>
                                     <div className="text-[10px] text-text-muted italic">
-                                        * עד {region.grace} ק"מ הציון הוא 100%. לאחר מכן יורד ב-{region.penaltyPerKm}% לכל ק"מ.
+                                        * עד {region.grace} ק"מ אין קנס. לאחר מכן יורדות {region.penaltyPerKm} נק' מהציון הסופי לכל ק"מ.
                                     </div>
                                 </div>
                             ))}
@@ -1887,17 +1988,6 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                         ) : null}
                                     </div>
 
-                                    {/* Geo */}
-                                    <div className="space-y-2">
-                                        <div className="flex justify-between text-sm font-bold">
-                                            <span className="text-text-default flex items-center gap-2"><GlobeAmericasIcon className="w-4 h-4 text-emerald-500"/> שכבה גיאוגרפית</span>
-                                            <span className="text-text-muted">{simResult.breakdown.geo !== null ? `${simResult.breakdown.geo}%` : 'לא חושב'}</span>
-                                        </div>
-                                        <div className="h-2.5 bg-bg-subtle rounded-full overflow-hidden">
-                                            <div className="h-full bg-emerald-500 rounded-full transition-all duration-1000" style={{ width: `${simResult.breakdown.geo || 0}%` }}></div>
-                                        </div>
-                                    </div>
-
                                     {/* Experience */}
                                     {isExperienceEnabled && (
                                         <div className="space-y-2">
@@ -1931,12 +2021,41 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                         })()}
                                     </div>
 
+                                    {/* Distance Penalty */}
+                                    {simResult.breakdown.geoPenalty > 0 && (
+                                        <div className="space-y-2 pt-4 mt-2 border-t border-border-subtle">
+                                            <div className="flex justify-between text-sm font-bold">
+                                                <span className="text-emerald-700 flex items-center gap-2">
+                                                    <GlobeAmericasIcon className="w-4 h-4"/>
+                                                    {simResult.breakdown.geoMissing
+                                                        ? 'קנס מיקום חסר'
+                                                        : simResult.breakdown.geoDistance != null && simResult.breakdown.geoMaxKm != null
+                                                            ? `קנס מרחק (${simResult.breakdown.geoDistance} ק"מ, סף ${simResult.breakdown.geoMaxKm} ק"מ)`
+                                                            : 'קנס מרחק'}
+                                                </span>
+                                                <span className="text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">-{simResult.breakdown.geoPenalty} נק'</span>
+                                            </div>
+                                        </div>
+                                    )}
+
                                     {/* Age Gap Penalty */}
                                     {simResult.breakdown.ageGapPenalty > 0 && (
                                         <div className="space-y-2 pt-4 mt-2 border-t border-border-subtle">
                                             <div className="flex justify-between text-sm font-bold">
                                                 <span className="text-orange-600 flex items-center gap-2"><UserGroupIcon className="w-4 h-4"/> קנס חריגת גיל</span>
                                                 <span className="text-orange-600 bg-orange-50 px-2 py-0.5 rounded-md">-{simResult.breakdown.ageGapPenalty} נק'</span>
+                                            </div>
+                                            <div className="h-2.5 bg-orange-100 rounded-full overflow-hidden">
+                                                <div className="h-full bg-orange-500 rounded-full transition-all duration-1000" style={{ width: `100%` }}></div>
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {(simResult.breakdown.roleExperiencePenalty > 0 || simResult.breakdown.roleLookbackPenalty > 0) && (
+                                        <div className="space-y-2 pt-4 mt-2 border-t border-border-subtle">
+                                            <div className="flex justify-between text-sm font-bold">
+                                                <span className="text-orange-600 flex items-center gap-2"><BriefcaseIcon className="w-4 h-4"/> קנס ניסיון תעסוקתי</span>
+                                                <span className="text-orange-600 bg-orange-50 px-2 py-0.5 rounded-md">-{(simResult.breakdown.roleExperiencePenalty > 0 ? simResult.breakdown.roleExperiencePenalty : simResult.breakdown.roleLookbackPenalty)} נק'</span>
                                             </div>
                                             <div className="h-2.5 bg-orange-100 rounded-full overflow-hidden">
                                                 <div className="h-full bg-orange-500 rounded-full transition-all duration-1000" style={{ width: `100%` }}></div>
@@ -1951,7 +2070,7 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                                 <span className="text-rose-600 flex items-center gap-2"><ScaleIcon className="w-4 h-4"/> קנסות כלליים</span>
                                                 <span className="text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">-{simResult.breakdown.generalPenalties || 0} נק'</span>
                                             </div>
-                                            {(simResult.breakdown.penaltyReasons || []).filter((r: { key?: string }) => r.key !== 'salary' && r.key !== 'age').map((r: { label: string; amount: number }, i: number) => (
+                                            {(simResult.breakdown.penaltyReasons || []).filter((r: { key?: string }) => r.key !== 'salary' && r.key !== 'age' && r.key !== 'geo' && r.key !== 'role_experience' && r.key !== 'role_lookback').map((r: { label: string; amount: number }, i: number) => (
                                                 <div key={i} className="flex justify-between text-xs text-rose-700 bg-rose-50/80 px-2 py-1 rounded">
                                                     <span>{r.label}</span>
                                                     <span className="font-bold">-{r.amount}</span>
@@ -2001,9 +2120,14 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                             );
                                         })()}
                                         {simResult.breakdown.candidateYears > 0 && <span className="block mt-1">שנות ניסיון המועמד: <strong>{simResult.breakdown.candidateYears}</strong>{simResult.breakdown.requiredYears > 0 ? ` (נדרש: ${simResult.breakdown.requiredYears})` : ''}.</span>}
-                                        {simResult.breakdown.geoMissing && <span className="font-bold text-amber-700 block mt-1"> ניקוד גיאוגרפי: ברירת מחדל (כתובת לא זמינה).</span>}
+                                        {simResult.breakdown.geoMissing && <span className="font-bold text-amber-700 block mt-1"> כתובת לא זמינה — קנס מיקום חסר: {simResult.breakdown.geoPenalty} נקודות.</span>}
                                         {simResult.breakdown.salaryPenalty > 0 && <span className="font-bold text-rose-700 block mt-1"> קנס פער שכר: {simResult.breakdown.salaryPenalty} נקודות.</span>}
                                         {simResult.breakdown.ageGapPenalty > 0 && <span className="font-bold text-orange-700 block mt-1"> קנס חריגת גיל: {simResult.breakdown.ageGapPenalty} נקודות.</span>}
+                                        {(simResult.breakdown.roleExperiencePenalty > 0 || simResult.breakdown.roleLookbackPenalty > 0) && (
+                                            <span className="font-bold text-orange-700 block mt-1">
+                                                {' '}קנס ניסיון תעסוקתי: {simResult.breakdown.roleExperiencePenalty > 0 ? simResult.breakdown.roleExperiencePenalty : simResult.breakdown.roleLookbackPenalty} נקודות.
+                                            </span>
+                                        )}
                                     </p>
                                 </div>
                             </div>
@@ -2023,10 +2147,9 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                 {(() => {
                     const vW = mainWeights.find(w => w.id === 'vector')?.value    ?? 0;
                     const tW = mainWeights.find(w => w.id === 'tags')?.value      ?? 0;
-                    const gW = mainWeights.find(w => w.id === 'geo')?.value       ?? 0;
                     const eW = isExperienceEnabled ? (mainWeights.find(w => w.id === 'experience')?.value ?? 0) : 0;
                     const iW = mainWeights.find(w => w.id === 'intent')?.value    ?? 0;
-                    const total = vW + tW + gW + eW + iW;
+                    const total = vW + tW + eW + iW;
                     return (
                         <div className="space-y-5">
                             {/* Main formula */}
@@ -2038,8 +2161,6 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                     <span className="bg-purple-100  text-purple-700  px-2 py-0.5 rounded font-bold">{vW}</span>
                                     <span className="text-text-muted">+</span>
                                     <span className="bg-blue-100    text-blue-700    px-2 py-0.5 rounded font-bold">{tW}</span>
-                                    <span className="text-text-muted">+</span>
-                                    <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded font-bold">{gW}</span>
                                     {eW > 0 && <><span className="text-text-muted">+</span><span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded font-bold">{eW}</span></>}
                                     <span className="text-text-muted">+</span>
                                     <span className="bg-rose-100    text-rose-700    px-2 py-0.5 rounded font-bold">{iW}</span>
@@ -2054,8 +2175,6 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                     <span className="bg-purple-100  text-purple-700  px-2 py-0.5 rounded">S_vector × {vW}</span>
                                     <span className="text-text-muted">+</span>
                                     <span className="bg-blue-100    text-blue-700    px-2 py-0.5 rounded">S_tags × {tW}</span>
-                                    <span className="text-text-muted">+</span>
-                                    <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">S_geo × {gW}</span>
                                     {eW > 0 && <>
                                         <span className="text-text-muted">+</span>
                                         <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded">S_exp × {eW}</span>
@@ -2075,8 +2194,17 @@ const AdminMatchingEngineView: React.FC<AdminMatchingEngineViewProps> = ({ tenan
                                     <span className="text-text-muted">−</span>
                                     <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded">Penalty_age</span>
                                     <span className="text-text-muted">−</span>
+                                    <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded">Penalty_role_exp</span>
+                                    <span className="text-text-muted">−</span>
+                                    <span className="bg-amber-100 text-amber-800 px-2 py-0.5 rounded">Penalty_lookback</span>
+                                    <span className="text-text-muted">−</span>
                                     <span className="bg-rose-200 text-rose-800 px-2 py-0.5 rounded">Penalty_general</span>
+                                    <span className="text-text-muted">−</span>
+                                    <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">Penalty_distance</span>
                                     <span className="text-text-muted">(max 0)</span>
+                                </div>
+                                <div className="text-text-muted mt-2 text-xs font-sans">
+                                    Penalty_distance = (ק"מ − מרחק לציון מלא) × קנס לכל ק"מ לפי אזור המשרה; ללא כתובת = {missingGeoPenalty} נק'
                                 </div>
                             </div>
 

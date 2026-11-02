@@ -54,7 +54,7 @@ SELECT
 {{context}}
 
 If info is missing (like summary or age), ask for it and then suggest the update via JSON when appropriate.$prompt$,
-  'gemini-3-flash-preview',
+  'gemini-3.8-flash',
   0.5,
   '["fullName","context","message","schema","tagsText"]'::jsonb,
   'chatbots',

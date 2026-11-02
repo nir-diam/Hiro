@@ -15,6 +15,15 @@ const assertCanListClientContacts = (actor, clientId) => {
   }
 };
 
+const parseIdList = (raw) => {
+  if (!raw) return [];
+  return String(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(0, 200);
+};
+
 const list = async (req, res) => {
   try {
     const clientId = String(req.params.id || '').trim();
@@ -25,9 +34,16 @@ const list = async (req, res) => {
     const organizationTmpId = req.query?.organizationTmpId
       ? String(req.query.organizationTmpId).trim()
       : null;
+    const ids = parseIdList(req.query?.ids);
+    const lookup = req.query?.lookup === '1' || req.query?.lookup === 'true';
+    const q = req.query?.q ? String(req.query.q).trim() : '';
     const rows = await clientContactService.listByClientIdWithClient(clientId, {
       organizationId,
       organizationTmpId,
+      ids,
+      lookup: lookup || ids.length > 0 || Boolean(q),
+      q,
+      limit: parseListLimit(req.query?.limit),
     });
     res.json(rows);
   } catch (err) {
@@ -35,22 +51,43 @@ const list = async (req, res) => {
   }
 };
 
+const parseListLimit = (raw, fallback = 50) =>
+  Math.min(100, Math.max(1, Number.parseInt(String(raw ?? ''), 10) || fallback));
+
+const parseListOffset = (raw) =>
+  Math.max(0, Number.parseInt(String(raw ?? ''), 10) || 0);
+
 const listAll = async (req, res) => {
   try {
     const actor = req.dbUser;
     if (!actor) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
+    const paginate = req.query?.paginate === '1' || req.query?.paginate === 'true';
+    const q = req.query?.q ? String(req.query.q).trim() : '';
+    const ids = parseIdList(req.query?.ids);
+    const lookup = req.query?.lookup === '1' || req.query?.lookup === 'true';
+    const listOpts = {
+      paginate,
+      limit: parseListLimit(req.query?.limit),
+      offset: parseListOffset(req.query?.offset),
+      q,
+      ids,
+      lookup: lookup || ids.length > 0,
+    };
     // Platform admins see every contact; tenant staff see only their client.
     if (clientService.isPlatformAdmin(actor)) {
-      const rows = await clientContactService.listAllWithClient();
+      const rows = await clientContactService.listAllWithClient(listOpts);
       return res.json(rows);
     }
     const tenantClientId = actor.clientId ? String(actor.clientId).trim() : '';
     if (!tenantClientId) {
       return res.status(403).json({ message: 'Only platform admins or tenant users can list contacts' });
     }
-    const rows = await clientContactService.listAllWithClient({ clientId: tenantClientId });
+    const rows = await clientContactService.listAllWithClient({
+      ...listOpts,
+      clientId: tenantClientId,
+    });
     return res.json(rows);
   } catch (err) {
     res.status(500).json({ message: err.message || 'Failed to list contacts' });

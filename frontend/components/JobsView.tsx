@@ -31,7 +31,7 @@ import {
     stickyTableHeaderCellClass,
 } from '../utils/stickyTableHeader';
 import ActiveFilterChips, { type ActiveFilterChip } from './ActiveFilterChips';
-import { fetchJobsGrid, type JobsGridFacets, type JobsGridStats } from '../services/jobsApi';
+import { fetchJobsGrid, updateJob, deleteJob, type JobsGridFacets, type JobsGridStats } from '../services/jobsApi';
 import { FormMultiSelect } from './FormMultiSelect';
 import { jobStatusFormToApi, JOB_STATUS_FORM_OPTIONS, type JobStatusFormLabel } from '../utils/jobStatusLabels';
 
@@ -852,23 +852,16 @@ const JobsView: React.FC = () => {
 
 
     const persistJobUpdate = useCallback(async (id: number, updates: Partial<Job>) => {
-        const res = await fetch(`${apiBase}/api/jobs/${id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updates),
-        });
-        if (!res.ok) throw new Error('Failed to update job');
-        const updated = await res.json();
+        const updated = (await updateJob(String(id), updates)) as Job;
         setJobs(prev => prev.map(job => (job.id === updated.id ? updated : job)));
         return updated;
-    }, [apiBase]);
+    }, []);
 
     const deleteJobRecord = useCallback(async (id: number) => {
-        const res = await fetch(`${apiBase}/api/jobs/${id}`, { method: 'DELETE' });
-        if (!res.ok) throw new Error('Failed to delete job');
+        await deleteJob(String(id));
         setJobs(prev => prev.filter(job => job.id !== id));
         setTotalJobs((prev) => Math.max(0, prev - 1));
-    }, [apiBase]);
+    }, []);
     
     // --- New state for Date Range ---
     const [dateRange, setDateRange] = useState<DateRange | null>(null);

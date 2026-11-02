@@ -1,4 +1,8 @@
 const RecruitmentSource = require('../models/RecruitmentSource');
+const {
+  getCachedOptions,
+  bumpRecruitmentSourceCacheVersion,
+} = require('./recruitmentSourceCacheService');
 
 const toDto = (row) => ({
   id: row.id,
@@ -34,7 +38,7 @@ const dedupeByName = (rows) => {
   return out;
 };
 
-const listOptions = async ({ clientId = null } = {}) => {
+const listOptionsFromDb = async ({ clientId = null } = {}) => {
   if (clientId) return listByClientId(clientId);
 
   const rows = await RecruitmentSource.findAll({
@@ -47,6 +51,9 @@ const listOptions = async ({ clientId = null } = {}) => {
   });
   return dedupeByName(rows);
 };
+
+const listOptions = async ({ clientId = null } = {}) =>
+  getCachedOptions(clientId, () => listOptionsFromDb({ clientId }));
 
 const nextSortIndex = async (clientId) => {
   const max = await RecruitmentSource.max('sortIndex', { where: { clientId } });
@@ -77,6 +84,7 @@ const createForClient = async (clientId, body) => {
       sortIndex,
       isActive,
     });
+    await bumpRecruitmentSourceCacheVersion();
     return toDto(row);
   } catch (e) {
     if (e?.name === 'SequelizeUniqueConstraintError') {
@@ -120,6 +128,7 @@ const updateForClient = async (clientId, sourceId, body) => {
   try {
     await row.update(patch);
     await row.reload();
+    await bumpRecruitmentSourceCacheVersion();
     return toDto(row);
   } catch (e) {
     if (e?.name === 'SequelizeUniqueConstraintError') {
@@ -138,6 +147,7 @@ const removeForClient = async (clientId, sourceId) => {
     err.status = 404;
     throw err;
   }
+  await bumpRecruitmentSourceCacheVersion();
   return { ok: true };
 };
 

@@ -7,6 +7,7 @@ const Job = require('../models/Job');
 const organizationEmbeddingService = require('../services/organizationEmbeddingService');
 const {
   resolveSubFieldFromPicklist,
+  buildCompanyEnrichmentPromptFromDb,
   persistEnrichmentResults,
   verifyOrganizationWebsite,
   applyWebsiteVerificationGate,
@@ -23,8 +24,6 @@ const {
   searchRegistrationNumber,
 } = require('../services/organizationEnrichmentService');
 const organizationEnrichUsageService = require('../services/organizationEnrichUsageService');
-const promptService = require('../services/promptService');
-const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
 const axios = require('axios');
 const organizationContactService = require('../services/organizationContactService');
@@ -38,8 +37,6 @@ const Client = require('../models/Client');
 const { sendSingleTurnChat, sendChat, resolveGeminiApiKey } = require('../services/geminiService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { filterSerpOrganicResults } = require('../utils/filterSerpOrganicResults');
-const { buildCompanyEnrichmentPrompt } = require('../prompts/companyEnrichmentPrompt');
-
 const UUID_RE = /^[0-9a-f-]{36}$/i;
 
 const resolveOrganizationActor = (req) => {
@@ -63,57 +60,18 @@ const resolveOrganizationActor = (req) => {
 };
 
 
-const fallbackCompanyPrompt = (companyNames, mainFieldOptions = [], website = '', snippet = '') =>
-  buildCompanyEnrichmentPrompt({ companyNames, mainFieldOptions, website, snippet });
-
-let companyPromptTemplate = null;
-const loadCompanyPromptTemplate = async () => {
-  try {
-    const record = await promptService.ensureById('company_enrichment');
-    companyPromptTemplate = record.template;
-  } catch (err) {
-    console.warn('[organization-enrich] missing company_enrichment prompt', err.message || err);
-    companyPromptTemplate = null;
-  }
-  return companyPromptTemplate;
-};
-
 /**
  * @param {Array<{name:string, website?:string|null}>} companyData
  */
 const buildCompanyPrompt = async (companyData) => {
-  const mainFieldOptions = await picklistService.getMainFieldOptionNames();
   // Support both legacy (string[]) and new ({name,website}[]) shapes
   const companyNames = companyData.map((c) => (typeof c === 'string' ? c : c.name));
-  // Single-company website for ${website} placeholder
-  const firstWebsite = companyData.length > 0
-    ? (typeof companyData[0] === 'string' ? '' : companyData[0].website || '')
-    : '';
-  const firstSnippet = companyData.length > 0
-    ? (typeof companyData[0] === 'string' ? '' : companyData[0].snippet || '')
-    : '';
-
-  const template = await loadCompanyPromptTemplate();
-  if (template) {
-    let out = template;
-    if (out.includes('{{company_names_json}}')) {
-      out = out.replace('{{company_names_json}}', JSON.stringify(companyNames));
-    }
-    if (out.includes('${companyNamesJson}')) {
-      out = out.replace('${companyNamesJson}', JSON.stringify(companyNames));
-    }
-    if (out.includes('${mainFieldJson}')) {
-      out = out.replace('${mainFieldJson}', JSON.stringify(mainFieldOptions));
-    }
-    if (out.includes('${website}')) {
-      out = out.replace('${website}', firstWebsite);
-    }
-    if (out.includes('${snippet}')) {
-      out = out.replace('${snippet}', firstSnippet);
-    }
-    return out;
-  }
-  return fallbackCompanyPrompt(companyNames, mainFieldOptions, firstWebsite, firstSnippet);
+  const first = companyData.length > 0 && typeof companyData[0] !== 'string' ? companyData[0] : {};
+  return buildCompanyEnrichmentPromptFromDb({
+    companyNames,
+    website: first.website || '',
+    snippet: first.snippet || '',
+  });
 };
 
 const LOGO_ALLOWED_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']);

@@ -74,6 +74,16 @@ const SystemTag = sequelize.define(
       type: DataTypes.TEXT,
       allowNull: true,
     },
+    /** Job role tags: required years of experience in this role (null = not set). */
+    years_experience: {
+      type: DataTypes.SMALLINT,
+      allowNull: true,
+    },
+    /** Job role tags: only count experience from the last N years (null = no limit). */
+    lookback_years: {
+      type: DataTypes.SMALLINT,
+      allowNull: true,
+    },
     is_active: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

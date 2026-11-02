@@ -144,10 +144,25 @@ export const isNonPrimaryCandidateProfile = (
     profile: Record<string, unknown> | null | undefined,
 ): boolean => isStaffDuplicateProfile(profile) || isLinkedCandidateProfileVersion(profile);
 
-/** Only staff shadow copies (צור העתק) skip the primary save confirmation dialog. */
+/** Staff shadow copies always save in place (no live-profile confirm). */
 export const shouldSaveCandidateProfileDirectly = (
     profile: Record<string, unknown> | null | undefined,
 ): boolean => isStaffDuplicateProfile(profile);
+
+/** Pinned staff shadow for client referral; falls back to newest only when none is pinned yet. */
+export const resolveStaffShadowProfile = <T extends Record<string, unknown>>(
+    profiles: T[],
+    anchor?: Record<string, unknown> | null,
+): T | undefined => {
+    const family = filterProfilesInSameFamily(profiles, anchor);
+    const shadows = family.filter((profile) => isStaffDuplicateProfile(profile) && !profile.isDeleted);
+    if (!shadows.length) return undefined;
+    const pinned = shadows.filter((profile) => profile.staffShadowPinned === true);
+    if (pinned.length) {
+        return pinned.slice().sort((a, b) => profileCreatedAtMs(b) - profileCreatedAtMs(a))[0];
+    }
+    return shadows.slice().sort((a, b) => profileCreatedAtMs(b) - profileCreatedAtMs(a))[0];
+};
 
 const hasDuplicateProfileNameSuffix = (profile: Record<string, unknown> | null | undefined): boolean => {
     const label = String(profile?.profileName || profile?.fullName || profile?.title || '').trim();
@@ -268,9 +283,9 @@ export const buildProfileDuplicatePayload = (
         delete clone[key];
     });
     if (userId) clone.userId = userId;
-    clone.profileName = profileName;
-    clone.title = profileName;
-    clone.fullName = profileName;
+    clone.profileName = source.profileName || source.fullName || profileName;
+    clone.title = source.title || source.fullName || profileName;
+    clone.fullName = source.fullName || source.title || profileName;
     clone.workExperience = cloneProfileRows(clone.workExperience, true);
     clone.education = cloneProfileRows(clone.education, true);
     clone.experience = cloneProfileRows(clone.experience, true);
@@ -420,4 +435,24 @@ export const hasCandidateCvFormChanges = (
         }
     }
     return false;
+};
+
+/** Diff of CV fields for staff→live proposal API. */
+export const buildLiveProfileProposalFields = (
+    current: Record<string, unknown> | null | undefined,
+    baseline: Record<string, unknown> | null | undefined,
+): Record<string, unknown> => {
+    if (!current || !baseline) return {};
+    const currentPick = pickComparableCandidateSaveData(current);
+    const baselinePick = pickComparableCandidateSaveData(baseline);
+    const keys = new Set([...Object.keys(currentPick), ...Object.keys(baselinePick)]);
+    const fields: Record<string, unknown> = {};
+    for (const key of keys) {
+        if (CANDIDATE_NON_CV_FORM_KEYS.has(key)) continue;
+        if (CANDIDATE_SAVE_COMPARE_IGNORE_KEYS.has(key)) continue;
+        if (stableStringify(currentPick[key]) !== stableStringify(baselinePick[key])) {
+            fields[key] = currentPick[key];
+        }
+    }
+    return fields;
 };

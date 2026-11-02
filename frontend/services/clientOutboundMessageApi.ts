@@ -257,6 +257,15 @@ const eventTypesList = (event: ClientEventLike): string[] =>
           ? [String(event.type).trim()]
           : [];
 
+/** GET /clients/:id/events may return a bare array or `{ items: [...] }`. */
+const parseClientEventsListResponse = (body: unknown): ClientEventLike[] => {
+    if (Array.isArray(body)) return body as ClientEventLike[];
+    if (body && typeof body === 'object' && Array.isArray((body as { items?: unknown }).items)) {
+        return (body as { items: ClientEventLike[] }).items;
+    }
+    return [];
+};
+
 const isProposalOutboundEvent = (event: ClientEventLike, meta: ClientEventLike['metadata']): boolean => {
     if (meta?.outboundProposal === true) return true;
     const types = eventTypesList(event);
@@ -509,21 +518,31 @@ export async function listOutboundMessageEvents(params: {
     const clientId = String(params.clientId || '').trim();
     if (!clientId || !apiBase()) return [];
 
-    // Load all client events; filter in-memory so contact history still shows
-    // messages even when organizationId was missing on the stored event.
-    const res = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(clientId)}/events`, {
-        method: 'GET',
-        headers: authHeaders(),
-        credentials: 'include',
-    });
+    // Server defaults to limit=20 on undecorated list calls — scope by contact and
+    // request a generous cap so contact «מיילים אישיים» is not empty when the client
+    // has many recent events for other contacts.
+    const qs = new URLSearchParams();
+    const companyWide = Boolean(params.companyWide);
+    const contactIdForQuery = !companyWide && params.contactId ? String(params.contactId).trim() : '';
+    if (contactIdForQuery) qs.set('contactId', contactIdForQuery);
+    const organizationIdForQuery = params.organizationId ? String(params.organizationId).trim() : '';
+    if (companyWide && organizationIdForQuery) qs.set('organizationId', organizationIdForQuery);
+    qs.set('limit', contactIdForQuery || companyWide ? '1200' : '2000');
+
+    const res = await fetch(
+        `${apiBase()}/api/clients/${encodeURIComponent(clientId)}/events?${qs.toString()}`,
+        {
+            method: 'GET',
+            headers: authHeaders(),
+            credentials: 'include',
+        },
+    );
     if (!res.ok) {
         throw new Error('טעינת היסטוריית הודעות נכשלה');
     }
-    const rows = await res.json();
-    const list: ClientEventLike[] = Array.isArray(rows) ? rows : [];
+    const list = parseClientEventsListResponse(await res.json());
     const contactId = params.contactId ? String(params.contactId).trim() : '';
-    const organizationId = params.organizationId ? String(params.organizationId).trim() : '';
-    const companyWide = Boolean(params.companyWide);
+    const organizationId = organizationIdForQuery;
     const contactEmails = Array.isArray(params.contactEmails)
         ? params.contactEmails.map((e) => String(e || '').trim()).filter(Boolean)
         : [];

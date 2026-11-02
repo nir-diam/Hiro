@@ -737,6 +737,8 @@ export type RecruitmentSourceSelectionHistoryEntry = {
   userId?: string | null;
   userName: string;
   selected: boolean;
+  kind?: 'note';
+  note?: string;
 };
 
 export type JobBoardRecruitmentSourcePayload = {

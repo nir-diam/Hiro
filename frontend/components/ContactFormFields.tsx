@@ -66,9 +66,41 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
   const officePhones = formData.phones.filter((p) => p.kind === 'office');
   const mobilePhones = formData.phones.filter((p) => p.kind === 'mobile');
 
+  /** Stable ids for the always-open empty rows, so the input keeps focus once it is typed into. */
+  const blankIds = React.useRef({
+    email: newContactEntryId(),
+    office: newContactEntryId(),
+    mobile: newContactEntryId(),
+  }).current;
+  const [showLinkedin, setShowLinkedin] = React.useState(false);
+  const linkedinOpen = showLinkedin || Boolean(formData.linkedin.trim());
+
+  const emailRows: ContactEmailEntry[] = formData.emails.length
+    ? formData.emails
+    : [{ id: blankIds.email, value: '', isPrimary: true }];
+  const isStoredEmail = (id: string) => formData.emails.some((row) => row.id === id);
+
+  const setEmailValue = (entry: ContactEmailEntry, value: string) =>
+    updateEmails(
+      isStoredEmail(entry.id)
+        ? formData.emails.map((row) => (row.id === entry.id ? { ...row, value } : row))
+        : [...formData.emails, { ...entry, value }],
+    );
+
+  const phoneRowsFor = (kind: 'office' | 'mobile', rows: ContactPhoneEntry[]): ContactPhoneEntry[] =>
+    rows.length ? rows : [{ id: blankIds[kind], value: '', kind, isPrimary: true }];
+  const isStoredPhone = (id: string) => formData.phones.some((row) => row.id === id);
+
+  const setPhoneValue = (entry: ContactPhoneEntry, value: string) =>
+    updatePhones(
+      isStoredPhone(entry.id)
+        ? formData.phones.map((row) => (row.id === entry.id ? { ...row, value } : row))
+        : [...formData.phones, { ...entry, value }],
+    );
+
   const renderEmailRows = () => (
     <div className="space-y-1.5">
-      {formData.emails.map((entry) => (
+      {emailRows.map((entry) => (
         <div key={entry.id} className="flex items-center gap-1.5">
           <button
             type="button"
@@ -81,37 +113,29 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
           <input
             type="email"
             value={entry.value}
-            onChange={(e) =>
-              updateEmails(
-                formData.emails.map((row) =>
-                  row.id === entry.id ? { ...row, value: e.target.value } : row,
-                ),
-              )
-            }
+            onChange={(e) => setEmailValue(entry, e.target.value)}
             placeholder="name@company.com"
             dir="ltr"
             className={`${inputClass} flex-1 min-w-0`}
           />
-          <button
-            type="button"
-            onClick={() => updateEmails(formData.emails.filter((row) => row.id !== entry.id))}
-            className={trashBtnClass}
-            aria-label="הסר"
-          >
-            <TrashIcon className="w-3.5 h-3.5" />
-          </button>
+          {isStoredEmail(entry.id) ? (
+            <button
+              type="button"
+              onClick={() => updateEmails(formData.emails.filter((row) => row.id !== entry.id))}
+              className={trashBtnClass}
+              aria-label="הסר"
+            >
+              <TrashIcon className="w-3.5 h-3.5" />
+            </button>
+          ) : null}
         </div>
       ))}
       <button
         type="button"
         onClick={() =>
           updateEmails([
-            ...formData.emails,
-            {
-              id: newContactEntryId(),
-              value: '',
-              isPrimary: formData.emails.length === 0,
-            },
+            ...(formData.emails.length ? formData.emails : emailRows),
+            { id: newContactEntryId(), value: '', isPrimary: false },
           ])
         }
         className="inline-flex items-center gap-1 text-[11px] font-bold text-primary-600 hover:text-primary-700"
@@ -131,12 +155,8 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
           onClick={() =>
             updatePhones([
               ...formData.phones,
-              {
-                id: newContactEntryId(),
-                value: '',
-                kind,
-                isPrimary: rows.length === 0,
-              },
+              ...(rows.length ? [] : phoneRowsFor(kind, rows)),
+              { id: newContactEntryId(), value: '', kind, isPrimary: false },
             ])
           }
           className="inline-flex items-center gap-0.5 text-[11px] font-bold text-primary-600 hover:text-primary-700 shrink-0"
@@ -145,7 +165,7 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
           הוסף
         </button>
       </div>
-      {rows.map((entry) => (
+      {phoneRowsFor(kind, rows).map((entry) => (
         <div key={entry.id} className="flex items-center gap-1.5">
           <button
             type="button"
@@ -158,24 +178,21 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
           <input
             type="tel"
             value={entry.value}
-            onChange={(e) =>
-              updatePhones(
-                formData.phones.map((row) =>
-                  row.id === entry.id ? { ...row, value: e.target.value } : row,
-                ),
-              )
-            }
+            onChange={(e) => setPhoneValue(entry, e.target.value)}
+            placeholder={kind === 'mobile' ? '054-1234567' : '03-1234567'}
             dir="ltr"
-            className={`${inputClass} flex-1 min-w-0`}
+            className={`${inputClass} flex-1 min-w-[11rem] text-left`}
           />
-          <button
-            type="button"
-            onClick={() => updatePhones(formData.phones.filter((row) => row.id !== entry.id))}
-            className={trashBtnClass}
-            aria-label="הסר"
-          >
-            <TrashIcon className="w-3.5 h-3.5" />
-          </button>
+          {isStoredPhone(entry.id) ? (
+            <button
+              type="button"
+              onClick={() => updatePhones(formData.phones.filter((row) => row.id !== entry.id))}
+              className={trashBtnClass}
+              aria-label="הסר"
+            >
+              <TrashIcon className="w-3.5 h-3.5" />
+            </button>
+          ) : null}
         </div>
       ))}
     </div>
@@ -355,28 +372,38 @@ const ContactFormFields: React.FC<ContactFormFieldsProps> = ({
       </Section>
 
       <Section title="פרטי קשר">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <div className="min-w-0">
-            <label className={labelClass}>דוא״ל</label>
-            {renderEmailRows()}
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2 gap-3 min-w-0">
-            {renderPhoneRows('office', officePhones, 'טלפון משרד')}
-            {renderPhoneRows('mobile', mobilePhones, 'טלפון נייד')}
-          </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {renderPhoneRows('mobile', mobilePhones, 'טלפון נייד')}
+          {renderPhoneRows('office', officePhones, 'טלפון משרד')}
+        </div>
+        <div className="min-w-0">
+          <label className={labelClass}>דוא״ל</label>
+          {renderEmailRows()}
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-0.5">
           <div>
             <label className={labelClass}>לינקדאין</label>
-            <input
-              type="url"
-              value={formData.linkedin}
-              onChange={(e) => patch({ linkedin: e.target.value })}
-              dir="ltr"
-              placeholder="linkedin.com/in/..."
-              className={inputClass}
-            />
+            {linkedinOpen ? (
+              <input
+                type="url"
+                value={formData.linkedin}
+                onChange={(e) => patch({ linkedin: e.target.value })}
+                dir="ltr"
+                placeholder="linkedin.com/in/..."
+                className={inputClass}
+                autoFocus={showLinkedin && !formData.linkedin}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowLinkedin(true)}
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-primary-600 hover:text-primary-700"
+              >
+                <PlusIcon className="w-3.5 h-3.5" />
+                הוסף לינקדאין
+              </button>
+            )}
           </div>
           <div>
             <label className={labelClass}>שם משתמש</label>

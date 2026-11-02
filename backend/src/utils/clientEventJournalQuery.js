@@ -54,6 +54,9 @@ const parseJournalDayTs = (raw) => {
   return Number.isNaN(d.getTime()) ? null : d.getTime();
 };
 
+const parseJournalSortDir = (raw) =>
+  String(raw || '').trim().toLowerCase() === 'asc' ? 'asc' : 'desc';
+
 const dateWithinRange = (raw, dateFrom, dateTo) => {
   const ts = parseJournalDayTs(raw);
   if (ts == null) return !dateFrom && !dateTo;
@@ -217,7 +220,37 @@ const parseJournalListQuery = (query, dbUser) => {
       query?.journalFilter === '1'
       || query?.journalFilter === 'true'
       || Boolean(String(query?.q || '').trim()),
+    sortDir: parseJournalSortDir(query?.sortDir || query?.dateSort),
   };
+};
+
+const journalMappedSortTs = (row) => {
+  const due = parseJournalDayTs(row?.dueDate);
+  if (due != null) return due;
+  return parseJournalDayTs(row?.date);
+};
+
+const compareJournalMappedRowsByDueDate = (a, b, sortDir) => {
+  const dir = sortDir === 'asc' ? 1 : -1;
+  const ta = journalMappedSortTs(a);
+  const tb = journalMappedSortTs(b);
+  if (ta == null && tb == null) return String(a?.id || '').localeCompare(String(b?.id || ''));
+  if (ta == null) return 1;
+  if (tb == null) return -1;
+  if (ta !== tb) return dir * (ta - tb);
+  const createdA = parseJournalDayTs(a?.date);
+  const createdB = parseJournalDayTs(b?.date);
+  if (createdA != null && createdB != null && createdA !== createdB) {
+    return dir * (createdA - createdB);
+  }
+  return String(a?.id || '').localeCompare(String(b?.id || ''));
+};
+
+/** Sort the full filtered journal set by due date before pagination. */
+const sortJournalMappedRowsByDueDate = (rows, sortDir) => {
+  const list = Array.isArray(rows) ? rows : [];
+  list.sort((a, b) => compareJournalMappedRowsByDueDate(a, b, parseJournalSortDir(sortDir)));
+  return list;
 };
 
 const hasServerJournalFilters = (opts) =>
@@ -315,9 +348,31 @@ const filterJournalMappedRows = (rows, opts) => {
   });
 };
 
+/** Widen SQL slice (not full JSONB) when filters may need rows outside the default due-date window. */
+const journalListNeedsFullEventsHistory = (opts) =>
+  Boolean(
+    opts?.q
+    || opts?.contactId
+    || opts?.candidateId
+    || opts?.statuses?.size
+    || opts?.companies?.size
+    || opts?.coordinators?.size
+    || opts?.pipelineIds?.size
+    || opts?.stageIds?.size
+    || opts?.editorFilters?.length
+    || opts?.dateFrom
+    || opts?.dateTo
+    || opts?.dueFrom
+    || opts?.dueTo
+  );
+
 module.exports = {
   parseJournalListQuery,
   filterJournalMappedRows,
   hasServerJournalFilters,
+  journalListNeedsFullEventsHistory,
   getDynamicStatusLabel,
+  parseJournalSortDir,
+  compareJournalMappedRowsByDueDate,
+  sortJournalMappedRowsByDueDate,
 };

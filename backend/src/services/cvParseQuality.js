@@ -4,7 +4,9 @@ const {
   nameLooksLikeJobHeadline,
   isPlaceholderPersonName,
   isSplitCvDocumentTitle,
+  isPortalLikePersonName,
 } = require('../utils/personName');
+const { experienceDateLooksCorrupt } = require('../utils/experienceDateSanitize');
 
 /** Panel option "Gemini 3 Pro". Used only when a Flash parse fails the quality check. */
 const CV_PARSE_PRO_MODEL = 'gemini-3.1-pro-preview';
@@ -59,8 +61,6 @@ function hasContact(email, phone) {
   return mail || digits.length >= 9;
 }
 
-const PORTAL_PERSON_NAME_RE = /^(?:jobmaster|alljobs|drushim|gotfriends|ethosia|linkedin|indeed|glassdoor|careerjet|דרושים|all jobs)$/i;
-
 function suspiciousName({ fullName, firstName, lastName, email }) {
   const sanitized = sanitizePersonNameFields({ fullName, firstName, lastName });
   if (sanitized.cleared) return true;
@@ -71,7 +71,7 @@ function suspiciousName({ fullName, firstName, lastName, email }) {
   if (nameLooksLikeJobHeadline(sanitized.fullName)) return true;
   const tokens = sanitized.fullName.split(/\s+/).filter(Boolean);
   if (tokens.length < 2) return true;
-  if (PORTAL_PERSON_NAME_RE.test(sanitized.fullName)) return true;
+  if (isPortalLikePersonName(sanitized.fullName)) return true;
   const local = String(email || '').split('@')[0].trim().toLowerCase();
   if (local && sanitized.fullName.toLowerCase() === local) return true;
   return false;
@@ -91,6 +91,7 @@ function activeTagCount(rows) {
 /**
  * Quality gate after a parse. Partial when experience, tags, contact, or the name failed.
  * `stage` is the first broken step: file_to_text | text_to_model | model_to_profile | post_parse_tags.
+ * Merge-to-existing ingest logs separately via stampCvMergedQuality with stage: merged.
  */
 function assessCvParseQuality({
   fullName,
@@ -109,6 +110,9 @@ function assessCvParseQuality({
   const tagsN = tagCount != null ? tagCountOf(tagCount) : tagCountOf(tags);
   if (suspiciousName({ fullName, firstName, lastName, email })) reasons.push('suspicious_name');
   if (!exp.length) reasons.push('no_experience');
+  if (exp.some((row) => experienceDateLooksCorrupt(row.startDate) || experienceDateLooksCorrupt(row.endDate))) {
+    reasons.push('corrupt_experience_dates');
+  }
   if (!tagsN) reasons.push('no_tags');
   if (!hasContact(email, phone)) reasons.push('no_contact');
 
@@ -168,16 +172,20 @@ async function maybeUpgradeParseWithPro(ai, {
   fileNameHint = null,
   modelUsed = null,
   parseWithModel,
+  fileBuffer = null,
+  mimeType = null,
 } = {}) {
   const text = String(resumeText || '');
   const quality = assessFromAiResult(ai, { extractedTextLength: text.trim().length });
   const base = { ai: ai && typeof ai === 'object' ? ai : {}, quality, retriedWithPro: false, model: modelUsed || null };
   if (!quality.partial || isProParseModel(modelUsed)) return base;
-  if (!text.trim() || typeof parseWithModel !== 'function') return base;
+  const hasInput = Boolean(text.trim()) || Boolean(fileBuffer && fileBuffer.length);
+  if (!hasInput || typeof parseWithModel !== 'function') return base;
   console.log('[cv-parse] partial quality, one Pro retry', {
     reasons: quality.reasons,
     stage: quality.stage,
     modelUsed: modelUsed || null,
+    nativeFile: Boolean(fileBuffer && fileBuffer.length),
   });
   let proAi = null;
   try {
@@ -185,6 +193,8 @@ async function maybeUpgradeParseWithPro(ai, {
       resumeText: text,
       fileNameHint,
       model: CV_PARSE_PRO_MODEL,
+      fileBuffer,
+      mimeType,
     });
   } catch (err) {
     console.warn('[cv-parse] Pro retry failed', err?.message || err);

@@ -10,6 +10,7 @@ import {
     DocumentArrowDownIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { fetchJobsForCompose, type JobComposeRow } from '../services/jobsApi';
 import { useAuth } from '../context/AuthContext';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import type { MessageModalConfig } from '../hooks/useUIState';
@@ -692,6 +693,7 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                 offset: String(offset),
                 sort: 'received',
                 dir: receivedSortDir,
+                score: '1',
             });
             const q = searchRef.current.trim();
             if (q) params.set('q', q);
@@ -947,21 +949,10 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
             } catch {
                 /* ignore */
             }
-            const base = (apiBase || '').replace(/\/$/, '');
-            const url = base ? `${base}/api/jobs` : '/api/jobs';
-            const res = await fetch(url, { cache: 'no-store' });
-            if (!res.ok) throw new Error('נכשל בטעינת המשרות');
-            const data = await res.json();
-            const jobList = Array.isArray(data)
-                ? data
-                : Array.isArray(data?.rows)
-                  ? data.rows
-                  : Array.isArray(data?.data)
-                    ? data.data
-                    : [];
-            const mapped = jobList.map((row: { id?: string; title?: string; name?: string; client?: string; status?: string }) => ({
+            const jobList = await fetchJobsForCompose();
+            const mapped = jobList.map((row: JobComposeRow) => ({
                 id: String(row.id ?? ''),
-                title: row.title || row.name || 'ללא שם',
+                title: row.title || 'ללא שם',
                 client: row.client != null ? String(row.client) : '',
                 status: row.status != null ? String(row.status) : undefined,
             }));

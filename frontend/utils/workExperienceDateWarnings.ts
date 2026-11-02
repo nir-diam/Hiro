@@ -17,6 +17,7 @@ export function formatExperienceEndForDisplay(end?: string | null): string {
   const s = String(end ?? '').trim();
   if (!s) return 'כיום';
   if (PRESENT_RE.test(s)) return 'כיום';
+  if (/^\d{4}$/.test(s)) return s;
   if (/^\d{4}-\d{2}/.test(s)) {
     try {
       return new Date(s.length === 7 ? `${s}-01` : s).toLocaleDateString('he-IL');
@@ -44,7 +45,7 @@ function parseYearMonth(raw?: string | null): { y: number; m: number } | null {
   const ym = s.match(/^(\d{4})-(\d{2})/);
   if (ym) return { y: Number(ym[1]), m: Number(ym[2]) };
   const yOnly = s.match(/^(\d{4})$/);
-  if (yOnly) return { y: Number(yOnly[1]), m: 1 };
+  if (yOnly) return { y: Number(yOnly[1]), m: 1 }; // duration only — stored value stays year-only
   return null;
 }
 

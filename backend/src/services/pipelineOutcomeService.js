@@ -28,7 +28,25 @@ const MessageTemplate = require('../models/MessageTemplate');
 const clientPipelineService = require('./clientPipelineService');
 const candidatePipelineService = require('./candidatePipelineService');
 const clientService = require('./clientService');
+const { completedEventLockedError, isCompletedEvent } = require('../utils/completedEventLock');
 const candidateService = require('./candidateService');
+
+const stubClientWithEvent = (clientId, event) => ({
+  id: String(clientId),
+  events: event ? [event] : [],
+});
+
+async function patchCtxClientEvent(ctx, applyMerge) {
+  if (!ctx?.clientId || !ctx?.clientEventId) return null;
+  const updated = await clientService.patchClientEventForApi(
+    ctx.clientId,
+    ctx.clientEventId,
+    applyMerge,
+  );
+  ctx.event = updated;
+  ctx.client = stubClientWithEvent(ctx.clientId, updated);
+  return updated;
+}
 const jobCandidateStatusService = require('./jobCandidateStatusService');
 const jobCandidateProcessJournalService = require('./jobCandidateProcessJournalService');
 const messageTemplateService = () => require('./messageTemplateService');
@@ -277,9 +295,6 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
   const defaultCoordinator = await resolvePipelineDefaultCoordinatorString(targetPipeline);
   const coordinator = defaultCoordinator || actor;
   const now = new Date().toISOString();
-  const client = await clientService.getById(ctx.clientId, { include: ['events'] });
-  const prevEvents = Array.isArray(client?.events) ? client.events : [];
-
   let contactId = null;
   let contactName = '';
   let linkedTo = null;
@@ -290,7 +305,7 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
   let sourceEvent = ctx.kind === 'client' ? ctx.event : null;
 
   if (!sourceEvent && ctx.clientEventId) {
-    sourceEvent = prevEvents.find((e) => String(e.id) === String(ctx.clientEventId)) || null;
+    sourceEvent = await clientService.getClientEventFromDb(ctx.clientId, ctx.clientEventId);
   }
 
   if (sourceEvent) {
@@ -392,7 +407,7 @@ async function runOpenAdditionalProcessAutomation(req, automation, ctx, { pipeli
     isActive: true,
   };
 
-  await clientService.update(ctx.clientId, { events: [newEvent, ...prevEvents] });
+  await clientService.prependClientEventInDb(ctx.clientId, newEvent);
 
   const openProcesses = [];
   if (sourceEvent && sourceEvent.isActive !== false) {
@@ -652,27 +667,24 @@ async function buildCandidateContext(clientId, jobCandidateId, candidateId) {
 }
 
 async function buildClientEventContext(clientId, clientEventId) {
-  const client = await clientService.getById(clientId, { include: ['events'] });
-  const events = Array.isArray(client.events) ? client.events : [];
-  const event = events.find((e) => String(e.id) === String(clientEventId));
+  const event = await clientService.getClientEventFromDb(clientId, clientEventId);
   if (!event) throw Object.assign(new Error('Client event not found'), { status: 404 });
   return {
     kind: 'client',
-    clientId,
+    clientId: String(clientId),
     clientEventId: String(event.id),
     event,
-    client,
+    client: stubClientWithEvent(clientId, event),
   };
 }
 
-/** Reload clients.events from DB — required before each automation (ctx.client is stale after prior writes). */
+/** Reload one journal row (not the full clients.events blob). */
 async function reloadClientEventContext(ctx) {
-  if (!ctx || ctx.kind !== 'client' || !ctx.clientId) return ctx;
-  const client = await clientService.getById(ctx.clientId, { include: ['events'] });
-  ctx.client = client;
-  if (ctx.clientEventId) {
-    const events = Array.isArray(client.events) ? client.events : [];
-    ctx.event = events.find((e) => String(e.id) === String(ctx.clientEventId)) || ctx.event;
+  if (!ctx || ctx.kind !== 'client' || !ctx.clientId || !ctx.clientEventId) return ctx;
+  const event = await clientService.getClientEventFromDb(ctx.clientId, ctx.clientEventId);
+  if (event) {
+    ctx.event = event;
+    ctx.client = stubClientWithEvent(ctx.clientId, event);
   }
   return ctx;
 }
@@ -909,29 +921,24 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
       );
       if (!targetPipeline) return { status: 'skipped', reason: 'pipeline_not_found' };
       const firstStage = resolveAutomationTargetStage(targetPipeline, automation.stageId);
-      if (ctx.kind === 'client' && ctx.event) {
-        const events = Array.isArray(ctx.client.events) ? ctx.client.events : [];
-        const next = events.map((e) =>
-          String(e.id) === String(ctx.clientEventId)
-            ? {
-                ...e,
-                processId: targetPipeline.id,
-                process: targetPipeline.name,
-                stageId: firstStage?.id || e.stageId,
-                stage: firstStage?.name || e.stage,
-                updates: [
-                  {
-                    id: `u-${Date.now()}`,
-                    title: `הועבר לתהליך: ${targetPipeline.name}`,
-                    date: new Date().toISOString(),
-                    creator: jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser),
-                  },
-                  ...(Array.isArray(e.updates) ? e.updates : []),
-                ],
-              }
-            : e,
-        );
-        await clientService.update(ctx.clientId, { events: next });
+      if (ctx.kind === 'client' && ctx.clientEventId) {
+        const actorName = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+        await patchCtxClientEvent(ctx, (e) => ({
+          ...e,
+          processId: targetPipeline.id,
+          process: targetPipeline.name,
+          stageId: firstStage?.id || e.stageId,
+          stage: firstStage?.name || e.stage,
+          updates: [
+            {
+              id: `u-${Date.now()}`,
+              title: `הועבר לתהליך: ${targetPipeline.name}`,
+              date: new Date().toISOString(),
+              creator: actorName,
+            },
+            ...(Array.isArray(e.updates) ? e.updates : []),
+          ],
+        }));
         return { status: 'applied', action: 'start_pipeline', pipelineId: targetPipeline.id };
       }
       if (ctx.kind === 'candidate' && ctx.candidateId) {
@@ -958,19 +965,13 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
             );
           }
         } else if (ctx.clientEventId) {
-          const events = Array.isArray(ctx.client?.events) ? ctx.client.events : [];
-          const next = events.map((e) =>
-            String(e.id) === String(ctx.clientEventId)
-              ? {
-                  ...e,
-                  processId: targetPipeline.id,
-                  process: targetPipeline.name,
-                  stageId: firstStage?.id || e.stageId,
-                  stage: firstStage?.name || e.stage,
-                }
-              : e,
-          );
-          await clientService.update(ctx.clientId, { events: next });
+          await patchCtxClientEvent(ctx, (e) => ({
+            ...e,
+            processId: targetPipeline.id,
+            process: targetPipeline.name,
+            stageId: firstStage?.id || e.stageId,
+            stage: firstStage?.name || e.stage,
+          }));
         }
         return { status: 'applied', action: 'start_pipeline', pipelineId: targetPipeline.id };
       }
@@ -1002,32 +1003,24 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
     case 'open_additional_process':
       return runOpenAdditionalProcessAutomation(req, automation, ctx, { pipelineKind });
     case 'close_event': {
-      if (ctx.kind === 'client' && ctx.event) {
-        const events = Array.isArray(ctx.client.events) ? ctx.client.events : [];
+      if (ctx.kind === 'client' && ctx.clientEventId) {
         const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
-        const next = events.map((e) => {
-          if (String(e.id) !== String(ctx.clientEventId)) return e;
-          return appendClientEventActivity({ ...e, isActive: false }, {
+        await patchCtxClientEvent(ctx, (e) =>
+          appendClientEventActivity({ ...e, isActive: false }, {
             summary: EVENT_CLOSED_SUMMARY,
             actor,
-          });
-        });
-        await clientService.update(ctx.clientId, { events: next });
+          }),
+        );
         return { status: 'applied', action: 'close_event' };
       }
       if (ctx.kind === 'candidate' && ctx.jobCandidate) {
-        const wm = jobCandidateProcessJournalService.plainWorkflowMeta(ctx.jobCandidate.workflowMeta);
-        const journal = Array.isArray(wm.statusJournal) ? wm.statusJournal : [];
-        if (journal[0]) {
-          const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
-          journal[0] = jobCandidateProcessJournalService.appendJournalEntryActivity(journal[0], {
-            summary: EVENT_CLOSED_SUMMARY,
-            actor,
-            isActive: false,
-          });
-          wm.statusJournal = journal;
-          await JobCandidate.update({ workflowMeta: wm }, { where: { id: ctx.jobCandidate.id } });
-        }
+        const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+        const updated = await jobCandidateProcessJournalService.closeCurrentJournalEntry(
+          ctx.jobCandidate.id,
+          { summary: EVENT_CLOSED_SUMMARY, actor },
+        );
+        if (!updated) return { status: 'skipped', reason: 'journal_entry_missing' };
+        ctx.jobCandidate = updated;
         return { status: 'applied', action: 'close_event' };
       }
       return { status: 'skipped', reason: 'unsupported_context' };
@@ -1064,16 +1057,14 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
       const actorName = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser) || 'אוטומציה';
       let prevMeta = await jobCandidateProcessJournalService.materializeStatusJournalForPatch(jc);
       prevMeta.workflowUpdatedAt = new Date().toISOString();
-      const journalMeta = jobCandidateProcessJournalService.applyJournalOnStatusPatch({
+      const journalMeta = jobCandidateProcessJournalService.recordOutcomeOnCurrentJournal({
         workflowMeta: prevMeta,
         prevStatus: jc.status,
         newStatus: statusName,
         actor: actorName,
-        internalNoteChanged: false,
-        internalNote: prevMeta.internalNote != null ? String(prevMeta.internalNote).trim() : '',
+        summary: statusName,
         dueDate: prevMeta.dueDate || null,
         dueTime: prevMeta.dueTime || null,
-        forceAppendStatus: true,
       });
       await jobCandidateStatusService.applyJobCandidateStatusChange({
         jobCandidateId,
@@ -1167,22 +1158,16 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline, options 
     note = outcome.name;
   } else if (outcome.actionType === 'close') {
     if (ctx.jobCandidate) {
-      const wm = jobCandidateProcessJournalService.plainWorkflowMeta(ctx.jobCandidate.workflowMeta);
-      const journal = Array.isArray(wm.statusJournal) ? wm.statusJournal : [];
-      if (journal[0]) {
-        const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
-        const closeSummary =
-          outcome.name && String(outcome.name).trim() && outcome.name !== EVENT_CLOSED_SUMMARY
-            ? `${EVENT_CLOSED_SUMMARY} · ${String(outcome.name).trim()}`
-            : EVENT_CLOSED_SUMMARY;
-        journal[0] = jobCandidateProcessJournalService.appendJournalEntryActivity(journal[0], {
-          summary: closeSummary,
-          actor,
-          isActive: false,
-        });
-        wm.statusJournal = journal;
-        await JobCandidate.update({ workflowMeta: wm }, { where: { id: ctx.jobCandidate.id } });
-      }
+      const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+      const closeSummary =
+        outcome.name && String(outcome.name).trim() && outcome.name !== EVENT_CLOSED_SUMMARY
+          ? `${EVENT_CLOSED_SUMMARY} · ${String(outcome.name).trim()}`
+          : EVENT_CLOSED_SUMMARY;
+      const updated = await jobCandidateProcessJournalService.closeCurrentJournalEntry(
+        ctx.jobCandidate.id,
+        { summary: closeSummary, actor },
+      );
+      if (updated) ctx.jobCandidate = updated;
     }
     const manualJournal = resolveManualOutcomeJournal(options);
     return {
@@ -1209,6 +1194,7 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline, options 
   }
 
   const syncJobLinkFromOutcome = !isOnboardingCandidatePipeline(pipeline);
+  let journalEntry = null;
 
   if (ctx.jobCandidateId && syncJobLinkFromOutcome) {
     const jc = await JobCandidate.findByPk(ctx.jobCandidateId);
@@ -1233,6 +1219,7 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline, options 
       req,
       source: 'pipeline_outcome',
     });
+    journalEntry = journalMeta.statusJournal?.[0] || null;
   }
 
   return {
@@ -1243,6 +1230,7 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline, options 
     dueTime,
     closed: false,
     historyComment: manualJournal.historyComment || undefined,
+    journalEntry,
   };
 }
 
@@ -1287,24 +1275,47 @@ async function applyClientOutcomeAction(req, ctx, outcome, pipeline, options = {
 
   const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
   const { newUpdate, historyRow } = buildClientEventStatusUpdate(actor, outcome, options);
-  const events = Array.isArray(ctx.client.events) ? ctx.client.events : [];
-  const nextEvents = events.map((e) =>
-    String(e.id) === String(ctx.clientEventId)
-      ? {
-          ...e,
-          stage: nextStageName,
-          stageId: nextStageId,
-          status: nextStatus,
-          dueDate: nextDueDate,
-          dueTime: nextDueTime,
-          isActive: nextIsActive,
-          updates: [newUpdate, ...(Array.isArray(e.updates) ? e.updates : [])],
-          history: [historyRow, ...(Array.isArray(e.history) ? e.history : [])],
-        }
-      : e,
-  );
-  await clientService.update(ctx.clientId, { events: nextEvents });
-  const updatedEvent = nextEvents.find((e) => String(e.id) === String(ctx.clientEventId));
+  const updatedEvent = await patchCtxClientEvent(ctx, (e) => {
+    const previousTitle = trim(e.title);
+    const previousStage = trim(e.stage);
+    const titleTracksStage =
+      !previousTitle
+      || previousTitle === previousStage
+      || previousTitle === trim(e.status);
+    const nextTitle =
+      titleTracksStage && trim(nextStageName) && trim(nextStageName) !== previousTitle
+        ? trim(nextStageName)
+        : e.title;
+    const existingUpdates = Array.isArray(e.updates) ? e.updates : [];
+    const priorTitleUpdate =
+      nextTitle && previousTitle && nextTitle !== previousTitle
+        ? {
+            id: `prior-${e.id || Date.now()}`,
+            title: previousTitle,
+            date: e.date || new Date().toISOString(),
+            creator: e.creator || actor,
+          }
+        : null;
+    const alreadyHasPrior = priorTitleUpdate
+      ? existingUpdates.some((row) => trim(row?.title) === previousTitle)
+      : true;
+    return {
+      ...e,
+      title: nextTitle,
+      stage: nextStageName,
+      stageId: nextStageId,
+      status: nextStatus,
+      dueDate: nextDueDate,
+      dueTime: nextDueTime,
+      isActive: nextIsActive,
+      updates: [
+        newUpdate,
+        ...(!alreadyHasPrior && priorTitleUpdate ? [priorTitleUpdate] : []),
+        ...existingUpdates,
+      ],
+      history: [historyRow, ...(Array.isArray(e.history) ? e.history : [])],
+    };
+  });
 
   return {
     event: updatedEvent,
@@ -1330,9 +1341,7 @@ async function syncClientEventAfterCandidateOutcome(
   const eventId = String(clientEventId || '').trim();
   if (!cid || !eventId) return null;
 
-  const client = await clientService.getById(cid, { include: ['events'] });
-  const events = Array.isArray(client?.events) ? client.events : [];
-  const event = events.find((e) => String(e.id) === eventId);
+  const event = await clientService.getClientEventFromDb(cid, eventId);
   if (!event) return null;
 
   const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
@@ -1355,6 +1364,17 @@ async function syncClientEventAfterCandidateOutcome(
   if (outcome.actionType === 'freeze') nextStatus = 'הושלם';
   if (outcome.actionType === 'close') nextIsActive = false;
 
+  const previousTitle = trim(event.title);
+  const previousStage = trim(event.stage);
+  const titleTracksStage =
+    !previousTitle
+    || previousTitle === previousStage
+    || previousTitle === trim(event.status);
+  const nextTitle =
+    titleTracksStage && trim(nextStageName) && trim(nextStageName) !== previousTitle
+      ? trim(nextStageName)
+      : event.title;
+
   const newUpdate = {
     id: `u-${Date.now()}`,
     title: activitySummary,
@@ -1362,35 +1382,59 @@ async function syncClientEventAfterCandidateOutcome(
     creator: actor,
     ...(historyComment ? { comment: historyComment } : {}),
   };
+  const priorTitleUpdate =
+    nextTitle
+    && previousTitle
+    && nextTitle !== previousTitle
+      ? {
+          id: `prior-${event.id || Date.now()}`,
+          title: previousTitle,
+          date: event.date || now,
+          creator: event.creator || actor,
+        }
+      : null;
   const historyRow = {
     user: actor,
     timestamp: now,
     summary: activitySummary,
     ...(historyComment ? { comment: historyComment } : {}),
   };
-  const nextEvents = events.map((e) =>
-    String(e.id) === eventId
-      ? {
-          ...e,
-          stage: nextStageName,
-          stageId: nextStageId,
-          status: nextStatus,
-          dueDate: nextDueDate,
-          dueTime: nextDueTime,
-          isActive: nextIsActive,
-          updates: [newUpdate, ...(Array.isArray(e.updates) ? e.updates : [])],
-          history: [historyRow, ...(Array.isArray(e.history) ? e.history : [])],
-          metadata: {
-            ...(e.metadata && typeof e.metadata === 'object' ? e.metadata : {}),
-            ...(ctx ? jobMetaFromContext(ctx) : {}),
-            lastKanbanStageId: nextStageId,
-            lastKanbanStageName: nextStageName,
-          },
-        }
-      : e,
-  );
-  await clientService.update(cid, { events: nextEvents });
-  return nextEvents.find((e) => String(e.id) === eventId) || null;
+  const priorHistoryRow =
+    priorTitleUpdate
+      ? { user: priorTitleUpdate.creator, timestamp: priorTitleUpdate.date, summary: previousTitle }
+      : null;
+  return clientService.patchClientEventForApi(cid, eventId, (e) => {
+    const existingUpdates = Array.isArray(e.updates) ? e.updates : [];
+    const alreadyHasPrior = priorTitleUpdate
+      ? existingUpdates.some((row) => trim(row?.title) === previousTitle)
+      : true;
+    return {
+      ...e,
+      title: nextTitle,
+      stage: nextStageName,
+      stageId: nextStageId,
+      status: nextStatus,
+      dueDate: nextDueDate,
+      dueTime: nextDueTime,
+      isActive: nextIsActive,
+      updates: [
+        newUpdate,
+        ...(!alreadyHasPrior && priorTitleUpdate ? [priorTitleUpdate] : []),
+        ...existingUpdates,
+      ],
+      history: [
+        historyRow,
+        ...(priorHistoryRow ? [priorHistoryRow] : []),
+        ...(Array.isArray(e.history) ? e.history : []),
+      ],
+      metadata: {
+        ...(e.metadata && typeof e.metadata === 'object' ? e.metadata : {}),
+        ...(ctx ? jobMetaFromContext(ctx) : {}),
+        lastKanbanStageId: nextStageId,
+        lastKanbanStageName: nextStageName,
+      },
+    };
+  });
 }
 
 async function executeOutcome(req, params) {
@@ -1418,6 +1462,11 @@ async function executeOutcome(req, params) {
 
   const { stage, outcome } = findOutcomeInPipeline(pipeline, stageId, outcomeId);
   if (!stage || !outcome) throw Object.assign(new Error('Outcome not found'), { status: 404 });
+
+  if (source === 'manual' && context.clientEventId && !['close', 'freeze'].includes(outcome.actionType)) {
+    const targetEvent = await clientService.getClientEventFromDb(clientId, context.clientEventId);
+    if (isCompletedEvent(targetEvent)) throw completedEventLockedError();
+  }
 
   let ctx;
   if (pipelineKind === 'candidate') {
@@ -1913,11 +1962,18 @@ async function inferFirstPipelineStageId(clientId, pipelineId) {
 }
 
 /**
- * Kanban / manual stage drag: run the configured "move" outcome (and its automations)
- * when staff moves a candidate between pipeline stages.
+ * Kanban / manual stage drag: same path as פעולות אפשריות —
+ * update the existing process event + status history (do not create a new event).
  */
 async function executeCandidateKanbanStageMove(req, params) {
-  const { candidateId, clientId, pipelineId, fromStageId, toStageId } = params || {};
+  const {
+    candidateId,
+    clientId,
+    pipelineId,
+    fromStageId,
+    toStageId,
+    jobCandidateId: preferredJobCandidateId = null,
+  } = params || {};
   if (!candidateId || !clientId || !pipelineId || !fromStageId || !toStageId) {
     return { executed: false, reason: 'missing_params' };
   }
@@ -1930,41 +1986,85 @@ async function executeCandidateKanbanStageMove(req, params) {
 
   const outcome = findMoveOutcomeForTransition(pipeline.stages, fromStageId, toStageId);
 
-  const links = await JobCandidate.findAll({
-    where: { candidateId },
-    attributes: ['id'],
-    order: [['updatedAt', 'DESC']],
-    limit: 1,
-  });
-  const jobCandidateId = links[0]?.id || null;
+  let jobCandidateId = preferredJobCandidateId ? String(preferredJobCandidateId).trim() : null;
+  if (jobCandidateId) {
+    const preferred = await JobCandidate.findByPk(jobCandidateId, {
+      attributes: ['id', 'candidateId'],
+    });
+    if (!preferred || String(preferred.candidateId) !== String(candidateId)) {
+      jobCandidateId = null;
+    }
+  }
+  if (!jobCandidateId) {
+    const links = await JobCandidate.findAll({
+      where: { candidateId },
+      attributes: ['id'],
+      order: [['updatedAt', 'DESC']],
+      limit: 1,
+    });
+    jobCandidateId = links[0]?.id || null;
+  }
 
-  const { recordCandidateKanbanStageMove } = require('../utils/candidateKanbanStageMoveEvent');
+  const {
+    recordCandidateKanbanStageMove,
+    findLinkedClientEventId,
+  } = require('../utils/candidateKanbanStageMoveEvent');
+
+  const clientEventId = await findLinkedClientEventId(
+    clientId,
+    candidateId,
+    jobCandidateId,
+    pipeline,
+  );
+
+  if (outcome) {
+    // Full outcome path (like possible actions): move + journal + update existing event history.
+    const result = await executeOutcome(req, {
+      pipelineKind: 'candidate',
+      clientId,
+      pipelineId,
+      stageId: fromStageId,
+      outcomeId: outcome.id,
+      context: {
+        candidateId,
+        jobCandidateId,
+        ...(clientEventId ? { clientEventId } : {}),
+      },
+      source: 'manual',
+    });
+
+    // If no linked event was found for syncClientEventAfterCandidateOutcome, still try
+    // update-only journal (never create a new event on kanban drag).
+    if (!clientEventId || !result?.actionResult?.event) {
+      const journalResult = await recordCandidateKanbanStageMove(req, {
+        candidateId,
+        clientId,
+        pipelineId,
+        fromStageId,
+        toStageId,
+        outcome,
+        jobCandidateId,
+        createIfMissing: false,
+        skipJobLinks: true,
+      });
+      return { executed: true, outcome, result, journalResult, clientEventId };
+    }
+
+    return { executed: true, outcome, result, clientEventId };
+  }
+
+  // No configured move outcome — still update existing journals only.
   const journalResult = await recordCandidateKanbanStageMove(req, {
     candidateId,
     clientId,
     pipelineId,
     fromStageId,
     toStageId,
-    outcome,
+    outcome: null,
     jobCandidateId,
+    createIfMissing: false,
   });
-
-  if (!outcome) {
-    return { executed: false, reason: 'no_matching_outcome', journalResult };
-  }
-
-  const result = await executeOutcome(req, {
-    pipelineKind: 'candidate',
-    clientId,
-    pipelineId,
-    stageId: fromStageId,
-    outcomeId: outcome.id,
-    context: { candidateId, jobCandidateId },
-    source: 'manual',
-    skipCandidateAction: true,
-  });
-
-  return { executed: true, outcome, result, journalResult };
+  return { executed: false, reason: 'no_matching_outcome', journalResult, clientEventId };
 }
 
 module.exports = {

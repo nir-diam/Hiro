@@ -93,9 +93,11 @@ const resolveActorLabel = (req, candidate) => {
   );
 };
 
-const eventLinkedToCandidate = (event, candidateId, contactId, candidateName) => {
+const eventLinkedToCandidate = (event, candidateId, contactId, candidateName, jobCandidateId = null) => {
   const cid = String(candidateId || '').trim();
   if (!cid) return false;
+  const jcId = trim(jobCandidateId);
+  if (jcId && String(event?.metadata?.jobCandidateId || '') === jcId) return true;
   const name = trim(candidateName).toLowerCase();
   if (name && trim(event?.contactName).toLowerCase() === name) return true;
   if (String(event?.contactId || '') === cid) return true;
@@ -118,12 +120,66 @@ const eventLinkedToCandidate = (event, candidateId, contactId, candidateName) =>
   return false;
 };
 
-const findLinkedEventIndexes = (prevEvents, candidateId, contactId, candidateName, pipeline) => {
+/** Prefer the active client-journal event for this job process (same as פעולות אפשריות). */
+async function findLinkedClientEventId(clientId, candidateId, jobCandidateId = null, pipeline = null) {
+  const cid = trim(clientId);
+  const candidateKey = trim(candidateId);
+  if (!cid || !candidateKey) return null;
+  const client = await clientService.getById(cid, { include: ['events'] });
+  const events = Array.isArray(client?.events) ? client.events : [];
+  const jcId = trim(jobCandidateId);
+
+  if (jcId) {
+    const byJob = events.find(
+      (event) =>
+        event?.isActive !== false &&
+        String(event?.metadata?.jobCandidateId || '') === jcId,
+    );
+    if (byJob?.id) return String(byJob.id);
+  }
+
+  const candidate = await candidateService.getById(candidateKey);
+  const label = trim(candidate?.fullName) || '';
+  const contact = await resolveClientContactForCandidate(cid, candidate);
+  const indexes = findLinkedEventIndexes(
+    events,
+    candidateKey,
+    contact?.id || null,
+    label,
+    pipeline,
+    jcId,
+  );
+  if (!indexes.length) return null;
+  const event = events[indexes[0]];
+  return event?.id ? String(event.id) : null;
+}
+
+const findLinkedEventIndexes = (
+  prevEvents,
+  candidateId,
+  contactId,
+  candidateName,
+  pipeline,
+  jobCandidateId = null,
+) => {
+  const jcId = trim(jobCandidateId);
+  if (jcId) {
+    const byJob = [];
+    for (let i = 0; i < prevEvents.length; i += 1) {
+      const event = prevEvents[i];
+      if (event?.isActive === false) continue;
+      if (String(event?.metadata?.jobCandidateId || '') === jcId) byJob.push(i);
+    }
+    if (byJob.length) return byJob;
+  }
+
   const linked = [];
   for (let i = 0; i < prevEvents.length; i += 1) {
     const event = prevEvents[i];
     if (event?.isActive === false) continue;
-    if (!eventLinkedToCandidate(event, candidateId, contactId, candidateName)) continue;
+    if (!eventLinkedToCandidate(event, candidateId, contactId, candidateName, jobCandidateId)) {
+      continue;
+    }
     linked.push({
       index: i,
       pipelineMatch: eventMatchesPipeline(event, pipeline),
@@ -146,15 +202,33 @@ const eventMatchesPipeline = (event, pipeline) => {
   return false;
 };
 
-async function recordJobLinkJournals(req, candidateId, toStageName, note, dueDate, dueTime = null) {
+async function recordJobLinkJournals(
+  req,
+  candidateId,
+  toStageName,
+  note,
+  dueDate,
+  dueTime = null,
+  preferredJobCandidateId = null,
+) {
   const cid = String(candidateId || '').trim();
   if (!cid || !toStageName) return { recorded: 0 };
 
-  const links = await JobCandidate.findAll({
-    where: { candidateId: cid },
-    order: [['updatedAt', 'DESC']],
-    limit: 24,
-  });
+  const preferredId = trim(preferredJobCandidateId);
+  let links;
+  if (preferredId) {
+    const preferred = await JobCandidate.findByPk(preferredId, {
+      attributes: ['id', 'candidateId'],
+    });
+    links =
+      preferred && String(preferred.candidateId) === cid ? [{ id: preferred.id }] : [];
+  } else {
+    links = await JobCandidate.findAll({
+      where: { candidateId: cid },
+      order: [['updatedAt', 'DESC']],
+      limit: 24,
+    });
+  }
 
   const actor = resolveActorLabel(req, null);
   let recorded = 0;
@@ -171,16 +245,14 @@ async function recordJobLinkJournals(req, candidateId, toStageName, note, dueDat
     if (note) prevMeta.internalNote = note;
     prevMeta.workflowUpdatedAt = new Date().toISOString();
 
-    const journalMeta = jobCandidateProcessJournalService.applyJournalOnStatusPatch({
+    const journalMeta = jobCandidateProcessJournalService.recordOutcomeOnCurrentJournal({
       workflowMeta: prevMeta,
       prevStatus,
       newStatus: toStageName,
       actor,
-      internalNoteChanged: Boolean(note),
-      internalNote: note || prevMeta.internalNote || '',
+      summary: note || toStageName,
       dueDate: prevMeta.dueDate || null,
       dueTime: prevMeta.dueTime || null,
-      forceAppendStatus: true,
     });
 
     await jobCandidateStatusService.applyJobCandidateStatusChange({
@@ -196,7 +268,18 @@ async function recordJobLinkJournals(req, candidateId, toStageName, note, dueDat
   return { recorded };
 }
 
-async function recordClientJournal(req, candidateId, pipeline, fromStage, toStage, outcome, dueDate, dueTime = null, jobCandidateId = null) {
+async function recordClientJournal(
+  req,
+  candidateId,
+  pipeline,
+  fromStage,
+  toStage,
+  outcome,
+  dueDate,
+  dueTime = null,
+  jobCandidateId = null,
+  { createIfMissing = false } = {},
+) {
   const cid = String(candidateId || '').trim();
   if (!cid || !pipeline || !toStage) return { recorded: 0 };
 
@@ -212,12 +295,9 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
   const now = new Date().toISOString();
   const toStageName = trim(toStage.name || toStage.id);
   const summary = toStageName || outcome?.name || trim(toStage.id);
-  const note =
-    fromStage && toStage && fromStage.id !== toStage.id
-      ? `${fromStage.name || fromStage.id} → ${toStageName}`
-      : summary;
 
   let recorded = 0;
+  let skippedCreate = 0;
   for (const clientId of clientIds) {
     const client = await clientService.getById(clientId, { include: ['events'] });
     const prevEvents = Array.isArray(client?.events) ? client.events : [];
@@ -230,6 +310,7 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
       contactId,
       label,
       pipeline,
+      jobCandidateId,
     );
 
     const newUpdate = {
@@ -280,9 +361,20 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
       continue;
     }
 
+    // Kanban drag must not spawn a new journal event — only update an existing one
+    // (same as פעולות אפשריות).
+    if (!createIfMissing) {
+      skippedCreate += 1;
+      continue;
+    }
+
     const linkedTo = contact
       ? { type: 'איש קשר', id: contact.id, name: contact.name }
       : { type: 'מועמד', id: cid, name: label };
+    const note =
+      fromStage && toStage && fromStage.id !== toStage.id
+        ? `${fromStage.name || fromStage.id} → ${toStageName}`
+        : summary;
     const event = {
       id: uuidv4(),
       title: `${summary}: ${label}`.slice(0, 240),
@@ -311,7 +403,7 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
     recorded += 1;
   }
 
-  return { recorded };
+  return { recorded, skippedCreate };
 }
 
 /**
@@ -327,6 +419,8 @@ async function recordCandidateKanbanStageMove(
     toStageId,
     outcome = null,
     jobCandidateId = null,
+    createIfMissing = false,
+    skipJobLinks = false,
   } = {},
 ) {
   const cid = String(candidateId || '').trim();
@@ -361,7 +455,9 @@ async function recordCandidateKanbanStageMove(
         : toStage.name || '';
 
   const toStageName = String(toStage.name || toStage.id).trim();
-  const jobLinks = await recordJobLinkJournals(req, cid, toStageName, note, dueDate, dueTime);
+  const jobLinks = skipJobLinks
+    ? { recorded: 0, skipped: true }
+    : await recordJobLinkJournals(req, cid, toStageName, note, dueDate, dueTime, jobCandidateId);
   const clientJournal = await recordClientJournal(
     req,
     cid,
@@ -372,6 +468,7 @@ async function recordCandidateKanbanStageMove(
     dueDate,
     dueTime,
     jobCandidateId,
+    { createIfMissing },
   );
 
   return {
@@ -384,4 +481,5 @@ async function recordCandidateKanbanStageMove(
 module.exports = {
   recordCandidateKanbanStageMove,
   resolveCandidateJobEventMeta,
+  findLinkedClientEventId,
 };

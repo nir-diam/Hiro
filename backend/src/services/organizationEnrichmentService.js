@@ -15,49 +15,41 @@ const { sendChat, resolveGeminiApiKey } = require('./geminiService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { filterSerpOrganicResults } = require('../utils/filterSerpOrganicResults');
 const { scheduleOrganizationEmbedding } = require('./organizationEmbeddingService');
-const { buildCompanyEnrichmentPrompt } = require('../prompts/companyEnrichmentPrompt');
+const { buildCompanyEnrichmentPrompt, fillCompanyEnrichmentTemplate } = require('../prompts/companyEnrichmentPrompt');
 const { isGenericBucketName } = require('../constants/genericOrganizationBuckets');
 
 const ACTIVITY_STATUSES = new Set(['פעילה', 'לא פעילה', 'בפירוק', 'לא ידוע']);
 
 // ── prompt (aligned with organizationController.enrich) ─────────────────────
 
-const fallbackCompanyPrompt = (companyNames, mainFieldOptions = [], website = '', snippet = '') =>
-  buildCompanyEnrichmentPrompt({ companyNames, mainFieldOptions, website, snippet });
-
-const buildCompanyPrompt = async (companyData) => {
-  const mainFieldOptions = await picklistService.getMainFieldOptionNames();
-  const companyNames = [companyData.name];
-  const website = companyData.website || '';
-  const snippet = companyData.snippet || '';
-
+/**
+ * company_enrichment prompt with the mainField / subField taxonomy taken from the picklist.
+ * @param {{ companyNames: string[], website?: string, snippet?: string }} input
+ */
+const buildCompanyEnrichmentPromptFromDb = async ({ companyNames, website = '', snippet = '' }) => {
+  const industryTaxonomy = await picklistService.getIndustryTaxonomy();
+  const params = {
+    companyNames,
+    mainFieldOptions: industryTaxonomy.map((t) => t.mainField),
+    industryTaxonomy,
+    website,
+    snippet,
+  };
   try {
     const record = await promptService.ensureById('company_enrichment');
-    const template = record?.template || '';
-    if (template) {
-      let out = template;
-      if (out.includes('{{company_names_json}}')) {
-        out = out.replace('{{company_names_json}}', JSON.stringify(companyNames));
-      }
-      if (out.includes('${companyNamesJson}')) {
-        out = out.replace('${companyNamesJson}', JSON.stringify(companyNames));
-      }
-      if (out.includes('${mainFieldJson}')) {
-        out = out.replace('${mainFieldJson}', JSON.stringify(mainFieldOptions));
-      }
-      if (out.includes('${website}')) {
-        out = out.replace('${website}', website);
-      }
-      if (out.includes('${snippet}')) {
-        out = out.replace('${snippet}', snippet);
-      }
-      return out;
-    }
-  } catch {
-    // fall through
+    if (record?.template) return fillCompanyEnrichmentTemplate(record.template, params);
+  } catch (err) {
+    console.warn('[orgEnrich] missing company_enrichment prompt', err?.message || err);
   }
-  return fallbackCompanyPrompt(companyNames, mainFieldOptions, website, snippet);
+  return buildCompanyEnrichmentPrompt(params);
 };
+
+const buildCompanyPrompt = async (companyData) =>
+  buildCompanyEnrichmentPromptFromDb({
+    companyNames: [companyData.name],
+    website: companyData.website || '',
+    snippet: companyData.snippet || '',
+  });
 
 // ── JSON helpers ──────────────────────────────────────────────────────────────
 
@@ -525,43 +517,24 @@ const setStrArray = (updates, key, val) => {
 
 // ── item post-processing (aligned with organizationController.enrich) ─────────
 
+/** Comparison key that ignores case, spacing and Hebrew/typographic quote variants. */
+const labelKey = (s) =>
+  String(s || '')
+    .replace(/[״“”]/g, '"')
+    .replace(/[׳‘’`]/g, "'")
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+/** Keeps only values that exist in `options`, returned in their picklist spelling. */
 const filterSubFieldsToOptions = (raw, options) => {
-  const allowed = new Set(options);
-  const seen = new Set();
+  const canonical = new Map(options.map((o) => [labelKey(o), o]));
   const out = [];
   for (const s of toStrArray(raw)) {
-    if (allowed.has(s) && !seen.has(s)) {
-      seen.add(s);
-      out.push(s);
-    }
+    const hit = canonical.get(labelKey(s));
+    if (hit && !out.includes(hit)) out.push(hit);
   }
   return out;
-};
-
-const buildSubFieldPicklistOptions = async (mainField, mainField2) => {
-  const subcats = await picklistService.listSubcategories(picklistService.BUSINESS_FIELD_CATEGORY_ID);
-  const mainFields = [];
-  const primary = String(mainField || '').trim();
-  if (primary) mainFields.push(primary);
-  for (const mf of mainField2) {
-    const t = String(mf || '').trim();
-    if (t && !mainFields.includes(t)) mainFields.push(t);
-  }
-
-  const options = [];
-  const subFieldToMainField = {};
-  for (const mf of mainFields) {
-    const mainCat = (subcats || []).find((c) => (c.name || '').trim() === mf);
-    if (!mainCat) continue;
-    const vals = await picklistService.listCategoryValues(mainCat.id);
-    for (const v of vals || []) {
-      const label = (v.label || v.value || '').trim();
-      if (!label || options.includes(label)) continue;
-      options.push(label);
-      subFieldToMainField[label] = mf;
-    }
-  }
-  return { options, subFieldToMainField };
 };
 
 const pickSubFieldsFromLlm = async (companyName, description, options, max = 3) => {
@@ -581,40 +554,57 @@ Example: {"subField":["תת-תחום א","תת-תחום ב"]}`,
   return filterSubFieldsToOptions(obj.subField, options).slice(0, max);
 };
 
+/**
+ * Restricts mainField / mainField2 / subField to the picklist taxonomy.
+ * Values the LLM invented are dropped; nothing is written to the picklist.
+ */
 const resolveSubFieldFromPicklist = async (item, companyName) => {
-  let mainField = item.mainField || '';
-  const mainField2 = Array.isArray(item.mainField2) ? item.mainField2 : [];
-
+  let taxonomy;
   try {
-    const { options, subFieldToMainField } = await buildSubFieldPicklistOptions(mainField, mainField2);
-    if (!options.length) {
-      item.subField = toStrArray(item.subField);
-      item.mainField = mainField;
-      return item;
-    }
-
-    let subFields = filterSubFieldsToOptions(item.subField, options);
-    if (!subFields.length) {
-      subFields = await pickSubFieldsFromLlm(companyName, item.description, options);
-    }
-
-    if (!mainField && subFields.length && subFieldToMainField[subFields[0]]) {
-      mainField = subFieldToMainField[subFields[0]];
-    }
-
-    item.mainField = mainField;
-    item.subField = subFields;
-
-    // Normalize mainField2: additional industries only (never duplicate primary).
-    const rawMf2 = Array.isArray(item.mainField2) ? item.mainField2 : [];
-    item.mainField2 = rawMf2
-      .map((f) => String(f || '').trim())
-      .filter((f) => f && f !== (mainField || '').trim());
+    taxonomy = await picklistService.getIndustryTaxonomy();
   } catch (e) {
-    console.warn(`[orgEnrich] subField LLM failed for "${companyName}"`, e?.message);
-    item.subField = toStrArray(item.subField);
+    console.warn(`[orgEnrich] industry picklist load failed for "${companyName}"`, e?.message);
+    taxonomy = [];
   }
 
+  const mainByKey = new Map(taxonomy.map((t) => [labelKey(t.mainField), t]));
+  const toMain = (v) => mainByKey.get(labelKey(v)) || null;
+
+  let primary = toMain(item.mainField);
+  const secondary = [];
+  for (const v of toStrArray(item.mainField2)) {
+    const entry = toMain(v);
+    if (entry && entry !== primary && !secondary.includes(entry)) secondary.push(entry);
+  }
+
+  // Invalid mainField: fall back to the first picklist mainField owning one of the returned subFields.
+  if (!primary) {
+    const rawSubKeys = new Set(toStrArray(item.subField).map(labelKey));
+    primary = taxonomy.find((t) => t.subFields.some((sf) => rawSubKeys.has(labelKey(sf))))
+      || secondary.shift()
+      || null;
+    const dup = secondary.indexOf(primary);
+    if (dup >= 0) secondary.splice(dup, 1);
+  }
+
+  const options = [];
+  for (const entry of [primary, ...secondary].filter(Boolean)) {
+    for (const sf of entry.subFields) if (!options.includes(sf)) options.push(sf);
+  }
+
+  let subFields = filterSubFieldsToOptions(item.subField, options);
+  if (!subFields.length && options.length) {
+    try {
+      subFields = await pickSubFieldsFromLlm(companyName, item.description, options);
+    } catch (e) {
+      console.warn(`[orgEnrich] subField LLM failed for "${companyName}"`, e?.message);
+      subFields = [];
+    }
+  }
+
+  item.mainField = primary ? primary.mainField : null;
+  item.mainField2 = secondary.map((t) => t.mainField);
+  item.subField = subFields;
   return item;
 };
 
@@ -1178,6 +1168,7 @@ module.exports = {
   scheduleOrganizationEnrichmentIfNeeded,
   buildOrganizationUpdates,
   finalizeEnrichmentItem,
+  buildCompanyEnrichmentPromptFromDb,
   resolveSubFieldFromPicklist,
   persistEnrichmentResults,
   hasStoredContact,

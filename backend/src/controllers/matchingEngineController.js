@@ -183,21 +183,6 @@ async function simulate(req, res) {
       return res.status(400).json({ message: 'candidateId and jobId are required' });
     }
 
-    // Config for simulation:
-    // - When the panel sends `config`, it is the full live form (sliders) — merge onto global defaults.
-    //   Do not also merge `presetId` (preset is already reflected in the panel when selected).
-    // - Otherwise: global + optional preset.
-    let config;
-    if (configOverride && typeof configOverride === 'object') {
-      config = svc.mergeEngineConfig(await svc.getConfig(), configOverride);
-    } else {
-      config = await svc.getConfig();
-      if (presetId) {
-        const preset = await svc.getPreset(presetId);
-        if (preset?.config) config = svc.mergeEngineConfig(config, preset.config);
-      }
-    }
-
     const candidateService = require('../services/candidateService');
     const candidateRow = await candidateService.findByPkWithTagsForMatchScore(candidateId);
     if (!candidateRow) return res.status(404).json({ message: 'Candidate not found' });
@@ -232,6 +217,38 @@ async function simulate(req, res) {
     }
     if (jobOverrides && typeof jobOverrides === 'object') {
       job = { ...job, ...jobOverrides };
+    }
+
+    // Config for simulation:
+    // - `config` from the panel is the full live form (sliders) — merge onto global defaults.
+    // - `presetId` — global + that preset.
+    // - Neither — same resolution as live scoring. `mode: 'candidate'` = candidate→jobs
+    //   (company preset only); default = Sonar (job preset, then company).
+    let config;
+    if (configOverride && typeof configOverride === 'object') {
+      config = {
+        ...svc.mergeEngineConfig(await svc.getConfig(), configOverride),
+        preset: { id: null, label: null, source: 'override' },
+      };
+    } else if (presetId) {
+      const preset = await svc.getPreset(presetId);
+      config = await svc.getConfig();
+      if (preset?.config) config = svc.mergeEngineConfig(config, preset.config);
+      config = {
+        ...config,
+        preset: preset
+          ? { id: Number(preset.id), label: preset.label || null, source: 'request' }
+          : { id: null, label: null, source: 'global' },
+      };
+    } else {
+      const authService = require('../services/authService');
+      const tenantClientId = req.dbUser
+        ? await authService.resolveEffectiveClientIdForUser(req.dbUser)
+        : null;
+      config = await svc.resolveEngineConfigForJob(job, {
+        tenantClientId,
+        ignoreJobPreset: req.body?.mode === 'candidate',
+      });
     }
 
     // Job embedding (attempt)
@@ -278,6 +295,7 @@ async function simulate(req, res) {
       parameterMatches: result.parameterMatches,
       candidateName: candidate.fullName || candidate.firstName || candidateId,
       jobTitle: job.title || jobId,
+      preset: config.preset || null,
       config,
       penaltyPoliciesUsed,
     });

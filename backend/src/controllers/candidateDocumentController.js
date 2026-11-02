@@ -3,8 +3,16 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 } = require('uuid');
 const candidateService = require('../services/candidateService');
 const { createS3Client, buildPublicUrl, buildCandidateDocumentKey } = require('../services/s3Service');
+const { presignIfOurS3 } = require('../services/candidateMediaUrlService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+
+async function presentDocument(doc) {
+  if (!doc || typeof doc !== 'object') return doc;
+  const out = { ...doc };
+  if (out.url) out.url = await presignIfOurS3(out.url);
+  return out;
+}
 
 function resolveUploaderDisplayName(req) {
   const u = req.user;
@@ -71,7 +79,7 @@ const attach = async (req, res) => {
       },
     });
 
-    res.status(201).json(doc);
+    res.status(201).json(await presentDocument(doc));
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Attach failed' });
   }
@@ -88,7 +96,7 @@ const update = async (req, res) => {
     await candidateService.update(req.params.id, { documents: next });
     const updatedDoc = next.find((d) => String(d.id) === docId);
     if (!updatedDoc) return res.status(404).json({ message: 'Document not found' });
-    res.json(updatedDoc);
+    res.json(await presentDocument(updatedDoc));
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
   }

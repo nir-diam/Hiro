@@ -3,12 +3,14 @@ const agentController = require('../controllers/agentController');
 const agentAuthMiddleware = require('../middleware/agentAuthMiddleware');
 const requireAgentScope = require('../middleware/requireAgentScope');
 const agentRequestLogger = require('../middleware/agentRequestLogger');
+const { invalidateAgentHttpGetCacheOnSuccess } = require('../middleware/httpGetResponseCacheMiddleware');
 const { AGENT_SCOPES } = require('../constants/agentScopes');
 
 const router = express.Router();
 
 router.use(agentAuthMiddleware);
 router.use(agentRequestLogger);
+router.use(invalidateAgentHttpGetCacheOnSuccess);
 
 router.get('/health', requireAgentScope(AGENT_SCOPES.PING), agentController.health);
 router.get('/me', requireAgentScope(AGENT_SCOPES.PING), agentController.me);

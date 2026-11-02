@@ -39,13 +39,13 @@ const listForCompose = async (req, res) => {
         await messageTemplateService.listByClient(user.clientId),
         recipientType,
       );
-      return res.json({ scope: 'client', templates: rows });
+      return res.json(await messageTemplateService.signAttachmentUrls({ scope: 'client', templates: rows }));
     }
     const rows = messageTemplateService.filterTemplatesForRecipient(
       await messageTemplateService.listAdmin(),
       recipientType,
     );
-    return res.json({ scope: 'admin', templates: rows });
+    return res.json(await messageTemplateService.signAttachmentUrls({ scope: 'admin', templates: rows }));
   } catch (err) {
     return res.status(err.status || 500).json({ message: err.message || 'Failed to list templates' });
   }
@@ -58,7 +58,7 @@ const listClient = async (req, res) => {
       return res.status(403).json({ message: 'Company context required for client templates' });
     }
     const rows = await messageTemplateService.listByClient(clientId);
-    return res.json(rows);
+    return res.json(await messageTemplateService.signAttachmentUrls(rows));
   } catch (err) {
     return res.status(err.status || 500).json({ message: err.message || 'Failed to list templates' });
   }
@@ -67,7 +67,7 @@ const listClient = async (req, res) => {
 const listAdmin = async (req, res) => {
   try {
     const rows = await messageTemplateService.listAdmin();
-    return res.json(rows);
+    return res.json(await messageTemplateService.signAttachmentUrls(rows));
   } catch (err) {
     return res.status(err.status || 500).json({ message: err.message || 'Failed to list templates' });
   }
@@ -81,7 +81,7 @@ const createClient = async (req, res) => {
       return res.status(403).json({ message: 'Company context required' });
     }
     const row = await messageTemplateService.createClient(clientId, req.body, user);
-    return res.status(201).json(row);
+    return res.status(201).json(await messageTemplateService.signAttachmentUrls(row));
   } catch (err) {
     return res.status(err.status || 400).json({ message: err.message || 'Create failed' });
   }
@@ -91,7 +91,7 @@ const createAdmin = async (req, res) => {
   try {
     const user = req.dbUser;
     const row = await messageTemplateService.createAdmin(req.body, user);
-    return res.status(201).json(row);
+    return res.status(201).json(await messageTemplateService.signAttachmentUrls(row));
   } catch (err) {
     return res.status(err.status || 400).json({ message: err.message || 'Create failed' });
   }
@@ -105,7 +105,7 @@ const updateClient = async (req, res) => {
       return res.status(403).json({ message: 'Company context required' });
     }
     const row = await messageTemplateService.update(req.params.id, 'client', clientId, req.body, user);
-    return res.json(row);
+    return res.json(await messageTemplateService.signAttachmentUrls(row));
   } catch (err) {
     return res.status(err.status || 400).json({ message: err.message || 'Update failed' });
   }
@@ -115,7 +115,7 @@ const updateAdmin = async (req, res) => {
   try {
     const user = req.dbUser;
     const row = await messageTemplateService.update(req.params.id, 'admin', null, req.body, user);
-    return res.json(row);
+    return res.json(await messageTemplateService.signAttachmentUrls(row));
   } catch (err) {
     return res.status(err.status || 400).json({ message: err.message || 'Update failed' });
   }
@@ -146,7 +146,7 @@ const removeAdmin = async (req, res) => {
 const listCatalog = async (req, res) => {
   try {
     const rows = await messageTemplateService.listAllCatalog();
-    return res.json(rows);
+    return res.json(await messageTemplateService.signAttachmentUrls(rows));
   } catch (err) {
     return res.status(err.status || 500).json({ message: err.message || 'Failed to list templates' });
   }
@@ -156,7 +156,7 @@ const createCatalog = async (req, res) => {
   try {
     const row = await messageTemplateService.createCatalog(req.body, req.dbUser);
     const full = await messageTemplateService.findByPkWithClient(row.id);
-    return res.status(201).json(messageTemplateService.toCatalogRow(full));
+    return res.status(201).json(await messageTemplateService.signAttachmentUrls(messageTemplateService.toCatalogRow(full)));
   } catch (err) {
     return res.status(err.status || 400).json({ message: err.message || 'Create failed' });
   }
@@ -166,7 +166,7 @@ const updateCatalog = async (req, res) => {
   try {
     await messageTemplateService.updateByIdAny(req.params.id, req.body, req.dbUser);
     const full = await messageTemplateService.findByPkWithClient(req.params.id);
-    return res.json(messageTemplateService.toCatalogRow(full));
+    return res.json(await messageTemplateService.signAttachmentUrls(messageTemplateService.toCatalogRow(full)));
   } catch (err) {
     return res.status(err.status || 400).json({ message: err.message || 'Update failed' });
   }

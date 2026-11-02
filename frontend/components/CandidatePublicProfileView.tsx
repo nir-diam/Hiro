@@ -23,11 +23,13 @@ import CandidateApplicationsView, { type PendingDigitalScreeningTask } from './C
 import JobSearchFilters, { EMPTY_JOB_SEARCH_FILTERS, type JobSearchFilterState } from './JobSearchFilters';
 import { filterAndSortPortalJobs, resolvePortalJobUpdatedAtMs } from '../utils/portalJobFilters';
 import { generateExperienceSummaryForCandidate } from '../services/experienceSummaryService';
+import { fetchCandidateFileUrl, filePathFromUrl } from '../services/candidateFileUrl';
 import { useLanguage } from '../context/LanguageContext';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { SmartTagType, SmartTagData } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import { buildCandidateGroupedSmartTags } from '../utils/candidateGroupedSmartTags';
+import { PrintableResume } from './PrintableResume';
 import {
     ApprovedTagRecord,
     fetchApprovedTagsCatalog,
@@ -1086,310 +1088,38 @@ const EditableField: React.FC<{
     );
 };
 
-export const PrintableResume: React.FC<{
-    data: any;
-    className?: string;
-    hideCompanyLogo?: boolean;
-    /** Tighter typography for PDF capture (off-screen clone). On-screen ResumeViewer uses default + hidden compact for export. */
-    density?: 'default' | 'compact';
-}> = ({ data, className = '', hideCompanyLogo = false, density = 'default' }) => {
-    const displayName = buildCandidateFullName(data.firstName, data.lastName) || data.fullName || '';
-    const printLanguages = normalizeLanguagesForPrintRows(data.languages);
-    const printDrivingLicenses = normalizeDrivingLicensesForPrint(data);
-    const explicitMilitary = Array.isArray(data.militaryExperience) ? data.militaryExperience : [];
-    const { civilianWorkExperience, militaryExperience } = splitWorkExperienceForPrint(
-        Array.isArray(data.workExperience) ? data.workExperience : [],
-        explicitMilitary,
-    );
-    const compact = density === 'compact';
-    const keyFacts = (Array.isArray(data.keyFacts) ? data.keyFacts : [])
-        .map((f: unknown) => String(f ?? '').trim())
-        .filter(Boolean)
-        .slice(0, 3);
-
-    const rootPad = compact ? 'p-3' : 'p-10';
-    const headerBar = compact ? 'pb-1.5 mb-3' : 'pb-4 mb-6';
-    const h1Cls = compact ? 'text-xl font-extrabold text-gray-900 mb-0.5 break-words leading-tight' : 'text-4xl font-extrabold text-gray-900 mb-1 break-words';
-    const titleCls = compact ? 'text-sm text-primary-600 font-semibold leading-tight' : 'text-xl text-primary-600 font-semibold';
-    const brandCls = compact ? 'text-sm font-bold tracking-tight text-gray-800 mb-0.5 flex items-center gap-1' : 'text-xl font-bold tracking-tight text-gray-800 mb-1 flex items-center gap-2';
-    const brandMark = compact ? 'w-5 h-5 text-xs' : 'w-8 h-8';
-    const hiroCls = compact ? 'text-[8px] text-gray-400 font-medium tracking-wide' : 'text-[10px] text-gray-400 font-medium tracking-wide';
-    const contactBar = compact
-        ? 'flex flex-wrap gap-1.5 text-[11px] leading-tight text-gray-600 mb-3 items-center bg-gray-50 px-2 py-1.5 rounded [&_svg]:w-3 [&_svg]:h-3'
-        : 'flex flex-wrap gap-4 text-sm text-gray-600 mb-8 items-center bg-gray-50 p-3 rounded';
-    const secTitle = compact
-        ? 'text-xs font-bold text-gray-800 uppercase border-b border-gray-200 mb-1.5 pb-0.5 leading-tight'
-        : 'text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-3 pb-1';
-    /** תמצית מנהלים stays default-sized even in compact (PDF) so it stays readable. */
-    const executiveSummaryHeadingCls =
-        'text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-3 pb-1 flex items-center justify-between';
-    const executiveSummaryBodyCls =
-        'text-sm leading-relaxed text-gray-700 whitespace-pre-line text-justify';
-    const expSectionMb = compact ? 'mb-4' : 'mb-8';
-    const expStack = compact ? 'space-y-3' : 'space-y-6';
-    const expH4 = compact ? 'text-xs font-bold text-gray-900 leading-tight' : 'text-base font-bold text-gray-900';
-    const expDate = compact ? 'text-[9px] font-medium text-gray-500 bg-gray-100 px-1 py-0.5 rounded shrink-0' : 'text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded shrink-0';
-    const expCompany = compact ? 'text-[11px] font-semibold text-primary-700 mb-0.5 leading-tight' : 'text-sm font-semibold text-primary-700 mb-2';
-    const expDesc = compact ? 'text-[11px] text-gray-700 leading-tight whitespace-pre-line' : 'text-sm text-gray-700 leading-relaxed whitespace-pre-line';
-    const eduSec = compact ? 'mb-4 break-inside-avoid' : 'mb-8 break-inside-avoid';
-    const eduUl = compact ? 'space-y-1.5' : 'space-y-3';
-    const eduLi = compact ? 'text-[11px] leading-tight' : 'text-sm';
-    const grid2 = compact ? 'grid grid-cols-2 gap-4 break-inside-avoid' : 'grid grid-cols-2 gap-8 break-inside-avoid';
-    const skillTag = compact
-        ? 'bg-gray-100 text-gray-800 text-[9px] font-medium px-1 py-0.5 rounded border border-gray-200 leading-tight'
-        : 'bg-gray-100 text-gray-800 text-xs font-medium px-2.5 py-1 rounded border border-gray-200';
-    const langUl = compact ? 'space-y-0.5 text-[11px] leading-tight' : 'space-y-2 text-sm';
-
-    const renderExperienceSection = (
-        items: any[],
-        heading: string,
-        headingMb: string,
-    ) => (
-        <section className={`printable-resume-section ${expSectionMb}`}>
-            <h3 className={`printable-resume-section-title ${secTitle} ${headingMb}`}>{heading}</h3>
-            <div className={expStack}>
-                {items.map((exp: any, index: number) => {
-                    const start = formatCvPrintDate(exp.startDate);
-                    const end = formatCvPrintDate(exp.endDate);
-                    const dateLabel =
-                        (typeof exp.dateRangeLabel === 'string' && exp.dateRangeLabel.trim()) ||
-                        [start, end].filter(Boolean).join(' — ');
-                    return (
-                        <div key={`${heading}-${index}`} className="printable-resume-entry">
-                            <div className="printable-resume-entry-head break-inside-avoid">
-                                <div className="flex flex-wrap justify-between items-baseline gap-x-2 gap-y-0.5 mb-0.5">
-                                    <h4 className={`${expH4} min-w-0 flex-1`}>{exp.title}</h4>
-                                    {dateLabel ? (
-                                        <span dir="ltr" className={expDate}>
-                                            {dateLabel}
-                                        </span>
-                                    ) : null}
-                                </div>
-                                {exp.company ? <div className={expCompany}>{exp.company}</div> : null}
-                            </div>
-                            {exp.description ? (
-                                <p className={`printable-resume-entry-desc ${expDesc}`}>{exp.description}</p>
-                            ) : null}
-                        </div>
-                    );
-                })}
-            </div>
-        </section>
-    );
-
-    return (
-        <div
-            className={`printable-resume-root bg-white text-gray-900 font-sans ${rootPad} max-w-[210mm] mx-auto shadow-none print:shadow-none ${className}`}
-        >
-            <style>{`
-                @media print {
-                    @page { margin: 12mm; size: A4; }
-                    html, body {
-                        -webkit-print-color-adjust: exact;
-                        print-color-adjust: exact;
-                    }
-                    .printable-resume-root {
-                        width: 100% !important;
-                        max-width: none !important;
-                        margin: 0 !important;
-                        padding: 12mm !important;
-                        overflow: visible !important;
-                    }
-                    .printable-resume-root * {
-                        overflow: visible !important;
-                    }
-                    .printable-resume-section-title {
-                        break-after: avoid-page;
-                        page-break-after: avoid;
-                    }
-                    .printable-resume-entry-head {
-                        break-inside: avoid-page;
-                        page-break-inside: avoid;
-                    }
-                    .printable-resume-entry-desc {
-                        break-inside: auto;
-                        page-break-inside: auto;
-                    }
-                    .printable-resume-root p,
-                    .printable-resume-root li {
-                        orphans: 3;
-                        widows: 3;
-                    }
-                }
-            `}</style>
-
-            {/* Header */}
-            <div
-                className={`printable-resume-header border-b-2 border-gray-800 ${headerBar} flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 break-inside-avoid`}
-            >
-                <div className="min-w-0 flex-1 order-2 sm:order-1">
-                    <h1 className={h1Cls}>{displayName}</h1>
-                    {data.title ? <h2 className={titleCls}>{data.title}</h2> : null}
-                </div>
-                {!hideCompanyLogo ? (
-                    <div className="flex flex-col items-start text-right shrink-0 order-1 sm:order-2">
-                        <div className={brandCls}>
-                            <div
-                                className={`${brandMark} bg-primary-100 rounded flex items-center justify-center text-primary-700 font-serif`}
-                            >
-                                מ&quot;א
-                            </div>
-                            מימד אנושי
-                        </div>
-                        <div className={hiroCls}>
-                            נוצר באמצעות <span className="font-bold text-gray-500">HIRO</span>
-                        </div>
-                    </div>
-                ) : (
-                    <div className={`${hiroCls} shrink-0 order-1 sm:order-2`}>
-                        נוצר באמצעות <span className="font-bold text-gray-500">HIRO</span>
-                    </div>
-                )}
-            </div>
-
-            {/* Contact Info */}
-            <div className={contactBar}>
-                {data.phone && (
-                    <div className="flex items-center gap-1">
-                        <PhoneIcon className="w-4 h-4" />
-                        <span>{data.phone}</span>
-                    </div>
-                )}
-                {data.email && (
-                    <div className="flex items-center gap-1">
-                        <EnvelopeIcon className="w-4 h-4" />
-                        <span>{data.email}</span>
-                    </div>
-                )}
-                {data.location && (
-                    <div className="flex items-center gap-1">
-                        <MapPinIcon className="w-4 h-4" />
-                        <span>{data.location}</span>
-                    </div>
-                )}
-            </div>
-
-            {keyFacts.length > 0 ? (
-                <section className="printable-resume-section mb-6">
-                    <h3 className={`printable-resume-section-title ${executiveSummaryHeadingCls}`}>עובדות מרכזיות</h3>
-                    <ul className={`${executiveSummaryBodyCls} list-disc pr-5 space-y-1`}>
-                        {keyFacts.map((fact: string, i: number) => (
-                            <li key={`kf-${i}`}>{fact}</li>
-                        ))}
-                    </ul>
-                </section>
-            ) : data.professionalSummary ? (
-                <section className="printable-resume-section mb-6">
-                    <h3 className={`printable-resume-section-title ${executiveSummaryHeadingCls}`}>תמצית </h3>
-                    <p className={`printable-resume-entry-desc ${executiveSummaryBodyCls}`}>{data.professionalSummary}</p>
-                </section>
-            ) : null}
-
-            {/* Experience */}
-            {civilianWorkExperience.length > 0 &&
-                renderExperienceSection(
-                    civilianWorkExperience,
-                    'ניסיון תעסוקתי',
-                    compact ? 'mb-2' : 'mb-4',
-                )}
-
-            {/* Military service */}
-            {militaryExperience.length > 0 &&
-                renderExperienceSection(
-                    militaryExperience,
-                    'ניסיון צבאי',
-                    compact ? 'mb-2' : 'mb-4',
-                )}
-
-            {/* Education */}
-            {data.education && data.education.length > 0 && (
-                <section className={`printable-resume-section ${eduSec}`}>
-                    <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-4'}`}>השכלה</h3>
-                    <ul className={eduUl}>
-                        {data.education.map((edu: any, index: number) => {
-                            const line = educationEntryToDisplayLine(edu);
-                            if (!line) return null;
-                            return (
-                                <li key={index} className={eduLi}>
-                                    <span className="font-semibold block text-gray-900">{line}</span>
-                                </li>
-                            );
-                        })}
-                    </ul>
-                </section>
-            )}
-
-            {/* Driving licenses */}
-            {printDrivingLicenses.length > 0 && (
-                <section className={`printable-resume-section ${compact ? 'mb-4 break-inside-avoid' : 'mb-8 break-inside-avoid'}`}>
-                    <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>רישיונות נהיגה</h3>
-                    <div className={compact ? 'flex flex-wrap gap-1.5' : 'flex flex-wrap gap-2'}>
-                        {printDrivingLicenses.map((license) => (
-                            <span key={license} className={skillTag}>
-                                {license}
-                            </span>
-                        ))}
-                    </div>
-                </section>
-            )}
-
-            {/* Skills & Languages Grid */}
-            {(printLanguages.length > 0 || (data.tagDetails?.length ?? 0) > 0) && (
-                <div className={compact ? 'space-y-4' : 'space-y-6'}>
-                    {(data.tagDetails?.length ?? 0) > 0 && (
-                        <section className="printable-resume-section">
-                            <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>מיומנויות</h3>
-                            <div className={compact ? 'flex flex-wrap gap-1.5' : 'flex flex-wrap gap-2'}>
-                                {(Array.isArray(data.tagDetails) ? data.tagDetails : []).map((tag: any, index: number) => {
-                                    const label =
-                                        typeof tag === 'string'
-                                            ? tag
-                                            : tag?.displayNameHe ?? tag?.nameHe ?? tag?.value ?? tag?.name ?? tag?.label ?? tag?.tagKey ?? '';
-                                    if (!label) return null;
-                                    return (
-                                        <span key={index} className={skillTag}>
-                                            {label}
-                                        </span>
-                                    );
-                                })}
-                            </div>
-                        </section>
-                    )}
-
-                    {printLanguages.length > 0 && (
-                        <section className="printable-resume-section">
-                            <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>שפות</h3>
-                            <ul className={langUl}>
-                                {printLanguages.map((row, index: number) => (
-                                    <li
-                                        key={index}
-                                        className="flex justify-between border-b border-gray-100 pb-1 last:border-0 gap-2"
-                                    >
-                                        <span className="font-medium">{row.name}</span>
-                                        <span className="text-gray-500 shrink-0">{row.levelText}</span>
-                                    </li>
-                                ))}
-                            </ul>
-                        </section>
-                    )}
-                </div>
-            )}
-        </div>
-    );
-};
+export { PrintableResume };
 
 const CvFilesManagementModal: React.FC<{
     isOpen: boolean;
     onClose: () => void;
     resumeUrl?: string;
+    candidateId?: string;
     candidateName?: string;
-}> = ({ isOpen, onClose, resumeUrl, candidateName }) => {
+}> = ({ isOpen, onClose, resumeUrl, candidateId, candidateName }) => {
+    const passedUrl = String(resumeUrl ?? '').trim();
+    const [url, setUrl] = useState(passedUrl);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        setUrl(passedUrl);
+        const id = String(candidateId || '').trim();
+        if (!id || !passedUrl) return;
+        let cancelled = false;
+        void fetchCandidateFileUrl(id, { which: 'resume', storedUrl: passedUrl }).then((fresh) => {
+            if (!cancelled && fresh) setUrl(fresh);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, candidateId, passedUrl]);
+
     if (!isOpen) return null;
 
-    const url = String(resumeUrl ?? '').trim();
-    const isDocx = /\.(doc|docx)$/i.test(url);
+    const filePath = filePathFromUrl(url);
+    const isDocx = /\.(doc|docx)$/i.test(filePath);
     const docxViewerUrl = isDocx ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}` : '';
-    const isImage = /\.(png|jpe?g|gif|webp)$/i.test(url);
+    const isImage = /\.(png|jpe?g|gif|webp)$/i.test(filePath);
 
     return (
         <div
@@ -3375,6 +3105,55 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         scrollToProfileCompletenessTarget(fieldId);
     };
 
+    const pendingStaffProposal =
+        formData?.pendingStaffProfileProposal?.status === 'pending'
+            ? formData.pendingStaffProfileProposal
+            : null;
+
+    const staffProposalApproveHref = (() => {
+        if (!pendingStaffProposal) return null;
+        const cid = String(formData?.id || staffPreviewCandidateId || '').trim();
+        const token = String(pendingStaffProposal.accessToken || '').trim();
+        if (!cid || !token) return null;
+        return `/candidate-portal/approve-profile-edits?cid=${encodeURIComponent(cid)}&token=${encodeURIComponent(token)}`;
+    })();
+
+    const renderPendingStaffProposalBanner = () => {
+        if (!pendingStaffProposal || !staffProposalApproveHref) return null;
+        const fieldKeys = Object.keys(pendingStaffProposal.fields || {});
+        const fieldCount = fieldKeys.length;
+        return (
+            <div id="staff-profile-proposal-banner" className="animate-fade-in mb-6">
+                <div className="bg-gradient-to-r from-sky-50 to-indigo-50 border border-sky-200 rounded-2xl p-5 shadow-sm">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                        <div className="text-right min-w-0">
+                            <h3 className="text-sky-900 font-extrabold text-lg tracking-tight">
+                                יש שינויים ממתינים לאישור המועמד
+                            </h3>
+                            <p className="text-sm text-sky-800/80 mt-1">
+                                {fieldCount > 0
+                                    ? `${fieldCount} שדות ממתינים לאישור — לא מוצגים בפרופיל עצמו עד שהמועמד מאשר.`
+                                    : 'בקשת אישור ממתינה — פתחו את דף האישור לצפייה.'}
+                            </p>
+                            {fieldCount > 0 ? (
+                                <p className="text-xs text-sky-700/70 mt-1 truncate" title={fieldKeys.join(', ')}>
+                                    {fieldKeys.slice(0, 8).join(' · ')}
+                                    {fieldKeys.length > 8 ? '…' : ''}
+                                </p>
+                            ) : null}
+                        </div>
+                        <Link
+                            to={staffProposalApproveHref}
+                            className="shrink-0 px-5 py-2.5 rounded-xl text-sm font-bold shadow-sm bg-sky-600 text-white hover:bg-sky-700 transition-colors"
+                        >
+                            צפה בשינויים וסווג
+                        </Link>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
     const renderProfileCompletenessBanner = () => {
         if (!showProfileCompletenessBanner) return null;
 
@@ -3504,7 +3283,13 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         </button>
                         <button
                             className={`p-2 ${formData.resumeUrl ? 'text-text-muted hover:text-primary-600' : 'text-text-subtle cursor-not-allowed'}`}
-                            onClick={() => formData.resumeUrl && window.open(formData.resumeUrl, '_blank')}
+                            onClick={() => {
+                                if (!formData.resumeUrl) return;
+                                const id = String(formData.id || '').trim();
+                                void fetchCandidateFileUrl(id, { which: 'resume', storedUrl: formData.resumeUrl }).then((fresh) => {
+                                    if (fresh) window.open(fresh, '_blank');
+                                });
+                            }}
                             disabled={!formData.resumeUrl}
                             title="הורד קורות חיים"
                             aria-label="הורד קורות חיים"
@@ -3696,6 +3481,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         <ProfileLoadingSkeleton />
                     ) : (
                         <div className="animate-fade-in">
+                    {activeView === 'profile' && renderPendingStaffProposalBanner()}
                     {activeView === 'profile' && renderProfileCompletenessBanner()}
                     <div className="flex justify-center gap-2 mb-3">
                         <button
@@ -3741,6 +3527,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 isOpen={isCvViewerOpen}
                 onClose={() => setIsCvViewerOpen(false)}
                 resumeUrl={formData.resumeUrl}
+                candidateId={formData.id}
                 candidateName={formData.fullName}
             />
             

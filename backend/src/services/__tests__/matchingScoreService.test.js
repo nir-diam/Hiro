@@ -42,6 +42,7 @@ const {
   computeFullMatchScore,
   computeTagScore,
   computeGeoScore,
+  computeGeoPenaltyPoints,
   computeIntentScore,
   resolveGeoRegionId,
   invalidateCityCache,
@@ -145,6 +146,71 @@ describe('computeGeoScore regional penaltyPerKm', () => {
   });
 });
 
+describe('computeGeoPenaltyPoints', () => {
+  it('caps long commutes so they cannot subtract 100 points', () => {
+    const pts = computeGeoPenaltyPoints(
+      { missing: false, distance: 77, maxValidKm: 15, penaltyPerKm: 2, score: 0 },
+      { maxGeoPenalty: 30 },
+    );
+    expect(pts).toBe(30);
+    expect(pts).toBeLessThan(100);
+  });
+
+  it('uses raw (km − grace) × perKm for moderate distances', () => {
+    const pts = computeGeoPenaltyPoints(
+      { missing: false, distance: 18, maxValidKm: 15, penaltyPerKm: 2, score: 94 },
+      { maxGeoPenalty: 30 },
+    );
+    expect(pts).toBe(6);
+  });
+});
+
+describe('age gap penalty cap', () => {
+  it('does not zero a moderate core score when age is far above job max', async () => {
+    const birthYear = new Date().getFullYear() - 61;
+    const job = {
+      city: 'אור יהודה',
+      gender: 'זכר',
+      ageMin: 24,
+      ageMax: 35,
+      skills: [{ tagType: 'role', key: 'operations_and_control_coordinator', mode: 'normal' }],
+    };
+    const candidate = {
+      gender: 'זכר',
+      birthYear: String(birthYear),
+      address: 'כפר סבא',
+      embedding: [],
+      tagDetails: [
+        { rawType: 'role', tagKey: 'operations_manager', displayNameHe: 'מנהל תפעול' },
+      ],
+    };
+    const config = {
+      ...BASE_CONFIG,
+      mainWeights: { vector: 50, tags: 50, experience: 0, intent: 0 },
+      maxAgeGapPenalty: 25,
+      maxGeoPenalty: 30,
+      geoRegions: [{ id: 'center', grace: 15, penaltyPerKm: 2 }],
+      tagWeights: [{ id: 'role', value: 100 }],
+      isExperienceEnabled: false,
+    };
+    City.findAll.mockResolvedValue([
+      { cityName: 'אור יהודה', city: 'אור יהודה', column4: 'מרכז', pointx: 200000, pointy: 650000 },
+      { cityName: 'כפר סבא', city: 'כפר סבא', column4: 'מרכז', pointx: 195000, pointy: 680000 },
+    ]);
+    const { finalScore, breakdown } = await computeFullMatchScore(
+      candidate,
+      job,
+      [],
+      config,
+      null,
+      { vectorScore: 73 },
+    );
+    expect(breakdown.ageGapPenalty).toBe(25);
+    expect(breakdown.ageGapPenalty).toBeLessThan(52);
+    expect(finalScore).toBeGreaterThan(0);
+  });
+});
+
 describe('computeFullMatchScore formula', () => {
   it('S_final = max(0, S_core - salary - age - general)', async () => {
     const job = {
@@ -177,11 +243,33 @@ describe('computeFullMatchScore formula', () => {
       breakdown.coreScore -
         breakdown.salaryPenalty -
         breakdown.ageGapPenalty -
-        breakdown.generalPenalties,
+        (breakdown.roleExperiencePenalty || 0) -
+        (breakdown.roleLookbackPenalty || 0) -
+        breakdown.generalPenalties -
+        breakdown.geoPenalty,
     );
     expect(finalScore).toBe(expected);
     expect(breakdown.generalPenalties).toBeGreaterThan(0);
     expect(breakdown.penaltyReasons.length).toBeGreaterThan(0);
+  });
+
+  it('applies geo as a direct penalty, not a weighted layer', async () => {
+    const config = {
+      ...BASE_CONFIG,
+      mainWeights: { vector: 0, tags: 0, geo: 50, experience: 0, intent: 100 },
+      missingGeoPenalty: 7,
+    };
+    const job = { city: 'חיפה' };
+    const candidate = { embedding: [] };
+    const { finalScore, breakdown } = await computeFullMatchScore(candidate, job, [], config, null);
+
+    expect(breakdown.weightedContributions.geo).toBeUndefined();
+    expect(breakdown.geoMissing).toBe(true);
+    expect(breakdown.geoPenalty).toBe(7);
+    expect(breakdown.penaltyReasons).toEqual(
+      expect.arrayContaining([expect.objectContaining({ key: 'geo', amount: 7, type: 'missing' })]),
+    );
+    expect(finalScore).toBe(Math.max(0, breakdown.coreScore - breakdown.generalPenalties - 7));
   });
 
   it('computeTagScore uses binary 0/100 per category and respects tagWeights', async () => {
@@ -212,6 +300,31 @@ describe('computeFullMatchScore formula', () => {
     expect(skillHeavy.breakdown.role).toBe(100);
     expect(skillHeavy.breakdown.skill).toBe(0);
     expect(skillHeavy.score).toBe(0);
+  });
+
+  it('treats related Hebrew role tokens as a category match', async () => {
+    const candidate = {
+      tagDetails: [
+        {
+          rawType: 'role',
+          tagKey: 'operations_manager',
+          displayNameHe: 'מנהל תפעול',
+        },
+      ],
+    };
+    const job = {
+      skills: [
+        {
+          tagType: 'role',
+          key: 'operations_and_control_coordinator',
+          name: 'רכז/ת תפעול ובקרה',
+          mode: 'normal',
+        },
+      ],
+    };
+    const result = await computeTagScore(candidate, job, [{ id: 'role', value: 100 }], {}, new Map());
+    expect(result.breakdown.role).toBe(100);
+    expect(result.score).toBe(100);
   });
 
   it('returns 0 with empty breakdown when job has no skills', async () => {
@@ -371,6 +484,77 @@ describe('computeFullMatchScore formula', () => {
           { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
         ],
         candidateTaxonomies: [
+          { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
+        ],
+      },
+    );
+    expect(result.intentType).toBe('exact');
+    expect(result.score).toBe(100);
+  });
+
+  it('does not treat CV role tags as exact when candidate is linked to a different role', () => {
+    const weights = [
+      { id: 'exact', value: 100 },
+      { id: 'role', value: 80 },
+      { id: 'cluster', value: 50 },
+      { id: 'different', value: 0 },
+    ];
+    const result = computeIntentScore(
+      {},
+      { id: 'job-office' },
+      null,
+      weights,
+      {
+        targetTaxonomies: [
+          { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
+        ],
+        linkedJobs: [
+          {
+            jobId: 'warehouse-app',
+            taxonomy: {
+              categoryId: 'logistics',
+              clusterId: 'warehouse',
+              roleId: 'warehouse_picker',
+            },
+          },
+        ],
+        candidateTaxonomies: [
+          { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
+        ],
+      },
+    );
+    expect(result.intentType).toBe('role');
+    expect(result.score).toBe(80);
+  });
+
+  it('keeps CV role-tag exact when it matches a linked application role', () => {
+    const weights = [
+      { id: 'exact', value: 100 },
+      { id: 'role', value: 80 },
+      { id: 'cluster', value: 50 },
+      { id: 'different', value: 0 },
+    ];
+    const result = computeIntentScore(
+      {},
+      { id: 'job-warehouse-2' },
+      null,
+      weights,
+      {
+        targetTaxonomies: [
+          { categoryId: 'logistics', clusterId: 'warehouse', roleId: 'warehouse_picker' },
+        ],
+        linkedJobs: [
+          {
+            jobId: 'warehouse-app',
+            taxonomy: {
+              categoryId: 'logistics',
+              clusterId: 'warehouse',
+              roleId: 'warehouse_picker',
+            },
+          },
+        ],
+        candidateTaxonomies: [
+          { categoryId: 'logistics', clusterId: 'warehouse', roleId: 'warehouse_picker' },
           { categoryId: 'admin', clusterId: 'office', roleId: 'office_mgr' },
         ],
       },

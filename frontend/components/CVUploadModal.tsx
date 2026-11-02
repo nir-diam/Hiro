@@ -127,7 +127,7 @@ const CVUploadModal: React.FC<CVUploadModalProps> = ({ isOpen, onClose, onUpload
 
             // FIX: Updated model to gemini-3-pro-preview for complex structured text parsing task
             const response = await ai.models.generateContent({
-                model: 'gemini-3-pro-preview',
+                model: 'gemini-3-pro-latest',
                 contents: {
                     parts: [
                         { text: prompt },

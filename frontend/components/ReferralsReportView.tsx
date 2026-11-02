@@ -15,6 +15,7 @@ import type { Candidate } from './CandidatesListView';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { authHeaders } from '../utils/authHeaders';
+import { fetchJobById, fetchJobsForCompose } from '../services/jobsApi';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import {
     SCREENING_CV_REFERRALS_UPDATED,
@@ -770,17 +771,9 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({
         setJobsListLoading(true);
         (async () => {
             try {
-                const url = isTenantUser
-                    ? `${apiBase}/api/jobs/for-list`
-                    : `${apiBase}/api/jobs`;
-                const res = await fetch(url, {
-                    headers: authHeaders(true),
-                    cache: 'no-store',
-                });
-                if (!res.ok) throw new Error('Failed to fetch jobs');
-                const payload = await res.json();
+                const payload = await fetchJobsForCompose();
                 if (active) {
-                    setJobs(Array.isArray(payload) ? payload : []);
+                    setJobs(payload as unknown as Job[]);
                 }
             } catch (err) {
                 console.error('[ReferralsReportView] failed to load jobs', err);
@@ -1318,16 +1311,14 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({
     });
 
     const handleOpenJobDrawer = (jobTitle: string, clientName: string) => {
-         const job = jobs.find(j => j.title === jobTitle);
-         const jobMap: {[key: string]: number} = { 'מפתח/ת Fullstack בכיר/ה': 2, 'מנהל/ת מוצר לחטיבת הפינטק': 7, 'מעצב/ת UX/UI': 3 };
-         const fallbackJob = jobs.find(j => j.id === (jobMap[jobTitle] || 1));
-         if (job || fallbackJob) {
-            setSelectedJob(job || fallbackJob || null);
-            setIsDrawerOpen(true);
-            return;
-         }
-         setSelectedJob(buildFallbackJob(jobTitle, clientName));
-         setIsDrawerOpen(true);
+        const row = jobs.find(j => j.title === jobTitle);
+        const fallback = buildFallbackJob(jobTitle, clientName);
+        setSelectedJob(row ? ({ ...fallback, ...row } as Job) : fallback);
+        setIsDrawerOpen(true);
+        if (!row?.id) return;
+        void fetchJobById(String(row.id)).then((full) => {
+            if (full) setSelectedJob(full as unknown as Job);
+        });
     };
 
     const handleOpenCandidateSummaryClick = (e: React.MouseEvent, referral: Referral) => {
@@ -1458,6 +1449,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                 body: JSON.stringify({
                     candidateId: ref.candidateId,
+                    cvProfileKind: data.cvProfileKind || 'shadow',
                     sends: [
                         {
                             jobId: ref.jobId,

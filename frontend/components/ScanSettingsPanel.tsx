@@ -14,6 +14,7 @@ export const SCAN_FILTER_KEYS = [
   'affinity',
   'mandatory_skill',
   'negative_skill',
+  'work_experience',
 ] as const;
 
 export type ScanFilterKey = (typeof SCAN_FILTER_KEYS)[number];

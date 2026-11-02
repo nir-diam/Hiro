@@ -5,6 +5,8 @@ import { useLanguage } from '../context/LanguageContext';
 import { jobIsOpenForStaffPick } from '../utils/jobPickerOpen';
 import { getJobHealthData, daysOpenFromDate } from '../utils/jobHealth';
 import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferralEvents';
+import { DEFAULT_CV_PROFILE_KIND, type CvProfileKind } from '../utils/cvProfileKind';
+import CvProfileKindPicker from './CvProfileKindPicker';
 
 export type BulkReferSuccessSummary = {
     /** Total email dispatches returned by the API (sum of count per candidate). */
@@ -83,6 +85,7 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
     const [submitting, setSubmitting] = useState(false);
     const [submitProgress, setSubmitProgress] = useState<{ current: number; total: number } | null>(null);
     const [submitError, setSubmitError] = useState<string | null>(null);
+    const [cvProfileKind, setCvProfileKind] = useState<CvProfileKind>(DEFAULT_CV_PROFILE_KIND);
 
     // Fetch jobs from backend when modal opens
     useEffect(() => {
@@ -165,6 +168,7 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
         setSearchTerm('');
         setSelectedJobId(null);
         setNotes('');
+        setCvProfileKind(DEFAULT_CV_PROFILE_KIND);
         setFetchedJobs([]);
         setJobsError(null);
         setContacts([]);
@@ -304,6 +308,7 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({
                                 candidateId,
+                                cvProfileKind,
                                 attachOriginalCv: true,
                                 attachSystemCvPdf: false,
                                 attachLastReferral: false,
@@ -553,6 +558,12 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
                                     )}
                                 </div>
                             ) : null}
+
+                            <CvProfileKindPicker
+                                value={cvProfileKind}
+                                onChange={setCvProfileKind}
+                                disabled={submitting}
+                            />
 
                             <div>
                                 <h3 className="text-sm font-bold text-text-default mb-3 flex items-center gap-2">

@@ -280,7 +280,7 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
     setLoading(true);
     setError(null);
     try {
-      const jobsRes = await fetch(`${apiBase}/api/jobs`, { headers: authHeaders() });
+      const jobsRes = await fetch(`${apiBase}/api/jobs?view=skills`, { headers: authHeaders() });
       if (!jobsRes.ok) throw new Error('Failed to load jobs');
       const rawJobs: any[] = await jobsRes.json();
       setJobs(

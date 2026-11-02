@@ -3064,7 +3064,7 @@ const AdminCompaniesView: React.FC = () => {
              Context: You are embedded in a "Global Company Database" for a recruitment system.`;
              
              const session = ai.chats.create({
-                 model: 'gemini-3-flash-preview',
+                 model: 'gemini-3.8-flash',
                  config: { 
                      systemInstruction,
                      tools: [{ functionDeclarations: [addCompaniesTool] }]

@@ -1,4 +1,6 @@
-const { presentPublicJob } = require('../publicJobPresenter');
+const { presentPublicJob, matchesPublicKey } = require('../publicJobPresenter');
+const { redactText } = require('../publicJobConfidential');
+const { resolveJobTaxonomy, indexJobCatalog } = require('../publicJobTaxonomy');
 const { sanitizePublicPayload, collectKeys } = require('../publicJobSanitize');
 const { filterPublicJobs, buildSynonymGroups, expandQuery } = require('../publicJobQuery');
 const { isJobListedOnSite, withinClosedWindow, jobAppearsOnSite } = require('../publicJobVisibility');
@@ -11,6 +13,7 @@ const {
   detectCvKind,
 } = require('../publicJobApplication');
 const { PUBLIC_JOBS_RESPONSE_BLOCKLIST } = require('../../constants/publicJobsApi');
+const { itmToWgs84, wgs84FromCityRow } = require('../publicJobGeo');
 
 const agency = {
   id: 'agency-1',
@@ -120,9 +123,121 @@ describe('public job presenter', () => {
     expect(dto.hoursDescription).toMatch(/שעות/);
     expect(dto.skills[0].label).toBe('מנהל/ת חשבונות');
     expect(dto.recruiter).toEqual({ firstName: 'דנה', imageUrl: null });
+    expect(dto.startDate).toBe('immediate');
     expect(dto.apply.questions.map((q) => q.type)).toEqual(['yes_no', 'video']);
     expect(dto.apply.questions[1].required).toBe(false);
     expect(dto.validThrough).toBeTruthy();
+  });
+
+  test('openDate stays the public posted date when a bulk stamp exists', () => {
+    const dto = view({ publicBoard: { publishedAt: '2026-10-22T12:00:00.000Z' } }).dto;
+    expect(dto.publishedAt).toBe('2026-10-01T00:00:00.000Z');
+  });
+
+  test('home and hybrid wording overrides the office default', () => {
+    const home = view({ job: { title: 'מפתח/ת', description: '100% מהבית, שעות גמישות' } }).dto;
+    const hybrid = view({ job: { title: 'נציג שירות', description: 'היברידי, יומיים מהבית' } }).dto;
+    const office = view().dto;
+    expect(home.workModel.value).toBe('remote');
+    expect(hybrid.workModel.value).toBe('hybrid');
+    expect(office.workModel.value).toBe('office');
+  });
+
+  test('partial home wording stays office or hybrid, not full remote', () => {
+    const option = view({ job: { description: 'אופציה לעבודה מהבית פעמיים בשבוע' } }).dto;
+    const friday = view({ job: { description: 'ימי שישי לסירוגין מהבית' } }).dto;
+    const support = view({ job: { description: 'תמיכה טכנית פרונטלית ומרחוק' } }).dto;
+    expect(option.workModel.value).toBe('hybrid');
+    expect(friday.workModel.value).toBe('hybrid');
+    expect(support.workModel.value).toBe('office');
+  });
+
+  test('sanitize keeps ISO timestamps when Sequelize returns Date objects', () => {
+    const presented = view({
+      job: {
+        openDate: new Date('2026-10-01T00:00:00.000Z'),
+        updatedAt: new Date('2026-10-18T00:00:00.000Z'),
+      },
+    });
+    const dto = sanitizePublicPayload(presented.dto);
+    expect(dto.publishedAt).toBe('2026-10-01T00:00:00.000Z');
+    expect(dto.updatedAt).toBe('2026-10-18T00:00:00.000Z');
+  });
+
+  test('explicit remote is kept', () => {
+    const dto = view({ publicBoard: { workModel: 'remote' }, job: { description: 'עבודה במשרד בתל אביב' } }).dto;
+    expect(dto.workModel.value).toBe('remote');
+  });
+
+  test('description keeps section breaks and fills the structured fields', () => {
+    const dto = view({
+      job: {
+        description: 'חברה מובילה מגייסת. עיקרי התפקיד: קליטת סחורה וליקוט. דרישות: רישיון ג. יתרון: ניסיון במחסן. הטבות: ארוחות.',
+      },
+      agency: { ...agency, metadata: { jobHeroBrandSource: 'job_client' } },
+    }).detail;
+    expect(dto.description).toContain('\nעיקרי התפקיד:');
+    expect(dto.responsibilities).toEqual(expect.arrayContaining(['קליטת סחורה וליקוט.']));
+    expect(dto.niceToHave).toEqual(expect.arrayContaining(['ניסיון במחסן.']));
+    expect(dto.benefits).toEqual(expect.arrayContaining(['ארוחות.']));
+    expect(dto.requirements.some((line) => line.includes('רישיון'))).toBe(true);
+  });
+
+  test('start date is immediate or a date, and system recruiter names are hidden', () => {
+    expect(view({ job: { availability: '🟢 מיידי (זמין לעבודה מיד).' } }).dto.startDate).toBe('immediate');
+    expect(view({ job: { availability: '2026-11-01' } }).dto.startDate).toBe('2026-11-01');
+    expect(view({ job: { availability: 'חודש הודעה מוקדמת' } }).dto.startDate).toBeNull();
+    expect(view({ job: { recruiter: 'גלעד,' } }).detail.recruiter).toEqual({ firstName: 'גלעד', imageUrl: null });
+    expect(view({ job: { recruiter: 'מערכת' } }).detail.recruiter).toBeNull();
+  });
+
+  test('the list slug resolves by that same slug, by id and by posting code', () => {
+    const presented = view();
+    const row = { job, publication, dto: presented.dto };
+    expect(matchesPublicKey(row, presented.dto.slug)).toBe(true);
+    expect(matchesPublicKey(row, job.id)).toBe(true);
+    expect(matchesPublicKey(row, 'PUB-9')).toBe(true);
+    expect(matchesPublicKey(row, 'missing-slug')).toBe(false);
+  });
+
+  test('a generic cluster label uses the catalog slug instead of a transliteration', () => {
+    const catalog = indexJobCatalog([
+      {
+        name: 'תחום כללי וללא ניסיון',
+        publicSlug: 'general',
+        clusters: [{ name: 'עבודה כללית', publicSlug: 'general-work' }],
+      },
+      {
+        name: 'לוגיסטיקה',
+        publicSlug: 'logistics',
+        clusters: [{ name: 'מחסן והפצה', publicSlug: 'warehouse' }],
+      },
+    ]);
+    const generic = resolveJobTaxonomy(catalog, {
+      jobFields: [{ category: 'כללי', fieldType: '' }],
+    });
+    expect(generic.clusterNode.slug).toBe('general');
+    expect(generic.clusterNode.label).toBe('תחום כללי וללא ניסיון');
+    const matched = resolveJobTaxonomy(catalog, {
+      jobFields: [{ category: 'כללי', fieldType: 'מחסן והפצה' }],
+    });
+    expect(matched.categoryNode.slug).toBe('warehouse');
+    expect(matched.clusterNode.slug).toBe('logistics');
+    const presented = presentPublicJob({
+      job: { ...job, jobFields: [{ category: 'כללי' }], field: '' },
+      publication,
+      agency,
+      org,
+      categoryNode: null,
+      clusterNode: null,
+      cityMeta: null,
+    });
+    expect(presented.dto.cluster).toBeNull();
+  });
+
+  test('removing the employer name does not leave a hole in the sentence', () => {
+    expect(redactText('לחברת סודי לוגיסטיקה, העוסקת בשיווק', ['סודי לוגיסטיקה']))
+      .toBe('לחברה העוסקת בשיווק');
   });
 
   test('a visible employer keeps name, logo and website', () => {
@@ -207,7 +322,7 @@ describe('site scope and status', () => {
 });
 
 describe('public application validation', () => {
-  const consent = { accepted: true, policyVersion: '2026-10-01', policyUrl: 'https://hiro.co.il/privacy' };
+  const consent = { accepted: true, policyVersion: '2026-10-01', policyUrl: 'https://app.hiro.co.il/privacy' };
 
   test('422 names the field', () => {
     expect(() => validatePublicApplication({ fullName: 'א', phone: '123', consent })).toThrow(expect.objectContaining({
@@ -258,5 +373,18 @@ describe('public application validation', () => {
     }
     expect(hitRateLimit({ phone: '0500000000', ip: '10.9.9.9' })).toBe(true);
     resetApplyRateLimit();
+  });
+});
+
+describe('public job geo', () => {
+  test('ITM city coordinates convert to WGS84 degrees', () => {
+    const { lat, lng } = itmToWgs84(195102.97, 733568.25);
+    expect(lat).toBeGreaterThan(32.5);
+    expect(lat).toBeLessThan(33);
+    expect(lng).toBeGreaterThan(34.8);
+    expect(lng).toBeLessThan(35.2);
+    const fromRow = wgs84FromCityRow({ pointX: 195102.97, pointY: 733568.25 });
+    expect(fromRow.lat).toBeCloseTo(lat, 3);
+    expect(fromRow.lng).toBeCloseTo(lng, 3);
   });
 });

@@ -52,8 +52,9 @@ export function useScreenTablePreferences(screenKey: ScreenPreferenceKey, option
         (mode: TableViewMode) => {
             setViewModeState(mode);
             setScreenPrefs(screenKey, { layoutMode: viewModeToLayoutMode(mode) });
+            void flushScreen(screenKey);
         },
-        [screenKey, setScreenPrefs],
+        [screenKey, setScreenPrefs, flushScreen],
     );
 
     const setVisibleColumns = useCallback(

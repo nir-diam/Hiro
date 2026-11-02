@@ -2,7 +2,7 @@
 
 const PRESENT_RE = /^(present|היום|נוכחי|current|עכשיו)$/i;
 
-function parseYearMonth(raw) {
+function parseYearMonth(raw, yearOnlyMonth = 1) {
   const s = String(raw ?? '').trim();
   if (!s) return null;
   if (PRESENT_RE.test(s)) {
@@ -12,7 +12,10 @@ function parseYearMonth(raw) {
   const ym = s.match(/^(\d{4})-(\d{2})/);
   if (ym) return { y: Number(ym[1]), m: Number(ym[2]) };
   const yOnly = s.match(/^(\d{4})$/);
-  if (yOnly) return { y: Number(yOnly[1]), m: 1 };
+  if (yOnly) {
+    const fallback = yearOnlyMonth === 12 ? 12 : 1;
+    return { y: Number(yOnly[1]), m: fallback };
+  }
   return null;
 }
 
@@ -49,4 +52,4 @@ function workExperienceNeedsDateReview(row, allRows = []) {
   return false;
 }
 
-module.exports = { workExperienceNeedsDateReview };
+module.exports = { workExperienceNeedsDateReview, parseYearMonth, toMonthIndex, PRESENT_RE };

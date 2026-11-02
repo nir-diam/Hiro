@@ -30,8 +30,10 @@ const sequelize = new Sequelize(
   },
 );
 
-const connectDb = async () => {
-  await sequelize.authenticate();
+const connectDb = async ({ skipAuthenticate = false } = {}) => {
+  if (!skipAuthenticate) {
+    await sequelize.authenticate();
+  }
 
   // Register models before sync to ensure associations load if added later
   require('../models/User');
@@ -123,13 +125,23 @@ const connectDb = async () => {
 
   const ClientPipeline = require('../models/ClientPipeline');
   const ClientPipelineStage = require('../models/ClientPipelineStage');
-  ClientPipeline.hasMany(ClientPipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
-  ClientPipelineStage.belongsTo(ClientPipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
+  // The ingest worker loads controllers before connectDb, and those already
+  // register this alias. A second hasMany with the same alias crashes startup.
+  if (!ClientPipeline.associations.stages) {
+    ClientPipeline.hasMany(ClientPipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
+  }
+  if (!ClientPipelineStage.associations.pipeline) {
+    ClientPipelineStage.belongsTo(ClientPipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
+  }
 
   const CandidatePipeline = require('../models/CandidatePipeline');
   const CandidatePipelineStage = require('../models/CandidatePipelineStage');
-  CandidatePipeline.hasMany(CandidatePipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
-  CandidatePipelineStage.belongsTo(CandidatePipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
+  if (!CandidatePipeline.associations.stages) {
+    CandidatePipeline.hasMany(CandidatePipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
+  }
+  if (!CandidatePipelineStage.associations.pipeline) {
+    CandidatePipelineStage.belongsTo(CandidatePipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
+  }
 
   // public_site_keys: sync only adds indexes on existing tables — ensure columns exist first.
   await sequelize.query(`
@@ -213,6 +225,12 @@ const connectDb = async () => {
   `).catch(() => {});
 
   await sequelize.query(`
+    ALTER TABLE system_tags
+      ADD COLUMN IF NOT EXISTS years_experience SMALLINT NULL,
+      ADD COLUMN IF NOT EXISTS lookback_years SMALLINT NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
     CREATE INDEX IF NOT EXISTS idx_system_tags_type_tag_active
       ON system_tags (type, tag_id)
       WHERE is_active = true;
@@ -273,6 +291,29 @@ const connectDb = async () => {
   await sequelize.query(`
     ALTER TABLE candidates
       ADD COLUMN IF NOT EXISTS "staffProfileCopy" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "staffShadowPinned" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+
+  // Staff shadow: fields the recruiter overrode (don't auto-sync from live).
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "shadowFieldOverrides" JSONB NOT NULL DEFAULT '{}'::jsonb;
+  `).catch(() => {});
+
+  // Live profile: pending recruiter edits awaiting candidate approval.
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "pendingStaffProfileProposal" JSONB NULL;
+  `).catch(() => {});
+
+  // Shadow: live updates waiting for recruiter accept/keep.
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "pendingLiveSync" JSONB NOT NULL DEFAULT '{}'::jsonb;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -417,6 +458,15 @@ const connectDb = async () => {
     ALTER TABLE clients
       ADD COLUMN IF NOT EXISTS "logoUrl" VARCHAR(2048),
       ADD COLUMN IF NOT EXISTS "primaryColor" VARCHAR(32);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE clients
+      ADD COLUMN IF NOT EXISTS events_recent jsonb NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+  await sequelize.query(`
+    ALTER TABLE clients
+      ADD COLUMN IF NOT EXISTS events_recent_at timestamptz NULL;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -1002,6 +1052,18 @@ const connectDb = async () => {
       WHERE status = 'pending';
   `).catch(() => {});
 
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_notification_messages_sender_updated
+      ON notification_messages ("senderUserId", "updatedAt" DESC)
+      WHERE status != 'deleted';
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_notification_messages_assignee_updated
+      ON notification_messages ("assigneeId", "updatedAt" DESC)
+      WHERE status != 'deleted';
+  `).catch(() => {});
+
   try {
     const [clearedRows] = await sequelize.query(`
       UPDATE candidates
@@ -1017,7 +1079,8 @@ const connectDb = async () => {
       RETURNING id;
     `);
     if (clearedRows?.length) {
-      console.log('[startup] cleared stale ingestPending on', clearedRows.length, 'candidate(s)');
+      const clearedIds = clearedRows.map((row) => row.id).filter(Boolean);
+      console.log('[startup] cleared stale ingestPending on', clearedIds.length, 'candidate(s)');
     }
   } catch (_) { /* non-fatal */ }
 

@@ -13,6 +13,7 @@ export type JobComposeRow = {
     title: string;
     client: string;
     postingCode?: string | null;
+    status?: string | null;
 };
 
 async function parseErr(res: Response): Promise<string> {
@@ -64,6 +65,21 @@ export async function fetchJobsForTenantScope(): Promise<unknown[]> {
         if (!res.ok) throw new Error(await parseErr(res));
         const payload = await res.json();
         return Array.isArray(payload) ? payload : [];
+    });
+}
+
+/** Full job (GET /api/jobs/:id) — use when opening a drawer instead of loading the whole catalog. */
+export async function fetchJobById(jobId: string): Promise<Record<string, unknown> | null> {
+    const id = String(jobId || '').trim();
+    if (!id) return null;
+    return fetchJsonDeduped(`GET /api/jobs/${id}`, async () => {
+        const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(id)}`, {
+            headers: authHeaders(),
+            cache: 'no-store',
+        });
+        if (!res.ok) return null;
+        const payload = await res.json();
+        return payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
     });
 }
 
@@ -138,6 +154,29 @@ export async function fetchJobsGrid(
             stats: payload?.stats,
         };
     });
+}
+
+/** PUT /api/jobs/:id — staff JWT required (global API auth). */
+export async function updateJob(jobId: string, body: unknown): Promise<unknown> {
+    const id = String(jobId || '').trim();
+    if (!id) throw new Error('Job id is required');
+    const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(id)}`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
+export async function deleteJob(jobId: string): Promise<void> {
+    const id = String(jobId || '').trim();
+    if (!id) throw new Error('Job id is required');
+    const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
 }
 
 /** POST /api/jobs/log-smart-import-open — audit when staff opens AI smart-import modal on NewJobView */

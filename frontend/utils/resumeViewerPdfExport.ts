@@ -1,18 +1,43 @@
+function nextFrame(): Promise<void> {
+    return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+}
+
+/** html2canvas drops unresolved CSS variables, which paints the resume as an empty page. */
+function concreteResumeCss(css: string, brand: string): string {
+    return css
+        .replace(/var\(--pr-ink\)/g, '#1f1f1f')
+        .replace(/var\(--pr-muted\)/g, '#4a4a4a')
+        .replace(/var\(--pr-line\)/g, '#e3e3e3')
+        .replace(/var\(--pr-brand\)/g, brand || '#93222b');
+}
+
 /**
  * Capture a DOM subtree as canvas at full scroll height (avoids clipping inside scroll parents).
+ * The node is parked off-screen, not under the page: a negative z-index or foreignObject
+ * snapshot comes back transparent and saves as a blank PDF.
  */
-async function captureElementToCanvas(el: HTMLElement, scale: number): Promise<HTMLCanvasElement> {
+async function captureElementToCanvas(
+    el: HTMLElement,
+    scale: number,
+    options?: { widthPx?: number },
+): Promise<HTMLCanvasElement> {
     const html2canvas = (await import('html2canvas')).default;
 
+    const w = options?.widthPx && options.widthPx > 0
+        ? options.widthPx
+        : Math.max(el.scrollWidth, el.offsetWidth, 1);
+    const brand = el.style.getPropertyValue('--pr-brand').trim() || '#93222b';
+
+    const host = document.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    host.style.cssText = `position:fixed;left:-12000px;top:0;width:${w}px;background:#ffffff;`;
+
     const clone = el.cloneNode(true) as HTMLElement;
-    const w = Math.max(el.scrollWidth, el.offsetWidth, 1);
     clone.style.boxSizing = 'border-box';
-    clone.style.position = 'fixed';
-    clone.style.left = '0';
-    clone.style.top = '0';
-    clone.style.zIndex = '-1';
-    clone.style.pointerEvents = 'none';
-    /** Must stay visible for painting — visibility:hidden yields a blank html2canvas raster in common browsers. */
+    clone.style.position = 'static';
+    clone.style.left = 'auto';
+    clone.style.top = 'auto';
+    clone.style.zIndex = 'auto';
     clone.style.visibility = 'visible';
     clone.style.opacity = '1';
     clone.style.width = `${w}px`;
@@ -23,27 +48,72 @@ async function captureElementToCanvas(el: HTMLElement, scale: number): Promise<H
     clone.style.overflow = 'visible';
     clone.style.margin = '0';
     clone.style.backgroundColor = '#ffffff';
+    clone.style.color = '#1f1f1f';
 
-    document.body.appendChild(clone);
+    const styleEl = clone.querySelector('style');
+    let headStyle: HTMLStyleElement | null = null;
+    if (styleEl?.textContent) {
+        const css = concreteResumeCss(styleEl.textContent, brand);
+        styleEl.textContent = css;
+        headStyle = document.createElement('style');
+        headStyle.setAttribute('data-pr-capture', '1');
+        headStyle.textContent = css;
+        document.head.appendChild(headStyle);
+    }
+
+    host.appendChild(clone);
+    document.body.appendChild(host);
 
     try {
-        void clone.offsetHeight;
-        await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
-        const h = Math.max(clone.scrollHeight, clone.offsetHeight, 1);
+        await nextFrame();
+        await Promise.all(
+            Array.from(clone.querySelectorAll('img')).map((img) =>
+                img.decode().catch(() => undefined),
+            ),
+        );
+        if (document.fonts?.ready) await document.fonts.ready;
+        await nextFrame();
 
+        const h = Math.max(clone.scrollHeight, clone.offsetHeight, 1);
         return await html2canvas(clone, {
             scale,
             useCORS: true,
             logging: false,
             backgroundColor: '#ffffff',
-            width: w,
-            height: h,
             windowWidth: w,
             windowHeight: h,
         });
     } finally {
-        clone.remove();
+        host.remove();
+        headStyle?.remove();
     }
+}
+
+/** A transparent foreignObject canvas has rgb 0 and must not count as drawn text. */
+function canvasHasInk(canvas: HTMLCanvasElement): boolean {
+    const ctx = canvas.getContext('2d');
+    if (!ctx || canvas.width < 2 || canvas.height < 2) return false;
+    let data: Uint8ClampedArray;
+    let width: number;
+    try {
+        const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        data = image.data;
+        width = image.width;
+    } catch {
+        return false;
+    }
+    const step = Math.max(8, Math.floor(Math.min(canvas.width, canvas.height) / 40));
+    let dark = 0;
+    let total = 0;
+    for (let y = 0; y < canvas.height; y += step) {
+        for (let x = 0; x < canvas.width; x += step) {
+            const i = (y * width + x) * 4;
+            if (data[i + 3] < 16) continue;
+            total += 1;
+            if ((data[i] + data[i + 1] + data[i + 2]) / 3 < 250) dark += 1;
+        }
+    }
+    return total > 0 && dark / total > 0.004;
 }
 
 /**
@@ -102,14 +172,17 @@ function findSmartPageBreak(
 export async function downloadElementAsMultiPagePdf(
     el: HTMLElement,
     filename: string,
-    options?: { marginMm?: number; scale?: number },
+    options?: { marginMm?: number; scale?: number; widthPx?: number },
 ): Promise<void> {
     const { jsPDF } = await import('jspdf');
 
     const margin = options?.marginMm ?? 5;
     const scale = options?.scale ?? 2;
 
-    const canvas = await captureElementToCanvas(el, scale);
+    const canvas = await captureElementToCanvas(el, scale, { widthPx: options?.widthPx });
+    if (!canvasHasInk(canvas)) {
+        throw new Error('blank_capture');
+    }
 
     const pdf = new jsPDF({ unit: 'mm', format: 'a4', orientation: 'portrait', compress: true });
     const pageW = pdf.internal.pageSize.getWidth();

@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, CalendarIcon, LinkIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ClockIcon, Cog6ToothIcon } from './Icons';
+import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, CalendarIcon, LinkIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ClockIcon, Cog6ToothIcon, LockClosedIcon } from './Icons';
 import EventFormModal, { type Event as EventFormEvent } from './EventFormModal';
 import { EventsFilterMultiselect } from './EventsFilterMultiselect';
 import { fetchEventTypes, filterEventTypesForContext, LEGACY_MANUAL_EVENT_TYPE_NAMES } from '../services/eventTypesApi';
@@ -15,6 +15,7 @@ import { fetchAuditLogsByEntity, type AuditLogEntry } from '../services/auditLog
 import { authHeaders } from '../utils/authHeaders';
 
 const AUDIT_LOG_FILTER_LABEL = 'יומן ביקורת';
+const LOCKED_EVENT_TOOLTIP = 'אירוע שהושלם נעול לעריכה ולמחיקה';
 const AUDIT_ACTION_HE: Record<string, string> = {
     create: 'יצירה',
     update: 'עדכון',
@@ -266,13 +267,22 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName,
     };
 
     const handleDeleteEvent = async (eventId: string) => {
+        setOpenMenuId(null);
+        if (events.find(e => e.id === eventId)?.status === 'הושלם') {
+            alert(LOCKED_EVENT_TOOLTIP);
+            return;
+        }
         if (window.confirm('האם אתה בטוח שברצונך למחוק את האירוע?')) {
+            const before = events;
             setEvents(events.filter(e => e.id !== eventId));
             if (apiBase && clientId) {
-                await fetch(`${apiBase}/api/clients/${clientId}/events/${eventId}`, { method: 'DELETE', headers: authHeaders(true) }).catch(() => null);
+                const res = await fetch(`${apiBase}/api/clients/${clientId}/events/${eventId}`, { method: 'DELETE', headers: authHeaders(true) }).catch(() => null);
+                if (res && res.status === 409) {
+                    setEvents(before);
+                    alert(LOCKED_EVENT_TOOLTIP);
+                }
             }
         }
-        setOpenMenuId(null);
     };
 
      const handleSaveEvent = async (
@@ -366,10 +376,9 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName,
         let active = true;
         setIsLoading(true);
         setError(null);
-        const orgQs = organizationId
-            ? `?organizationId=${encodeURIComponent(organizationId)}`
-            : '';
-        fetch(`${apiBase}/api/clients/${clientId}/events${orgQs}`, { headers: authHeaders(true) })
+        const params = new URLSearchParams({ summary: '1', limit: '500' });
+        if (organizationId) params.set('organizationId', organizationId);
+        fetch(`${apiBase}/api/clients/${clientId}/events?${params.toString()}`, { headers: authHeaders(true) })
             .then(r => { if (!r.ok) throw new Error('Failed to load events'); return r.json(); })
             .then(data => {
                 if (!active) return;
@@ -746,8 +755,12 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName,
                                     {visibleColumns.map(colId => <td key={colId} className="p-4 text-text-muted">{renderCell(event, colId)}</td>)}
                                     <td className="p-4 text-center">
                                         <div onClick={(e) => e.stopPropagation()} className="relative inline-block" ref={openMenuId === event.id ? menuRef : null}>
-                                            <button onClick={() => setOpenMenuId(openMenuId === event.id ? null : event.id)} className="p-2 rounded-full hover:bg-bg-hover text-text-muted"><EllipsisVerticalIcon className="w-5 h-5"/></button>
-                                            {openMenuId === event.id && (
+                                            {event.status === 'הושלם' ? (
+                                                <span className="p-2 inline-flex text-text-subtle" title={LOCKED_EVENT_TOOLTIP}><LockClosedIcon className="w-5 h-5"/></span>
+                                            ) : (
+                                                <button onClick={() => setOpenMenuId(openMenuId === event.id ? null : event.id)} className="p-2 rounded-full hover:bg-bg-hover text-text-muted"><EllipsisVerticalIcon className="w-5 h-5"/></button>
+                                            )}
+                                            {openMenuId === event.id && event.status !== 'הושלם' && (
                                                 <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10"><button onClick={() => handleEditEvent(event)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> ערוך</button><button onClick={() => handleDeleteEvent(event.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> מחק</button></div>
                                             )}
                                         </div>
@@ -846,8 +859,14 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName,
                             <div className="flex justify-between items-center mt-4 pt-3 border-t border-border-default">
                                 <span className="text-xs text-text-muted">נוצר ע"י: {event.coordinator}</span>
                                 <div className="flex gap-1">
-                                    <button onClick={(e) => { e.stopPropagation(); handleEditEvent(event); }} className="p-1.5 rounded-full hover:bg-bg-hover text-text-muted"><PencilIcon className="w-4 h-4"/></button>
-                                    <button onClick={(e) => { e.stopPropagation(); handleDeleteEvent(event.id); }} className="p-1.5 rounded-full hover:bg-red-100 text-red-500"><TrashIcon className="w-4 h-4"/></button>
+                                    {event.status === 'הושלם' ? (
+                                        <span className="p-1.5 text-text-subtle" title={LOCKED_EVENT_TOOLTIP}><LockClosedIcon className="w-4 h-4"/></span>
+                                    ) : (
+                                        <>
+                                            <button onClick={(e) => { e.stopPropagation(); handleEditEvent(event); }} className="p-1.5 rounded-full hover:bg-bg-hover text-text-muted"><PencilIcon className="w-4 h-4"/></button>
+                                            <button onClick={(e) => { e.stopPropagation(); handleDeleteEvent(event.id); }} className="p-1.5 rounded-full hover:bg-red-100 text-red-500"><TrashIcon className="w-4 h-4"/></button>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         </div>

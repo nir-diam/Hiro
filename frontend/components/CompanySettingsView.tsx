@@ -64,7 +64,6 @@ function PresetMainWeightsMiniBar({ config }: { config: Record<string, unknown> 
     const keys = [
         { id: 'vector', color: 'bg-purple-400', label: 'V' },
         { id: 'tags', color: 'bg-blue-400', label: 'T' },
-        { id: 'geo', color: 'bg-emerald-400', label: 'G' },
         { id: 'experience', color: 'bg-orange-400', label: 'E' },
         { id: 'intent', color: 'bg-rose-400', label: 'I' },
     ];

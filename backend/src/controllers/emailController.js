@@ -19,6 +19,7 @@ const {
   fetchResumeBinaryForMail,
   ensureOrganizationsFromExperience,
   enrichCandidateFromResumeText,
+  resumeExtractLooksUnreliable,
 } = require('./candidateController');
 const Candidate = require('../models/Candidate');
 const Job = require('../models/Job');
@@ -30,6 +31,7 @@ const {
   CV_PARSING_PROMPT_ID,
   buildResumeResponseSchema,
   getResumePromptTemplate,
+  findMissingResumeKeys,
 } = require('../services/cvParsingPromptService');
 const {
   normalizeWorkExperience,
@@ -37,8 +39,15 @@ const {
   ensureRoleTagCoverage,
   attachTagIdsToWorkExperience,
   workExperienceTagLinksChanged,
+  cvParseFailedUpdate,
 } = require('../utils/workExperienceNormalize');
 const { sendChat } = require('../services/geminiService');
+const {
+  isCvParseSendFileToGeminiEnabled,
+  resolveGeminiCvInlineFile,
+  buildCvFileParseInstruction,
+  buildGeminiCvFileUserParts,
+} = require('../utils/cvParseSendFile');
 const User = require('../models/User');
 const authService = require('../services/authService');
 const NotificationMessage = require('../models/NotificationMessage');
@@ -48,6 +57,14 @@ const { Op, Sequelize, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const { stripCvDocumentTitleFromPersonName, nameLooksLikeJobHeadline, sanitizePersonNameFields } = require('../utils/personName');
+const {
+  resolveIngestStubFullName,
+  resolvePostIngestPersonName,
+  extractNameHintFromCvBody,
+  extractNameHintFromResumeFilename,
+  collectIngestNameHints,
+  personNameLooksAcceptable,
+} = require('../utils/emailIngestPersonName');
 const { bufferLooksLikeResume } = require('../utils/resumeFileKind');
 const {
   resolveGeminiModelName,
@@ -58,7 +75,12 @@ const {
   activeTagCount,
   THIN_RESUME_TEXT_CHARS,
 } = require('../services/cvParseQuality');
-const { syncTagsWithRetry, stampCvParseQuality, stampSavedCandidateQuality } = require('../services/cvParseQualityService');
+const {
+  syncTagsWithRetry,
+  stampCvParseQuality,
+  stampSavedCandidateQuality,
+  stampCvMergedQuality,
+} = require('../services/cvParseQualityService');
 const proposalService = require('../services/proposalService');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const cvForwardService = require('../services/cvForwardService');
@@ -74,12 +96,27 @@ const {
   resolvePrimaryFromHashMatch,
 } = require('../services/cvContentHashService');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
+const { mapResumeProfileFields, keepRecruiterProfileFields } = require('../utils/resumeProfileFields');
 const { applyJobLinkOnboardingStageOne } = require('../services/jobCandidateOnboardingIngestService');
+const { runInEmailIngest } = require('../utils/ingestContext');
+const { runWithIngestDbYield } = require('../utils/dbPoolYield');
+
+const ingestCandidateUpdate = (id, patch) =>
+  candidateService.update(id, patch, { forIngest: true });
 
 const EMAIL_INGEST_MAX_CONCURRENT = Math.max(
   1,
-  Math.min(6, Number(process.env.EMAIL_INGEST_MAX_CONCURRENT || 2) || 2),
+  Math.min(
+    process.env.EMAIL_INGEST_WORKER === '1' ? 1 : 6,
+    Number.parseInt(process.env.EMAIL_INGEST_MAX_CONCURRENT || '1', 10) || 1,
+  ),
 );
+
+/** inline = ingest on API process (default). worker = API only enqueues; scripts/email-ingest-worker.js drains. */
+const EMAIL_INGEST_DISPATCH = String(process.env.EMAIL_INGEST_DISPATCH || 'inline')
+  .trim()
+  .toLowerCase();
+const emailIngestRunsOnApi = () => EMAIL_INGEST_DISPATCH !== 'worker';
 let emailIngestActive = 0;
 const emailIngestWaitQueue = [];
 
@@ -107,6 +144,61 @@ const EMAIL_INGEST_TIMEOUT_MS = Math.max(
   60_000,
   Number(process.env.EMAIL_INGEST_TIMEOUT_MS || 8 * 60 * 1000) || 8 * 60 * 1000,
 );
+
+/** Same S3 object may notify many times while ingest holds DB connections — avoid pool acquire on dedupe. */
+const emailUploadInflightByKey = new Map();
+const emailUploadCreateByKey = new Map();
+
+const emailUploadDedupeKey = (bucket, fileKey) =>
+  `${String(bucket || '').trim()}::${String(fileKey || '').trim()}`;
+
+const plainEmailUploadRow = (record) =>
+  (record?.get ? record.get({ plain: true }) : record);
+
+const rememberEmailUploadInflight = (bucket, fileKey, record) => {
+  const body = plainEmailUploadRow(record);
+  if (!body?.fileKey) return body;
+  emailUploadInflightByKey.set(emailUploadDedupeKey(bucket, fileKey), body);
+  return body;
+};
+
+const clearEmailUploadInflight = (bucket, fileKey) => {
+  emailUploadInflightByKey.delete(emailUploadDedupeKey(bucket, fileKey));
+};
+
+const isConnectionAcquireTimeout = (error) =>
+  error?.name === 'SequelizeConnectionAcquireTimeoutError'
+  || /ConnectionAcquireTimeoutError/i.test(String(error?.name || ''))
+  || /Operation timeout/i.test(String(error?.message || ''));
+
+/** Stored in email_uploads.user_notes so the ingest worker skips poison rows. */
+const EMAIL_UPLOAD_INGEST_FAILED_PREFIX = 'INGEST_FAILED:';
+
+const isPermanentEmailIngestError = (error) => {
+  const code = String(error?.name || error?.Code || '').trim();
+  const msg = String(error?.message || '');
+  return (
+    code === 'NoSuchKey'
+    || code === 'NoSuchBucket'
+    || /NoSuchKey/i.test(msg)
+    || /NoSuchBucket/i.test(msg)
+  );
+};
+
+const markEmailUploadIngestFailed = async (record, reason) => {
+  if (!record?.id) return;
+  const note = `${EMAIL_UPLOAD_INGEST_FAILED_PREFIX} ${String(reason || 'unknown').slice(0, 480)}`;
+  try {
+    await record.update({ userNotes: note });
+    console.warn('[email] upload row marked ingest failed (worker will skip)', {
+      recordId: record.id,
+      fileKey: record.fileKey,
+      reason: String(reason || '').slice(0, 120),
+    });
+  } catch (err) {
+    console.warn('[email] mark ingest failed on upload row', record.id, err?.message || err);
+  }
+};
 
 const ORG_SYNC_AFTER_EMAIL_DELAY_MS = Math.max(
   0,
@@ -351,85 +443,15 @@ async function resolveEmailSenderSmtpContext(req) {
   }
 }
 
-/**
- * Job application inboxes use plus addressing: {prefix}+{postingCode}@{domain}
- * e.g. hiro+123@…, humand+5848@…, nir+5222@… — prefix is not always "hiro".
- */
-const postingCodeFromPlusAddressText = (text = '') => {
-  const m = String(text || '').match(/[a-zA-Z0-9][a-zA-Z0-9._-]*\+([a-zA-Z0-9_-]+)@/i);
-  return m ? m[1] : null;
-};
-
-const { POSTING_CODE_MATCH_MIN, isPostingCodeValidForMatch } = jobService;
-
-/** Fallback when plus-tagging missed: first standalone number >= POSTING_CODE_MATCH_MIN (100_000). */
-const extractPostingCodeFromLargeNumberInText = (text = '') => {
-  const src = String(text || '').trim();
-  if (!src) return null;
-  const re = /\b(\d+)\b/gu;
-  let m;
-  while ((m = re.exec(src)) !== null) {
-    const digits = m[1];
-    if (digits.length > 12) continue;
-    const n = Number(digits);
-    if (Number.isFinite(n) && n >= POSTING_CODE_MATCH_MIN) return digits;
-  }
-  return null;
-};
-
-const extractPostingCodeFromEmailAddress = (email = '') => {
-  const raw = String(email || '').trim();
-  if (!raw) return null;
-  const angle = raw.match(/<([^>]+@[^>]+)>/i);
-  const addr = angle ? angle[1].trim() : raw;
-  const fromPlus = postingCodeFromPlusAddressText(addr);
-  if (fromPlus) return fromPlus;
-  if (angle) {
-    const displayPart = raw
-      .replace(angle[0], '')
-      .trim()
-      .replace(/^["']|["']$/g, '')
-      .trim();
-    const fromNumber = extractPostingCodeFromLargeNumberInText(displayPart);
-    if (fromNumber) return fromNumber;
-  }
-  return extractPostingCodeFromLargeNumberInText(raw);
-};
-
-/** e.g. "Name - 603771.pdf" → 603771 */
-const extractPostingCodeFromFileKey = (fileKey = '') => {
-  const base = String(fileKey || '').split('/').pop() || '';
-  let name = base;
-  try {
-    name = decodeURIComponent(base);
-  } catch {
-    /* keep raw */
-  }
-  const dashMatch = name.match(/[-–—]\s*(\d{4,12})(?:\.[^.]+)?$/);
-  if (dashMatch) return dashMatch[1];
-  const tailMatch = name.match(/(\d{4,12})(?:\.[^.]+)?$/);
-  return tailMatch ? tailMatch[1] : null;
-};
-
-const extractPostingCodeFromSubject = (subject = '') => {
-  const text = String(subject || '').trim();
-  if (!text) return null;
-  const fromPlus = postingCodeFromPlusAddressText(text);
-  if (fromPlus) return fromPlus;
-  // AllJobs: … מס' 640478
-  const masMatch = text.match(/מס['\u05F3]?\s*(\d{4,12})/u);
-  if (masMatch && isPostingCodeValidForMatch(masMatch[1])) return masMatch[1];
-  const fromLargeNumber = extractPostingCodeFromLargeNumberInText(text);
-  if (fromLargeNumber) return fromLargeNumber;
-  // JobMaster: "Name - 538515"
-  const dashMatch = text.match(/[-–—]\s*(\d{4,12})\s*$/);
-  if (dashMatch && isPostingCodeValidForMatch(dashMatch[1])) return dashMatch[1];
-  const all = [...text.matchAll(/\b(\d{4,12})\b/g)].map((m) => m[1]);
-  for (let i = all.length - 1; i >= 0; i -= 1) {
-    if (isPostingCodeValidForMatch(all[i])) return all[i];
-  }
-  return null;
-};
+const { isPostingCodeValidForMatch } = jobService;
+const {
+  postingCodeFromPlusAddressText,
+  extractPostingCodeFromLargeNumberInText,
+  extractPostingCodeFromEmailAddress,
+  extractPostingCodeFromFileKey,
+  extractPostingCodeFromSubject,
+  collectPostingCodeCandidatesFromSubject,
+} = require('../utils/postingCodeFromEmail');
 
 const formatJobForEmailUpload = (job) => {
   if (!job) return null;
@@ -608,7 +630,7 @@ const reuploadResumeAttachmentsForCandidate = async (
       textChunks.push('');
       continue;
     }
-    uploaded.push({ ...put, fileLabel: filename });
+    uploaded.push({ ...put, fileLabel: filename, attachmentIndex: i });
     const piece =
       (await extractResumeTextFromUpload(fileBase64, mimeType)) ||
       (await fetchResumeText(put.publicUrl, candidateId)) ||
@@ -638,7 +660,7 @@ const ensureCandidateEmailFromCvText = async (candidateId, cvText, fallbackFromF
   if (existing) return { row, email: existing };
   const extracted = extractCvContactEmail(cvText, fallbackFromFirstCv);
   if (!extracted) return { row, email: null };
-  await candidateService.update(candidateId, { email: extracted });
+  await ingestCandidateUpdate(candidateId, { email: extracted });
   const updated = await candidateService.getById(candidateId, { forIngest: true });
   return { row: updated, email: extracted };
 };
@@ -688,6 +710,7 @@ const runEmailIngestFullEnrichment = async (candidateId, combinedText, attachmen
   const base = await candidateService.getById(candidateId, { forIngest: true });
   await enrichCandidateFromResumeText(base, combinedText || '', {
     pdfBuffer: isPdf ? buf : undefined,
+    fileBuffer: buf,
     fileName: attachment.filename || fileLabel || 'resume.pdf',
     mimeType,
     inbound,
@@ -695,56 +718,32 @@ const runEmailIngestFullEnrichment = async (candidateId, combinedText, attachmen
   return true;
 };
 
-/**
- * Filename often encodes the candidate when agency footers share one email across CVs:
- * `…-1-of-3-קורות חיים של מאיה גל ללא.docx`
- */
-const extractNameHintFromResumeFilename = (fileLabel) => {
-  if (!fileLabel) return null;
-  let s = String(fileLabel).split(/[/\\]/).pop() || '';
-  s = s.replace(/\.[^.]+$/i, '');
-  s = s.replace(/^\d+-\d+-of-\d+-/i, '').replace(/^\d+-/i, '');
-  const m1 = s.match(/של\s+(.+?)(?:\s+ללא)?$/u);
-  if (m1 && m1[1]) {
-    const name = m1[1].replace(/קורות\s*חיים/gi, '').trim();
-    if (name.length >= 2) return name;
-  }
-  const m2 = s.match(/קורות\s*חיים\s*[-–]\s*(.+)/u);
-  if (m2 && m2[1]) {
-    const v = m2[1].trim();
-    if (v.length >= 2) return v;
-  }
-  return null;
-};
-
-/** Best-effort person label for splitting multi-attachment mail (before email heuristics). */
-const extractNameHintFromCvBody = (text) => {
-  if (!text || typeof text !== 'string') return null;
-  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  const reName = /^(?:שם|שם מלא|name)\s*[:：]\s*(.+)/i;
-  for (const line of lines.slice(0, 55)) {
-    const mm = line.match(reName);
-    if (mm && mm[1]) {
-      const v = mm[1].replace(/\s+/g, ' ').trim();
-      if (v.length >= 2 && v.length < 120) return v;
-    }
-  }
-  const reCvDash = /^קורות\s*חיים\s*[-–]\s*(.+)$/i;
-  for (const line of lines.slice(0, 8)) {
-    const m = line.match(reCvDash);
-    if (m && m[1]) {
-      const v = m[1].trim();
-      if (v.length >= 2 && v.length < 120) return v;
-    }
-  }
-  if (lines[0]) {
-    const L = lines[0]
-      .replace(/^קו["׳״]?ח\s*[-–]?\s*/i, '')
-      .replace(/^קורות\s*חיים\s*[-–]?\s*/i, '')
-      .trim();
-    if (L.length >= 2 && L.length < 90 && !/@/.test(L) && !/^\d+$/.test(L) && !nameLooksLikeJobHeadline(L)) return L;
-  }
-  return null;
+const applyIngestPersonNameFallback = async (
+  candidateId,
+  { subject, combinedText, fileLabel, recruitmentSourceName },
+) => {
+  if (!candidateId) return;
+  const row = await candidateService.getById(candidateId, { forIngest: true });
+  const patch = resolvePostIngestPersonName({
+    fullName: row?.fullName,
+    firstName: row?.firstName,
+    lastName: row?.lastName,
+    cvText: combinedText,
+    subject,
+    fileLabel,
+    recruitmentSourceName,
+    nameHints: collectIngestNameHints(combinedText, fileLabel),
+  });
+  if (!patch || patch.source === 'existing') return;
+  await ingestCandidateUpdate(candidateId, {
+    fullName: patch.fullName,
+    ...(patch.firstName ? { firstName: patch.firstName } : { firstName: null }),
+    ...(patch.lastName ? { lastName: patch.lastName } : { lastName: null }),
+  });
+  console.log('[email] person name fallback applied', {
+    candidateId,
+    fullName: patch.fullName,
+  });
 };
 
 /**
@@ -796,6 +795,7 @@ async function resolveCandidateAuditDisplayName(candidateRef) {
 
 const processEmailUpload = async (record, req = null) => {
   await acquireEmailIngestSlot();
+  return runInEmailIngest(async () => {
   let slotHeld = true;
   const releaseSlotOnce = () => {
     if (!slotHeld) return;
@@ -823,25 +823,40 @@ const processEmailUpload = async (record, req = null) => {
     const id = String(candidateId);
     ingestPendingIds.add(id);
     try {
-      await candidateService.update(id, { ingestPending: true });
+      await runWithIngestDbYield(async () => {
+        await Candidate.update({ ingestPending: true }, { where: { id } });
+      });
     } catch (err) {
       console.warn('[email] mark ingestPending failed', id, err?.message || err);
     }
   };
   const releaseAllIngestPending = async () => {
-    for (const id of ingestPendingIds) {
+    const ids = [...ingestPendingIds];
+    for (const id of ids) {
       try {
-        await candidateService.update(id, { ingestPending: false });
+        await runWithIngestDbYield(async () => {
+          await Candidate.update({ ingestPending: false }, { where: { id } });
+        });
       } catch (err) {
         console.warn('[email] clear ingestPending failed', id, err?.message || err);
       }
     }
     ingestPendingIds.clear();
+    const uniqueIds = [...new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))];
+    for (const id of uniqueIds) {
+      try {
+        await candidateService.ensureStaffShadowAfterReady(id, { req, force: true });
+      } catch (err) {
+        console.warn('[email] shadow ensure/refresh failed', id, err?.message || err);
+      }
+    }
   };
+  let candidate = null;
   try {
     const rawEmail = await downloadEmailFromS3(record.bucket, record.fileKey);
     if (!rawEmail) {
       console.warn('[email] failed to download raw email', record.fileKey);
+      await markEmailUploadIngestFailed(record, 'empty S3 object');
       return;
     }
     console.log('[email] downloaded raw email', { recordId: record.id, size: rawEmail.length });
@@ -858,6 +873,7 @@ const processEmailUpload = async (record, req = null) => {
     const fromEmail = fromAddress?.address?.trim().toLowerCase();
     if (!fromEmail) {
       console.warn('[email] missing from address', record.fileKey);
+      await markEmailUploadIngestFailed(record, 'missing from address');
       return;
     }
 
@@ -870,6 +886,7 @@ const processEmailUpload = async (record, req = null) => {
         attachments: (parsed.attachments || []).map((att) => att.filename),
       });
       console.warn('[email] no resume attachment found', record.fileKey);
+      await markEmailUploadIngestFailed(record, 'no resume attachment');
       return;
     }
 
@@ -914,22 +931,34 @@ const processEmailUpload = async (record, req = null) => {
     if (postingCode && !isPostingCodeValidForMatch(postingCode)) {
       postingCode = null;
     }
+    const postingCodesToTry = [];
+    const pushCode = (code) => {
+      const raw = String(code || '').trim();
+      if (!raw || !isPostingCodeValidForMatch(raw) || postingCodesToTry.includes(raw)) return;
+      postingCodesToTry.push(raw);
+    };
+    pushCode(postingCode);
+    collectPostingCodeCandidatesFromSubject(subject || '').forEach(pushCode);
     let resolvedJob = null;
-    if (postingCode) {
-      resolvedJob = await jobService.findByPostingCode(postingCode);
-      const isUuid = (value) =>
-        typeof value === 'string' &&
-        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
-      if (resolvedJob && !isUuid(resolvedJob.id)) {
-        resolvedJob = null;
+    const isUuid = (value) =>
+      typeof value === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+    for (const code of postingCodesToTry) {
+      const found = await jobService.findByPostingCode(code);
+      if (found && isUuid(found.id)) {
+        resolvedJob = found;
+        postingCode = code;
+        break;
       }
-      if (!resolvedJob) {
-        console.warn('[email] posting code parsed but no matching job', {
-          recordId: record.id,
-          postingCode,
-          subject: String(subject || '').slice(0, 160),
-        });
-      }
+    }
+    if (!resolvedJob && postingCodesToTry.length) {
+      console.warn('[email] posting code parsed but no matching job', {
+        recordId: record.id,
+        postingCode: postingCodesToTry[0],
+        triedPostingCodes: postingCodesToTry,
+        subject: String(subject || '').slice(0, 160),
+      });
+      postingCode = postingCodesToTry[0];
     }
     const inboxToText = parsed.to?.text || '';
     let resolvedJobClientId = await clientUsageSettingService.resolveClientIdForWelcomeEmail({
@@ -951,7 +980,7 @@ const processEmailUpload = async (record, req = null) => {
     // so do not write it into candidates.email; CV parsing below owns that field.
     // For job-directed mail (posting code in To), inbound-only reuse is dangerous:
     // one recruiter can forward many applicants from the same From address.
-    let candidate = null;
+    candidate = null;
     let stampedCandidateId = null;
     let candidateCreatedViaEmailIngest = false;
     let reusedExistingCandidateByHash = false;
@@ -960,10 +989,12 @@ const processEmailUpload = async (record, req = null) => {
     // duplicate people dedupe after parse via mergeIfDuplicateIdentity (email/phone/tz).
     // Never reuse by envelope From — recruiter inboxes forward many applicants from one sender.
     if (!candidate) {
-      const inferredName =
-        stripCvDocumentTitleFromPersonName(fromAddress?.name?.trim())
-        || fromEmail.split('@')[0]
-        || 'מועמד חדש';
+      const inferredName = resolveIngestStubFullName({
+        fromDisplayName: fromAddress?.name?.trim(),
+        fromEmail,
+        subject,
+        recruitmentSourceName: matchedRecruitmentSource?.name || emailIngestSource,
+      });
       candidate = await candidateService.create(
         {
           /** Stable key when CV/AI later overwrites `email` to a different address. */
@@ -989,7 +1020,7 @@ const processEmailUpload = async (record, req = null) => {
             ? candidate.get('inboundFromEmail')
             : candidate.inboundFromEmail;
         if (!rawInbound) {
-          await candidateService.update(candidate.id, { inboundFromEmail: fromEmail });
+          await ingestCandidateUpdate(candidate.id, { inboundFromEmail: fromEmail });
         }
       } catch (e) {
         console.warn(
@@ -1002,6 +1033,11 @@ const processEmailUpload = async (record, req = null) => {
     const textChunks = [];
     /** @type {Array<{ publicUrl: string, key: string, size: number, fileLabel: string }>} */
     const uploaded = [];
+    /**
+     * Who each stored file belongs to. A multi-CV mail can hash-match a different
+     * existing candidate per attachment; the last match must not inherit the first file.
+     */
+    const attachmentOwners = [];
     const totalResumes = resumeAttachments.length;
     const attachmentHashes = [];
     const hashDedupedAttachmentIndices = new Set();
@@ -1034,7 +1070,7 @@ const processEmailUpload = async (record, req = null) => {
           }
           if (candidateCreatedViaEmailIngest) {
             try {
-              await candidateService.update(candidate.id, { isDeleted: true });
+              await ingestCandidateUpdate(candidate.id, { isDeleted: true });
             } catch (delErr) {
               console.warn('[email] failed to soft-delete stub after hash dedup', delErr?.message || delErr);
             }
@@ -1043,6 +1079,16 @@ const processEmailUpload = async (record, req = null) => {
           candidateCreatedViaEmailIngest = false;
           reusedExistingCandidateByHash = true;
           hashDedupedAttachmentIndices.add(i);
+          try {
+            stampCvMergedQuality(primary.id, {
+              source: emailIngestSource,
+              emailFileKey: record.fileKey,
+              mergeReason: 'resume_hash',
+              duplicateCandidateId: previousStubId,
+            });
+          } catch (stampErr) {
+            console.warn('[email] merged quality stamp after hash dedup', stampErr?.message || stampErr);
+          }
         }
       }
 
@@ -1060,6 +1106,16 @@ const processEmailUpload = async (record, req = null) => {
       const put = await putResumeFileInS3(candidate.id, fileBase64, filename, mimeType);
       if (!put) continue;
       uploaded.push({ ...put, fileLabel: filename });
+      attachmentOwners.push({
+        candidateId: String(candidate.id),
+        index: i,
+        publicUrl: put.publicUrl,
+        key: put.key,
+        size: put.size || 0,
+        fileLabel: filename,
+        resumeBuffer: resumeAttachment.content,
+        resumeMimeType: mimeType,
+      });
       console.log(
         '[email] resume uploaded to S3',
         `(${i + 1}/${totalResumes})`,
@@ -1104,18 +1160,18 @@ const processEmailUpload = async (record, req = null) => {
       if (cvEmail && cvEmail !== fromNorm) {
         const existingByCvEmail = await candidateService.findByEmail(cvEmail);
         if (existingByCvEmail && String(existingByCvEmail.id) !== String(candidate.id)) {
+          const routedDupId = candidateCreatedViaEmailIngest ? String(candidate.id) : null;
           if (candidateCreatedViaEmailIngest) {
-            const stubId = String(candidate.id);
             try {
               await recordCandidateIdentityMerge(null, {
                 primaryCandidateId: existingByCvEmail.id,
-                duplicateCandidateId: stubId,
+                duplicateCandidateId: routedDupId,
               });
             } catch (evtErr) {
               console.warn('[email] CV-email route journal failed', evtErr?.message || evtErr);
             }
             try {
-              await candidateService.update(candidate.id, { isDeleted: true });
+              await ingestCandidateUpdate(candidate.id, { isDeleted: true });
             } catch (delErr) {
               console.warn('[email] soft-delete stub after CV-email routing failed', delErr?.message || delErr);
             }
@@ -1127,6 +1183,16 @@ const processEmailUpload = async (record, req = null) => {
             cvEmail,
             recordId: record.id,
           });
+          try {
+            stampCvMergedQuality(candidate.id, {
+              source: emailIngestSource,
+              emailFileKey: record.fileKey,
+              mergeReason: 'cv_email',
+              duplicateCandidateId: routedDupId,
+            });
+          } catch (stampErr) {
+            console.warn('[email] merged quality stamp after CV-email route', stampErr?.message || stampErr);
+          }
         }
       }
     }
@@ -1158,6 +1224,22 @@ const processEmailUpload = async (record, req = null) => {
         uploaded.push(...reforked.uploaded);
         textChunks.length = 0;
         textChunks.push(...reforked.textChunks);
+        attachmentOwners.length = 0;
+        for (const u of reforked.uploaded) {
+          const i = u.attachmentIndex;
+          const src = resumeAttachments[i];
+          if (i == null || !src?.content) continue;
+          attachmentOwners.push({
+            candidateId: String(candidate.id),
+            index: i,
+            publicUrl: u.publicUrl,
+            key: u.key,
+            size: u.size || 0,
+            fileLabel: u.fileLabel,
+            resumeBuffer: src.content,
+            resumeMimeType: src.contentType || 'application/octet-stream',
+          });
+        }
         if (reforked.uploaded[0]) {
           firstResumeContentHash = hashResumeBuffer(resumeAttachments[0]?.content);
         }
@@ -1236,28 +1318,34 @@ const processEmailUpload = async (record, req = null) => {
 
     const latest = await candidateService.getById(candidate.id, { forIngest: true });
     const prevDocs = Array.isArray(latest?.documents) ? [...latest.documents] : [];
-    const extraDocEntries = uploaded
-      .slice(1)
-      .map((u, idx) => {
-        const j = idx + 1;
-        if (splitFileIndices.has(j)) return null;
-        return {
-          id: randomUUID(),
-          name: u.fileLabel || 'קורות חיים',
-          type: 'resume',
-          uploadDate: new Date().toISOString(),
-          uploadedBy: 'מייל',
-          notes: 'קליטה ממייל (מצורף מרובה)',
-          fileSize: u.size || 0,
-          key: u.key,
-          url: u.publicUrl,
-        };
-      })
-      .filter(Boolean);
-    await candidateService.update(candidate.id, {
-      resumeUrl: uploaded[0].publicUrl,
+    const primaryOwner =
+      attachmentOwners.find(
+        (o) => String(o.candidateId) === String(candidate.id) && !splitFileIndices.has(o.index),
+      ) || attachmentOwners.find((o) => String(o.candidateId) === String(candidate.id));
+    const primaryResumeUrl = primaryOwner?.publicUrl || uploaded[0].publicUrl;
+    const primaryResumeHash = primaryOwner ? attachmentHashes[primaryOwner.index] : firstResumeContentHash;
+    const extraDocEntries = attachmentOwners
+      .filter(
+        (o) =>
+          String(o.candidateId) === String(candidate.id) &&
+          !splitFileIndices.has(o.index) &&
+          o.publicUrl !== primaryResumeUrl,
+      )
+      .map((o) => ({
+        id: randomUUID(),
+        name: o.fileLabel || 'קורות חיים',
+        type: 'resume',
+        uploadDate: new Date().toISOString(),
+        uploadedBy: 'מייל',
+        notes: 'קליטה ממייל (מצורף מרובה)',
+        fileSize: o.size || 0,
+        key: o.key,
+        url: o.publicUrl,
+      }));
+    await ingestCandidateUpdate(candidate.id, {
+      resumeUrl: primaryResumeUrl,
       resumeUploadedAt: new Date(),
-      ...(firstResumeContentHash ? { resumeContentHash: firstResumeContentHash } : {}),
+      ...(primaryResumeHash ? { resumeContentHash: primaryResumeHash } : {}),
       documents: extraDocEntries.length ? [...extraDocEntries, ...prevDocs] : prevDocs,
     });
 
@@ -1353,10 +1441,12 @@ const processEmailUpload = async (record, req = null) => {
       && isPdfAttachmentBuffer(resumeAttachments[0].content, resumeAttachments[0].contentType),
     );
     const thinExtract = String(combinedText || '').trim().length < THIN_RESUME_TEXT_CHARS;
+    const unreliableExtract =
+      hasCvText && resumeExtractLooksUnreliable(String(combinedText || ''));
     if (
       !ranFullEnrichment
       && attachmentIsPdf
-      && thinExtract
+      && (thinExtract || unreliableExtract)
       && (candidateCreatedViaEmailIngest || profileIncompleteOnDb)
     ) {
       try {
@@ -1369,69 +1459,142 @@ const processEmailUpload = async (record, req = null) => {
           inboundContact,
         );
         if (ranFullEnrichment) {
-          console.log('[email] thin PDF text — sent the file to the model', {
+          console.log('[email] PDF sent to vision/text enrichment', {
             candidateId: candidate.id,
             textLen: String(combinedText || '').trim().length,
+            thinExtract,
+            unreliableExtract,
           });
         }
       } catch (thinErr) {
-        console.warn('[email] thin PDF enrichment failed', candidate.id, thinErr?.message || thinErr);
+        console.warn('[email] PDF enrichment failed', candidate.id, thinErr?.message || thinErr);
       }
     }
 
-    const forwardEligible =
-      (hasCvText || ranFullEnrichment) && uploaded[0] && resolvedJob?.id && candidate?.id;
-    if (forwardEligible) {
+    const forwardedCandidateIds = new Set();
+    const scheduleEmailCvForward = async ({
+      cand,
+      owner,
+      extractedText,
+      hasText,
+      didEnrich,
+    }) => {
+      if (!resolvedJob?.id || !cand?.id || !owner) return;
+      if (!owner.resumeBuffer && !owner.publicUrl) return;
       let forwardAssociation = null;
       try {
         forwardAssociation = await jobCandidateService.associateCandidateWithJob({
           jobId: resolvedJob.id,
-          candidateId: candidate.id,
+          candidateId: cand.id,
           source: 'email',
           manualOverride: false,
         });
       } catch (assocErr) {
         console.warn('[email] early job association for CV forward failed', assocErr?.message || assocErr);
       }
+      const linkedId = forwardAssociation?.record?.id ?? null;
+      if (linkedId) {
+        const onboardClientId = await resolveClientIdForJobLinkOnboarding(
+          resolvedJobClientId,
+          resolvedJob,
+        );
+        if (onboardClientId) {
+          await ensureJobLinkRecruitmentStageOne({
+            jobCandidateId: linkedId,
+            clientId: onboardClientId,
+            req,
+            source: 'email_ingest_cv_forward',
+          });
+        }
+      }
       console.log('[email] scheduling CV forward', {
-        candidateId: candidate.id,
+        candidateId: cand.id,
         jobId: resolvedJob.id,
         postingCode,
-        hasCvText,
-        ranFullEnrichment,
+        attachmentIndex: owner.index,
+        hasCvText: Boolean(hasText),
+        ranFullEnrichment: Boolean(didEnrich),
       });
       cvForwardService.scheduleCvForward({
-        candidateId: candidate.id,
+        candidateId: cand.id,
         jobId: resolvedJob.id,
         intakeChannel: 'email',
-        candidate,
+        candidate: cand,
         job: resolvedJob,
         jobCandidate: forwardAssociation?.record,
-        resumeBuffer: resumeAttachments[0]?.content,
-        resumeUrl: uploaded[0]?.publicUrl,
-        resumeFileName: uploaded[0]?.fileLabel || resumeAttachments[0]?.filename,
-        resumeMimeType: resumeAttachments[0]?.contentType,
-        extractedText: combinedText,
-        hasCvText,
-        ranFullEnrichment,
+        resumeBuffer: owner.resumeBuffer,
+        resumeUrl: owner.publicUrl,
+        resumeFileName: owner.fileLabel,
+        resumeMimeType: owner.resumeMimeType,
+        extractedText: extractedText || '',
+        hasCvText: Boolean(hasText),
+        ranFullEnrichment: Boolean(didEnrich),
         originalEmailSubject: subject,
         originalEmailText: parsed.text?.trim() || body,
         originalEmailHtml: parsed.html?.trim() || null,
         recruitmentSourceName: matchedRecruitmentSource?.name || emailIngestSource,
       });
+      forwardedCandidateIds.add(String(cand.id));
+    };
+
+    if (primaryOwner && candidate?.id) {
+      await scheduleEmailCvForward({
+        cand: candidate,
+        owner: primaryOwner,
+        extractedText: combinedText,
+        hasText: hasCvText,
+        didEnrich: ranFullEnrichment,
+      });
+    }
+
+    for (const owner of attachmentOwners) {
+      if (splitFileIndices.has(owner.index)) continue;
+      const ownerId = String(owner.candidateId);
+      if (forwardedCandidateIds.has(ownerId)) continue;
+      let other = null;
+      try {
+        other = await candidateService.getById(ownerId, { forIngest: true });
+      } catch (loadErr) {
+        console.warn('[email] hash-routed candidate load failed', ownerId, loadErr?.message || loadErr);
+      }
+      if (!other?.id) continue;
+      await scheduleEmailCvForward({
+        cand: other,
+        owner,
+        extractedText: textChunks[owner.index] || '',
+        hasText: String(textChunks[owner.index] || '').trim().length > 40,
+        didEnrich: false,
+      });
     }
 
     if (ranFullEnrichment && candidate?.id) {
       stampedCandidateId = String(candidate.id);
+      try {
+        await applyIngestPersonNameFallback(candidate.id, {
+          subject,
+          combinedText,
+          fileLabel: uploaded[0]?.fileLabel,
+          recruitmentSourceName: emailIngestSource,
+        });
+      } catch (nameFbErr) {
+        console.warn('[email] name fallback after full enrichment', candidate.id, nameFbErr?.message || nameFbErr);
+      }
     }
 
     if (shouldRunAiParse && !ranFullEnrichment) {
       await markIngestPending(candidate.id);
-      const parsedUpdates = buildParsedUpdates(candidate, combinedText || '');
+      const parsedUpdates = keepRecruiterProfileFields(
+        buildParsedUpdates(candidate, combinedText || ''),
+        candidate,
+      );
       if (Object.keys(parsedUpdates).length) {
-        await candidateService.update(candidate.id, parsedUpdates);
+        await ingestCandidateUpdate(candidate.id, parsedUpdates);
       }
-      const { aiFields, aiTags, parseMeta } = await deriveCandidateFieldsFromResume(combinedText);
+      const firstOwner = attachmentOwners[0];
+      const { aiFields, aiTags, parseMeta } = await deriveCandidateFieldsFromResume(combinedText, {
+        fileBuffer: firstOwner?.resumeBuffer,
+        mimeType: firstOwner?.resumeMimeType,
+      });
       let savedTagCount = 0;
       if (aiFields && Object.keys(aiFields).length) {
         const safeAi = applyInboundContact({ ...aiFields }, inboundContact);
@@ -1448,7 +1611,21 @@ const processEmailUpload = async (record, req = null) => {
           }
         }
         if (!safeAi.phone && inboundContact.phone) safeAi.phone = inboundContact.phone;
-        await candidateService.update(candidate.id, safeAi);
+        const profileSafe = keepRecruiterProfileFields(safeAi, candidate);
+        Object.assign(safeAi, profileSafe);
+        for (const key of ['gender', 'mobility', 'drivingLicenses', 'drivingLicense', 'birthYear', 'birthMonth', 'birthDay', 'age']) {
+          if (!Object.prototype.hasOwnProperty.call(profileSafe, key)) delete safeAi[key];
+        }
+        if (
+          safeAi.fullName != null
+          && String(safeAi.fullName).trim()
+          && !personNameLooksAcceptable(safeAi.fullName)
+        ) {
+          delete safeAi.fullName;
+          delete safeAi.firstName;
+          delete safeAi.lastName;
+        }
+        await ingestCandidateUpdate(candidate.id, safeAi);
 
         const auditNameAfterAi = await resolveCandidateAuditDisplayName(candidate);
 
@@ -1497,8 +1674,18 @@ const processEmailUpload = async (record, req = null) => {
         const roleEnsured = ensureRoleTagCoverage([], rowForLink?.workExperience || []);
         const linkedExp = attachTagIdsToWorkExperience(roleEnsured.workExperience, synced);
         if (workExperienceTagLinksChanged(rowForLink?.workExperience, linkedExp)) {
-          await candidateService.update(candidate.id, { workExperience: linkedExp });
+          await ingestCandidateUpdate(candidate.id, { workExperience: linkedExp });
         }
+      }
+      try {
+        await applyIngestPersonNameFallback(candidate.id, {
+          subject,
+          combinedText,
+          fileLabel: uploaded[0]?.fileLabel,
+          recruitmentSourceName: emailIngestSource,
+        });
+      } catch (nameFbErr) {
+        console.warn('[email] name fallback after AI parse', candidate.id, nameFbErr?.message || nameFbErr);
       }
       const stampedRow = await candidateService.getById(candidate.id, { forIngest: true });
       const parseQuality = assessCvParseQuality({
@@ -1538,7 +1725,7 @@ const processEmailUpload = async (record, req = null) => {
           : {}),
       });
     }
-    await candidateService.update(candidate.id, emailIngestSourcePatch);
+    await ingestCandidateUpdate(candidate.id, emailIngestSourcePatch);
 
     // Duplicate identity (email / phone / tz): merge this ingest row into the existing candidate.
     try {
@@ -1557,6 +1744,16 @@ const processEmailUpload = async (record, req = null) => {
         candidate = await candidateService.getById(identityResult.candidateId, { forIngest: true });
         candidateCreatedViaEmailIngest = false;
         await record.update({ candidateId: candidate.id });
+        try {
+          stampCvMergedQuality(identityResult.candidateId, {
+            source: emailIngestSource,
+            emailFileKey: record.fileKey,
+            mergeReason: 'identity',
+            duplicateCandidateId: identityResult.removedDuplicateId || null,
+          });
+        } catch (stampErr) {
+          console.warn('[email] merged quality stamp after identity merge', stampErr?.message || stampErr);
+        }
       }
       await candidateService.repairPartialIdentityLink(candidate.id);
     } catch (identityErr) {
@@ -1579,6 +1776,11 @@ const processEmailUpload = async (record, req = null) => {
       await candidateCompletenessService.refreshCandidateDataStatusForClient(candidate.id, resolvedJobClientId);
     } catch (cmpErr) {
       console.warn('[email] completeness after ingest', cmpErr?.message || cmpErr);
+    }
+    try {
+      await candidateService.ensureStaffShadowAfterReady(candidate.id, { req, force: true });
+    } catch (err) {
+      console.warn('[email] shadow after enrichment failed', candidate.id, err?.message || err);
     }
 
     if (shouldRunAiParse && !ranFullEnrichment) {
@@ -1712,7 +1914,7 @@ const processEmailUpload = async (record, req = null) => {
       welcomeOnce.add(k);
       if (!candidateRowEmail(welcomeCandidate)) {
         try {
-          await candidateService.update(cand.id, { email: k });
+          await ingestCandidateUpdate(cand.id, { email: k });
           const refreshed = await candidateService.getById(cand.id, { forIngest: true });
           if (refreshed) welcomeCandidate = refreshed;
         } catch (persistErr) {
@@ -1743,10 +1945,18 @@ const processEmailUpload = async (record, req = null) => {
       const norm = contactEmail ? String(contactEmail).trim().toLowerCase() : null;
       if (!identitySplitIndices.has(j) && norm === fromEmail) continue;
 
-      const nameGuess =
+      let nameGuess =
         extractNameHintFromCvBody(textChunks[j] || '') ||
         extractNameHintFromResumeFilename(up.fileLabel || '') ||
         inferNameFromCvTextForEmail(textChunks[j] || '', contactEmail);
+      if (!personNameLooksAcceptable(nameGuess)) {
+        nameGuess = resolveIngestStubFullName({
+          fromDisplayName: fromAddress?.name?.trim(),
+          fromEmail,
+          subject,
+          recruitmentSourceName: matchedRecruitmentSource?.name || emailIngestSource,
+        });
+      }
 
       let splitCand;
       let splitCandIsNew = false;
@@ -1764,6 +1974,15 @@ const processEmailUpload = async (record, req = null) => {
             candidateId: splitCand.id,
             hashPrefix: splitHash.slice(0, 12),
           });
+          try {
+            stampCvMergedQuality(splitCand.id, {
+              source: emailIngestSource,
+              emailFileKey: record.fileKey,
+              mergeReason: 'resume_hash',
+            });
+          } catch (stampErr) {
+            console.warn('[email] merged quality stamp after split hash reuse', stampErr?.message || stampErr);
+          }
         }
       }
       if (!splitCand) {
@@ -1797,10 +2016,24 @@ const processEmailUpload = async (record, req = null) => {
               linked: Boolean(splitCand._identityLinked),
             });
             splitCandIsNew = false;
+            if (splitCand._identityReused) {
+              try {
+                stampCvMergedQuality(splitCand.id, {
+                  source: emailIngestSource,
+                  emailFileKey: record.fileKey,
+                  mergeReason: 'identity',
+                });
+              } catch (stampErr) {
+                console.warn(
+                  '[email] merged quality stamp after split identity reuse',
+                  stampErr?.message || stampErr,
+                );
+              }
+            }
           }
         }
       }
-      await candidateService.update(splitCand.id, {
+      await ingestCandidateUpdate(splitCand.id, {
         resumeUrl: up.publicUrl,
         resumeUploadedAt: new Date(),
         ...(splitHash ? { resumeContentHash: splitHash } : {}),
@@ -1818,7 +2051,11 @@ const processEmailUpload = async (record, req = null) => {
       const tj = textChunks[j] || '';
       let splitStampedId = null;
       if (!splitHashReused) {
-        const { aiFields: splitAi, aiTags: splitTags, parseMeta: splitMeta } = await deriveCandidateFieldsFromResume(tj);
+        const splitAtt = resumeAttachments[j];
+        const { aiFields: splitAi, aiTags: splitTags, parseMeta: splitMeta } = await deriveCandidateFieldsFromResume(tj, {
+          fileBuffer: splitAtt?.content,
+          mimeType: splitAtt?.contentType,
+        });
         if (splitAi && Object.keys(splitAi).length) {
           const safeS = applyInboundContact({ ...splitAi }, inboundContact);
           if (safeS.email && String(safeS.email).includes('@')) {
@@ -1831,7 +2068,12 @@ const processEmailUpload = async (record, req = null) => {
             delete safeS.email;
           }
           if (!safeS.phone && inboundContact.phone) safeS.phone = inboundContact.phone;
-          await candidateService.update(splitCand.id, safeS);
+          const profileSafe = keepRecruiterProfileFields(safeS, splitCand);
+          Object.assign(safeS, profileSafe);
+          for (const key of ['gender', 'mobility', 'drivingLicenses', 'drivingLicense', 'birthYear', 'birthMonth', 'birthDay', 'age']) {
+            if (!Object.prototype.hasOwnProperty.call(profileSafe, key)) delete safeS[key];
+          }
+          await ingestCandidateUpdate(splitCand.id, safeS);
         }
         let splitTagCount = 0;
         if (splitTags && splitTags.length) {
@@ -1872,6 +2114,16 @@ const processEmailUpload = async (record, req = null) => {
         if (splitIdentity.merged) {
           splitCand = await candidateService.getById(splitIdentity.candidateId, { forIngest: true });
           splitCandIsNew = false;
+          try {
+            stampCvMergedQuality(splitIdentity.candidateId, {
+              source: emailIngestSource,
+              emailFileKey: record.fileKey,
+              mergeReason: 'identity',
+              duplicateCandidateId: splitIdentity.removedDuplicateId || null,
+            });
+          } catch (stampErr) {
+            console.warn('[email] merged quality stamp after split identity merge', stampErr?.message || stampErr);
+          }
         }
       } catch (splitIdentityErr) {
         console.warn('[email] split identity merge failed', splitIdentityErr?.message || splitIdentityErr);
@@ -1893,6 +2145,17 @@ const processEmailUpload = async (record, req = null) => {
         source: 'email',
         manualOverride: false,
       });
+      const splitOwner = attachmentOwners.find((o) => o.index === j);
+      const splitText = textChunks[j] || '';
+      if (splitOwner && !forwardedCandidateIds.has(String(splitCand.id))) {
+        await scheduleEmailCvForward({
+          cand: splitCand,
+          owner: splitOwner,
+          extractedText: splitText,
+          hasText: String(splitText).trim().length > 40,
+          didEnrich: false,
+        });
+      }
       if (splitCand._pendingCvAudit) {
         const { sid, sname } = splitCand._pendingCvAudit;
         await systemEventEmitter.emit(null, {
@@ -1985,11 +2248,37 @@ const processEmailUpload = async (record, req = null) => {
       recordId: record?.id,
       fileKey: record?.fileKey,
     });
+    if (candidate?.id) {
+      try {
+        const linked = record?.candidateId ? String(record.candidateId) : '';
+        if (!linked) {
+          await record.update({ candidateId: candidate.id });
+          console.warn('[email] linked upload row after partial ingest failure', {
+            recordId: record.id,
+            candidateId: candidate.id,
+          });
+        }
+      } catch (linkErr) {
+        console.warn('[email] could not link upload after ingest error', record?.id, linkErr?.message || linkErr);
+      }
+    }
+    if (isPermanentEmailIngestError(error)) {
+      await markEmailUploadIngestFailed(record, error.message || error.name || error.Code);
+    }
   } finally {
     clearTimeout(slotTimer);
     releaseSlotOnce();
+    const finalizeIds = [...ingestPendingIds];
+    for (const fid of finalizeIds) {
+      try {
+        await candidateService.finalizeIngestCandidateLocation(fid);
+      } catch (err) {
+        console.warn('[email] finalize city after ingest failed', fid, err?.message || err);
+      }
+    }
     await releaseAllIngestPending();
   }
+  });
 };
 
 /** Duplicate ingest notifies insert a later row with the same S3 key and no parsed headers. */
@@ -2448,7 +2737,7 @@ const NOTIFICATION_MESSAGE_LIST_ORDER = [
 
 async function findNotificationMessageList(options) {
   return sequelize.transaction(async (t) => {
-    await sequelize.query('SET LOCAL statement_timeout = 60000', { transaction: t });
+    await sequelize.query("SET LOCAL statement_timeout = '15000'", { transaction: t });
     return NotificationMessage.findAll({ ...options, transaction: t });
   });
 }
@@ -2639,11 +2928,12 @@ const getNotificationMessages = async (req, res) => {
 
     const scopeContactId = String(req.query?.contactId || '').trim();
     const statusNotDeleted = { status: { [Op.ne]: 'deleted' } };
+    const listLimit = summary ? 200 : 500;
     const listQueryBase = {
       attributes: NOTIFICATION_MESSAGE_LIST_ATTRIBUTES,
       include: NOTIFICATION_MESSAGE_LIST_INCLUDE,
       order: NOTIFICATION_MESSAGE_LIST_ORDER,
-      limit: 500,
+      limit: listLimit,
     };
 
     const contactScopeLiteral = scopeContactId
@@ -2652,29 +2942,28 @@ const getNotificationMessages = async (req, res) => {
         )
       : null;
 
-    const queries = [];
-
+    const visibilityOr = [];
     if (ctx.userId != null) {
-      const senderWhere = contactScopeLiteral
-        ? { [Op.and]: [statusNotDeleted, { senderUserId: ctx.userId }, contactScopeLiteral] }
-        : { [Op.and]: [statusNotDeleted, { senderUserId: ctx.userId }] };
-      queries.push(findNotificationMessageList({ ...listQueryBase, where: senderWhere }));
-
-      const assigneeWhere = contactScopeLiteral
-        ? { [Op.and]: [statusNotDeleted, { assigneeId: ctx.userId }, contactScopeLiteral] }
-        : { [Op.and]: [statusNotDeleted, { assigneeId: ctx.userId }] };
-      queries.push(findNotificationMessageList({ ...listQueryBase, where: assigneeWhere }));
+      visibilityOr.push({ senderUserId: ctx.userId });
+      visibilityOr.push({ assigneeId: ctx.userId });
+    }
+    const includeEmailRecipientScan =
+      process.env.NOTIFICATIONS_INCLUDE_EMAIL_RECIPIENT_SCAN === '1'
+      || ctx.userId == null;
+    if (includeEmailRecipientScan && recipientOr.length) {
+      visibilityOr.push({ [Op.or]: recipientOr });
+    }
+    if (!visibilityOr.length) {
+      res.set('Cache-Control', 'private, no-store');
+      return res.json([]);
     }
 
-    if (recipientOr.length) {
-      const recipientWhere = contactScopeLiteral
-        ? { [Op.and]: [statusNotDeleted, { [Op.or]: recipientOr }, contactScopeLiteral] }
-        : { [Op.and]: [statusNotDeleted, { [Op.or]: recipientOr }] };
-      queries.push(findNotificationMessageList({ ...listQueryBase, where: recipientWhere }));
-    }
+    const whereParts = [statusNotDeleted, { [Op.or]: visibilityOr }];
+    if (contactScopeLiteral) whereParts.push(contactScopeLiteral);
+    const where = { [Op.and]: whereParts };
 
-    const rowSets = await Promise.all(queries);
-    const records = mergeNotificationRowsDeduped(rowSets, 500);
+    const rows = await findNotificationMessageList({ ...listQueryBase, where });
+    const records = mergeNotificationRowsDeduped([rows], listLimit);
 
     let payload = records.map((r) => formatNotificationMessageRow(r));
     payload = payload.map((row) =>
@@ -2686,7 +2975,9 @@ const getNotificationMessages = async (req, res) => {
     return res.json(payload);
   } catch (error) {
     console.error('[email][getNotificationMessages]', error);
-    return res.status(500).json({ message: 'Failed to load notification messages' });
+    const { httpStatusForDbError } = require('../utils/dbHttpError');
+    const status = httpStatusForDbError(error, { defaultStatus: 500 });
+    return res.status(status).json({ message: 'Failed to load notification messages' });
   }
 };
 
@@ -3077,30 +3368,96 @@ const upload = async (req, res) => {
     return res.status(400).json({ message: 'jobId, fileKey, and bucket are required' });
   }
 
-  try {
-    const priorComplete = await EmailUpload.findOne({
-      where: {
-        bucket,
-        fileKey,
-        candidateId: { [Op.not]: null },
-      },
-      order: [['id', 'ASC']],
+  const dedupeKey = emailUploadDedupeKey(bucket, fileKey);
+  const inflightBody = emailUploadInflightByKey.get(dedupeKey);
+  if (inflightBody) {
+    console.log('[email] upload deduped — in-flight (memory)', {
+      priorRecordId: inflightBody.id,
+      fileKey,
     });
-    if (priorComplete?.candidateId) {
+    return res.status(200).json(inflightBody);
+  }
+
+  try {
+    let record;
+    let created = false;
+    let pendingCreate = emailUploadCreateByKey.get(dedupeKey);
+    if (!pendingCreate) {
+      pendingCreate = (async () => {
+        const earliest = await EmailUpload.findOne({
+          where: { bucket, fileKey },
+          order: [['id', 'ASC']],
+        });
+        if (earliest) return { record: earliest, created: false };
+        const row = await emailService.create({ jobId, fileKey, bucket });
+        return { record: row, created: true };
+      })();
+      emailUploadCreateByKey.set(dedupeKey, pendingCreate);
+    }
+    try {
+      ({ record, created } = await pendingCreate);
+    } finally {
+      if (emailUploadCreateByKey.get(dedupeKey) === pendingCreate) {
+        emailUploadCreateByKey.delete(dedupeKey);
+      }
+    }
+
+    const plain = rememberEmailUploadInflight(bucket, fileKey, record);
+
+    if (record?.candidateId) {
       console.log('[email] upload notify deduped — fileKey already ingested', {
-        priorRecordId: priorComplete.id,
-        candidateId: priorComplete.candidateId,
+        priorRecordId: record.id,
+        candidateId: record.candidateId,
         fileKey,
       });
-      return res.status(200).json(priorComplete);
+      clearEmailUploadInflight(bucket, fileKey);
+      return res.status(200).json(plain);
     }
-    const record = await emailService.create({ jobId, fileKey, bucket });
-    // Await: 201 only after all attachments are stored and candidate is updated, so clients
-    // that load the profile right away see every file (void + early 201 caused a race).
-    await processEmailUpload(record, req);
-    return res.status(201).json(record);
+
+    if (!created) {
+      console.log('[email] upload deduped — same fileKey already queued or processing', {
+        priorRecordId: record.id,
+        fileKey,
+        jobId: record.jobId,
+      });
+      if (!emailIngestRunsOnApi()) {
+        clearEmailUploadInflight(bucket, fileKey);
+      }
+      return res.status(200).json({
+        ...plain,
+        ingestStatus: record?.candidateId ? 'done' : 'queued',
+      });
+    }
+
+    if (!emailIngestRunsOnApi()) {
+      console.log('[email] upload queued for ingest worker', {
+        recordId: record.id,
+        fileKey,
+      });
+      clearEmailUploadInflight(bucket, fileKey);
+      return res.status(202).json({ ...plain, ingestStatus: 'queued' });
+    }
+
+    void processEmailUpload(record, req)
+      .catch((err) => {
+        console.error('[email][processEmailUpload] background', {
+          message: err?.message || err,
+          recordId: record?.id,
+          fileKey,
+        });
+      })
+      .finally(() => {
+        clearEmailUploadInflight(bucket, fileKey);
+      });
+
+    return res.status(202).json({ ...plain, ingestStatus: 'processing' });
   } catch (error) {
+    clearEmailUploadInflight(bucket, fileKey);
     console.error('Failed to save email upload', error);
+    if (isConnectionAcquireTimeout(error)) {
+      res.set('Retry-After', '30');
+      return res.status(503).json({ message: 'Database busy; retry shortly' });
+    }
     return res.status(500).json({ message: 'Could not persist upload' });
   }
 };
@@ -3911,14 +4268,14 @@ const defaultReferralWorkflowStatusForRecruiterClient = async (senderUserId, jwt
   return name || fallback;
 };
 
-/** POST body: { candidateId, attachOriginalCv?, attachSystemCvPdf?, attachLastReferral?, minimalCvReferralBody?, systemCvPdfBase64?, sends: [...] } */
+/** POST body: { candidateId, cvProfileKind?, attachOriginalCv?, attachSystemCvPdf?, attachLastReferral?, minimalCvReferralBody?, systemCvPdfBase64?, sends: [...] } */
 const sendScreeningCv = async (req, res) => {
   try {
     const candidateIdRaw = req.body?.candidateId;
     if (candidateIdRaw == null || String(candidateIdRaw).trim() === '') {
       return res.status(400).json({ message: 'candidateId is required' });
     }
-    const candidateId = String(candidateIdRaw).trim();
+    const requestedCandidateId = String(candidateIdRaw).trim();
     const { sends } = req.body || {};
     if (!Array.isArray(sends) || sends.length === 0) {
       return res.status(400).json({ message: 'sends must be a non-empty array' });
@@ -3931,12 +4288,27 @@ const sendScreeningCv = async (req, res) => {
           ? true
           : Boolean(req.body.attachLastReferral);
 
+    const resolvedCv = await candidateService.resolveReferralCvSource(
+      requestedCandidateId,
+      req.body?.cvProfileKind,
+    );
+    const candidateId = resolvedCv.primaryId || requestedCandidateId;
+    const cvSource = resolvedCv.source || null;
     const candidate = await Candidate.findByPk(candidateId, {
       attributes: ['id', 'fullName', 'resumeUrl', 'phone', 'email', 'address', 'location'],
     });
     if (!candidate) {
       return res.status(404).json({ message: 'Candidate not found' });
     }
+    const cvCandidate = {
+      id: cvSource?.id || candidate.id,
+      fullName: cvSource?.fullName || candidate.fullName,
+      resumeUrl: cvSource?.resumeUrl || candidate.resumeUrl,
+      phone: cvSource?.phone || candidate.phone,
+      email: cvSource?.email || candidate.email,
+      address: cvSource?.address || candidate.address,
+      location: cvSource?.location || candidate.location,
+    };
 
     const attachOriginalCv =
       req.body?.attachOriginalCv === undefined || req.body?.attachOriginalCv === null
@@ -3950,7 +4322,7 @@ const sendScreeningCv = async (req, res) => {
       return res.status(400).json({ message: 'נדרש לבחור לפחות סוג קובץ אחד לצירוף' });
     }
 
-    const safeFileStem = String(candidate.fullName || 'candidate')
+    const safeFileStem = String(cvCandidate.fullName || candidate.fullName || 'candidate')
       .replace(/[^\w\u0590-\u05FF\- ]+/g, '')
       .trim()
       .replace(/\s+/g, '-')
@@ -3959,11 +4331,11 @@ const sendScreeningCv = async (req, res) => {
     const attachments = [];
 
     if (attachOriginalCv) {
-      if (!candidate.resumeUrl) {
+      if (!cvCandidate.resumeUrl) {
         return res.status(400).json({ message: 'למועמד אין קובץ קורות חיים מצורף' });
       }
 
-      const bin = await fetchResumeBinaryForMail(candidate.resumeUrl, candidate.id);
+      const bin = await fetchResumeBinaryForMail(cvCandidate.resumeUrl, cvCandidate.id);
       if (!bin || !bin.buffer?.length) {
         return res.status(400).json({ message: 'לא ניתן להוריד את קובץ קורות החיים לצורף למייל' });
       }
@@ -4008,7 +4380,7 @@ const sendScreeningCv = async (req, res) => {
     } = await resolveEmailSenderSmtpContext(req);
 
     const results = [];
-    const candLabel = candidate.fullName || 'המועמד';
+    const candLabel = cvCandidate.fullName || candidate.fullName || 'המועמד';
     const senderUserId = req?.user?.sub || req?.user?.id || null;
     const coordinatorSignOff =
       [req?.user?.fullName, req?.user?.name, req?.user?.email]
@@ -4059,7 +4431,7 @@ const sendScreeningCv = async (req, res) => {
       const toEmailCombined = contactRows.map((r) => r.email).join(', ');
 
       const { textBlock: candContactText, htmlBlock: candContactHtml } =
-        buildCandidateContactSectionForScreeningMail(candidate);
+        buildCandidateContactSectionForScreeningMail(cvCandidate);
 
       const additionalNotesPlain =
         typeof block.additionalNotes === 'string' ? block.additionalNotes : '';
@@ -4884,7 +5256,15 @@ const getScreeningCvReferralById = async (req, res) => {
   }
 };
 
+const isEmailUploadIngestTerminal = (record) => {
+  const notes = String(record?.userNotes ?? record?.user_notes ?? '').trim();
+  return notes.startsWith(EMAIL_UPLOAD_INGEST_FAILED_PREFIX);
+};
+
 module.exports = {
+  processEmailUpload,
+  markEmailUploadIngestFailed,
+  isEmailUploadIngestTerminal,
   upload,
   getByCandidate,
   getByCandidates,
@@ -5098,8 +5478,6 @@ const extractStructuredFields = (text) => {
           text: snippet,
         });
       });
-    } else {
-      segments.push({ sy: '2000', ey: '2000', text: block.trim() });
     }
 
     segments.forEach((seg) => {
@@ -5110,8 +5488,8 @@ const extractStructuredFields = (text) => {
         title: seg.text.split('.')[0] || `ניסיון ${sy}${ey ? `-${ey}` : ''}`,
         company: '',
         companyField: '',
-        startDate: `${sy}-01`,
-        endDate: /present|כיום/i.test(ey) ? 'Present' : ey === sy ? `${ey}-12` : `${ey}-12`,
+        startDate: sy,
+        endDate: /present|כיום/i.test(ey) ? 'Present' : ey,
         description: seg.text,
       });
     });
@@ -5130,7 +5508,8 @@ const extractStructuredFields = (text) => {
         ...yearLines.map((l, idx) => {
           const m = l.match(/(20\d{2}|19\d{2}).{0,10}(20\d{2}|19\d{2}|כיום|present)/i);
           const single = l.match(/(20\d{2}|19\d{2})/);
-          const sy = m ? m[1] : single ? single[1] : '2000';
+          const sy = m ? m[1] : single ? single[1] : '';
+          if (!sy) return null;
           const eyRaw = m ? m[2] : sy;
           const ey = /כיום|present/i.test(eyRaw) ? 'Present' : eyRaw;
           return {
@@ -5138,11 +5517,11 @@ const extractStructuredFields = (text) => {
             title: l,
             company: '',
             companyField: '',
-            startDate: `${sy}-01`,
-            endDate: ey === sy ? `${ey}-12` : ey === 'Present' ? 'Present' : `${ey}-12`,
+            startDate: sy,
+            endDate: ey === 'Present' ? 'Present' : ey,
             description: l,
           };
-        }),
+        }).filter(Boolean),
       );
     }
   }
@@ -5156,18 +5535,6 @@ const extractStructuredFields = (text) => {
     if (eduLines.length) {
       eduLines.forEach((l, idx) => educationCards.push({ id: idx + 1, value: l }));
     }
-  }
-  if (experienceCards.length === 0 && text && text.trim().length > 30) {
-    const snippet = text.trim().slice(0, 220);
-    experienceCards.push({
-      id: 1,
-      title: snippet.split('.')[0] || 'ניסיון תעסוקתי',
-      company: '',
-      companyField: '',
-      startDate: '2000-01',
-      endDate: '2000-12',
-      description: snippet,
-    });
   }
   if (educationCards.length === 0) {
     const eduMatch = text.match(/.{0,50}(אוניברסיט|מכללה|college|university|degree|b\.?a|bcom|bsc|msc|m\.a|phd|mba|תואר|לימוד|studies|certif|certificate|תעודה|diploma).{0,80}/i);
@@ -5249,9 +5616,12 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
     "title": string|null,
     "company": string|null,
     "companyField": string|null,
-    "startDate": string|null,
-    "endDate": string|null,
-    "description": string|null
+    "description": string,
+    "isCurrent": boolean,
+    "startYear": number|null,
+    "startMonth": number|null,
+    "endYear": number|null,
+    "endMonth": number|null
   }],
   "education": [{ "value": string|null }]
 }
@@ -5264,7 +5634,7 @@ Rules:
 - If the CV contains any skills/tools/technologies/traits, you MUST extract them into the relevant list (do not leave both lists empty).
 - skills.soft = interpersonal/behavioral skills (e.g., תקשורת בין-אישית, עבודת צוות, מנהיגות, שירותיות, סדר וארגון, פתרון בעיות). Max 30.
 - skills.technical = tools/technologies/platforms/methods/certifications (e.g., Excel, SQL, Python, React, Jira, AWS, Docker). Max 30.
-- Prefer realistic date formats; if only year exists use YYYY-01 / YYYY-12.
+- workExperience dates are integers (startYear, startMonth, endYear, endMonth) plus isCurrent. Months are null when the CV does not write a month. Never a date string. description is required.
 - Always include top-level "availability" and "preferredWorkingHours" (null when not stated); see the appended schedule rules at the end of this prompt.
 
 Output constraints:
@@ -5294,52 +5664,155 @@ const coercePreferredWorkingHoursFromAi = (raw) => {
   return s.slice(0, 255);
 };
 
-const parseResumeWithAi = async ({ resumeText, model = null }) => {
+const pickProfessionalSummaryForIngest = (aiSummary, fallbackSummary) => {
+  const ai = String(aiSummary || '').trim();
+  if (ai && ai.length <= 900 && !/@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(ai)) return ai;
+  if (ai && ai.length > 900) return ai.slice(0, 500).trim();
+  const fb = String(fallbackSummary || '').trim();
+  if (fb.length > 400) return null;
+  return fb || null;
+};
+
+const parseResumeWithAi = async ({
+  resumeText,
+  model = null,
+  fileBuffer = null,
+  mimeType = null,
+} = {}) => {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) return null;
-  if (!resumeText || !String(resumeText).trim()) return null;
+  let nativeParts = isCvParseSendFileToGeminiEnabled()
+    ? buildGeminiCvFileUserParts({
+      buffer: fileBuffer,
+      mimeType,
+      instruction: buildCvFileParseInstruction(),
+    })
+    : null;
+  const cvText = String(resumeText || '').slice(0, 50000);
+  if (!nativeParts && !cvText.trim()) return null;
   const promptRecord = await getResumePromptTemplate({ appendices: 'email' });
   const chosenModel = resolveGeminiModelName(model || promptRecord?.model, null);
   const systemPrompt = (promptRecord?.template?.replace('{candidate_tag}', getCandidateTagsSchemaText())) || buildAiResumePrompt(getCandidateTagsSchemaText());
-  const cvText = resumeText.slice(0, 50000);
-  console.log('[email] cv parse model', { model: chosenModel || 'gemini-3-flash-preview' });
-  const raw = await sendChat({
-    apiKey,
-    systemPrompt,
-    history: [{ role: 'user', text: cvText }],
-    message: resumeText,
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 16384,
-      responseMimeType: 'application/json',
-      responseSchema: buildResumeResponseSchema(),
-    },
-    promptId: CV_PARSING_PROMPT_ID,
-    model: chosenModel,
-    llmInputJson: {
-      cvTextLength: cvText.length,
-      cvTextPreview: cvText.slice(0, 4000),
-      model: chosenModel || 'gemini-3-flash-preview',
-    },
+  const generationConfig = {
+    temperature: 1,
+    maxOutputTokens: 16384,
+    responseMimeType: 'application/json',
+    responseSchema: buildResumeResponseSchema(),
+  };
+  const nativeFile = nativeParts ? resolveGeminiCvInlineFile(fileBuffer, mimeType) : null;
+  console.log('[email] cv parse model', {
+    model: chosenModel || 'gemini-3-flash-preview',
+    sendNativeFile: Boolean(nativeParts),
+    nativeMime: nativeFile?.mimeType || null,
+    nativeBytes: fileBuffer?.length || 0,
   });
-  const parsed = tryParseJson(raw);
+
+  const sendParse = async ({ pass, missingKeys }) => {
+    const useFile = Boolean(nativeParts);
+    const userParts = useFile
+      ? buildGeminiCvFileUserParts({
+        buffer: fileBuffer,
+        mimeType,
+        instruction: pass === 'repair'
+          ? buildCvFileParseInstruction({ repairMissing: missingKeys || [] })
+          : buildCvFileParseInstruction(),
+      })
+      : undefined;
+    const message = useFile
+      ? ''
+      : pass === 'repair'
+        ? (
+          `Your previous JSON was missing, truncated, or invalid (missing keys: ${JSON.stringify(missingKeys)}). ` +
+          'Return ONE complete JSON object matching the schema. workExperience dates are integers: startYear, startMonth, endYear, endMonth, plus isCurrent. Months are null when not written in the CV. Never a date string. ' +
+          'Include EVERY job row from the CV.\n\n' +
+          `CV TEXT:\n${cvText}`
+        )
+        : `CV TEXT (verbatim):\n\n${cvText}`;
+    return sendChat({
+      apiKey,
+      systemPrompt,
+      history: useFile ? [] : [{ role: 'user', text: cvText }],
+      message,
+      userParts,
+      generationConfig,
+      promptId: CV_PARSING_PROMPT_ID,
+      model: chosenModel,
+      llmInputJson: {
+        pass: pass || 'primary',
+        missingKeys: missingKeys || undefined,
+        cvTextLength: cvText.length,
+        cvTextPreview: useFile ? undefined : cvText.slice(0, 4000),
+        model: chosenModel || 'gemini-3-flash-preview',
+        sendNativeFile: useFile,
+        nativeMime: nativeFile?.mimeType || null,
+      },
+    });
+  };
+
+  let raw;
+  try {
+    raw = await sendParse({ pass: 'primary' });
+  } catch (err) {
+    if (nativeParts && cvText.trim()) {
+      console.warn('[email] native file send failed, falling back to text', err?.message || err);
+      nativeParts = null;
+      raw = await sendParse({ pass: 'primary' });
+    } else {
+      throw err;
+    }
+  }
+  const rawStr = String(raw || '');
+  let parsed = tryParseJson(rawStr);
+  let missing = findMissingResumeKeys(parsed);
+  const looksTruncated =
+    rawStr.length > 0 && !rawStr.trimEnd().endsWith('}') && !rawStr.trimEnd().endsWith(']');
+  if ((!parsed || missing.length || looksTruncated) && (nativeParts || cvText.trim())) {
+    try {
+      console.warn('[email] cv parse repair pass', { missing, looksTruncated, rawLen: rawStr.length, sendNativeFile: Boolean(nativeParts) });
+      const repairRaw = await sendParse({ pass: 'repair', missingKeys: missing });
+      const repaired = tryParseJson(repairRaw);
+      if (repaired && typeof repaired === 'object') {
+        parsed = parsed && typeof parsed === 'object' ? { ...parsed, ...repaired } : repaired;
+        missing = findMissingResumeKeys(parsed);
+      }
+    } catch (repairErr) {
+      console.warn('[email] cv parse repair failed', repairErr?.message || repairErr);
+    }
+  }
   return parsed && typeof parsed === 'object' ? parsed : null;
 };
 
-const deriveCandidateFieldsFromResume = async (text) => {
+const deriveCandidateFieldsFromResume = async (text, options = {}) => {
   const trimmed = typeof text === 'string' ? text.trim() : '';
-  if (!trimmed) {
+  const fileBuffer = options.fileBuffer;
+  const mimeType = options.mimeType;
+  const canSendFile = isCvParseSendFileToGeminiEnabled()
+    && Boolean(resolveGeminiCvInlineFile(fileBuffer, mimeType));
+  if (!trimmed && !canSendFile) {
     return { aiFields: null, aiTags: [], rawResult: null, parseMeta: { model: null, retriedWithPro: false } };
   }
   const promptRecord = await getResumePromptTemplate({ appendices: 'email' });
   const configuredModel = resolveGeminiModelName(promptRecord?.model, 'gemini-3-flash-preview');
-  let aiResult = (await parseResumeWithAi({ resumeText: trimmed, model: configuredModel })) || {};
+  let aiResult = (await parseResumeWithAi({
+    resumeText: trimmed,
+    model: configuredModel,
+    fileBuffer: canSendFile ? fileBuffer : null,
+    mimeType: canSendFile ? mimeType : null,
+  })) || {};
   let parseMeta = { model: configuredModel, retriedWithPro: false };
   try {
     const upgraded = await maybeUpgradeParseWithPro(aiResult, {
       resumeText: trimmed,
       modelUsed: configuredModel,
-      parseWithModel: ({ resumeText: nextText, model }) => parseResumeWithAi({ resumeText: nextText, model }),
+      fileBuffer: canSendFile ? fileBuffer : null,
+      mimeType: canSendFile ? mimeType : null,
+      parseWithModel: ({ resumeText: nextText, model, fileBuffer: nextBuf, mimeType: nextMime }) =>
+        parseResumeWithAi({
+          resumeText: nextText,
+          model,
+          fileBuffer: nextBuf,
+          mimeType: nextMime,
+        }),
     });
     if (upgraded?.ai) aiResult = upgraded.ai;
     parseMeta = {
@@ -5382,7 +5855,8 @@ const deriveCandidateFieldsFromResume = async (text) => {
     ? sanitizedName.fullName
     : '';
   const fullName = sanitizedName.cleared ? '' : (heuristicName || '');
-  let workExperience = normalizeWorkExperience(aiResult.workExperience || fallback.workExperience);
+  const parseFailed = cvParseFailedUpdate(aiResult.workExperience, trimmed);
+  let workExperience = parseFailed ? [] : normalizeWorkExperience(aiResult.workExperience);
   let aiTags = Array.isArray(aiResult.tags) && aiResult.tags.length
     ? aiResult.tags
     : tags.map((name) => ({ name }));
@@ -5401,8 +5875,10 @@ const deriveCandidateFieldsFromResume = async (text) => {
     ...(availabilityFromAi ? { availability: availabilityFromAi } : {}),
     ...(pwhFromAi ? { preferredWorkingHours: pwhFromAi } : {}),
     title: aiResult.title || fallback.title || null,
-    professionalSummary:
-      aiResult.professionalSummary || fallback.professionalSummary || fallback.summary || null,
+    professionalSummary: pickProfessionalSummaryForIngest(
+      aiResult.professionalSummary,
+      fallback.professionalSummary || fallback.summary,
+    ),
     ...(normalizeStringArray(aiResult.keyFacts).slice(0, 3).length
       ? { keyFacts: normalizeStringArray(aiResult.keyFacts).slice(0, 3) }
       : {}),
@@ -5412,8 +5888,10 @@ const deriveCandidateFieldsFromResume = async (text) => {
     },
     tags,
     workExperience,
+    ...(parseFailed ? { status: parseFailed.status, statusExplanation: parseFailed.statusExplanation } : {}),
     education: normalizeEducation(aiResult.education || fallback.education),
     languages: normalizeLanguages(aiResult.languages || fallback.languages),
+    ...mapResumeProfileFields(aiResult),
     industryAnalysis: aiResult.industryAnalysis || fallback.industryAnalysis || {},
     searchText: normalizeResumeSearchText(trimmed).slice(0, 50000),
     searchTextSavedAt: new Date(),

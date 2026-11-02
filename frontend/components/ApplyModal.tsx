@@ -99,7 +99,7 @@ const ApplyModal: React.FC<ApplyModalProps> = ({ isOpen, onClose, onApply, job }
             Provide a detailed analysis in Hebrew, including a match score, specific strengths relative to this job, and tips for improving the resume for this specific application.`;
 
             const result = await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
+                model: 'gemini-3.8-flash',
                 contents: prompt,
                 config: {
                     responseMimeType: "application/json",

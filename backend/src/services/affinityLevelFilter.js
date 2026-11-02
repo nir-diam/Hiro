@@ -2,8 +2,9 @@
  * Domain-fit (זיקה לתחום) hard filter.
  *
  * Engine intentType (matchingScoreService):
- *   exact   — linked to this job or same roleId
- *   role    — same role cluster
+ *   exact   — linked to this job, same roleId as a linked application,
+ *             or (when no links) same roleId from candidate profile/CV tags
+ *   role    — same role cluster (or CV-only exact demoted when other links exist)
  *   cluster — same category, different cluster
  *   different — no taxonomy overlap
  *

@@ -1,6 +1,7 @@
 const EventType = require('../models/EventType');
+const { getCachedList, bumpEventTypeCacheVersion } = require('./eventTypeCacheService');
 
-const list = async () => {
+const listFromDb = async () => {
   const rows = await EventType.findAll({
     order: [
       ['sortOrder', 'ASC'],
@@ -9,6 +10,8 @@ const list = async () => {
   });
   return rows.map((r) => r.get({ plain: true }));
 };
+
+const list = async () => getCachedList(listFromDb);
 
 const getById = async (id) => {
   const row = await EventType.findByPk(id);
@@ -43,6 +46,7 @@ const create = async (payload) => {
     forFlight: Boolean(payload.forFlight),
     sortOrder: nextOrder,
   });
+  await bumpEventTypeCacheVersion();
   return row.get({ plain: true });
 };
 
@@ -69,6 +73,7 @@ const update = async (id, payload) => {
     updates.sortOrder = parseInt(payload.sortOrder, 10) || 0;
   }
   await row.update(updates);
+  await bumpEventTypeCacheVersion();
   return row.reload().then((r) => r.get({ plain: true }));
 };
 
@@ -80,6 +85,7 @@ const remove = async (id) => {
     throw err;
   }
   await row.destroy();
+  await bumpEventTypeCacheVersion();
   return true;
 };
 

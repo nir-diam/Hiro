@@ -11,7 +11,7 @@ async function getJobsList(): Promise<{ client?: string; city?: string; status?:
   if (_jobsListCache) return _jobsListCache;
   if (_jobsListPending) return _jobsListPending;
   const base = apiBase();
-  _jobsListPending = fetch(`${base}/api/jobs?limit=2000`, { headers: authHeaders() })
+  _jobsListPending = fetch(`${base}/api/jobs?view=picker`, { headers: authHeaders() })
     .then(async (res) => {
       if (!res.ok) return [];
       const data = await res.json();
@@ -51,6 +51,8 @@ export interface JobMatchResult {
     generalPenalties?: number;
     salaryPenalty?: number;
     ageGapPenalty?: number;
+    roleExperiencePenalty?: number;
+    roleLookbackPenalty?: number;
     penaltyReasons?: Array<{ label: string; amount: number; key?: string; type?: string }>;
     geoDistance?: number | null;
     geo?: number;

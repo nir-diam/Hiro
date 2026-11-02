@@ -1,7 +1,8 @@
 const { slugifySegment, normalizeSearchText, composeJobSlug } = require('./publicJobSlug');
 const {
   mapEmploymentTypeLabel,
-  mapWorkModel,
+  resolvePublicWorkModel,
+  normalizePublicStartDate,
   deriveSeniority,
   deriveExperience,
   deriveHoursDescription,
@@ -10,12 +11,20 @@ const {
 } = require('./publicJobCatalog');
 const { boardOf } = require('./publicJobVisibility');
 const { buildCompanyDto, publicCompanyDto, redactText, isEmployerConfidential } = require('./publicJobConfidential');
+const { splitPublicDescription, recruiterFirstName, sectionToLines } = require('./publicJobCopy');
 
-const stripHtml = (html) =>
-  String(html || '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+const toIsoTimestamp = (value) => {
+  if (value == null || value === '') return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+};
+
+const oneLine = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+
+const stripHtml = (html) => oneLine(String(html || '').replace(/<[^>]+>/g, ' '));
 
 const firstPath = (job) => (Array.isArray(job?.jobFields) ? job.jobFields[0] : null) || {};
 
@@ -81,9 +90,25 @@ const validThrough = (job) => {
 };
 
 const recruiterDto = (job) => {
-  const firstName = String(job?.recruiter || '').trim().split(/\s+/)[0];
+  const firstName = recruiterFirstName(job?.recruiter);
   if (!firstName) return null;
   return { firstName, imageUrl: null };
+};
+
+const matchesPublicKey = ({ job, publication, dto }, key) => {
+  const raw = String(key || '').trim();
+  if (!raw) return false;
+  const lower = raw.toLowerCase();
+  if (String(job?.id || '') === raw) return true;
+  if (String(dto?.slug || '').toLowerCase() === lower) return true;
+  if (String(dto?.jobNumber || '').toLowerCase() === lower) return true;
+  const board = boardOf(publication);
+  if (String(board.publicSlug || '').toLowerCase() === lower) return true;
+  const aliases = Array.isArray(board.slugAliases) ? board.slugAliases : [];
+  if (aliases.some((alias) => String(alias).toLowerCase() === lower)) return true;
+  return [publication?.publicationCode, job?.postingCode].some(
+    (code) => code && String(code).toLowerCase() === lower,
+  );
 };
 
 const resolveSlug = (job, publication) => {
@@ -115,11 +140,11 @@ const presentPublicJob = ({
   const pub = publication?.get ? publication.get({ plain: true }) : publication || {};
   const board = boardOf(pub);
   const path = firstPath(plain);
-  const categoryLabel = path.fieldType || plain.field || categoryNode?.label || null;
-  const clusterLabel = path.category || clusterNode?.label || null;
-  const categorySlug = categoryNode?.slug || (categoryLabel ? slugifySegment(categoryLabel) : null);
+  const categoryLabel = categoryNode?.label || null;
+  const clusterLabel = clusterNode?.label || null;
+  const categorySlug = categoryNode?.slug || null;
   const categoryAliases = categoryNode?.aliases || [];
-  const clusterSlug = clusterNode?.slug || (clusterLabel ? slugifySegment(clusterLabel) : null);
+  const clusterSlug = clusterNode?.slug || null;
   const roleLabel = path.role || plain.role || null;
   const industryLabel = org?.mainField || null;
   const industrySlug = industryLabel ? slugifySegment(industryLabel) : null;
@@ -137,9 +162,10 @@ const presentPublicJob = ({
   const confidential = company.confidential === true;
   const descriptionSource = pub.publicJobDescription || plain.PublicDescription || plain.description || '';
   const secrets = company._secrets || [];
-  const description = confidential ? redactText(stripHtml(descriptionSource), secrets) : String(descriptionSource || '');
+  const copy = splitPublicDescription(confidential ? redactText(descriptionSource, secrets) : descriptionSource);
+  const description = copy.description;
   const teaserSource = board.teaser || description;
-  const teaser = (confidential ? redactText(teaserSource, secrets) : stripHtml(teaserSource)).slice(0, 180);
+  const teaser = oneLine(confidential ? redactText(teaserSource, secrets) : teaserSource).slice(0, 180);
   const titleRaw = pub.publicJobTitle || plain.publicJobTitle || plain.title;
   const title = confidential ? redactText(titleRaw, secrets) : titleRaw;
   const experience = deriveExperience(
@@ -147,7 +173,14 @@ const presentPublicJob = ({
     board,
   );
   const seniority = deriveSeniority(experience.experienceYearsMin, experience.noExperience, roleLabel);
-  const workModel = mapWorkModel(board.workModel);
+  const workModel = resolvePublicWorkModel(board.workModel, [
+    titleRaw,
+    pub.publicJobTitle,
+    plain.title,
+    plain.location,
+    descriptionSource,
+    ...(Array.isArray(plain.jobType) ? plain.jobType : []),
+  ]);
   const employmentType = (Array.isArray(plain.jobType) ? plain.jobType : [])
     .map(mapEmploymentTypeLabel)
     .filter(Boolean);
@@ -161,14 +194,16 @@ const presentPublicJob = ({
   const showAddress = board.showAddress === true;
   const citySlug = cityMeta?.slug || (plain.city ? slugifySegment(plain.city) : null);
   const hideHero = confidential && isEmployerConfidential(agency, pub) && pub.heroBrandSource === 'job_client';
-  const publishedAt = board.publishedAt || plain.openDate || null;
+  const publishedAt = toIsoTimestamp(plain.openDate || board.publishedAt || null);
   const publishedAtMs = publishedAt ? new Date(publishedAt).getTime() : null;
+  const updatedAt = toIsoTimestamp(plain.updatedAt || plain.openDate || null);
   const skills = mapSkills(plain);
   const requiredLabels = skillRows(plain).filter((skill) => skill.required).map((skill) => skill.label);
   const requirementLines = [
     ...requiredLabels,
     ...(Array.isArray(plain.requirements) ? plain.requirements : []),
     ...(pub.publicJobRequirements ? String(pub.publicJobRequirements).split(/\n+/) : []),
+    ...(copy.requirementsText ? copy.requirementsText.split(/\n+/) : []),
   ].map((line) => String(line || '').trim()).filter(Boolean);
   const requirements = [...new Set(confidential ? requirementLines.map((line) => redactText(line, secrets)) : requirementLines)];
   const hoursDescription = deriveHoursDescription(description, board.hoursDescription);
@@ -203,7 +238,7 @@ const presentPublicJob = ({
     imageUrl: hideHero ? null : pub.heroImageUrl || null,
     company: companyPublic,
     status,
-    updatedAt: plain.updatedAt || plain.openDate || null,
+    updatedAt,
     publishedAt,
     skills,
     hoursDescription,
@@ -212,6 +247,7 @@ const presentPublicJob = ({
     noExperience: experience.noExperience,
     seniority,
     validThrough: validThrough(plain),
+    startDate: normalizePublicStartDate(plain.availability),
   };
   const hiringOrganization = confidential
     ? companyPublic.publisher
@@ -223,11 +259,10 @@ const presentPublicJob = ({
   const detail = {
     ...list,
     description,
-    responsibilities: board.responsibilities || '',
-    niceToHave: board.niceToHave || '',
-    benefits: board.benefits || '',
+    responsibilities: sectionToLines(board.responsibilities || copy.responsibilities),
+    niceToHave: sectionToLines(board.niceToHave || copy.niceToHave),
+    benefits: sectionToLines(board.benefits || copy.benefits),
     requirements,
-    startDate: plain.availability || null,
     recruiter: recruiterDto(plain),
     apply: { questions: mapQuestions(pub) },
     googleForJobs: {
@@ -283,5 +318,6 @@ module.exports = {
   stripHtml,
   presentPublicJob,
   resolveSlug,
+  matchesPublicKey,
   mapQuestions,
 };

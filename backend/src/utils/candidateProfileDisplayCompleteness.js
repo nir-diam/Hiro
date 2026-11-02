@@ -3,13 +3,21 @@
 const trim = (v) => (v != null && v !== undefined ? String(v).trim() : '');
 
 const resolveDisplayAge = (candidate = {}) => {
-  const age = trim(candidate.age);
-  if (age) return age;
   const y = parseInt(trim(candidate.birthYear), 10);
   if (Number.isFinite(y) && y >= 1900 && y <= 2100) {
-    return String(new Date().getFullYear() - y);
+    const now = new Date();
+    let age = now.getFullYear() - y;
+    const m = parseInt(trim(candidate.birthMonth), 10);
+    const d = parseInt(trim(candidate.birthDay), 10);
+    if (Number.isFinite(m) && m >= 1 && m <= 12) {
+      const monthDiff = now.getMonth() + 1 - m;
+      if (monthDiff < 0 || (monthDiff === 0 && Number.isFinite(d) && d >= 1 && now.getDate() < d)) {
+        age -= 1;
+      }
+    }
+    if (age >= 0 && age <= 130) return String(age);
   }
-  return '';
+  return trim(candidate.age);
 };
 
 const buildProfileDisplayMissingLabels = (candidate = {}) => {

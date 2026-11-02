@@ -9,7 +9,6 @@ const { sendChat, resolveGeminiApiKey } = require('./geminiService');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const OrganizationAiDecision = require('../models/OrganizationAiDecision');
 const aiDecisionAuditService = require('./aiDecisionAuditService');
-const picklistService = require('./picklistService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { scheduleOrganizationEmbedding } = require('./organizationEmbeddingService');
 const {
@@ -679,22 +678,6 @@ const findByAnyName = async ({ name, nameEn, legalName }) => {
   });
 };
 
-const ensureIndustryPicklistEntries = async (mainField, subField) => {
-  if (!mainField) return null;
-  const mainCategory = await picklistService.ensureMainFieldCategory(mainField);
-  const subFields = Array.isArray(subField)
-    ? subField.map((s) => String(s || '').trim()).filter(Boolean)
-    : subField
-      ? [String(subField).trim()].filter(Boolean)
-      : [];
-  if (mainCategory) {
-    for (const sf of subFields) {
-      await picklistService.ensureCategoryValueByLabel(mainCategory.id, sf);
-    }
-  }
-  return mainCategory;
-};
-
 // Empty string "" is invalid for numeric columns; normalize to null
 const sanitizePayload = (payload) => {
   if (!payload || typeof payload !== 'object') return payload;
@@ -847,10 +830,6 @@ const create = async (payload, options = {}) => {
     };
     throw err;
   }
-  await ensureIndustryPicklistEntries(clean.mainField, clean.subField);
-  for (const mf of clean.mainField2 || []) {
-    await ensureIndustryPicklistEntries(mf, []);
-  }
   const { sequelize } = require('../config/db');
   const org = await sequelize.transaction(async (transaction) => {
     const created = await Organization.create(clean, { transaction });
@@ -880,11 +859,6 @@ const update = async (id, payload, options = {}) => {
   const beforeState = clonePlain(org);
   const additionalLocationsInput = payload?.additionalLocations;
   const clean = sanitizePayload(payload);
-  await ensureIndustryPicklistEntries(clean.mainField || org.mainField, clean.subField || org.subField);
-  const extraMains = clean.mainField2 ?? org.mainField2 ?? [];
-  for (const mf of extraMains) {
-    await ensureIndustryPicklistEntries(mf, []);
-  }
   const { sequelize } = require('../config/db');
   await sequelize.transaction(async (transaction) => {
     await org.update(clean, { transaction });

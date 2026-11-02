@@ -20,20 +20,62 @@ import {
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 import {
     isStaffDuplicateProfile,
+    stripDuplicateProfileNameSuffix,
     isNonPrimaryCandidateProfile,
     isCanonicalPrimaryCandidateProfile,
     originalPrimaryCandidateProfileCardClass,
-    buildDuplicateProfileName,
     buildProfileDuplicatePayload,
     sanitizeProfileDuplicatePayload,
     shouldSaveCandidateProfileDirectly,
     hasCandidateFormChanges,
     hasCandidateCvFormChanges,
+    buildLiveProfileProposalFields,
     canShareStaffProfileWithCandidate,
     mergeCandidateProfileIdentity,
+    resolveStaffShadowProfile,
 } from '../utils/candidateProfileDuplicate';
+
+const LIVE_SYNC_FIELD_LABELS_HE: Record<string, string> = {
+  firstName: 'שם פרטי',
+  lastName: 'שם משפחה',
+  fullName: 'שם מלא',
+  phone: 'טלפון',
+  email: 'אימייל',
+  idNumber: 'תעודת זהות',
+  address: 'עיר / כתובת',
+  location: 'מיקום',
+  gender: 'מגדר',
+  maritalStatus: 'מצב משפחתי',
+  birthYear: 'שנת לידה',
+  title: 'כותרת',
+  professionalSummary: 'תקציר מקצועי',
+  workExperience: 'ניסיון תעסוקתי',
+  education: 'השכלה',
+  languages: 'שפות',
+  skills: 'כישורים',
+  desiredRoles: 'תפקידים מבוקשים',
+  salaryMin: 'שכר מינימום',
+  salaryMax: 'שכר מקסימום',
+  employmentType: 'סוג העסקה',
+  jobScope: 'היקף משרה',
+  preferredWorkModels: 'מודל עבודה',
+  availability: 'זמינות',
+  profilePicture: 'תמונת פרופיל',
+};
+
+const formatLiveSyncPreview = (value: unknown): string => {
+  if (value == null || value === '') return '—';
+  if (typeof value === 'string') return value.length > 100 ? `${value.slice(0, 97)}…` : value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  try {
+    const s = JSON.stringify(value);
+    return s.length > 100 ? `${s.slice(0, 97)}…` : s;
+  } catch {
+    return '—';
+  }
+};
 import { createPortal } from 'react-dom';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
     CANDIDATES_HAS_DEGREE_LIST_PATH,
     clearCandidatesListViewSessionState,
@@ -92,7 +134,8 @@ const EditableField: React.FC<{
     collapsible?: boolean;
     /** Shown when value is empty (defaults to placeholder). */
     emptyText?: string;
-}> = ({ value, placeholder, onSave, className = "", icon, multiline = false, collapsible = false, emptyText }) => {
+    readOnly?: boolean;
+}> = ({ value, placeholder, onSave, className = "", icon, multiline = false, collapsible = false, emptyText, readOnly = false }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [localValue, setLocalValue] = useState(value);
     const [isExpanded, setIsExpanded] = useState(false);
@@ -168,8 +211,8 @@ const EditableField: React.FC<{
                 ) : (
                     <div className="relative pr-6">
                          <div 
-                            onClick={() => setIsEditing(true)}
-                            className="cursor-pointer hover:bg-bg-hover/50 rounded-md py-0.5 px-1 min-h-[1.5em]"
+                            onClick={() => { if (!readOnly) setIsEditing(true); }}
+                            className={`rounded-md py-0.5 px-1 min-h-[1.5em] ${readOnly ? 'cursor-default' : 'cursor-pointer hover:bg-bg-hover/50'}`}
                         >
                             <p className="whitespace-pre-line break-words leading-relaxed">
                                 {hasValue ? (
@@ -194,7 +237,8 @@ const EditableField: React.FC<{
                             </button>
                         )}
 
-                        {/* Edit Button */}
+                        {/* Edit Button — hidden while parent locks the live profile */}
+                        {!readOnly ? (
                         <button
                             onClick={(e) => { e.stopPropagation(); setIsEditing(true); }}
                             className="absolute top-0 right-0 p-1 opacity-0 group-hover:opacity-100 transition-opacity text-text-subtle hover:text-primary-600 z-20"
@@ -202,6 +246,7 @@ const EditableField: React.FC<{
                         >
                             <PencilIcon className="w-3.5 h-3.5" />
                         </button>
+                        ) : null}
                     </div>
                 )}
             </div>
@@ -372,11 +417,13 @@ interface CandidateListItem {
 
 interface MultiProfileOption {
     id: string | number;
+    backendId?: string;
     profileName: string;
     profilePicture?: string;
     isDeleted?: boolean;
     canonicalCandidateId?: string | null;
     staffProfileCopy?: boolean;
+    staffShadowPinned?: boolean;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -785,7 +832,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 }) => {
   const { t } = useLanguage();
   const navigate = useNavigate();
+  const location = useLocation();
   const summaryId = useId();
+  const defaultShadowRedirectKeyRef = useRef('');
 
   const handleSmartTagSearch = useCallback(
     (tag: SmartTagData) => {
@@ -829,7 +878,6 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const showProfileSwitcher = profileList.length > 0;
   const showDuplicateProfileButton = Boolean(onDuplicateProfile);
   const duplicateProfileBusy = isSaving || isDuplicatingProfile || isSharingProfileWithCandidate;
-  const [duplicateSaveConfirmOpen, setDuplicateSaveConfirmOpen] = useState(false);
   const profileForSaveDecision = useMemo(
     () =>
       mergeCandidateProfileIdentity(
@@ -857,6 +905,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   );
   const [tagModes, setTagModes] = useState<Record<string, SmartTagMode>>({});
   const [isSwitcherOpen, setSwitcherOpen] = useState(false);
+  const [pinShadowBusyId, setPinShadowBusyId] = useState<string | null>(null);
   const switcherRef = useRef<HTMLDivElement | null>(null);
   const handleProfileChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
     const selectedId = event.target.value;
@@ -1469,13 +1518,6 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       if (!sourceId) {
           throw new Error('מזהה המועמד חסר.');
       }
-      const existingNames = profileList.map(
-          (profile) =>
-              profile.profileName ||
-              profile.fullName ||
-              buildCandidateFullName(profile.firstName, profile.lastName) ||
-              '',
-      );
       const fileStem = String(file.name || '')
           .replace(/\.[^.]+$/, '')
           .trim();
@@ -1485,7 +1527,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           buildCandidateFullName(candidateData.firstName, candidateData.lastName) ||
           candidateData.fullName ||
           'פרופיל';
-      const profileName = buildDuplicateProfileName(baseName, existingNames);
+      const profileName = String(baseName || 'פרופיל').trim() || 'פרופיל';
       const primaryCandidateId = String(candidateData.canonicalCandidateId || sourceId).trim();
       const payload = sanitizeProfileDuplicatePayload(
           buildProfileDuplicatePayload(
@@ -1630,7 +1672,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       try {
         const listRes = await fetch(
           `${apiBase}/api/candidates/${encodeURIComponent(String(backendId))}/profile-versions`,
-          { signal: controller.signal, headers: authHeaders() },
+          { signal: controller.signal, headers: authHeaders(), cache: 'no-store' },
         );
         if (!listRes.ok) return;
 
@@ -1639,18 +1681,20 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         const options = list
           .map((item: any) => ({
             id: item.id,
-            profileName:
+            profileName: stripDuplicateProfileNameSuffix(
               item.profileName ||
               item.title ||
               buildCandidateFullName(item.firstName, item.lastName) ||
               item.fullName ||
               'פרופיל',
+            ),
             profilePicture: item.profilePicture,
             isDeleted: Boolean(item.isDeleted),
             createdAt: item.createdAt,
             updatedAt: item.updatedAt,
             canonicalCandidateId: item.canonicalCandidateId ?? null,
             staffProfileCopy: Boolean(item.staffProfileCopy),
+            staffShadowPinned: Boolean(item.staffShadowPinned),
             backendId: item.id,
           }))
           .filter(Boolean);
@@ -1664,6 +1708,29 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     loadProfiles();
     return () => controller.abort();
   }, [apiBase, candidateData.backendId, candidateData.id]);
+
+  useEffect(() => {
+    if (!onSwitchProfile || profileList.length === 0) return;
+    const wantsLive = new URLSearchParams(location.search || '').get('view') === 'live';
+    if (wantsLive) return;
+    if (isStaffDuplicateProfile(candidateData as Record<string, unknown>)) {
+      defaultShadowRedirectKeyRef.current = '';
+      return;
+    }
+
+    const shadow = resolveStaffShadowProfile(
+      profileList as Array<Record<string, unknown>>,
+      candidateData as Record<string, unknown>,
+    );
+    const shadowId = String(shadow?.backendId || shadow?.id || '').trim();
+    const currentId = String(candidateData.backendId || candidateData.id || '').trim();
+    if (!shadowId || shadowId === currentId) return;
+
+    const key = `${currentId}->${shadowId}`;
+    if (defaultShadowRedirectKeyRef.current === key) return;
+    defaultShadowRedirectKeyRef.current = key;
+    onSwitchProfile(shadowId);
+  }, [candidateData, location.search, onSwitchProfile, profileList]);
 
   const sourceClientLabel =
     (candidateData as any).source ||
@@ -1729,7 +1796,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   }, [candidateData.id, candidateData.backendId]);
 
   useEffect(() => {
-    setDuplicateSaveConfirmOpen(false);
+    setLiveApprovalConfirmOpen(false);
+    setLiveProfileEditUnlocked(false);
   }, [candidateData.backendId, candidateData.id]);
 
   const tagDetailsModeSignature = useMemo(
@@ -1744,6 +1812,44 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const handleProfileSelect = (profile: MultiProfileOption) => {
     setSwitcherOpen(false);
     onSwitchProfile?.(profile.id);
+  };
+
+  const handleToggleShadowPin = async (event: React.MouseEvent, profile: MultiProfileOption) => {
+    event.stopPropagation();
+    const profileId = String(profile.backendId || profile.id || '').trim();
+    if (!profileId || !apiBase || pinShadowBusyId) return;
+    if (!isStaffDuplicateProfile(profile as Record<string, unknown>) || profile.isDeleted) return;
+
+    const nextPinned = !Boolean(profile.staffShadowPinned);
+    setPinShadowBusyId(profileId);
+    try {
+      const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(profileId)}/pin-staff-shadow`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ pinned: nextPinned }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(typeof data?.message === 'string' ? data.message : 'עדכון הנעיצה נכשל');
+        return;
+      }
+      setFetchedProfiles((prev) =>
+        prev.map((item) => {
+          const itemId = String(item.backendId || item.id || '').trim();
+          if (!itemId) return item;
+          if (itemId === profileId) return { ...item, staffShadowPinned: nextPinned };
+          if (nextPinned && isStaffDuplicateProfile(item as Record<string, unknown>)) {
+            return { ...item, staffShadowPinned: false };
+          }
+          return item;
+        }),
+      );
+    } catch (err) {
+      console.error('Failed to pin staff shadow', err);
+      alert('עדכון הנעיצה נכשל');
+    } finally {
+      setPinShadowBusyId(null);
+    }
   };
 
   const renderDuplicateProfileButton = (compact = false) => {
@@ -1825,7 +1931,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
               isStaffDuplicateProfile(activeProfileOption as Record<string, unknown>) ? 'opacity-60' : ''
             }
           >
-            {activeProfileOption?.profileName || 'פרופיל'}
+            {stripDuplicateProfileNameSuffix(activeProfileOption?.profileName || 'פרופיל')}
           </span>
           <span className="w-px h-3 bg-current opacity-20" />
           <span className="tabular-nums whitespace-nowrap">{dateLabel}</span>
@@ -1863,6 +1969,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
               {normalizedProfileList.map((profile, index) => {
                 const isActive = profile.id === activeProfileOption?.id;
                 const isDuplicate = isStaffDuplicateProfile(profile as Record<string, unknown>);
+                const isPinnedShadow = isDuplicate && Boolean(profile.staffShadowPinned);
                 const profileDateLabel = getProfileDateLabel(profile);
                 const sourceLabel = (profile as any).source || (profile as any).sourceClientName || '';
                 const baseRowClasses = [
@@ -1891,22 +1998,31 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                         </p>
                         {isDuplicate && !profile.isDeleted && (
                           <span className="text-[10px] font-semibold text-text-muted bg-bg-subtle px-2 py-0.5 rounded-full border border-border-subtle shrink-0">
-                            עותק
+                            עותק צל
+                          </span>
+                        )}
+                        {!isDuplicate && !profile.isDeleted && isCanonicalPrimaryCandidateProfile(profile as Record<string, unknown>) && (
+                          <span className="text-[10px] font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 shrink-0">
+                            גרסת המועמד
                           </span>
                         )}
                         {profile.isDeleted && (
                           <span className="text-[10px] font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded-full border border-red-100">מחוק</span>
                         )}
+                        {isDuplicate && !profile.isDeleted && (
                         <button
                           type="button"
-                          className={`ml-2 text-text-subtle hover:text-primary-600 transition-colors ${isActive ? 'text-primary-500 opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
-                          title={isActive ? 'בטל נעיצה' : 'בחר כפרופיל ברירת מחדל'}
+                          disabled={pinShadowBusyId != null}
+                          onClick={(event) => void handleToggleShadowPin(event, profile)}
+                          className={`ml-2 text-text-subtle hover:text-primary-600 transition-colors disabled:opacity-50 ${isPinnedShadow ? 'text-primary-500 opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                          title={isPinnedShadow ? 'בטל נעיצה' : 'בחר כפרופיל ברירת מחדל'}
                         >
                           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="w-3 h-3">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
                             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
                           </svg>
                         </button>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mt-0.5 text-[10px] text-text-muted">
                         <span className="whitespace-nowrap">{profileDateLabel}</span>
@@ -1916,6 +2032,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                             <span className="truncate max-w-[100px]">{sourceLabel}</span>
                           </>
                         ) : null}
+                        {isPinnedShadow && (
+                          <span className="bg-primary-100 text-primary-700 px-1 rounded ml-1">נעוץ</span>
+                        )}
                         {isActive && (
                           <span className="bg-green-100 text-green-700 px-1 rounded ml-1">פעיל</span>
                         )}
@@ -1949,25 +2068,227 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     [candidateData, savedCandidateBaseline],
   );
 
+  const [liveProfileEditUnlocked, setLiveProfileEditUnlocked] = useState(false);
+  const [liveApprovalConfirmOpen, setLiveApprovalConfirmOpen] = useState(false);
+  const [proposingLiveEdits, setProposingLiveEdits] = useState(false);
+  const [liveSyncBusyField, setLiveSyncBusyField] = useState<string | null>(null);
+  const fieldsReadOnly = isViewingOriginalPrimaryProfile && !liveProfileEditUnlocked;
+
+  const pendingLiveSyncEntries = useMemo(() => {
+    const raw = candidateData?.pendingLiveSync;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [] as Array<[string, any]>;
+    return Object.entries(raw as Record<string, unknown>).filter(
+      ([, entry]) => entry && typeof entry === 'object',
+    );
+  }, [candidateData?.pendingLiveSync]);
+
+  useEffect(() => {
+    setLiveProfileEditUnlocked(false);
+    setLiveApprovalConfirmOpen(false);
+  }, [currentProfileId, isViewingOriginalPrimaryProfile]);
+
   const handleSaveCandidateClick = useCallback(() => {
-    if (!onSaveCandidate || isSaving || !hasUnsavedFormChanges) return;
-    if (isStaffShadowProfile || !hasUnsavedCvFormChanges) {
+    if (!onSaveCandidate || isSaving || !hasUnsavedFormChanges || proposingLiveEdits) return;
+    if (isStaffShadowProfile) {
       onSaveCandidate();
       return;
     }
-    setDuplicateSaveConfirmOpen(true);
-  }, [onSaveCandidate, isStaffShadowProfile, isSaving, hasUnsavedFormChanges, hasUnsavedCvFormChanges]);
+    if (isViewingOriginalPrimaryProfile) {
+      if (!liveProfileEditUnlocked) return;
+      setLiveApprovalConfirmOpen(true);
+      return;
+    }
+    onSaveCandidate();
+  }, [
+    onSaveCandidate,
+    isStaffShadowProfile,
+    isViewingOriginalPrimaryProfile,
+    liveProfileEditUnlocked,
+    isSaving,
+    hasUnsavedFormChanges,
+    proposingLiveEdits,
+  ]);
 
-  const handleConfirmDuplicateSave = useCallback(() => {
-    setDuplicateSaveConfirmOpen(false);
-    onSaveCandidate?.();
-  }, [onSaveCandidate]);
+  const applyShadowRowUpdate = useCallback(
+    (updated: Record<string, unknown>) => {
+      onFormChange((prev: any) => ({
+        ...prev,
+        ...updated,
+        id: prev?.id,
+        backendId: updated.id || prev?.backendId,
+        pendingLiveSync: updated.pendingLiveSync ?? {},
+        shadowFieldOverrides: updated.shadowFieldOverrides ?? prev?.shadowFieldOverrides,
+      }));
+      window.dispatchEvent(
+        new CustomEvent('candidate-data-refreshed', {
+          detail: { backendId: updated.id || candidateId },
+        }),
+      );
+    },
+    [onFormChange, candidateId],
+  );
 
-  const handleSaveAsShadowCopy = useCallback(() => {
-    if (!onDuplicateProfile || duplicateProfileBusy) return;
-    setDuplicateSaveConfirmOpen(false);
-    onDuplicateProfile();
-  }, [onDuplicateProfile, duplicateProfileBusy]);
+  const handleAcceptLiveSyncField = useCallback(
+    async (field: string) => {
+      if (!apiBase || !candidateId || liveSyncBusyField) return;
+      setLiveSyncBusyField(field);
+      try {
+        const res = await fetch(
+          `${apiBase}/api/candidates/${encodeURIComponent(String(candidateId))}/live-sync/accept`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ field }),
+          },
+        );
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body?.message || 'קבלת עדכון נכשלה');
+        applyShadowRowUpdate(body as Record<string, unknown>);
+      } catch (err: unknown) {
+        window.alert(err instanceof Error ? err.message : 'קבלת עדכון נכשלה');
+      } finally {
+        setLiveSyncBusyField(null);
+      }
+    },
+    [apiBase, candidateId, liveSyncBusyField, authHeaders, applyShadowRowUpdate],
+  );
+
+  const handleKeepLiveSyncField = useCallback(
+    async (field: string) => {
+      if (!apiBase || !candidateId || liveSyncBusyField) return;
+      setLiveSyncBusyField(field);
+      try {
+        const res = await fetch(
+          `${apiBase}/api/candidates/${encodeURIComponent(String(candidateId))}/live-sync/keep`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ field }),
+          },
+        );
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body?.message || 'שמירת הערך נכשלה');
+        applyShadowRowUpdate(body as Record<string, unknown>);
+      } catch (err: unknown) {
+        window.alert(err instanceof Error ? err.message : 'שמירת הערך נכשלה');
+      } finally {
+        setLiveSyncBusyField(null);
+      }
+    },
+    [apiBase, candidateId, liveSyncBusyField, authHeaders, applyShadowRowUpdate],
+  );
+
+  const [isReprocessing, setIsReprocessing] = useState(false);
+  const canReprocessFromResume = Boolean(candidateId);
+
+  const handleReprocessFromResume = useCallback(async () => {
+    if (!apiBase || !candidateId || isReprocessing || uploadState.inProgress) return;
+    const confirmed = window.confirm(
+      'עיבוד מחדש יריץ שוב את ניתוח קורות החיים עם AI מהקובץ הקיים בשרת. להמשיך?',
+    );
+    if (!confirmed) return;
+
+    setIsReprocessing(true);
+    setUploadState({ inProgress: true, type: 'resume', message: 'מעבד קורות חיים מחדש...' });
+    try {
+      const res = await fetch(
+        `${apiBase}/api/candidates/${encodeURIComponent(String(candidateId))}/reprocess`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        },
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok && res.status !== 202) {
+        throw new Error(body?.message || 'עיבוד מחדש נכשל');
+      }
+
+      const applyEnrichedCandidate = (updated: Record<string, unknown>) => {
+        onFormChange((prev: any) => ({
+          ...prev,
+          ...updated,
+          backendId: candidateId,
+          id: candidateId,
+        }));
+        window.dispatchEvent(
+          new CustomEvent('candidate-data-refreshed', {
+            detail: { backendId: candidateId },
+          }),
+        );
+      };
+
+      let updated: Record<string, unknown> = body;
+      if (isCandidateEnrichmentPending(res.status, body)) {
+        updated = await waitForCandidateEnrichment(
+          apiBase,
+          String(candidateId),
+          authHeaders,
+        );
+      }
+      applyEnrichedCandidate(updated);
+
+      const exp = Array.isArray(updated.workExperience) ? updated.workExperience : [];
+      const status = String(updated.status || '');
+      const explanation = String(updated.statusExplanation || '').trim();
+      if (status === 'נכשל בעיבוד' || exp.length === 0) {
+        alert(
+          explanation ||
+            'העיבוד הסתיים אך לא נמצא ניסיון תעסוקתי בקובץ קורות החיים. בדקו שהקובץ המצורף אינו ריק והעלו קו"ח מעודכן במידת הצורך.',
+        );
+      } else {
+        alert('עיבוד מחדש הושלם — פרטי המועמד עודכנו מהקובץ.');
+      }
+    } catch (err: unknown) {
+      console.error('Candidate reprocess failed', err);
+      alert(err instanceof Error ? err.message : 'עיבוד מחדש נכשל');
+    } finally {
+      setIsReprocessing(false);
+      setUploadState({ inProgress: false, type: 'resume', message: '' });
+    }
+  }, [apiBase, candidateId, isReprocessing, uploadState.inProgress, onFormChange]);
+
+  const handleConfirmLiveApprovalRequest = useCallback(async () => {
+    if (!apiBase || !candidateId || proposingLiveEdits) return;
+    const fields = buildLiveProfileProposalFields(
+      candidateData as Record<string, unknown>,
+      savedCandidateBaseline as Record<string, unknown> | null,
+    );
+    if (!Object.keys(fields).length) {
+      setLiveApprovalConfirmOpen(false);
+      window.alert('אין שינויים לשליחה לאישור.');
+      return;
+    }
+    setProposingLiveEdits(true);
+    try {
+      const res = await fetch(
+        `${apiBase}/api/candidates/${encodeURIComponent(String(candidateId))}/propose-profile-edits`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...authHeaders() },
+          body: JSON.stringify({ fields }),
+        },
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.message || 'שליחה לאישור נכשלה');
+      setLiveApprovalConfirmOpen(false);
+      setLiveProfileEditUnlocked(false);
+      if (savedCandidateBaseline) {
+        onFormChange({ ...savedCandidateBaseline });
+      }
+    } catch (err: unknown) {
+      window.alert(err instanceof Error ? err.message : 'שליחה לאישור נכשלה');
+    } finally {
+      setProposingLiveEdits(false);
+    }
+  }, [
+    apiBase,
+    candidateId,
+    proposingLiveEdits,
+    candidateData,
+    savedCandidateBaseline,
+    authHeaders,
+    onFormChange,
+  ]);
 
   const renderProfileVideo = (className = '') =>
       profileVideoUrl ? (
@@ -2061,7 +2382,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                           </h3>
                           <div className="flex flex-col gap-2 mb-3">
                               <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-3 gap-y-2">
-                                  <EditableField
+                                  <EditableField readOnly={fieldsReadOnly}
                                       value={candidateData.firstName || ''}
                                       placeholder="שם פרטי"
                                       onSave={(val) =>
@@ -2073,7 +2394,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                       }
                                       className="text-3xl font-extrabold text-text-default tracking-tight"
                                   />
-                                  <EditableField
+                                  <EditableField readOnly={fieldsReadOnly}
                                       value={candidateData.lastName || ''}
                                       placeholder="שם משפחה"
                                       onSave={(val) =>
@@ -2119,7 +2440,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                   ) : null}
                               </div>
                               <div className="flex items-center justify-center sm:justify-start text-text-muted text-sm bg-bg-subtle/50 px-2 py-0.5 rounded-md border border-border-subtle gap-1 w-fit max-w-full">
-                                  <EditableField
+                                  <EditableField readOnly={fieldsReadOnly}
                                       value={displayAge}
                                       placeholder="גיל"
                                       emptyText="לא צוין"
@@ -2136,6 +2457,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                       }
                                       className="min-w-[80px]"
                                       compact
+                                      readOnly={fieldsReadOnly}
                                   />
                               </div>
                           </div>
@@ -2143,7 +2465,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                       </div>
 
                       <div className="mb-3">
-                          <EditableField 
+                          <EditableField readOnly={fieldsReadOnly} 
                               value={candidateData.title || ''} 
                               placeholder={t('profile.main_profile_label')} 
                               onSave={(val) => onFormChange({ ...candidateData, title: val })}
@@ -2203,19 +2525,23 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                       <div className="relative pr-6">
                                           <div
                                               role="button"
-                                              tabIndex={0}
+                                              tabIndex={fieldsReadOnly ? -1 : 0}
                                               onClick={() => {
+                                                  if (fieldsReadOnly) return;
                                                   setSummaryDraft(candidateData.professionalSummary || '');
                                                   setSummaryEditing(true);
                                               }}
                                               onKeyDown={(e) => {
+                                                  if (fieldsReadOnly) return;
                                                   if (e.key === 'Enter' || e.key === ' ') {
                                                       e.preventDefault();
                                                       setSummaryDraft(candidateData.professionalSummary || '');
                                                       setSummaryEditing(true);
                                                   }
                                               }}
-                                              className="cursor-pointer hover:bg-bg-hover/50 rounded-md py-0.5 px-1 min-h-[1.5em]"
+                                              className={`rounded-md py-0.5 px-1 min-h-[1.5em] ${
+                                                fieldsReadOnly ? 'cursor-default' : 'cursor-pointer hover:bg-bg-hover/50'
+                                              }`}
                                           >
                                               <p
                                                   className={`whitespace-pre-line break-words leading-relaxed text-sm text-text-default ${
@@ -2557,6 +2883,75 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             initialCategory={tagSelectorCategory}
         />
 
+        {isViewingOriginalPrimaryProfile ? (
+          <div className="mb-3 rounded-xl border border-emerald-200 bg-emerald-50/80 px-3 py-2 text-sm text-emerald-900">
+            {liveProfileEditUnlocked
+              ? 'עריכת הפרופיל החי פתוחה — ערכו שדות ואז לחצו «שלח לאישור המועמד». הפרופיל יתעדכן רק אחרי אישור.'
+              : 'פרופיל המועמד (חי) — לקריאה בלבד. לחצו «עריכת פרופיל חי» בתחתית כדי לערוך ולשלוח לאישור. עריכת היום־יום היא בעותק הצל.'}
+          </div>
+        ) : null}
+        {isStaffShadowProfile && pendingLiveSyncEntries.length > 0 ? (
+          <div className="mb-3 rounded-xl border border-sky-200 bg-sky-50 px-3 py-3 text-sm text-sky-950 space-y-2">
+            <p className="font-bold">המועמד עדכן שדות בפרופיל החי</p>
+            {pendingLiveSyncEntries.some(([, entry]) => entry?.updatedAt) ? (
+              <p className="text-xs text-sky-900/80">
+                {(() => {
+                  const latest = pendingLiveSyncEntries
+                    .map(([, entry]) => String(entry?.updatedAt || ''))
+                    .filter(Boolean)
+                    .sort()
+                    .at(-1);
+                  return latest
+                    ? `עודכן ב-${new Date(latest).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}`
+                    : null;
+                })()}
+              </p>
+            ) : null}
+            <p className="text-xs text-sky-900/80">
+              בחר/י לכל שדה: לקבל את הערך החדש או להשאיר את הערך בעותק הצל שלך.
+            </p>
+            <ul className="space-y-2">
+              {pendingLiveSyncEntries.map(([field, entry]) => (
+                <li
+                  key={field}
+                  className="rounded-lg border border-sky-200/80 bg-white/70 px-2.5 py-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="min-w-0">
+                    <p className="font-semibold text-xs">
+                      {LIVE_SYNC_FIELD_LABELS_HE[field] || field}
+                    </p>
+                    <p className="text-[11px] text-sky-900/80 truncate" title={formatLiveSyncPreview(entry?.liveValue)}>
+                      ערך חדש: {formatLiveSyncPreview(entry?.liveValue)}
+                    </p>
+                    {entry?.updatedAt ? (
+                      <p className="text-[11px] text-sky-800/80">
+                        עודכן ב-{new Date(String(entry.updatedAt)).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      disabled={Boolean(liveSyncBusyField)}
+                      onClick={() => void handleAcceptLiveSyncField(field)}
+                      className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
+                    >
+                      {liveSyncBusyField === field ? '…' : 'קבל'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(liveSyncBusyField)}
+                      onClick={() => void handleKeepLiveSyncField(field)}
+                      className="rounded-lg border border-sky-300 bg-white px-3 py-1.5 text-xs font-bold text-sky-900 hover:bg-sky-100 disabled:opacity-60"
+                    >
+                      השאר שלי
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {showSaveFooter ? (
             <div
                 className="fixed inset-x-0 bottom-0 z-[35] border-t border-border-default bg-bg-card/95 backdrop-blur-md shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
@@ -2568,31 +2963,91 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                         {saveStatusMessage ? <p>{saveStatusMessage}</p> : null}
                     </div>
                     <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+                        {isViewingOriginalPrimaryProfile && liveProfileEditUnlocked ? (
+                            <button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setLiveProfileEditUnlocked(false);
+                                }}
+                                className="inline-flex items-center gap-1.5 shrink-0 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2.5 text-sm font-bold text-amber-800 transition hover:bg-amber-100"
+                                title="נעילת עריכת הפרופיל החי"
+                            >
+                                <PencilIcon className="w-4 h-4" />
+                                עריכה פתוחה
+                            </button>
+                        ) : null}
                         {renderDuplicateProfileButton()}
                         {renderShareWithCandidateButton()}
+                        {isViewingOriginalPrimaryProfile && !liveProfileEditUnlocked ? (
+                            <button
+                                type="button"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    setLiveProfileEditUnlocked(true);
+                                }}
+                                className="shrink-0 inline-flex items-center gap-1.5 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md"
+                                title="פתחו עריכה — אחרי שינוי שדות תוכלו לשלוח לאישור המועמד"
+                            >
+                                <PencilIcon className="w-4 h-4" />
+                                עריכת פרופיל חי
+                            </button>
+                        ) : (
                         <button
                             type="button"
                             onClick={(e) => {
                                 e.stopPropagation();
                                 handleSaveCandidateClick();
                             }}
-                            disabled={isSaving || !hasUnsavedFormChanges}
+                            disabled={isSaving || !hasUnsavedFormChanges || proposingLiveEdits}
                             className={`shrink-0 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${
-                                isSaving || !hasUnsavedFormChanges ? 'opacity-60 cursor-not-allowed' : ''
+                                isSaving || !hasUnsavedFormChanges || proposingLiveEdits
+                                  ? 'opacity-60 cursor-not-allowed'
+                                  : ''
+                            }`}
+                            title={
+                              isViewingOriginalPrimaryProfile && !hasUnsavedFormChanges
+                                ? 'ערכו שדה כלשהו ואז שלחו לאישור'
+                                : undefined
+                            }
+                        >
+                            {isSaving || proposingLiveEdits
+                              ? 'שולח…'
+                              : isViewingOriginalPrimaryProfile
+                                ? 'שלח לאישור המועמד'
+                                : 'שמירת פרטים'}
+                        </button>
+                        )}
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                void handleReprocessFromResume();
+                            }}
+                            disabled={isSaving || isReprocessing || uploadState.inProgress || !canReprocessFromResume}
+                            title={
+                                canReprocessFromResume
+                                    ? 'הרצת ניתוח AI מחדש מקובץ קורות החיים הקיים'
+                                    : 'אין קובץ קורות חיים למועמד זה'
+                            }
+                            className={`shrink-0 bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition border border-border-default ${
+                                isSaving || isReprocessing || uploadState.inProgress || !canReprocessFromResume
+                                    ? 'opacity-60 cursor-not-allowed'
+                                    : ''
                             }`}
                         >
-                            {isSaving ? 'שומר/ת...' : 'שמירת פרטים'}
+                            {isReprocessing ? 'מעבד מחדש...' : 'עיבוד מחדש'}
                         </button>
                     </div>
                 </div>
             </div>
         ) : null}
 
-        {duplicateSaveConfirmOpen
+        {liveApprovalConfirmOpen
           ? createPortal(
               <div
                 className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[240] flex items-center justify-center p-4"
-                onClick={() => setDuplicateSaveConfirmOpen(false)}
+                onClick={() => setLiveApprovalConfirmOpen(false)}
                 dir="rtl"
                 role="presentation"
               >
@@ -2601,46 +3056,36 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                   onClick={(e) => e.stopPropagation()}
                   role="dialog"
                   aria-modal="true"
-                  aria-labelledby="duplicate-save-confirm-title"
+                  aria-labelledby="live-approval-confirm-title"
                 >
                   <div className="flex items-start gap-3 p-4 border-b border-border-default bg-bg-subtle/40">
                     <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
                       <ExclamationTriangleIcon className="w-6 h-6 text-amber-700" />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <h3 id="duplicate-save-confirm-title" className="font-bold text-text-default text-lg">
-                        שמירה על מקור
+                      <h3 id="live-approval-confirm-title" className="font-bold text-text-default text-lg">
+                        שליחה לאישור המועמד
                       </h3>
                       <p className="text-sm text-text-muted mt-1 leading-relaxed">
-                        ניתן לשמור על המקור, או ליצור עותק צל עם השינויים הנוכחיים בלי לעדכן את הפרופיל המקורי.
+                        העדכון יישלח למועמד לאישור. הפרופיל שלו יתעדכן רק אחרי שיאשר.
                       </p>
                     </div>
                   </div>
                   <div className="flex flex-col sm:flex-row gap-2 p-4 border-t border-border-default bg-bg-subtle/20">
                     <button
                       type="button"
-                      onClick={() => setDuplicateSaveConfirmOpen(false)}
+                      onClick={() => setLiveApprovalConfirmOpen(false)}
                       className="flex-1 py-2.5 rounded-xl border border-border-default font-semibold text-text-default hover:bg-bg-hover"
                     >
                       ביטול
                     </button>
-                    {onDuplicateProfile ? (
-                      <button
-                        type="button"
-                        onClick={handleSaveAsShadowCopy}
-                        disabled={duplicateProfileBusy}
-                        className="flex-1 py-2.5 rounded-xl border border-primary-200 bg-primary-50 font-bold text-primary-700 hover:bg-primary-100 disabled:opacity-60"
-                      >
-                        {isDuplicatingProfile ? 'יוצר/ת עותק...' : 'שמירה בעותק צל'}
-                      </button>
-                    ) : null}
                     <button
                       type="button"
-                      onClick={handleConfirmDuplicateSave}
-                      disabled={isSaving}
+                      disabled={proposingLiveEdits}
+                      onClick={() => void handleConfirmLiveApprovalRequest()}
                       className="flex-1 py-2.5 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 disabled:opacity-60"
                     >
-                      {isSaving ? 'שומר/ת...' : 'שמירה על המקור'}
+                      {proposingLiveEdits ? 'שולח…' : 'שלח לאישור'}
                     </button>
                   </div>
                 </div>

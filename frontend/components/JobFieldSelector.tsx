@@ -74,7 +74,10 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({
             setError(null);
             try {
                 const apiBase = import.meta.env.VITE_API_BASE || '';
-                const res = await fetch(`${apiBase}/api/job-fields`, { headers: { ...authHeaders() } });
+                const res = await fetch(`${apiBase}/api/job-fields`, {
+                    credentials: 'include',
+                    headers: { ...authHeaders() },
+                });
                 if (!res.ok) throw new Error('Failed to load job fields');
                 const data = await res.json();
                 if (Array.isArray(data)) {

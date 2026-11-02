@@ -16,15 +16,15 @@ const { resolveRegionSlug, regionLabel } = require('../utils/publicJobCatalog');
 const {
   isJobListedOnSite,
   wasListedOnSite,
-  wasPubliclyPublished,
   withinClosedWindow,
   jobAppearsOnSite,
   boardOf,
 } = require('../utils/publicJobVisibility');
-const { presentPublicJob, resolveSlug } = require('../utils/publicJobPresenter');
+const { presentPublicJob, matchesPublicKey } = require('../utils/publicJobPresenter');
 const { sanitizePublicPayload } = require('../utils/publicJobSanitize');
 const { buildSynonymGroups, filterPublicJobs } = require('../utils/publicJobQuery');
-const { buildTaxonomy } = require('../utils/publicJobTaxonomy');
+const { buildTaxonomy, indexJobCatalog, resolveJobTaxonomy } = require('../utils/publicJobTaxonomy');
+const { wgs84FromCityRow } = require('../utils/publicJobGeo');
 const {
   validatePublicApplication,
   assertScreeningAnswers,
@@ -43,7 +43,18 @@ const cache = {
   tagsAt: 0,
   industries: null,
   industriesAt: 0,
+  roles: null,
+  rolesAt: 0,
+  views: new Map(),
 };
+
+const PUBLIC_JOB_ATTRIBUTES = [
+  'id', 'title', 'publicJobTitle', 'client', 'clientId', 'organizationId',
+  'field', 'role', 'jobFields', 'priority', 'city', 'region',
+  'availability', 'postingCode', 'validityDays', 'salaryMin', 'salaryMax',
+  'status', 'openDate', 'recruiter', 'location', 'jobType',
+  'description', 'PublicDescription', 'requirements', 'skills', 'updatedAt',
+];
 
 const httpError = (status, message, code, field) => {
   const err = new Error(message);
@@ -69,17 +80,15 @@ const loadCategories = async () => {
   });
   for (const category of rows) {
     if (!category.publicSlug) {
-      await category.update({
-        publicSlug: buildStableSlug(category.name, category.id),
-        slugLocked: true,
-      }).catch(() => {});
+      const publicSlug = buildStableSlug(category.name, category.id);
+      category.publicSlug = publicSlug;
+      category.update({ publicSlug, slugLocked: true }).catch(() => {});
     }
     for (const cluster of category.clusters || []) {
       if (!cluster.publicSlug) {
-        await cluster.update({
-          publicSlug: buildStableSlug(cluster.name, cluster.id),
-          slugLocked: true,
-        }).catch(() => {});
+        const publicSlug = buildStableSlug(cluster.name, cluster.id);
+        cluster.publicSlug = publicSlug;
+        cluster.update({ publicSlug, slugLocked: true }).catch(() => {});
       }
     }
   }
@@ -134,42 +143,20 @@ const loadIndustries = async () => {
   return cache.industries;
 };
 
-const indexCatalog = (categories) => {
-  const byCategoryName = new Map();
-  const byClusterName = new Map();
-  for (const category of categories) {
-    const parent = {
-      slug: category.publicSlug || slugifySegment(category.name),
-      label: category.name,
-      aliases: Array.isArray(category.slugAliases) ? category.slugAliases : [],
-    };
-    byClusterName.set(normalizeSearchText(category.name), parent);
-    for (const cluster of category.clusters || []) {
-      const node = {
-        slug: cluster.publicSlug || slugifySegment(cluster.name),
-        label: cluster.name,
-        aliases: Array.isArray(cluster.slugAliases) ? cluster.slugAliases : [],
-        parent,
-      };
-      byCategoryName.set(normalizeSearchText(cluster.name), node);
-    }
-  }
-  return { byCategoryName, byClusterName };
-};
-
 const indexCities = (cities) => {
   const byName = new Map();
   for (const city of cities) {
     const label = city.cityName || city.city;
     if (!label) continue;
     const regionSlug = resolveRegionSlug(city.region || city.column4) || null;
+    const { lat, lng } = wgs84FromCityRow(city);
     byName.set(normalizeSearchText(label), {
       slug: city.publicSlug || slugifySegment(label),
       label,
       regionSlug,
       regionLabel: regionSlug ? regionLabel(regionSlug) : city.region || null,
-      lat: city.pointY ?? city.pointy ?? null,
-      lng: city.pointX ?? city.pointx ?? null,
+      lat,
+      lng,
     });
   }
   return byName;
@@ -182,7 +169,6 @@ const rememberSlug = (publication, slug) => {
     publicBoard: {
       ...board,
       publicSlug: slug,
-      publishedAt: board.publishedAt || new Date().toISOString(),
     },
   }).catch(() => {});
 };
@@ -205,21 +191,7 @@ const loadJobsForPublications = async (publications) => {
   if (!ids.length) return [];
   return Job.findAll({
     where: { id: { [Op.in]: ids } },
-    attributes: {
-      exclude: [
-        'embedding',
-        'internalNotes',
-        'uniqueEmail',
-        'cvForwardSettings',
-        'contacts',
-        'events',
-        'aiRawDescription',
-        'telephoneQuestions',
-        'languages',
-        'listNotes',
-        'listNotesHistory',
-      ],
-    },
+    attributes: PUBLIC_JOB_ATTRIBUTES,
   });
 };
 
@@ -254,10 +226,7 @@ const presentPair = (job, publication, context) => {
   const jobPlain = plain(job);
   const agency = context.agencies.get(String(jobPlain.clientId || '')) || null;
   const org = context.orgs.get(String(jobPlain.organizationId || '')) || null;
-  const fieldName = normalizeSearchText((jobPlain.jobFields && jobPlain.jobFields[0]?.fieldType) || jobPlain.field);
-  const categoryNode = context.catalog.byCategoryName.get(fieldName) || null;
-  const parentName = normalizeSearchText(jobPlain.jobFields?.[0]?.category || '');
-  const clusterNode = categoryNode?.parent || context.catalog.byClusterName.get(parentName) || null;
+  const { categoryNode, clusterNode } = resolveJobTaxonomy(context.catalog, jobPlain);
   const cityMeta = context.cities.get(normalizeSearchText(jobPlain.city)) || null;
   const view = presentPublicJob({
     job,
@@ -285,18 +254,25 @@ const buildContext = async (jobs) => {
   return {
     agencies,
     orgs,
-    catalog: indexCatalog(categories.map(plain)),
+    catalog: indexJobCatalog(categories.map(plain)),
     cities: indexCities(cities.map(plain)),
     categories,
   };
 };
 
 const loadAllViews = async (siteContext) => {
-  const publications = await loadPublicationPool();
+  const site = siteFromContext(siteContext);
+  const cacheKey = `${site.id || ''}|${site.mode || ''}|${site.clientId || ''}`;
+  const hit = cache.views.get(cacheKey);
+  if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
+
+  const publicationsPromise = loadPublicationPool();
+  const warmCatalog = Promise.all([loadCategories(), loadCities()]);
+  const publications = await publicationsPromise;
   const jobs = await loadJobsForPublications(publications);
+  await warmCatalog;
   const pubByJob = new Map(publications.map((row) => [String(row.jobId), row]));
   const context = await buildContext(jobs);
-  const site = siteFromContext(siteContext);
   const views = [];
   for (const job of jobs) {
     const publication = pubByJob.get(String(job.id));
@@ -317,7 +293,13 @@ const loadAllViews = async (siteContext) => {
     if (view.listed) rememberSlug(publication, view.dto.slug);
     views.push(view);
   }
-  return { views, context };
+  const value = { views, context };
+  cache.views.set(cacheKey, { at: Date.now(), value });
+  return value;
+};
+
+const invalidatePublicJobsCache = () => {
+  cache.views.clear();
 };
 
 const listedViews = async (siteContext) => {
@@ -339,41 +321,27 @@ const listJobs = async (siteContext, query = {}) => {
   return payload;
 };
 
+const findView = async (siteContext, slugOrId) => {
+  const key = String(slugOrId || '').trim();
+  if (!key) throw httpError(400, 'Job identifier is required');
+  const { views } = await loadAllViews(siteContext);
+  const view = views.find((row) => matchesPublicKey(row, key));
+  if (!view) throw httpError(404, 'Job not found', 'NOT_FOUND');
+  return view;
+};
+
 const getJobBySlugOrId = async (siteContext, slugOrId) => {
-  let job;
-  try {
-    job = await jobPublicationService.resolveJobBySlug(slugOrId);
-  } catch (err) {
-    if (err.status === 404) throw httpError(404, 'Job not found', 'NOT_FOUND');
-    throw err;
-  }
-  const publication = await JobPublication.findOne({ where: { jobId: job.id } });
-  if (!publication) throw httpError(404, 'Job not found', 'NOT_FOUND');
-  if (!wasPubliclyPublished(publication) && publication.publishToGeneralBoard !== true) {
-    const board = boardOf(publication);
-    if (!board.publishedAt && !board.publicClosedAt && !(board.publishedSiteIds || []).length) {
-      throw httpError(404, 'Job not found', 'NOT_FOUND');
-    }
-  }
-  const context = await buildContext([job]);
-  const view = presentPair(job, publication, context);
-  const site = siteFromContext(siteContext);
-  const args = { publication, jobClientId: job.clientId, site, agency: view.agency };
-  if (!isJobListedOnSite(args) && !wasListedOnSite(args)) {
-    throw httpError(404, 'Job not found', 'NOT_FOUND');
-  }
-  const open = isJobListedOnSite(args) && jobAppearsOnSite(plain(job), view.agency);
-  if (!open) {
-    if (!wasPubliclyPublished(publication) && !wasListedOnSite(args)) {
-      throw httpError(404, 'Job not found', 'NOT_FOUND');
-    }
-    if (!withinClosedWindow(plain(job), publication)) {
+  const view = await findView(siteContext, slugOrId);
+  if (!view.listed && !view.wasListed) throw httpError(404, 'Job not found', 'NOT_FOUND');
+  if (!view.listed) {
+    if (!withinClosedWindow(plain(view.job), view.publication)) {
       throw httpError(410, 'Job is closed', 'JOB_CLOSED');
     }
-    view.detail.status = 'closed';
-    view.dto.status = 'closed';
+    return {
+      job: sanitizePublicPayload({ ...view.detail, status: 'closed' }),
+      httpStatus: 200,
+    };
   }
-  if (open) rememberSlug(publication, view.dto.slug);
   return { job: sanitizePublicPayload(view.detail), httpStatus: 200 };
 };
 
@@ -413,7 +381,7 @@ const getTaxonomy = async (siteContext) => {
     loadCategories(),
     loadCities(),
     loadIndustries(),
-    JobRole.findAll({ attributes: ['clusterId', 'value', 'synonyms'], limit: 5000 }),
+    loadRoles(),
   ]);
   const clusterSlugById = new Map();
   for (const category of categories) {
@@ -468,7 +436,7 @@ const recordJobView = async (siteContext, slugOrId, body = {}) => {
   const result = await getJobBySlugOrId(siteContext, slugOrId);
   if (result.job.status === 'closed') return { ok: true, status: 'closed' };
   const src = body.channel || body.src || body.source || 'public_site_v1';
-  await jobPublicationService.recordVisit(result.job.slug, src);
+  await jobPublicationService.recordVisit(result.job.id, src);
   return { ok: true };
 };
 
@@ -500,25 +468,11 @@ const submitJobApplication = async (siteContext, slugOrId, body = {}, reqMeta = 
     throw httpError(429, 'Too many applications', 'RATE_LIMITED');
   }
 
-  let job;
-  try {
-    job = await jobPublicationService.resolveJobBySlug(slugOrId);
-  } catch (err) {
-    if (err.status === 404) throw httpError(404, 'Job not found', 'NOT_FOUND');
-    throw err;
-  }
-  const publication = await JobPublication.findOne({ where: { jobId: job.id } });
-  if (!publication) throw httpError(404, 'Job not found', 'NOT_FOUND');
-  const context = await buildContext([job]);
-  const view = presentPair(job, publication, context);
-  const site = siteFromContext(siteContext);
-  const args = { publication, jobClientId: job.clientId, site, agency: view.agency };
-  if (!wasListedOnSite(args) && !isJobListedOnSite(args)) {
-    throw httpError(404, 'Job not found', 'NOT_FOUND');
-  }
-  if (!isJobListedOnSite(args) || !jobAppearsOnSite(plain(job), view.agency)) {
-    throw httpError(410, 'Job is closed', 'JOB_CLOSED');
-  }
+  const view = await findView(siteContext, slugOrId);
+  const job = view.job;
+  const publication = view.publication;
+  if (!view.wasListed && !view.listed) throw httpError(404, 'Job not found', 'NOT_FOUND');
+  if (!view.listed) throw httpError(410, 'Job is closed', 'JOB_CLOSED');
   assertScreeningAnswers(publication.screeningQuestions, parsed.answers);
 
   const sourceName = recruitmentSourceNameFor(siteContext, view.agency);
@@ -526,9 +480,8 @@ const submitJobApplication = async (siteContext, slugOrId, body = {}, reqMeta = 
     await ensureRecruitmentSource(view.agency.id, sourceName);
   }
   const testMode = siteContext?.environment === 'test';
-  const slug = resolveSlug(plain(job), publication);
   try {
-    const { response } = await jobPublicationService.submitApplication(slug, {
+    const { response, runEnrichmentAfterResponse } = await jobPublicationService.submitApplication(job.id, {
       publicSiteApply: true,
       rejectIfExists: true,
       fullName: parsed.fullName,
@@ -546,7 +499,11 @@ const submitJobApplication = async (siteContext, slugOrId, body = {}, reqMeta = 
       testSubmission: testMode,
       src: 'public_site_v1',
     });
-    return { applicationId: response?.applicationId || response?.candidateId };
+    return {
+      applicationId: response?.applicationId || response?.candidateId,
+      candidateId: response?.candidateId || null,
+      runEnrichmentAfterResponse,
+    };
   } catch (err) {
     if (err.status === 409 || err.code === 'ALREADY_APPLIED') {
       throw httpError(409, 'Already applied', 'ALREADY_APPLIED');
@@ -554,6 +511,16 @@ const submitJobApplication = async (siteContext, slugOrId, body = {}, reqMeta = 
     if (err.status === 422) throw err;
     throw err;
   }
+};
+
+const loadRoles = async () => {
+  if (cache.roles && Date.now() - cache.rolesAt < CACHE_MS) return cache.roles;
+  cache.roles = await JobRole.findAll({
+    attributes: ['clusterId', 'value', 'synonyms'],
+    limit: 5000,
+  });
+  cache.rolesAt = Date.now();
+  return cache.roles;
 };
 
 const health = (siteContext) => ({
@@ -574,4 +541,5 @@ module.exports = {
   recordJobView,
   submitJobApplication,
   health,
+  invalidatePublicJobsCache,
 };

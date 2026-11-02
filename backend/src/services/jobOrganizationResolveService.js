@@ -149,18 +149,29 @@ const resolveOrganizationIdForJob = async ({
 
 /**
  * Job description AI analyze — suggest org only on exact name match (no fuzzy / no primary fallback).
+ * Prefer an org already linked to the client; if the hiring company is not linked yet,
+ * fall back to a global exact name match so smart-import can attach it.
  */
 const resolveOrganizationIdForAnalyze = async ({ client = null, clientId = null } = {}) => {
   const label = String(client || '').trim();
   if (!label) return null;
   const cid = clientId ? String(clientId).trim() : '';
 
-  const map = await buildOrganizationLabelMap({
-    clientIds: cid ? [cid] : [],
+  if (cid) {
+    const linkedMap = await buildOrganizationLabelMap({
+      clientIds: [cid],
+      extraLabels: [label],
+      linkedCanonicalOnly: true,
+    });
+    const linked = resolveOrgIdFromLabelMapExact(label, linkedMap);
+    if (linked) return linked;
+  }
+
+  const globalMap = await buildOrganizationLabelMap({
+    clientIds: [],
     extraLabels: [label],
-    linkedCanonicalOnly: Boolean(cid),
   });
-  return resolveOrgIdFromLabelMapExact(label, map);
+  return resolveOrgIdFromLabelMapExact(label, globalMap);
 };
 
 /**

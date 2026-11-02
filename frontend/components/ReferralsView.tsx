@@ -13,6 +13,7 @@ import type { Candidate } from './CandidatesListView';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
+import { fetchJobById, fetchJobsForCompose } from '../services/jobsApi';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferralEvents';
 
@@ -353,17 +354,9 @@ const ReferralsView: React.FC<{
         setJobCatalogLoading(true);
         (async () => {
             try {
-                const url = isTenantUser
-                    ? `${apiBase}/api/jobs/for-list`
-                    : `${apiBase}/api/jobs`;
-                const res = await fetch(url, {
-                    headers: authHeaders(true),
-                    cache: 'no-store',
-                });
-                if (!res.ok) throw new Error('Failed to load jobs');
-                const data = await res.json();
+                const data = await fetchJobsForCompose();
                 if (isActive) {
-                    setJobCatalog(Array.isArray(data) ? data : []);
+                    setJobCatalog(data as unknown as Job[]);
                 }
             } catch (err) {
                 console.error('[ReferralsView] failed to load jobs', err);
@@ -718,6 +711,7 @@ const ReferralsView: React.FC<{
                 headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
                 body: JSON.stringify({
                     candidateId: ref.candidateId,
+                    cvProfileKind: data.cvProfileKind || 'shadow',
                     sends: [
                         {
                             jobId: ref.jobId,
@@ -783,18 +777,14 @@ const ReferralsView: React.FC<{
     });
 
     const handleOpenJobDrawer = (jobTitle: string, clientName: string) => {
-         const job = jobCatalog.find(j => j.title === jobTitle);
-        const jobMap: {[key: string]: number} = { 'מפתח/ת Fullstack בכיר/ה': 2, 'מנהל/ת מוצר לחטיבת הפינטק': 7, 'מעצב/ת UX/UI': 3 }
-        const fallbackJob = jobCatalog.find(j => j.id === (jobMap[jobTitle] || 1));
-
-        if (job || fallbackJob) {
-            setSelectedJob(job || fallbackJob || null);
-            setIsDrawerOpen(true);
-            return;
-        }
-
-        setSelectedJob(buildFallbackJob(jobTitle, clientName));
+        const row = jobCatalog.find(j => j.title === jobTitle);
+        const fallback = buildFallbackJob(jobTitle, clientName);
+        setSelectedJob(row ? ({ ...fallback, ...row } as Job) : fallback);
         setIsDrawerOpen(true);
+        if (!row?.id) return;
+        void fetchJobById(String(row.id)).then((full) => {
+            if (full) setSelectedJob(full as unknown as Job);
+        });
     };
 
     // Calculate Stats

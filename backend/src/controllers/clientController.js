@@ -32,7 +32,10 @@ const list = async (req, res) => {
     }
   }
 
-  const clients = await clientService.list({ activeOnly });
+  const includeJournalCounts =
+    req.query?.journalCounts === '1'
+    && clientService.isPlatformAdmin(user);
+  const clients = await clientService.list({ activeOnly, includeJournalCounts });
   res.json(clients);
 };
 
@@ -168,11 +171,28 @@ const remove = async (req, res) => {
 };
 
 /** Linked Organization / OrganizationTmp rows for a tenant client (M:N via client_organization_links). */
+const parseListLimit = (raw, fallback = 50) =>
+  Math.min(100, Math.max(1, Number.parseInt(String(raw ?? ''), 10) || fallback));
+
+const parseListOffset = (raw) =>
+  Math.max(0, Number.parseInt(String(raw ?? ''), 10) || 0);
+
 const listLinkedOrganizations = async (req, res) => {
   try {
     const clientId = String(req.params.id || '').trim();
     clientService.assertCanAccessClientOrganizations(req.dbUser, clientId);
-    const links = await clientService.listLinkedOrganizationsForClient(clientId);
+    const paginate = req.query?.paginate === '1' || req.query?.paginate === 'true';
+    const q = req.query?.q ? String(req.query.q).trim() : '';
+    const pipelineId = req.query?.pipelineId ? String(req.query.pipelineId).trim() : '';
+    const pipelineStage = req.query?.pipelineStage ? String(req.query.pipelineStage).trim() : '';
+    const links = await clientService.listLinkedOrganizationsForClient(clientId, {
+      paginate,
+      limit: parseListLimit(req.query?.limit),
+      offset: parseListOffset(req.query?.offset),
+      q,
+      pipelineId,
+      pipelineStage,
+    });
     res.json(links);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list linked organizations' });

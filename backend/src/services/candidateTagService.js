@@ -27,6 +27,9 @@ const Job = require('../models/Job');
 const Candidate = require('../models/Candidate');
 const User = require('../models/User');
 const tagScoringEngine = require('./tagScoringEngine');
+const { bumpCandidateListCacheVersion } = require('./candidateListCacheService');
+const { normalizeJobSkillYears } = require('../utils/jobAiAnalyzeNormalize');
+const { invalidateCandidateMatchScoreCaches } = require('./matchScoreCacheService');
 
 const CANDIDATE_TYPE_ALIASES_LOOKUP = {
   education: 'degree',
@@ -871,6 +874,16 @@ const syncCandidateTagDetailsFromPayload = async (candidateId, tagDetails = []) 
   }
 };
 
+const JOB_TAG_YEARS_MAX = 50;
+
+/** Whole years 0..50 for job role-tag experience settings; anything else → null. */
+const normalizeJobTagYears = (value) => {
+  if (value == null || value === '') return null;
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(n, JOB_TAG_YEARS_MAX);
+};
+
 const normalizeJobSkillEntry = (skill) => {
   if (!skill || !skill.name) return null;
   const name = String(skill.name).trim();
@@ -903,6 +916,11 @@ const normalizeJobSkillEntry = (skill) => {
     confidence_score: Number.isFinite(relevance) ? relevance : null,
     raw_type_reason:
       skill.aiMode != null && String(skill.aiMode).trim() ? String(skill.aiMode).trim() : null,
+    ...normalizeJobSkillYears({
+      ...skill,
+      years_experience: normalizeJobTagYears(skill.years_experience ?? skill.yearsExperience),
+      lookback_years: normalizeJobTagYears(skill.lookback_years ?? skill.lookbackYears),
+    }),
   };
 };
 
@@ -947,6 +965,8 @@ const mapSystemTagsToJobSkills = (rows = []) =>
           ? plain.confidence_score
           : undefined,
       aiMode: plain.raw_type_reason || undefined,
+      years_experience: plain.years_experience ?? null,
+      lookback_years: plain.lookback_years ?? null,
       status: tagPlain?.status || 'pending',
     };
   });
@@ -1013,6 +1033,8 @@ const mapLegacyJobSkillsJson = (skills = []) =>
         quote: s.quote || undefined,
         relevance_score: s.relevance_score,
         aiMode: s.aiMode,
+        years_experience: s.years_experience ?? null,
+        lookback_years: s.lookback_years ?? null,
         status: s.status || 'pending',
       };
     })
@@ -1097,6 +1119,8 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
   const payloads = Array.from(entries.values());
 
   await SystemTag.destroy({ where: jobTagTypeWhere({ entity_id: jobId }) });
+  // Candidate→jobs matching caches hydrated job skills (5 min).
+  Promise.resolve(require('./redisService').del(`job:skills-match:${jobId}`)).catch(() => {});
   if (!payloads.length) return [];
 
   const resolved = await Promise.all(payloads.map((payload) => resolveCatalogTagForJobSkill(payload)));
@@ -1124,6 +1148,8 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
         quote: payload.quote,
         confidence_score: payload.confidence_score,
         raw_type_reason: payload.raw_type_reason,
+        years_experience: payload.years_experience,
+        lookback_years: payload.lookback_years,
         calculated_weight: score.calculatedWeight,
         final_score: score.finalScore,
         is_active: isActive,
@@ -1223,10 +1249,13 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
     4, // max 4 concurrent SystemTag inserts
   );
 
-  return SystemTag.findAll({
+  const synced = await SystemTag.findAll({
     where: candidateTagTypeWhere({ entity_id: candidateId }),
     include: [{ model: Tag, as: 'tag' }],
   });
+  await bumpCandidateListCacheVersion();
+  await invalidateCandidateMatchScoreCaches(candidateId);
+  return synced;
 };
 
 const removeAbsentTags = async (candidateId, tags = []) => {

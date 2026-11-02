@@ -11,12 +11,13 @@ import { LanguageProvider } from './context/LanguageContext';
 import { AuthProvider } from './context/AuthContext';
 import { UserPreferencesProvider } from './context/UserPreferencesContext';
 
-// ─── Global 401 interceptor ───────────────────────────────────────────────────
-// Patches window.fetch once so every API call in the app auto-redirects on
-// 401 Unauthorized — no need to add handling to individual service files.
-(function install401Interceptor() {
+// ─── Global fetch patch (staff JWT + 401 handling) ───────────────────────────
+// Production API requires Authorization on almost all /api/* routes (see backend SECURITY.md).
+// Many legacy fetch() calls omit headers — attach the stored token here once for the whole app.
+(function installFetchAuthAnd401Interceptor() {
   const _originalFetch = window.fetch.bind(window);
   let _redirecting = false;
+  const apiBaseRaw = String(import.meta.env.VITE_API_BASE || '').replace(/\/+$/, '');
 
   const isLoginRoute = () => {
     const path = window.location.pathname;
@@ -29,10 +30,69 @@ import { UserPreferencesProvider } from './context/UserPreferencesContext';
       url,
     );
 
+  const resolveRequestUrl = (input: RequestInfo | URL): string => {
+    if (typeof input === 'string') return input;
+    if (input instanceof URL) return input.href;
+    return input.url;
+  };
+
+  /** Hiro staff / portal API (not arbitrary third-party URLs that happen to contain "/api/"). */
+  const isHiroApiRequest = (url: string): boolean => {
+    if (url.startsWith('/api/')) return true;
+    try {
+      const parsed = new URL(url, window.location.origin);
+      if (parsed.pathname.startsWith('/api/')) {
+        if (!apiBaseRaw) return true;
+        const base = new URL(apiBaseRaw);
+        return parsed.origin === base.origin;
+      }
+    } catch {
+      /* ignore */
+    }
+    return false;
+  };
+
+  const readStoredToken = (): string | null => {
+    try {
+      return localStorage.getItem('token') || sessionStorage.getItem('token');
+    } catch {
+      return null;
+    }
+  };
+
+  const headersHaveAuth = (headers: Headers): boolean => {
+    const auth = headers.get('Authorization') || headers.get('authorization');
+    return Boolean(auth && String(auth).trim());
+  };
+
+  const withStaffAuth = (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): [RequestInfo | URL, RequestInit | undefined] => {
+    const url = resolveRequestUrl(input);
+    if (!isHiroApiRequest(url)) return [input, init];
+
+    const token = readStoredToken();
+    if (!token) return [input, init];
+
+    if (input instanceof Request) {
+      const merged = new Headers(input.headers);
+      if (init?.headers) new Headers(init.headers).forEach((v, k) => merged.set(k, v));
+      if (headersHaveAuth(merged)) return [input, init];
+      merged.set('Authorization', `Bearer ${token}`);
+      return [new Request(input, { ...init, headers: merged }), undefined];
+    }
+
+    const headers = new Headers(init?.headers ?? undefined);
+    if (headersHaveAuth(headers)) return [input, init];
+    headers.set('Authorization', `Bearer ${token}`);
+    return [input, { ...init, headers }];
+  };
+
   /** Returns true if the stored JWT is genuinely expired (or absent). */
   function isTokenExpiredOrMissing(): boolean {
     try {
-      const token = localStorage.getItem('token');
+      const token = readStoredToken();
       if (!token) return true;
       const parts = token.split('.');
       if (parts.length !== 3) return true;
@@ -44,15 +104,11 @@ import { UserPreferencesProvider } from './context/UserPreferencesContext';
   }
 
   window.fetch = async (...args: Parameters<typeof fetch>): Promise<Response> => {
-    const response = await _originalFetch(...args);
+    const [input, init] = withStaffAuth(args[0], args[1]);
+    const response = await _originalFetch(input, init);
 
     if (response.status === 401 && !_redirecting) {
-      const url =
-        typeof args[0] === 'string'
-          ? args[0]
-          : args[0] instanceof URL
-            ? args[0].href
-            : (args[0] as Request).url;
+      const url = resolveRequestUrl(input);
 
       // Only intercept our own API calls, not CDN / external resources
       if (url.includes('/api/')) {

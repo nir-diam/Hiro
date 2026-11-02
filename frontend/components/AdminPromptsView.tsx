@@ -8,6 +8,7 @@ import {
 import { usePrompts, PromptTemplate } from '../context/PromptContext';
 import { useLanguage } from '../context/LanguageContext';
 import { GoogleGenAI } from '@google/genai';
+import { authHeaders } from '../utils/authHeaders';
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -68,7 +69,10 @@ const AdminPromptsView: React.FC = () => {
 
     const handleEdit = (prompt: PromptTemplate) => {
         setSelectedPrompt(prompt);
-        setEditForm({ ...prompt });
+        setEditForm({
+            ...prompt,
+            model: prompt.model === 'gemini-3-flash-preview' ? 'gemini-3.8-flash' : prompt.model,
+        });
         setErrorMessage(null);
         setIsNew(false);
         setSaveStatus('idle');
@@ -90,7 +94,7 @@ const AdminPromptsView: React.FC = () => {
             name: 'פרומפט חדש',
             description: '',
             template: '',
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-3.8-flash',
             temperature: 0.5,
             variables: [],
             category: 'other',
@@ -257,11 +261,13 @@ const AdminPromptsView: React.FC = () => {
     const fetchHistory = useCallback(async (promptId?: string) => {
         setIsHistoryLoading(true);
         try {
-            const url = new URL(`${apiBase}/api/prompts/history`, window.location.origin);
-            if (promptId) {
-                url.searchParams.set('promptId', promptId);
-            }
-            const res = await fetch(url.toString());
+            const root = (apiBase || '').replace(/\/$/, '');
+            const qs = promptId ? `?promptId=${encodeURIComponent(promptId)}` : '';
+            const res = await fetch(`${root}/api/prompts/history${qs}`, {
+                credentials: 'include',
+                cache: 'no-store',
+                headers: { Accept: 'application/json', ...authHeaders() },
+            });
             if (!res.ok) throw new Error('Failed to load history');
             const data = await res.json();
             if (Array.isArray(data)) {
@@ -522,7 +528,7 @@ const AdminPromptsView: React.FC = () => {
                                                     onChange={(e) => setEditForm({ ...editForm, model: e.target.value })}
                                                     className="w-full bg-white border border-border-default rounded-lg p-2.5 text-sm"
                                                 >
-                                                    <option value="gemini-3-flash-preview">Gemini 3 Flash (מהיר וחסכוני)</option>
+                                                    <option value="gemini-3.8-flash">Gemini 3.8 Flash (מהיר וחסכוני)</option>
                                                     <option value="gemini-3-pro-preview">Gemini 3 Pro (חכם ומדויק)</option>
                                                 </select>
                                             </div>

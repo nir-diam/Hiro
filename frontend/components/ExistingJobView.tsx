@@ -18,6 +18,7 @@ import PublishJobView from './PublishJobView';
 import HiroAIChat from './HiroAIChat';
 import InviteManagerModal from './InviteManagerModal';
 import { useLanguage } from '../context/LanguageContext';
+import { updateJob } from '../services/jobsApi';
 import { useUnsavedChangesGuard } from '../hooks/useUnsavedChangesGuard';
 import { confirmLeaveWithoutSave } from '../utils/confirmLeaveWithoutSave';
 import { formatJobTagRelevanceScoreOnTenHe } from '../utils/tagWeightDisplay';
@@ -233,7 +234,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
         Context: ${JSON.stringify(contextData)}`;
         
         const newChatSession = ai.chats.create({
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-3.8-flash',
             config: { 
                 systemInstruction,
                 tools: [{ 
@@ -319,23 +320,10 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
             onSave(jobData);
             return;
         }
-        try {
-            const res = await fetch(`${apiBase}/api/jobs/${jobId}`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(jobData),
-            });
-            if (!res.ok) {
-                throw new Error('Update failed');
-            }
-            const updated = await res.json();
-            setJobDataState(updated);
-            setJobFormDirty(false);
-            onSave(updated);
-        } catch (err: any) {
-            console.error('[ExistingJobView] failed to save job', err);
-            alert(err?.message || 'עדכון משרה נכשל');
-        }
+        const updated = (await updateJob(jobId, jobData)) as typeof jobDataState;
+        setJobDataState(updated);
+        setJobFormDirty(false);
+        onSave(updated);
     };
 
     return (

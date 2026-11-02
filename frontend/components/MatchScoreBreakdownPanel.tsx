@@ -1,7 +1,6 @@
 import React, { useCallback, useMemo, useState } from 'react';
 import {
     BriefcaseIcon,
-    GlobeAmericasIcon,
     ScaleIcon,
     SparklesIcon,
     TagIcon,
@@ -56,7 +55,6 @@ type LayerBarConfig = {
 const CONTRIBUTION_KEYS: Record<string, string> = {
     semantic: 'vector',
     tags: 'tags',
-    geo: 'geo',
     experience: 'experience',
     intent: 'intent',
 };
@@ -64,7 +62,6 @@ const CONTRIBUTION_KEYS: Record<string, string> = {
 const LAYER_LABEL_KEYS: Record<string, string> = {
     semantic: 'job.sonar.layer_semantic',
     tags: 'job.sonar.layer_tags',
-    geo: 'job.sonar.layer_geo',
     experience: 'job.sonar.layer_experience',
     intent: 'job.sonar.layer_intent',
 };
@@ -87,7 +84,6 @@ function jobRecordToTagMatchJob(job: Record<string, unknown>): JobTagMatchInput 
 const LAYER_LABEL_FULL_KEYS: Record<string, string> = {
     semantic: 'job.sonar.layer_semantic_full',
     tags: 'job.sonar.layer_tags_full',
-    geo: 'job.sonar.layer_geo_full',
     experience: 'job.sonar.layer_experience_full',
     intent: 'job.sonar.layer_intent_full',
 };
@@ -114,13 +110,6 @@ function buildLayerBars(
             iconClass: 'text-blue-500',
             Icon: TagIcon,
         },
-        {
-            key: 'geo',
-            scores: [bd.geoScore, bd.geo],
-            barClass: 'bg-emerald-500',
-            iconClass: 'text-emerald-500',
-            Icon: GlobeAmericasIcon,
-        },
         ...(showExperience
             ? [
                   {
@@ -142,21 +131,28 @@ function buildLayerBars(
     ];
 
     const contributions = bd.weightedContributions;
+    const totalWeight = Object.entries(contributions || {}).reduce(
+        (sum, [key, part]) => (key === 'geo' ? sum : sum + (Number(part?.weight) || 0)),
+        0,
+    );
     return rows
         .map((row) => {
             const score = pickBreakdownScore(...row.scores);
             if (score == null) return null;
             const contribKey = CONTRIBUTION_KEYS[row.key] ?? row.key;
             const weight = contributions?.[contribKey]?.weight;
-            // A layer at 0% in the active template (e.g. Geo on "מימד אנושי") does not
-            // enter the final score. Showing its raw score (26%) reads as if it did.
+            // A layer at 0% in the active template does not enter the final score.
+            // Showing its raw score (26%) reads as if it did.
             if (typeof weight === 'number' && weight <= 0) return null;
             const labelKey = shortLabels ? LAYER_LABEL_KEYS[row.key] : LAYER_LABEL_FULL_KEYS[row.key];
             return {
                 key: row.key,
                 label: labelKey ? t(labelKey) : row.key,
                 score,
-                weight: typeof weight === 'number' ? weight : undefined,
+                weight:
+                    typeof weight === 'number' && totalWeight > 0
+                        ? (weight * 100) / totalWeight
+                        : undefined,
                 barClass: row.barClass,
                 iconClass: row.iconClass,
                 Icon: row.Icon,
@@ -345,6 +341,15 @@ export const MatchScoreBreakdownPanel: React.FC<{
         undefined;
 
     const agePenalty = typeof bd?.ageGapPenalty === 'number' && bd.ageGapPenalty > 0 ? Math.round(bd.ageGapPenalty) : 0;
+    const roleExperiencePenalty =
+        typeof bd?.roleExperiencePenalty === 'number' && bd.roleExperiencePenalty > 0
+            ? Math.round(bd.roleExperiencePenalty)
+            : 0;
+    const roleLookbackPenalty =
+        typeof bd?.roleLookbackPenalty === 'number' && bd.roleLookbackPenalty > 0
+            ? Math.round(bd.roleLookbackPenalty)
+            : 0;
+    const roleTenurePenalty = roleExperiencePenalty > 0 ? roleExperiencePenalty : roleLookbackPenalty;
     const salaryPenalty =
         typeof bd?.salaryPenalty === 'number' && bd.salaryPenalty > 0 ? Math.round(bd.salaryPenalty) : 0;
 
@@ -356,7 +361,14 @@ export const MatchScoreBreakdownPanel: React.FC<{
     const generalReasons = useMemo(() => {
         if (penaltyReasons.length) {
             return penaltyReasons.filter(
-                (pr) => pr.key !== 'age_gap' && pr.type !== 'age_gap' && !/גיל|age/i.test(String(pr.label || '')),
+                (pr) =>
+                    pr.key !== 'geo' &&
+                    pr.key !== 'age_gap' &&
+                    pr.key !== 'role_experience' &&
+                    pr.key !== 'role_lookback' &&
+                    pr.key !== 'role_tenure' &&
+                    pr.type !== 'age_gap' &&
+                    !/גיל|age/i.test(String(pr.label || '')),
             );
         }
         return [];
@@ -366,6 +378,13 @@ export const MatchScoreBreakdownPanel: React.FC<{
         const items: PenaltyItem[] = [];
         if (agePenalty > 0) {
             items.push({ key: 'age_gap', label: t('job.sonar.penalty_age_gap'), amount: agePenalty });
+        }
+        if (roleTenurePenalty > 0) {
+            items.push({
+                key: 'role_experience',
+                label: t('job.sonar.penalty_role_experience'),
+                amount: roleTenurePenalty,
+            });
         }
         for (const pr of generalReasons) {
             items.push({
@@ -405,7 +424,7 @@ export const MatchScoreBreakdownPanel: React.FC<{
         }
 
         return items.filter((item) => item.amount > 0);
-    }, [agePenalty, bd, generalReasons, salaryPenalty, t]);
+    }, [agePenalty, bd, generalReasons, roleTenurePenalty, salaryPenalty, t]);
 
     const summaryText = professionalSummary?.trim() || null;
 

@@ -39,6 +39,7 @@ import {
 } from '../utils/taskLinkedContext';
 import { inboxNotificationMatchesScope, type InboxTaskScope } from '../utils/inboxLinkedTasks';
 import { authHeaders } from '../utils/authHeaders';
+import { fetchEventTypes, filterEventTypesForContext } from '../services/eventTypesApi';
 
 // --- TYPES ---
 type NotificationType = 'task' | 'message' | 'system';
@@ -47,6 +48,8 @@ type NotificationStatus = 'New' | 'In Progress' | 'Done';
 /** Advanced status filter: טופל / לא טופל (`metadata.taskCompleted` — משימות והודעות). לא קשור לנקרא. */
 const NOTIFICATION_READ_FILTER_PENDING = 'pending';
 const NOTIFICATION_READ_FILTER_DONE = 'done_read';
+
+type NotificationDateSortOrder = 'desc' | 'asc';
 
 const ADVANCED_FILTER_FIELD_LABELS: Record<string, string> = {
     sender: 'שולח',
@@ -57,6 +60,41 @@ const ADVANCED_FILTER_FIELD_LABELS: Record<string, string> = {
     fromDate: 'מתאריך',
     toDate: 'עד תאריך',
 };
+
+const DEFAULT_NOTIFICATION_CATEGORY = 'כללי';
+
+const NOTIFICATION_CATEGORY_LABELS: Record<string, string> = {
+    screening_cv: 'שליחת קו"ח',
+};
+
+function normalizeNotificationCategory(value: unknown): string {
+    const raw = String(value ?? '').trim();
+    return raw || DEFAULT_NOTIFICATION_CATEGORY;
+}
+
+function notificationCategoryLabel(value: string): string {
+    const key = String(value || '').trim();
+    return NOTIFICATION_CATEGORY_LABELS[key] || key;
+}
+
+type LinkedClientFilterOption = { id: string; label: string };
+
+function uniqueCategoryOptions(...groups: Array<Iterable<string> | undefined>): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    const push = (value: string) => {
+        const name = String(value || '').trim();
+        if (!name || seen.has(name)) return;
+        seen.add(name);
+        out.push(name);
+    };
+    push(DEFAULT_NOTIFICATION_CATEGORY);
+    for (const group of groups) {
+        if (!group) continue;
+        for (const value of group) push(value);
+    }
+    return out;
+}
 
 interface Notification {
   id: string;
@@ -74,7 +112,7 @@ interface Notification {
   recipientReadAt?: string;
   senderUserId?: string | null;
   status: NotificationStatus;
-  category: 'כללי' | 'גיוס' | 'מכירות';
+  category: string;
   urgency?: 'נמוכה' | 'בינונית' | 'גבוהה';
   linkedCandidateId?: number;
   /** DB UUID for drawer fetch (when local id alone is insufficient). */
@@ -102,6 +140,123 @@ interface Notification {
   senderThreadUnread?: boolean;
   recipientThreadUnread?: boolean;
 }
+
+/** Tasks / reminders in the inbox that carry a linked client id. */
+function notificationHasLinkedClientTaskOrReminder(
+    n: Pick<Notification, 'type' | 'linkedClientId' | 'dueDate'>,
+): boolean {
+    if (!n.linkedClientId) return false;
+    if (n.type === 'task') return true;
+    return Boolean(n.dueDate);
+}
+
+type AdvancedMultiSelectOption = { value: string; label: string };
+
+type AdvancedFiltersState = {
+    senders: string[];
+    recipients: string[];
+    statuses: string[];
+    categories: string[];
+    linkedClientIds: string[];
+    fromDate: string;
+    toDate: string;
+};
+
+function advancedMultiSelectSummary(
+    selected: string[],
+    options: AdvancedMultiSelectOption[],
+    emptyLabel: string,
+    countLabel: string,
+): string {
+    if (selected.length === 0) return emptyLabel;
+    if (selected.length === 1) {
+        return options.find((o) => o.value === selected[0])?.label || selected[0];
+    }
+    return `${selected.length} ${countLabel}`;
+}
+
+const AdvancedMultiSelectFilter: React.FC<{
+    fieldKey: string;
+    id: string;
+    label: string;
+    options: AdvancedMultiSelectOption[];
+    selected: string[];
+    onSelectedChange: (next: string[]) => void;
+    isOpen: boolean;
+    onToggleOpen: () => void;
+    emptyLabel?: string;
+    countLabel?: string;
+    emptyOptionsMessage?: string;
+}> = ({
+    fieldKey,
+    id,
+    label,
+    options,
+    selected,
+    onSelectedChange,
+    isOpen,
+    onToggleOpen,
+    emptyLabel = 'הכל',
+    countLabel = 'נבחרו',
+    emptyOptionsMessage = 'אין אפשרויות',
+}) => {
+    const toggleValue = (value: string) => {
+        const next = new Set(selected);
+        if (next.has(value)) next.delete(value);
+        else next.add(value);
+        onSelectedChange([...next]);
+    };
+
+    return (
+        <div className="flex flex-col gap-1 min-w-0 relative" data-advanced-multi-filter={fieldKey}>
+            <span className="text-xs font-bold text-text-muted uppercase tracking-wide">{label}</span>
+            <button
+                type="button"
+                id={id}
+                onClick={onToggleOpen}
+                className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm text-right flex items-center justify-between gap-2"
+            >
+                <span className="truncate">
+                    {advancedMultiSelectSummary(selected, options, emptyLabel, countLabel)}
+                </span>
+                <ChevronDownIcon
+                    className={`w-4 h-4 shrink-0 text-text-muted transition-transform ${isOpen ? 'rotate-180' : ''}`}
+                />
+            </button>
+            {isOpen ? (
+                <div className="absolute top-full mt-1 right-0 left-0 z-50 bg-bg-card border border-border-default rounded-lg shadow-lg max-h-56 overflow-y-auto p-2 space-y-1">
+                    {options.length === 0 ? (
+                        <p className="text-xs text-text-muted px-2 py-1">{emptyOptionsMessage}</p>
+                    ) : (
+                        options.map((opt) => (
+                            <label
+                                key={opt.value}
+                                className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-bg-hover cursor-pointer text-sm"
+                            >
+                                <input
+                                    type="checkbox"
+                                    className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                                    checked={selected.includes(opt.value)}
+                                    onChange={() => toggleValue(opt.value)}
+                                />
+                                <span className="truncate">{opt.label}</span>
+                            </label>
+                        ))
+                    )}
+                    {selected.length > 0 ? (
+                        <button
+                            type="button"
+                            className="w-full text-xs font-semibold text-primary-600 hover:text-primary-800 pt-2 border-t border-border-subtle mt-1"
+                            onClick={() => onSelectedChange([])}
+                        >
+                            נקה בחירה
+                        </button>
+                    ) : null}
+                </div>
+            ) : null}
+        </div>
+    );
+};
 
 type NotificationAttachment = {
   filename: string;
@@ -635,8 +790,10 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     const [archivedNotifications, setArchivedNotifications] = useState<Notification[]>([]);
     const [activeTab, setActiveTab] = useState<NotificationTab>('all');
     const [searchTerm, setSearchTerm] = useState('');
+    const [dateSortOrder, setDateSortOrder] = useState<NotificationDateSortOrder>('desc');
     const [expandedId, setExpandedId] = useState<string | null>(null);
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
+    const [catalogCategories, setCatalogCategories] = useState<string[]>([]);
     const [selectedNotifications, setSelectedNotifications] = useState<string[]>([]);
     const [isAssignMenuOpen, setIsAssignMenuOpen] = useState(false);
     const [assignMenuAnchor, setAssignMenuAnchor] = useState<AssignAnchor | null>(null);
@@ -654,19 +811,31 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
     const [replySubmittingId, setReplySubmittingId] = useState<string | null>(null);
     const assignPanelRef = useRef<HTMLDivElement>(null);
     const bulkAssignBtnRef = useRef<HTMLButtonElement>(null);
+    const [openAdvancedMultiFilterKey, setOpenAdvancedMultiFilterKey] = useState<string | null>(null);
     const loadNotificationsRef = useRef<(() => Promise<void>) | null>(null);
     const detailLoadedRef = useRef<Set<string>>(new Set());
     
-    const initialAdvancedFilters = {
-        sender: '',
-        recipient: '',
-        status: NOTIFICATION_READ_FILTER_PENDING,
-        category: '',
+    const initialAdvancedFilters: AdvancedFiltersState = {
+        senders: [],
+        recipients: [],
+        statuses: [NOTIFICATION_READ_FILTER_PENDING],
+        categories: [],
+        linkedClientIds: [],
         fromDate: '',
         toDate: '',
-        linkedClient: '',
     };
     const [advancedFilters, setAdvancedFilters] = useState(initialAdvancedFilters);
+
+    useEffect(() => {
+        if (!openAdvancedMultiFilterKey) return;
+        const handlePointer = (event: MouseEvent) => {
+            const target = event.target as HTMLElement | null;
+            if (target?.closest('[data-advanced-multi-filter]')) return;
+            setOpenAdvancedMultiFilterKey(null);
+        };
+        document.addEventListener('mousedown', handlePointer);
+        return () => document.removeEventListener('mousedown', handlePointer);
+    }, [openAdvancedMultiFilterKey]);
     
     useEffect(() => {
         if (!isAssignMenuOpen) return;
@@ -729,10 +898,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
         }
         let active = true;
 
-        const mapCategory = (value: unknown): Notification['category'] => {
-            if (value === 'גיוס' || value === 'מכירות') return value;
-            return 'כללי';
-        };
+        const mapCategory = (value: unknown): Notification['category'] =>
+            normalizeNotificationCategory(value);
 
         const mapUrgency = (value: unknown): Notification['urgency'] => {
             if (value === 'נמוכה' || value === 'בינונית' || value === 'גבוהה') return value;
@@ -824,7 +991,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                         status,
                         category: mapCategory(row?.category),
                         urgency: mapUrgency(row?.sla),
-                        linkedClient: undefined,
+                        linkedClient: linkedClientLabel || linkedClientId || undefined,
                         linkedCandidateId,
                         linkedCandidateBackendId,
                         linkedJobId: linkedJobId || undefined,
@@ -859,6 +1026,30 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
         return () => {
             active = false;
             loadNotificationsRef.current = null;
+        };
+    }, [apiBase]);
+
+    useEffect(() => {
+        if (!apiBase) {
+            setCatalogCategories([]);
+            return;
+        }
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        let cancelled = false;
+        void fetchEventTypes(apiBase, token)
+            .then((rows) => {
+                if (cancelled) return;
+                setCatalogCategories(
+                    filterEventTypesForContext(rows, 'flight')
+                        .map((row) => String(row.name || '').trim())
+                        .filter(Boolean),
+                );
+            })
+            .catch(() => {
+                if (!cancelled) setCatalogCategories([]);
+            });
+        return () => {
+            cancelled = true;
         };
     }, [apiBase]);
 
@@ -1038,9 +1229,10 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
         }
     };
 
-    const handleAdvancedFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+    const handleAdvancedDateFilterChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = e.target;
-        setAdvancedFilters(prev => ({ ...prev, [name]: value }));
+        if (name !== 'fromDate' && name !== 'toDate') return;
+        setAdvancedFilters((prev) => ({ ...prev, [name]: value }));
     };
     
     const filterOptions = useMemo(() => {
@@ -1048,9 +1240,26 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
         return {
             senders: [...new Set(notificationsForFilters.map(n => n.sender))],
             recipients: [...new Set(notificationsForFilters.map(n => n.recipient))],
-            categories: [...new Set(notificationsForFilters.map(n => n.category))],
-            linkedClients: [...new Set(notificationsForFilters.map(n => n.linkedClient).filter(Boolean))] as string[],
+            categories: uniqueCategoryOptions(
+                catalogCategories,
+                notificationsForFilters.map((n) => n.category),
+            ),
         };
+    }, [scopedNotifications, scopedArchivedNotifications, catalogCategories]);
+
+    const linkedClientFilterOptions = useMemo((): LinkedClientFilterOption[] => {
+        const notificationsForFilters = [...scopedNotifications, ...scopedArchivedNotifications];
+        const byId = new Map<string, string>();
+        for (const n of notificationsForFilters) {
+            if (!notificationHasLinkedClientTaskOrReminder(n)) continue;
+            const id = String(n.linkedClientId).trim();
+            const label = String(n.linkedClientLabel || n.linkedClient || id).trim() || id;
+            const prev = byId.get(id);
+            if (!prev || label.length > prev.length) byId.set(id, label);
+        }
+        return [...byId.entries()]
+            .map(([id, label]) => ({ id, label }))
+            .sort((a, b) => a.label.localeCompare(b.label, 'he'));
     }, [scopedNotifications, scopedArchivedNotifications]);
 
     const filteredNotifications = useMemo(() => {
@@ -1078,13 +1287,23 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                 (n.recipient && n.recipient.toLowerCase().includes(search))
             )
             .filter(n => {
-                const { sender, recipient, status, category, fromDate, toDate, linkedClient } = advancedFilters;
-                if (sender && n.sender !== sender) return false;
-                if (recipient && n.recipient !== recipient) return false;
-                if (status === NOTIFICATION_READ_FILTER_PENDING && n.handledComplete) return false;
-                if (status === NOTIFICATION_READ_FILTER_DONE && !n.handledComplete) return false;
-                if (category && n.category !== category) return false;
-                if (linkedClient && n.linkedClient !== linkedClient) return false;
+                const { senders, recipients, statuses, categories, fromDate, toDate, linkedClientIds } =
+                    advancedFilters;
+                if (senders.length > 0 && !senders.includes(n.sender)) return false;
+                if (recipients.length > 0 && !recipients.includes(n.recipient)) return false;
+                if (categories.length > 0 && !categories.includes(n.category)) return false;
+                if (statuses.length > 0) {
+                    const isPending = !n.handledComplete;
+                    const isDone = n.handledComplete;
+                    const statusMatch =
+                        (statuses.includes(NOTIFICATION_READ_FILTER_PENDING) && isPending)
+                        || (statuses.includes(NOTIFICATION_READ_FILTER_DONE) && isDone);
+                    if (!statusMatch) return false;
+                }
+                if (linkedClientIds.length > 0) {
+                    const cid = n.linkedClientId ? String(n.linkedClientId) : '';
+                    if (!cid || !linkedClientIds.includes(cid)) return false;
+                }
 
                 const notificationDate = new Date(n.timestamp);
                 if (fromDate && notificationDate < new Date(fromDate)) return false;
@@ -1093,19 +1312,81 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                 return true;
             });
 
-        const byTimeDesc = (a: Notification, b: Notification) =>
-            notificationActivityTime(b) - notificationActivityTime(a);
+        const byDate = (a: Notification, b: Notification) => {
+            const diff = notificationActivityTime(a) - notificationActivityTime(b);
+            return dateSortOrder === 'asc' ? diff : -diff;
+        };
 
-        return [...filtered].sort(byTimeDesc);
-    }, [activeTab, searchTerm, inboxNotifications, sentNotifications, scopedArchivedNotifications, advancedFilters]);
+        return [...filtered].sort(byDate);
+    }, [
+        activeTab,
+        searchTerm,
+        inboxNotifications,
+        sentNotifications,
+        scopedArchivedNotifications,
+        advancedFilters,
+        dateSortOrder,
+    ]);
 
     /** Default read filter is `pending`; don’t treat it as an “active search” for empty-state copy. */
     const hasAdvancedFilterBeyondDefaults = useMemo(() => {
         const f = advancedFilters;
-        if (f.sender || f.recipient || f.category || f.fromDate || f.toDate || f.linkedClient) return true;
-        if (f.status && f.status !== NOTIFICATION_READ_FILTER_PENDING) return true;
+        if (
+            f.senders.length > 0
+            || f.recipients.length > 0
+            || f.categories.length > 0
+            || f.linkedClientIds.length > 0
+            || f.fromDate
+            || f.toDate
+        ) {
+            return true;
+        }
+        if (f.statuses.length === 0) return true;
+        if (f.statuses.length > 1) return true;
+        if (f.statuses.length === 1 && f.statuses[0] !== NOTIFICATION_READ_FILTER_PENDING) return true;
         return false;
     }, [advancedFilters]);
+
+    const statusFilterOptions = useMemo(
+        (): AdvancedMultiSelectOption[] => [
+            { value: NOTIFICATION_READ_FILTER_DONE, label: 'טופל' },
+            { value: NOTIFICATION_READ_FILTER_PENDING, label: 'לא טופל' },
+        ],
+        [],
+    );
+
+    const senderFilterOptions = useMemo(
+        (): AdvancedMultiSelectOption[] =>
+            [...filterOptions.senders]
+                .filter(Boolean)
+                .sort((a, b) => a.localeCompare(b, 'he'))
+                .map((value) => ({ value, label: value })),
+        [filterOptions.senders],
+    );
+
+    const recipientFilterOptions = useMemo(
+        (): AdvancedMultiSelectOption[] =>
+            [...filterOptions.recipients]
+                .filter(Boolean)
+                .sort((a, b) => a.localeCompare(b, 'he'))
+                .map((value) => ({ value, label: value })),
+        [filterOptions.recipients],
+    );
+
+    const categoryFilterOptions = useMemo(
+        (): AdvancedMultiSelectOption[] =>
+            filterOptions.categories.map((value) => ({
+                value,
+                label: notificationCategoryLabel(value),
+            })),
+        [filterOptions.categories],
+    );
+
+    const linkedClientMultiOptions = useMemo(
+        (): AdvancedMultiSelectOption[] =>
+            linkedClientFilterOptions.map((o) => ({ value: o.id, label: o.label })),
+        [linkedClientFilterOptions],
+    );
 
     const handleToggleSelect = (id: string) => {
         setSelectedNotifications(prev => 
@@ -1487,14 +1768,6 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
         void loadNotificationsRef.current?.();
     };
     
-    const filterKeyMap: { [key: string]: keyof typeof filterOptions | 'status_read' } = {
-        sender: 'senders',
-        recipient: 'recipients',
-        status: 'status_read',
-        category: 'categories',
-        linkedClient: 'linkedClients',
-    };
-
     useEffect(() => {
         // Clear selection when changing tabs
         setSelectedNotifications([]);
@@ -1577,13 +1850,30 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                             className="w-full bg-bg-card border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition"
                         />
                     </div>
+                    <div className="flex flex-col gap-1 shrink-0 min-w-[9.5rem]">
+                        <label htmlFor="notification-date-sort" className="text-[10px] font-bold text-text-muted uppercase tracking-wide sr-only">
+                            מיון לפי תאריך
+                        </label>
+                        <select
+                            id="notification-date-sort"
+                            value={dateSortOrder}
+                            onChange={(e) =>
+                                setDateSortOrder(e.target.value === 'asc' ? 'asc' : 'desc')
+                            }
+                            className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg py-2.5 px-2 transition shadow-sm"
+                            title="מיון לפי תאריך"
+                        >
+                            <option value="desc">תאריך: חדש → ישן</option>
+                            <option value="asc">תאריך: ישן → חדש</option>
+                        </select>
+                    </div>
                     <button
                         type="button"
                         onClick={(e) => {
                             e.preventDefault();
                             setIsAdvancedFilterOpen(!isAdvancedFilterOpen);
                         }}
-                        className="text-sm font-semibold text-primary-600 hover:text-primary-800 flex items-center gap-1"
+                        className="text-sm font-semibold text-primary-600 hover:text-primary-800 flex items-center gap-1 shrink-0"
                     >
                         <span>חיפוש מתקדם</span>
                         <ChevronDownIcon className={`w-4 h-4 transition-transform ${isAdvancedFilterOpen ? 'rotate-180' : ''}`} />
@@ -1592,46 +1882,80 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                 {isAdvancedFilterOpen && (
                     <div className="pt-3 border-t border-border-default">
                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 items-end">
-                            {Object.keys(filterKeyMap).map((filter) => {
-                                const mapKey = filterKeyMap[filter as keyof typeof filterKeyMap];
-                                const opts =
-                                    mapKey === 'status_read'
-                                        ? []
-                                        : (filterOptions[mapKey as keyof typeof filterOptions] as string[]);
-                                const fieldId = `adv-filter-${filter}`;
-                                const label = ADVANCED_FILTER_FIELD_LABELS[filter] || filter;
-                                return (
-                                    <div key={filter} className="flex flex-col gap-1 min-w-0">
-                                        <label htmlFor={fieldId} className="text-xs font-bold text-text-muted uppercase tracking-wide">
-                                            {label}
-                                        </label>
-                                        <select
-                                            id={fieldId}
-                                            name={filter}
-                                            value={(advancedFilters as Record<string, string>)[filter]}
-                                            onChange={handleAdvancedFilterChange}
-                                            className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm"
-                                        >
-                                            {mapKey === 'status_read' ? (
-                                                <>
-                                                    <option value="">הכל</option>
-                                                    <option value={NOTIFICATION_READ_FILTER_DONE}>טופל</option>
-                                                    <option value={NOTIFICATION_READ_FILTER_PENDING}>לא טופל</option>
-                                                </>
-                                            ) : (
-                                                <>
-                                                    <option value="">הכל</option>
-                                                    {opts.map((opt: string) => (
-                                                        <option key={opt} value={opt}>
-                                                            {opt}
-                                                        </option>
-                                                    ))}
-                                                </>
-                                            )}
-                                        </select>
-                                    </div>
-                                );
-                            })}
+                            <AdvancedMultiSelectFilter
+                                fieldKey="sender"
+                                id="adv-filter-sender"
+                                label={ADVANCED_FILTER_FIELD_LABELS.sender}
+                                options={senderFilterOptions}
+                                selected={advancedFilters.senders}
+                                onSelectedChange={(senders) => setAdvancedFilters((prev) => ({ ...prev, senders }))}
+                                isOpen={openAdvancedMultiFilterKey === 'sender'}
+                                onToggleOpen={() =>
+                                    setOpenAdvancedMultiFilterKey((k) => (k === 'sender' ? null : 'sender'))
+                                }
+                                countLabel="שולחים"
+                            />
+                            <AdvancedMultiSelectFilter
+                                fieldKey="recipient"
+                                id="adv-filter-recipient"
+                                label={ADVANCED_FILTER_FIELD_LABELS.recipient}
+                                options={recipientFilterOptions}
+                                selected={advancedFilters.recipients}
+                                onSelectedChange={(recipients) =>
+                                    setAdvancedFilters((prev) => ({ ...prev, recipients }))
+                                }
+                                isOpen={openAdvancedMultiFilterKey === 'recipient'}
+                                onToggleOpen={() =>
+                                    setOpenAdvancedMultiFilterKey((k) => (k === 'recipient' ? null : 'recipient'))
+                                }
+                                countLabel="מקבלים"
+                            />
+                            <AdvancedMultiSelectFilter
+                                fieldKey="status"
+                                id="adv-filter-status"
+                                label={ADVANCED_FILTER_FIELD_LABELS.status}
+                                options={statusFilterOptions}
+                                selected={advancedFilters.statuses}
+                                onSelectedChange={(statuses) =>
+                                    setAdvancedFilters((prev) => ({ ...prev, statuses }))
+                                }
+                                isOpen={openAdvancedMultiFilterKey === 'status'}
+                                onToggleOpen={() =>
+                                    setOpenAdvancedMultiFilterKey((k) => (k === 'status' ? null : 'status'))
+                                }
+                                countLabel="סטטוסים"
+                            />
+                            <AdvancedMultiSelectFilter
+                                fieldKey="category"
+                                id="adv-filter-category"
+                                label={ADVANCED_FILTER_FIELD_LABELS.category}
+                                options={categoryFilterOptions}
+                                selected={advancedFilters.categories}
+                                onSelectedChange={(categories) =>
+                                    setAdvancedFilters((prev) => ({ ...prev, categories }))
+                                }
+                                isOpen={openAdvancedMultiFilterKey === 'category'}
+                                onToggleOpen={() =>
+                                    setOpenAdvancedMultiFilterKey((k) => (k === 'category' ? null : 'category'))
+                                }
+                                countLabel="קטגוריות"
+                            />
+                            <AdvancedMultiSelectFilter
+                                fieldKey="linkedClient"
+                                id="adv-filter-linkedClient"
+                                label={ADVANCED_FILTER_FIELD_LABELS.linkedClient}
+                                options={linkedClientMultiOptions}
+                                selected={advancedFilters.linkedClientIds}
+                                onSelectedChange={(linkedClientIds) =>
+                                    setAdvancedFilters((prev) => ({ ...prev, linkedClientIds }))
+                                }
+                                isOpen={openAdvancedMultiFilterKey === 'linkedClient'}
+                                onToggleOpen={() =>
+                                    setOpenAdvancedMultiFilterKey((k) => (k === 'linkedClient' ? null : 'linkedClient'))
+                                }
+                                countLabel="לקוחות"
+                                emptyOptionsMessage="אין לקוחות עם משימה או תזכורת"
+                            />
                             <div className="flex flex-col gap-1 min-w-0">
                                 <label htmlFor="adv-filter-fromDate" className="text-xs font-bold text-text-muted uppercase tracking-wide">
                                     {ADVANCED_FILTER_FIELD_LABELS.fromDate}
@@ -1641,7 +1965,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                                     type="date"
                                     name="fromDate"
                                     value={advancedFilters.fromDate}
-                                    onChange={handleAdvancedFilterChange}
+                                    onChange={handleAdvancedDateFilterChange}
                                     className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm"
                                 />
                             </div>
@@ -1654,7 +1978,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                                     type="date"
                                     name="toDate"
                                     value={advancedFilters.toDate}
-                                    onChange={handleAdvancedFilterChange}
+                                    onChange={handleAdvancedDateFilterChange}
                                     className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm"
                                 />
                             </div>
@@ -2017,7 +2341,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({
                                                         </>
                                                     )}
                                                     {notification.urgency && <div><strong className="text-text-muted">דחיפות:</strong> <span className="font-semibold text-text-default">{notification.urgency}</span></div>}
-                                                    {notification.category && <div><strong className="text-text-muted">קטגוריה:</strong> <span className="font-semibold text-text-default">{notification.category}</span></div>}
+                                                    {notification.category && <div><strong className="text-text-muted">קטגוריה:</strong> <span className="font-semibold text-text-default">{notificationCategoryLabel(notification.category)}</span></div>}
                                                 </div>
                                                 {(() => {
                                                     const cand =

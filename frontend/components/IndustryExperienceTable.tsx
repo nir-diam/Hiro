@@ -34,6 +34,7 @@ type ExperienceItem = {
   yearsAgo: number;
   tags: string[];
   roleTag: string;
+  cvTitle: string;
   type: string;
   size: string;
   description: string;
@@ -153,6 +154,7 @@ const IndustryExperienceTable: React.FC<{ experiences?: ExperienceInput[] }> = (
           yearsAgo: 0,
           tags: [],
           roleTag: '',
+          cvTitle: '',
           type: '',
           size: '',
           location: '',
@@ -171,6 +173,7 @@ const IndustryExperienceTable: React.FC<{ experiences?: ExperienceInput[] }> = (
         yearsAgo: yearsAgo,
         tags: Array.isArray(exp.tags) ? exp.tags : [],
         roleTag: String(exp.roleTag || exp.role_tag || '').trim(),
+        cvTitle: String(exp.title || exp.position || exp.role || '').trim(),
         type: exp.type || '',
         size: exp.size || '',
       description: exp.description || '',
@@ -232,11 +235,20 @@ const IndustryExperienceTable: React.FC<{ experiences?: ExperienceInput[] }> = (
                   </div>
               );
           case 'roleTag':
-              return item.roleTag ? (
-                  <ExperienceTag>{item.roleTag}</ExperienceTag>
-              ) : (
-                  <span className="text-text-muted">—</span>
-              );
+              if (item.roleTag) {
+                  return <ExperienceTag>{item.roleTag}</ExperienceTag>;
+              }
+              if (item.cvTitle) {
+                  return (
+                      <span
+                          className="text-xs text-text-muted italic max-w-[220px] truncate block"
+                          title="תפקיד מהקו״ח — אין תגית תפקיד מקושרת בפרופיל"
+                      >
+                          {item.cvTitle}
+                      </span>
+                  );
+              }
+              return <span className="text-text-muted">—</span>;
           case 'tags':
               return (
                   <div className="flex flex-col gap-1 max-w-[260px]">

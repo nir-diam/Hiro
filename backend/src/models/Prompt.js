@@ -9,7 +9,7 @@ const Prompt = sequelize.define(
     name: { type: DataTypes.STRING, allowNull: false },
     description: { type: DataTypes.TEXT, allowNull: false, defaultValue: '' },
     template: { type: DataTypes.TEXT, allowNull: false, defaultValue: '' },
-    model: { type: DataTypes.STRING, allowNull: false, defaultValue: 'gemini-3-flash-preview' },
+    model: { type: DataTypes.STRING, allowNull: false, defaultValue: 'gemini-3.8-flash' },
     temperature: { type: DataTypes.FLOAT, defaultValue: 0.5 },
     variables: { type: DataTypes.JSONB, defaultValue: [] },
     category: {

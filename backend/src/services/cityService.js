@@ -6,12 +6,55 @@ const {
   hebrewCityCompareKey,
   hebrewCitySpellingVariants,
 } = require('../utils/hebrewCityVariants');
+const { cityCatalogCache } = require('./cityCatalogCacheService');
+const { catalogRegionNamesFromRows, resolveRegionAgainstCatalog } = require('../utils/jobRegionCatalog');
 
-const getAll = async () => {
-  return City.findAll({
-    order: [['cityName', 'ASC'], ['city', 'ASC']],
-  });
+/** Loaded once — email ingest used to issue dozens of City queries per candidate update. */
+let cityCatalogRows = null;
+let cityCatalogLoadPromise = null;
+
+const loadCityCatalog = async () => {
+  if (cityCatalogRows) return cityCatalogRows;
+  if (!cityCatalogLoadPromise) {
+    cityCatalogLoadPromise = City.findAll({
+      order: [['cityName', 'ASC'], ['city', 'ASC']],
+      raw: true,
+    }).then((rows) => {
+      cityCatalogRows = rows;
+      return rows;
+    });
+  }
+  return cityCatalogLoadPromise;
 };
+
+const rowMatchesIlike = (row, term, fuzzy) => {
+  const t = String(term || '').trim();
+  if (!t) return false;
+  const needle = fuzzy ? t.toLowerCase() : t.toLowerCase();
+  const names = [row.cityName, row.city].filter(Boolean).map((s) => String(s).trim());
+  for (const name of names) {
+    const hay = name.toLowerCase();
+    if (fuzzy) {
+      if (hay.includes(needle)) return true;
+    } else if (hay === needle) return true;
+  }
+  return false;
+};
+
+const sortCityRows = (rows) =>
+  [...rows].sort((a, b) => {
+    const an = String(a.cityName || a.city || '');
+    const bn = String(b.cityName || b.city || '');
+    return an.localeCompare(bn, 'he');
+  });
+
+const getAllFromDb = async () => {
+  const rows = await loadCityCatalog();
+  return rows.map((r) => City.build(r));
+};
+
+const getAll = async () =>
+  cityCatalogCache.getCached({ kind: 'all' }, getAllFromDb, 'cities:all');
 
 /**
  * Search cities by city_name or city (case-insensitive LIKE).
@@ -19,17 +62,13 @@ const getAll = async () => {
  * @returns {Promise<City[]>}
  */
 const getBySearch = async (search) => {
-  if (!search || typeof search !== 'string') return getAll();
-  const term = `%${search.trim()}%`;
-  return City.findAll({
-    where: {
-      [Op.or]: [
-        { cityName: { [Op.iLike]: term } },
-        { city: { [Op.iLike]: term } },
-      ],
-    },
-    order: [['cityName', 'ASC'], ['city', 'ASC']],
-  });
+  const rows = await loadCityCatalog();
+  if (!search || typeof search !== 'string') {
+    return sortCityRows(rows).map((r) => City.build(r));
+  }
+  const term = search.trim();
+  const matched = sortCityRows(rows.filter((r) => rowMatchesIlike(r, term, true)));
+  return matched.map((r) => City.build(r));
 };
 
 /** Search using Hebrew spelling variants (נהריה → also נהרייה). */
@@ -63,29 +102,17 @@ const resolveCityForJob = async (locationStr) => {
 
   const searchTerms = getLocationSearchTerms(trimmed);
 
-  const findOneByExact = async (term) =>
-    City.findOne({
-      where: {
-        [Op.or]: [
-          { cityName: { [Op.iLike]: term } },
-          { city: { [Op.iLike]: term } },
-        ],
-      },
-    });
+  const findOneByExact = async (term) => {
+    const rows = await loadCityCatalog();
+    const hit = rows.find((r) => rowMatchesIlike(r, term, false));
+    return hit ? City.build(hit) : null;
+  };
 
-  const findOneByFuzzy = async (term) =>
-    City.findOne({
-      where: {
-        [Op.or]: [
-          { cityName: { [Op.iLike]: `%${term}%` } },
-          { city: { [Op.iLike]: `%${term}%` } },
-        ],
-      },
-      order: [
-        ['cityName', 'ASC'],
-        ['city', 'ASC'],
-      ],
-    });
+  const findOneByFuzzy = async (term) => {
+    const rows = await loadCityCatalog();
+    const matched = sortCityRows(rows.filter((r) => rowMatchesIlike(r, term, true)));
+    return matched[0] ? City.build(matched[0]) : null;
+  };
 
   // 1. Exact match for each term (full string first, then derived: "חיפה", "תל אביב", etc.)
   for (const term of searchTerms) {
@@ -156,14 +183,9 @@ const CITY_MATCH_MIN_SCORE = 550;
 const findCityRowExact = async (term) => {
   const t = String(term || '').trim();
   if (!t) return null;
-  return City.findOne({
-    where: {
-      [Op.or]: [
-        { cityName: { [Op.iLike]: t } },
-        { city: { [Op.iLike]: t } },
-      ],
-    },
-  });
+  const rows = await loadCityCatalog();
+  const hit = rows.find((r) => rowMatchesIlike(r, t, false));
+  return hit ? City.build(hit) : null;
 };
 
 const resolveCityExact = async (locationStr) => {
@@ -246,6 +268,12 @@ const resolveCityById = async (id) => {
   return canonicalCityName(await City.findByPk(n));
 };
 
+/** Map a job region onto City.column4 names. Unknown values become null. */
+const resolveRegionForJob = async (raw) => {
+  const rows = await loadCityCatalog();
+  return resolveRegionAgainstCatalog(raw, catalogRegionNamesFromRows(rows));
+};
+
 /**
  * Return list of cities inside a radius (in km) from a chosen city.
  * Uses projected X/Y coordinates (pointx/pointy or pointX/pointY) and simple Euclidean distance.
@@ -256,21 +284,16 @@ const resolveCityById = async (id) => {
 const getWithinRadius = async (cityName, radiusKm) => {
   if (!cityName || !radiusKm || Number.isNaN(radiusKm)) return [];
 
-  const where = {
-    [Op.or]: [
-      { cityName: { [Op.iLike]: cityName.trim() } },
-      { city: { [Op.iLike]: cityName.trim() } },
-    ],
-  };
+  const rows = await loadCityCatalog();
+  const centerPlain = rows.find((r) => rowMatchesIlike(r, cityName.trim(), false));
+  if (!centerPlain) return [];
 
-  const center = await City.findOne({ where });
-  if (!center) return [];
-
+  const center = City.build(centerPlain);
   const centerX = center.pointx ?? center.pointX;
   const centerY = center.pointy ?? center.pointY;
   if (centerX == null || centerY == null) return [];
 
-  const allCities = await City.findAll();
+  const allCities = rows.map((r) => City.build(r));
   const maxDistMeters = radiusKm * 1000;
 
   const withDistance = allCities
@@ -304,6 +327,7 @@ module.exports = {
   resolveCityForCandidate,
   resolveCityExact,
   resolveCityById,
+  resolveRegionForJob,
   scoreCityNameMatch,
   getLocationSearchTerms,
 };

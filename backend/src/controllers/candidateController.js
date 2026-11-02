@@ -3,6 +3,12 @@ const jwt = require('jsonwebtoken');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const candidateService = require('../services/candidateService');
+const candidateKanbanBoardService = require('../services/candidateKanbanBoardService');
+const {
+  presignCandidateMediaFields,
+  presignOwnedCandidateFile,
+} = require('../services/candidateMediaUrlService');
+const { httpStatusForDbError } = require('../utils/dbHttpError');
 const authService = require('../services/authService');
 const { embedCandidateAndSave, searchCandidates, buildSearchDocument, cosineSimilarity, normalizeEmbedding } = require('../services/vectorSearchService');
 const { embedText } = require('../services/embeddingService');
@@ -32,6 +38,7 @@ const auditLogger = require('../utils/auditLogger');
 const { mergeProfileApprovalEvent, recordProfileApprovalClientJournal, recordProfileApprovalJobLinkJournals } = require('../utils/candidateProfileApprovalEvent');
 const { recordDuplicateResumeHashIngest } = require('../utils/candidateCanonicalLinkEvent');
 const { stripCvDocumentTitleFromPersonName, nameLooksLikeJobHeadline } = require('../utils/personName');
+const { mapResumeProfileFields, keepRecruiterProfileFields } = require('../utils/resumeProfileFields');
 const { extractDocxXmlText } = require('../utils/docxXmlText');
 const { sniffResumeKind } = require('../utils/resumeFileKind');
 const {
@@ -54,7 +61,14 @@ const {
   enrichWorkExperienceRoleTags,
   attachTagIdsToWorkExperience,
   workExperienceTagLinksChanged,
+  cvParseFailedUpdate,
 } = require('../utils/workExperienceNormalize');
+const {
+  isCvParseSendFileToGeminiEnabled,
+  resolveGeminiCvInlineFile,
+  buildCvFileParseInstruction,
+  buildGeminiCvFileUserParts,
+} = require('../utils/cvParseSendFile');
 const pipelineOutcomeService = require('../services/pipelineOutcomeService');
 const candidatePipelineService = require('../services/candidatePipelineService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
@@ -187,7 +201,11 @@ const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...ar
 const mammoth = require('mammoth');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
 const { extractWithPdftotextVariants } = require('../utils/pdftotextExtract');
-const { pickBestResumeTextExtract, resumeTextLooksOcrGarbled } = require('../utils/pdfTextQuality');
+const {
+  pickBestResumeTextExtract,
+  resumeTextLooksOcrGarbled,
+  resumeTextHasPdfFontEncodingNoise,
+} = require('../utils/pdfTextQuality');
 const { resolveCandidateSearchText } = require('../utils/buildSearchTextFromAiParse');
 const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
@@ -659,6 +677,7 @@ const isUnreliableResumeTextExtract = (text) => {
   const s = String(text || '').trim();
   if (!s) return true;
   if (resumeTextLooksOcrGarbled(s)) return true;
+  if (resumeTextHasPdfFontEncodingNoise(s)) return true;
   if (looksLikeRawPdfUtf8String(s)) return true;
   // Thin text layer — common for designed / partially image CVs
   if (s.length < 400) return true;
@@ -734,7 +753,12 @@ const decodeFileBase64Payload = (raw) => {
   return buf.length ? buf : null;
 };
 
-const { createS3Client, buildPublicUrl } = require('../services/s3Service');
+const {
+  createS3Client,
+  buildPublicUrl,
+  getObjectBufferFromStoredUrl,
+  parseS3KeyFromStoredUrl,
+} = require('../services/s3Service');
 const messageTemplateService = require('../services/messageTemplateService');
 
 const getBearerTokenFromRequest = (req) => {
@@ -1334,27 +1358,6 @@ const parseSalaryInt = (v) => {
   return Number.isFinite(n) ? n : null;
 };
 
-/** LLM often returns drivingLicenses as [{ class: "…" }] or similar — extract displayable strings. */
-const normalizeDrivingLicenseList = (arr) => {
-  if (!Array.isArray(arr)) return [];
-  const out = [];
-  for (const x of arr) {
-    if (x == null) continue;
-    if (typeof x === 'string') {
-      const t = x.trim();
-      if (t && t !== '-') out.push(t);
-      continue;
-    }
-    if (typeof x === 'object') {
-      const t = String(
-        x.value ?? x.class ?? x.name ?? x.label ?? x.license ?? x.type ?? x.title ?? '',
-      ).trim();
-      if (t && t !== '-' && t !== '[object Object]') out.push(t);
-    }
-  }
-  return out;
-};
-
 const MARITAL_STATUS_LIKE = /^(רווק|רווקה|נשוי|נשואה|גרוש|גרושה|אלמן|אלמנה|ידועים בציבור)/i;
 
 const maritalStatusFromAi = (ai) => {
@@ -1391,28 +1394,6 @@ const coercePreferredWorkingHoursFromAi = (raw) => {
   return s.slice(0, 255);
 };
 
-const normalizeMobilityDrivingFromAi = (ai) => {
-  if (!ai || typeof ai !== 'object') return {};
-  const out = {};
-  const mob = ai.mobility != null ? String(ai.mobility).trim() : '';
-  if (mob && mob !== '-') out.mobility = mob;
-
-  let licenses = normalizeDrivingLicenseList(ai.drivingLicenses);
-  if (!licenses.length && ai.drivingLicenses != null && typeof ai.drivingLicenses === 'string') {
-    licenses = normalizeStringArray(ai.drivingLicenses).filter((x) => x && x !== '-');
-  }
-  if (!licenses.length && ai.drivingLicense != null) {
-    const one = String(ai.drivingLicense).trim();
-    if (one && one !== '-') licenses = [one];
-  }
-  licenses = licenses.filter((x) => x && x !== '-');
-  if (licenses.length) {
-    out.drivingLicenses = licenses;
-    out.drivingLicense = licenses[0];
-  }
-  return out;
-};
-
 /**
  * Scalar / JSON fields from CV parse JSON → Candidate model (no skills, workExperience, education, languages, tags).
  * Uses fallback (e.g. regex extract) when AI omitted a field.
@@ -1433,7 +1414,6 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
     'address',
     'location',
     'idNumber',
-    'gender',
    // 'availability', do not change it!
     'physicalWork',
     'jobScope',
@@ -1443,10 +1423,6 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
     'companySize',
     'candidateNotes',
     'internalNotes',
-    'birthYear',
-    'birthMonth',
-    'birthDay',
-    'age',
     'title',
     'professionalSummary',
   ].forEach(mergeStr);
@@ -1497,7 +1473,7 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
     }
   }
 
-  Object.assign(out, normalizeMobilityDrivingFromAi(ai));
+  Object.assign(out, mapResumeProfileFields(ai));
 
   const fn = strOrNull(ai.firstName) ?? strOrNull(fb.firstName);
   const ln = strOrNull(ai.lastName) ?? strOrNull(fb.lastName);
@@ -1824,9 +1800,12 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
     "title": string|null,
     "company": string|null,
     "companyField": string|null,
-    "startDate": string|null,   // YYYY-MM if possible
-    "endDate": string|null,     // YYYY-MM or "Present"
-    "description": string|null,
+    "description": string,
+    "isCurrent": boolean,
+    "startYear": number|null,
+    "startMonth": number|null,
+    "endYear": number|null,
+    "endMonth": number|null,
     "roleTag": string|null      // exact tags[].name for a raw_type "role" tag linked to this job
   }],
   "education": [{ "value": string|null }]
@@ -1840,7 +1819,7 @@ Rules:
 - If the CV contains any skills/tools/technologies/traits, you MUST extract them into the relevant list (do not leave both lists empty).
 - skills.soft = interpersonal/behavioral skills (e.g., תקשורת בין-אישית, עבודת צוות, מנהיגות, שירותיות, סדר וארגון, פתרון בעיות). Max 30.
 - skills.technical = tools/technologies/platforms/methods/certifications (e.g., Excel, SQL, Python, React, Salesforce, Google Ads, Power BI, Jira, AWS, Docker). Max 30.
-- Prefer realistic date formats; if only year exists use YYYY-01 / YYYY-12.
+- workExperience dates are integers (startYear, startMonth, endYear, endMonth) plus isCurrent. Months are null when the CV does not write a month. Never a date string. description is required.
 - Each workExperience row MUST include roleTag matching one role tag in tags[] (same name string).
 - Always include top-level "availability" and "preferredWorkingHours" (null when not stated); see the appended schedule rules at the end of this prompt.
 
@@ -1904,19 +1883,36 @@ const findMissingResumeKeys = (parsed) => {
   return missing;
 };
 
-const parseResumeWithAi = async ({ resumeText, fileNameHint = null, model = null }) => {
+const parseResumeWithAi = async ({
+  resumeText,
+  fileNameHint = null,
+  model = null,
+  fileBuffer = null,
+  mimeType = null,
+} = {}) => {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     console.log('[attachMedia-ai] missing GEMINI_API_KEY/API_KEY/GOOGLE_API_KEY -> skip ai');
     return null;
   }
-  if (!resumeText || !String(resumeText).trim()) {
-    console.log('[attachMedia-ai] empty resumeText -> skip ai');
-    return null;
-  }
-  if (looksLikeRawPdfUtf8String(resumeText)) {
-    console.warn('[attachMedia-ai] skip: input looks like raw PDF bytes, not extracted text');
-    return null;
+  const sendNativeFile = isCvParseSendFileToGeminiEnabled();
+  let nativeParts = sendNativeFile
+    ? buildGeminiCvFileUserParts({
+      buffer: fileBuffer,
+      mimeType,
+      instruction: buildCvFileParseInstruction({ fileNameHint }),
+    })
+    : null;
+  const cvText = String(resumeText || '').slice(0, 50000);
+  if (!nativeParts) {
+    if (!cvText.trim()) {
+      console.log('[attachMedia-ai] empty resumeText -> skip ai');
+      return null;
+    }
+    if (looksLikeRawPdfUtf8String(resumeText)) {
+      console.warn('[attachMedia-ai] skip: input looks like raw PDF bytes, not extracted text');
+      return null;
+    }
   }
   const promptRecord = await getResumePromptTemplate();
   const chosenModel = resolveGeminiModelName(model || promptRecord?.model, null);
@@ -1924,39 +1920,101 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null, model = null
     ? String(promptRecord.template).replace('{candidate_tag}', getCandidateTagsSchemaText())
     : buildAiResumePrompt(getCandidateTagsSchemaText());
 
-  const cvText = String(resumeText).slice(0, 50000);
   const nameHintLine = fileNameHint
     ? `\n\nFILENAME NAME HINT (strong signal — use this EXACT full name including every middle name for firstName/lastName/fullName unless the CV clearly shows a different person):\n${fileNameHint}\nIMPORTANT: Do NOT drop middle names. If the hint is "אליהו ארי יחזקאל", fullName must be "אליהו ארי יחזקאל", firstName "אליהו ארי", lastName "יחזקאל".\n`
     : '';
   const generationConfig = {
-    temperature: 0.1,
+    temperature: 1,
     maxOutputTokens: 16384,
     responseMimeType: 'application/json',
     responseSchema: buildResumeResponseSchema(),
-    thinkingConfig: { thinkingBudget: 0 },
+    thinkingConfig: { thinkingLevel: 'low' },
   };
 
   const promptIdForLog = promptRecord?.id || CV_PARSING_PROMPT_ID;
+  const nativeFile = nativeParts ? resolveGeminiCvInlineFile(fileBuffer, mimeType) : null;
   console.log('[attachMedia-ai] calling gemini', {
     resumeLen: cvText.length,
     fileNameHint: fileNameHint || null,
-    model: chosenModel || 'gemini-3-flash-preview',
+    model: chosenModel || 'gemini-3.8-flash',
     promptId: promptIdForLog,
+    sendNativeFile: Boolean(nativeParts),
+    nativeMime: nativeFile?.mimeType || null,
+    nativeBytes: fileBuffer?.length || 0,
   });
-  const raw = await sendChat({
-    apiKey,
-    systemPrompt,
-    message: `CV TEXT (verbatim, do not summarize before extracting):${nameHintLine}\n\n${cvText}`,
-    generationConfig,
-    promptId: promptIdForLog,
-    model: chosenModel,
-    llmInputJson: {
-      cvTextLength: cvText.length,
-      cvTextPreview: cvText.slice(0, 4000),
-      fileNameHint: fileNameHint || null,
-      model: chosenModel || 'gemini-3-flash-preview',
-    },
-  });
+
+  const sendParse = async ({ pass, missingKeys }) => {
+    const useFile = Boolean(nativeParts);
+    const repairInstruction = useFile
+      ? buildCvFileParseInstruction({ fileNameHint, repairMissing: missingKeys || [] })
+      : null;
+    const userParts = useFile
+      ? buildGeminiCvFileUserParts({
+        buffer: fileBuffer,
+        mimeType,
+        instruction: pass === 'repair' ? repairInstruction : buildCvFileParseInstruction({ fileNameHint }),
+      })
+      : undefined;
+    const message = useFile
+      ? ''
+      : pass === 'repair'
+        ? (
+          `Your previous JSON was missing or malformed for these keys: ${JSON.stringify(missingKeys)}.\n` +
+          `Re-read the CV below and return the SAME JSON object you produced before, ` +
+          `but with EVERY required key present (use null / [] / {} when truly unknown). ` +
+          `workExperience dates are integers: startYear, startMonth, endYear, endMonth, plus isCurrent. ` +
+          `Months are null when not written in the CV. Never a date string. ` +
+          `Do not drop any fields you already populated correctly.\n\n` +
+          `CV TEXT:\n${cvText}`
+        )
+        : `CV TEXT (verbatim, do not summarize before extracting):${nameHintLine}\n\n${cvText}`;
+    return sendChat({
+      apiKey,
+      systemPrompt,
+      message,
+      userParts,
+      generationConfig,
+      promptId: promptIdForLog,
+      model: chosenModel,
+      llmInputJson: {
+        pass: pass || 'primary',
+        missingKeys: missingKeys || undefined,
+        cvTextLength: cvText.length,
+        cvTextPreview: useFile ? undefined : cvText.slice(0, 4000),
+        fileNameHint: fileNameHint || null,
+        model: chosenModel || 'gemini-3.8-flash',
+        sendNativeFile: useFile,
+        nativeMime: nativeFile?.mimeType || null,
+      },
+    });
+  };
+
+  let raw;
+  try {
+    raw = await sendParse({ pass: 'primary' });
+  } catch (err) {
+    if (nativeParts && cvText.trim() && !looksLikeRawPdfUtf8String(resumeText)) {
+      console.warn('[attachMedia-ai] native file send failed, falling back to text', err?.message || err);
+      nativeParts = null;
+      raw = await sendChat({
+        apiKey,
+        systemPrompt,
+        message: `CV TEXT (verbatim, do not summarize before extracting):${nameHintLine}\n\n${cvText}`,
+        generationConfig,
+        promptId: promptIdForLog,
+        model: chosenModel,
+        llmInputJson: {
+          pass: 'text-fallback',
+          cvTextLength: cvText.length,
+          cvTextPreview: cvText.slice(0, 4000),
+          fileNameHint: fileNameHint || null,
+          model: chosenModel || 'gemini-3.8-flash',
+        },
+      });
+    } else {
+      throw err;
+    }
+  }
   const rawStr = String(raw || '');
   let parsed = tryParseJson(rawStr);
   let missing = findMissingResumeKeys(parsed);
@@ -1970,6 +2028,7 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null, model = null
     rawTail: rawStr.slice(-300),
     keys: parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 30) : [],
     missing,
+    sendNativeFile: Boolean(nativeParts),
     softSkillsCount: Array.isArray(parsed?.skills?.soft) ? parsed.skills.soft.length : 0,
     technicalSkillsCount: Array.isArray(parsed?.skills?.technical) ? parsed.skills.technical.length : 0,
     tagsCount: Array.isArray(parsed?.tags) ? parsed.tags.length : 0,
@@ -1980,25 +2039,7 @@ const parseResumeWithAi = async ({ resumeText, fileNameHint = null, model = null
   // One-shot validate-and-repair pass when JSON did not parse or required keys are missing.
   if (!parsed || missing.length) {
     try {
-      const repairMessage =
-        `Your previous JSON was missing or malformed for these keys: ${JSON.stringify(missing)}.\n` +
-        `Re-read the CV below and return the SAME JSON object you produced before, ` +
-        `but with EVERY required key present (use null / [] / {} when truly unknown). ` +
-        `Do not drop any fields you already populated correctly.\n\n` +
-        `CV TEXT:\n${cvText}`;
-      const repairRaw = await sendChat({
-        apiKey,
-        systemPrompt,
-        message: repairMessage,
-        generationConfig,
-        promptId: promptIdForLog,
-        model: chosenModel,
-        llmInputJson: {
-          pass: 'repair',
-          missingKeys: missing,
-          cvTextLength: cvText.length,
-        },
-      });
+      const repairRaw = await sendParse({ pass: 'repair', missingKeys: missing });
       const repairedParsed = tryParseJson(repairRaw);
       if (repairedParsed && typeof repairedParsed === 'object') {
         parsed = parsed && typeof parsed === 'object'
@@ -2033,7 +2074,7 @@ const _callGeminiForCvParsing = async (userParts, label, modelOverride = null) =
 
   const chosenModel = resolveGeminiModelName(
     modelOverride || promptRecord?.model,
-    'gemini-3-flash-preview',
+    'gemini-3.8-flash',
   );
   console.log('[cv-parse] model', { path: label, model: chosenModel });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${chosenModel}:generateContent?key=${apiKey}`;
@@ -2041,10 +2082,10 @@ const _callGeminiForCvParsing = async (userParts, label, modelOverride = null) =
     systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
     contents: [{ role: 'user', parts: userParts }],
     generationConfig: {
-      temperature: 0.1,
+      temperature: 1,
       maxOutputTokens: 16384,
       responseMimeType: 'application/json',
-      thinkingConfig: { thinkingBudget: 0 },
+      thinkingConfig: { thinkingLevel: 'low' },
     },
   };
 
@@ -2312,7 +2353,10 @@ const batchMatchScores = async (req, res) => {
       return res.status(400).json({ message: 'Maximum 100 items per request' });
     }
     const tenantClientId = await getStaffClientIdFromRequest(req);
-    const scores = await candidateService.scoreCandidateJobPairs(items, { tenantClientId });
+    const scores = await candidateService.scoreCandidateJobPairs(items, {
+      tenantClientId,
+      scoreTimeBudgetMs: 40_000,
+    });
     res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.json({ scores });
   } catch (err) {
@@ -2326,7 +2370,8 @@ const list = async (req, res) => {
     await runCandidateList(req, res);
   } catch (err) {
     console.error('[candidateController.list]', err.message || err);
-    res.status(err.status || 400).json({ message: err.message || 'Failed to list candidates' });
+    const status = httpStatusForDbError(err, { defaultStatus: err.status || 500 });
+    res.status(status).json({ message: err.message || 'Failed to list candidates' });
   }
 };
 
@@ -2335,7 +2380,8 @@ const listPost = async (req, res) => {
     await runCandidateList(req, res);
   } catch (err) {
     console.error('[candidateController.listPost]', err.message || err);
-    res.status(err.status || 400).json({ message: err.message || 'Failed to list candidates' });
+    const status = httpStatusForDbError(err, { defaultStatus: err.status || 500 });
+    res.status(status).json({ message: err.message || 'Failed to list candidates' });
   }
 };
 
@@ -2357,7 +2403,7 @@ const listByWorkedAtCompany = async (req, res) => {
       yearsLeftAgo,
       limit,
     });
-    res.json({ data: rows, total: count });
+    res.json({ data: await Promise.all(rows.map((row) => presignCandidateMediaFields(row))), total: count });
   } catch (err) {
     console.error('[candidateController.listByWorkedAtCompany]', err.message || err);
     res.status(err.status || 500).json({ message: err.message || 'Failed to list candidates by worked-at-company' });
@@ -2367,7 +2413,7 @@ const listByWorkedAtCompany = async (req, res) => {
 const getByUser = async (req, res) => {
   try {
     const candidates = await candidateService.listByUserId(req.params.userId);
-    res.json(candidates);
+    res.json(await Promise.all(candidates.map((row) => presignCandidateMediaFields(row))));
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Not found' });
   }
@@ -2385,20 +2431,184 @@ const listRelatedCandidates = async (req, res) => {
 const listProfileVersions = async (req, res) => {
   try {
     const rows = await candidateService.listProfileVersionsForCandidate(req.params.id);
-    res.json(rows);
+    res.json(await Promise.all(rows.map((row) => presignCandidateMediaFields(row))));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list profile versions' });
+  }
+};
+
+const pinStaffShadow = async (req, res) => {
+  try {
+    const pinned = req.body?.pinned === true || req.body?.pinned === 'true';
+    const updated = await candidateService.setStaffShadowPinned(req.params.id, pinned);
+    res.json(await presignCandidateMediaFields(updated));
+  } catch (err) {
+    res.status(err.status || 500).json({
+      message: err.message || 'Failed to pin staff shadow',
+    });
+  }
+};
+
+const getReferralCvProfile = async (req, res) => {
+  try {
+    const kind = req.query?.kind || req.query?.cvProfileKind;
+    const resolved = await candidateService.resolveReferralCvSource(req.params.id, kind);
+    const source = resolved.source
+      ? await presignCandidateMediaFields(resolved.source)
+      : null;
+    res.json({
+      kind: resolved.kind,
+      primaryId: resolved.primaryId,
+      pinned: Boolean(resolved.pinned),
+      candidate: source,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      message: err.message || 'Failed to resolve referral CV profile',
+    });
+  }
+};
+
+/** Ensure a staff shadow copy exists for this candidate family; return it (create if missing). */
+const ensureStaffShadow = async (req, res) => {
+  try {
+    const result = await candidateService.ensureStaffShadowCopy(req.params.id, { req });
+    const shadow = result.shadow
+      ? await presignCandidateMediaFields(result.shadow)
+      : null;
+    res.json({
+      primaryId: result.primaryId,
+      created: Boolean(result.created),
+      shadow,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      message: err.message || 'Failed to ensure staff shadow copy',
+    });
   }
 };
 
 const shareProfileWithCandidate = async (req, res) => {
   try {
     const updated = await candidateService.shareStaffProfileWithCandidate(req.params.id);
-    res.json(updated);
+    res.json(await presignCandidateMediaFields(updated));
   } catch (err) {
     res.status(err.status || 500).json({
       message: err.message || 'Failed to share profile with candidate',
     });
+  }
+};
+
+const acceptLiveSyncField = async (req, res) => {
+  try {
+    const shadowSync = require('../services/candidateShadowSyncService');
+    const field = req.body?.field || req.params.field;
+    const updated = await shadowSync.acceptLiveSyncField(req.params.id, field);
+    res.json(await presignCandidateMediaFields(updated));
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to accept live sync field' });
+  }
+};
+
+const keepLiveSyncField = async (req, res) => {
+  try {
+    const shadowSync = require('../services/candidateShadowSyncService');
+    const field = req.body?.field || req.params.field;
+    const updated = await shadowSync.keepShadowField(req.params.id, field);
+    res.json(await presignCandidateMediaFields(updated));
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to keep shadow field' });
+  }
+};
+
+const proposeStaffProfileEdits = async (req, res) => {
+  try {
+    const shadowSync = require('../services/candidateShadowSyncService');
+    const notify = require('../services/candidateStaffProposalNotifyService');
+    const fields = req.body?.fields;
+    const note = req.body?.note || null;
+    const dbUserName = req.dbUser
+      ? require('../services/jobCandidateProcessJournalService').displayNameFromUser(req.dbUser)
+      : '';
+    const proposedBy =
+      (dbUserName && dbUserName !== 'מערכת' ? dbUserName : null) ||
+      (req.user?.name && String(req.user.name).trim()) ||
+      (req.user?.email && String(req.user.email).trim()) ||
+      null;
+    const proposal = await shadowSync.proposeStaffProfileEdits(req.params.id, {
+      fields,
+      proposedBy,
+      note,
+    });
+    const frontendBase = String(
+      process.env.FRONTEND_BASE_URL || process.env.APP_BASE_URL || '',
+    ).replace(/\/$/, '');
+    const approveUrl = `${frontendBase}/candidate-portal/approve-profile-edits?cid=${encodeURIComponent(req.params.id)}&token=${encodeURIComponent(proposal.accessToken || '')}`;
+    const notifyResult = await notify.notifyCandidateOfStaffProposal({
+      candidateId: req.params.id,
+      proposal,
+      approveUrl,
+      req,
+    });
+    res.json({
+      proposal: {
+        id: proposal.id,
+        status: proposal.status,
+        createdAt: proposal.createdAt,
+        expiresAt: proposal.expiresAt,
+        fields: proposal.fields,
+        note: proposal.note,
+      },
+      notify: notifyResult,
+      approveUrl,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to propose profile edits' });
+  }
+};
+
+const getStaffProfileProposal = async (req, res) => {
+  try {
+    const shadowSync = require('../services/candidateShadowSyncService');
+    const accessToken = req.query?.token || req.body?.accessToken || null;
+    const data = await shadowSync.getPendingStaffProfileProposal(req.params.id, { accessToken });
+    res.json(data);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load proposal' });
+  }
+};
+
+const resolveStaffProfileProposal = async (req, res) => {
+  try {
+    const shadowSync = require('../services/candidateShadowSyncService');
+    const decisions = req.body?.decisions || {};
+    const accessToken = req.body?.accessToken || req.query?.token || null;
+    const actor =
+      (req.body?.actor && String(req.body.actor).trim()) ||
+      (req.user?.name && String(req.user.name).trim()) ||
+      'המועמד';
+    const result = await shadowSync.resolveStaffProfileProposal(req.params.id, {
+      decisions,
+      actor,
+      accessToken,
+    });
+    try {
+      await systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CANDIDATE_STAFF_PROFILE_PROPOSAL_RESOLVED,
+        entityType: 'Candidate',
+        entityId: req.params.id,
+        entityName: actor,
+        params: {
+          approved: result.appliedFields?.length || 0,
+          decisions: result.proposal?.decisions || {},
+        },
+      });
+    } catch (evtErr) {
+      console.warn('[resolveStaffProfileProposal] system event failed', evtErr?.message || evtErr);
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to resolve proposal' });
   }
 };
 
@@ -2422,10 +2632,46 @@ Use this schema as guidance when tagging professional skills or roles.
 `;
 
 
+/** Fresh short-lived URL for a file already stored on this candidate. */
+const getFileUrl = async (req, res) => {
+  try {
+    const candidate = await candidateService.getById(req.params.id, { forIngest: true });
+    const signed = await presignOwnedCandidateFile(candidate, {
+      which: req.query.which,
+      documentId: req.query.documentId,
+      storedUrl: req.query.storedUrl,
+    });
+    res.json(signed);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to sign file' });
+  }
+};
+
 const get = async (req, res) => {
   try {
     const tenantClientId = await getStaffClientIdFromRequest(req);
-    const candidate = await candidateService.getById(req.params.id, { tenantClientId });
+    let candidate = await candidateService.getById(req.params.id, { tenantClientId });
+    const isShadow =
+      candidate?.staffProfileCopy === true
+      && candidate?.canonicalCandidateId
+      && String(candidate.canonicalCandidateId) !== String(candidate.id);
+    const shadowTagCount = Array.isArray(candidate?.tagDetails)
+      ? candidate.tagDetails.length
+      : Array.isArray(candidate?.tags)
+        ? candidate.tags.length
+        : 0;
+    if (isShadow && !shadowTagCount) {
+      try {
+        await candidateService.repairStaffShadowTags(req.params.id);
+        candidate = await candidateService.getById(req.params.id, { tenantClientId });
+      } catch (repairErr) {
+        console.warn(
+          '[candidateController.get] shadow tag repair failed',
+          req.params.id,
+          repairErr?.message || repairErr,
+        );
+      }
+    }
     const out = { ...candidate };
     delete out.embedding;
     res.json(out);
@@ -2512,6 +2758,17 @@ const create = async (req, res) => {
     });
     await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
     const enrichedAfter = await candidateService.getById(candidate.id);
+    if (
+      enrichedAfter?.id
+      && !allowProfileVersion
+      && enrichedAfter.ingestPending !== true
+    ) {
+      try {
+        await candidateService.ensureStaffShadowAfterReady(enrichedAfter.id, { req, force: true });
+      } catch (err) {
+        console.warn('[create] ensureStaffShadowCopy failed', enrichedAfter.id, err?.message || err);
+      }
+    }
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome && !identityAttached) {
       messageTemplateService.queueCandidateWelcomeEmail(enrichedAfter, {
@@ -2531,6 +2788,11 @@ const clearCandidateIngestPending = async (candidateId) => {
     await candidateService.update(candidateId, { ingestPending: false });
   } catch (err) {
     console.warn('[clearCandidateIngestPending]', candidateId, err?.message || err);
+  }
+  try {
+    await candidateService.ensureStaffShadowAfterReady(candidateId, { force: true });
+  } catch (err) {
+    console.warn('[clearCandidateIngestPending] shadow ensure/refresh failed', candidateId, err?.message || err);
   }
 };
 
@@ -2586,9 +2848,11 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
 
     let visionAiResult = null;
     const pdfBuffer = buffer && isPdfUploadBuffer(buffer, mimeType) ? buffer : null;
+    const sendNativeFile = isCvParseSendFileToGeminiEnabled()
+      && Boolean(resolveGeminiCvInlineFile(buffer, mimeType));
     const textGarbled = resumeTextLooksOcrGarbled(text);
     const unreliableText = isUnreliableResumeTextExtract(text);
-    if (pdfBuffer && (!String(text || '').trim() || unreliableText)) {
+    if (!sendNativeFile && pdfBuffer && (!String(text || '').trim() || unreliableText)) {
       console.log('[cv-vision] running Gemini Vision', {
         reason: !String(text || '').trim() ? 'empty-text' : textGarbled ? 'ocr-garbled' : 'unreliable-text',
         textLen: String(text || '').trim().length,
@@ -2597,7 +2861,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     }
 
     if (!text || !String(text).trim()) {
-      if (!visionAiResult) {
+      if (!visionAiResult && !sendNativeFile) {
         const err = new Error(
           'Could not extract readable text from this file. If the PDF is a scan or image-only, paste the resume as text in resumeText, or export a text-based PDF. Otherwise ensure fileBase64 is a valid file.',
         );
@@ -2605,7 +2869,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
         throw err;
       }
     }
-    if (text && looksLikeRawPdfUtf8String(text) && !visionAiResult) {
+    if (text && looksLikeRawPdfUtf8String(text) && !visionAiResult && !sendNativeFile) {
       const err = new Error(
         'Extracted data looks like raw PDF bytes, not text. The PDF may be image-based — use resumeText to paste the CV, or a text-based PDF export.',
       );
@@ -2614,7 +2878,28 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     }
 
     let aiResult = {};
-    if (visionAiResult && (!String(text || '').trim() || unreliableText)) {
+    if (sendNativeFile) {
+      console.log('[cv-parse] sending native file to Gemini (CV_PARSE_SEND_FILE_TO_GEMINI)');
+      aiResult = (await parseResumeWithAi({
+        resumeText: text,
+        fileNameHint,
+        fileBuffer: buffer,
+        mimeType,
+      })) || {};
+    }
+    const nativeMissing = findMissingResumeKeys(aiResult);
+    const nativeMostlyFailed = !aiResult
+      || typeof aiResult !== 'object'
+      || nativeMissing.length >= RESUME_REQUIRED_TOP_KEYS.length - 2;
+    if (sendNativeFile && nativeMostlyFailed && pdfBuffer && !visionAiResult) {
+      console.log('[cv-vision] native-file parse weak — trying PDF vision fallback', {
+        missingKeys: nativeMissing.length,
+      });
+      visionAiResult = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+    }
+    if (sendNativeFile && !nativeMostlyFailed) {
+      console.log('[cv-parse] using native-file Gemini result as primary structured parse');
+    } else if (visionAiResult && (!String(text || '').trim() || unreliableText)) {
       aiResult = visionAiResult;
       console.log('[cv-vision] using vision result as primary structured parse');
     } else if (String(text || '').trim() && !looksLikeRawPdfUtf8String(text)) {
@@ -2645,12 +2930,14 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
     let parseMeta = { model: null, retriedWithPro: false };
     try {
       const promptForModel = await getResumePromptTemplate();
-      const configuredModel = resolveGeminiModelName(promptForModel?.model, 'gemini-3-flash-preview');
+      const configuredModel = resolveGeminiModelName(promptForModel?.model, 'gemini-3.8-flash');
       const upgraded = await maybeUpgradeParseWithPro(aiResult, {
         resumeText: text,
         fileNameHint,
         modelUsed: configuredModel,
         parseWithModel: parseResumeWithAi,
+        fileBuffer: sendNativeFile ? buffer : null,
+        mimeType,
       });
       if (upgraded?.ai) aiResult = upgraded.ai;
       parseMeta = {
@@ -2677,7 +2964,10 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
       techSkills = heuristic.technical;
     }
 
-    let normalizedWorkExperience = normalizeWorkExperience(aiResult.workExperience || fallback.workExperience);
+    const parseFailed = cvParseFailedUpdate(aiResult.workExperience, text);
+    let normalizedWorkExperience = parseFailed
+      ? []
+      : normalizeWorkExperience(aiResult.workExperience);
 
     const aiTagObjects = Array.isArray(aiResult.tags)
       ? aiResult.tags
@@ -2741,6 +3031,7 @@ const runCreateFromAiEnrichment = async (stubId, ctx) => {
       },
       tags,
       workExperience: normalizedWorkExperience,
+      ...(parseFailed ? { status: parseFailed.status, statusExplanation: parseFailed.statusExplanation } : {}),
       education: normalizeEducation(aiResult.education || fallback.education),
       languages: normalizeLanguages(aiResult.languages || fallback.languages),
       industryAnalysis,
@@ -3110,7 +3401,7 @@ const saveParsedText = async (req, res) => {
     if (embedText.length > 3) {
       void tryEmbedCandidate(updated.id, embedText);
     }
-    res.json(updated);
+    res.json(await presignCandidateMediaFields(updated));
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Save failed' });
   }
@@ -3123,7 +3414,7 @@ const deleteParsedTextHistoryVersion = async (req, res) => {
       req.params.id,
       req.params.index,
     );
-    res.json(updated);
+    res.json(await presignCandidateMediaFields(updated));
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Delete failed' });
   }
@@ -3331,6 +3622,23 @@ const update = async (req, res) => {
     }
     const refreshed = await candidateService.getById(candidate.id);
 
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'workExperience') &&
+      valuesDiffer(previous?.workExperience, refreshed?.workExperience)
+    ) {
+      void ensureOrganizationsFromExperience(refreshed.workExperience, candidate.id, {
+        context: 'candidate_profile',
+      }).catch((err) => {
+        console.warn('[candidate update] workExperience org sync failed', err?.message || err);
+      });
+      try {
+        const { invalidateCandidateMatchCache } = require('../services/candidateJobMatchingService');
+        await invalidateCandidateMatchCache(candidate.id);
+      } catch (cacheErr) {
+        console.warn('[candidate update] match cache invalidate failed', cacheErr?.message || cacheErr);
+      }
+    }
+
     const fieldChanges = buildCandidateUpdateAuditChanges(previous, refreshed, body);
     if (fieldChanges.length) {
       const labels = fieldChanges.map((c) => c.field).slice(0, 24);
@@ -3392,7 +3700,7 @@ const approveDataCorrections = async (req, res) => {
         actor: actor || '—',
       },
     });
-    res.json(updated);
+    res.json(await presignCandidateMediaFields(updated));
   } catch (err) {
     const status = err.status || 500;
     res.status(status).json({ message: err.message || 'אישור תיקונים נכשל' });
@@ -3498,7 +3806,13 @@ const attachMedia = async (req, res) => {
         const enrichedCandidate = await runAttachMediaResumeEnrichment(
           candidateId,
           baseCandidate,
-          { extraText, pdfBuffer, fileName: resumeFileName },
+          {
+            extraText,
+            pdfBuffer,
+            fileName: resumeFileName,
+            fileBuffer: resumeBuffer,
+            mimeType: resumeMimeType,
+          },
           req,
         );
         scheduleCvForwardFromRequest(req, {
@@ -3522,10 +3836,102 @@ const attachMedia = async (req, res) => {
         processing: true,
       });
     }
-    res.json(baseCandidate);
+    res.json(await presignCandidateMediaFields(baseCandidate));
   } catch (err) {
     console.error('[attachMedia-error]', req.params.id, err);
     res.status(err.status || 400).json({ message: err.message || 'Failed to attach media' });
+  }
+};
+
+/**
+ * Re-run full CV enrichment from the candidate's existing resume file (Gemini + tags + completeness).
+ * Same pipeline as attachMedia resume processing, without uploading a new file.
+ */
+const reprocessFromResume = async (req, res) => {
+  const candidateId = req.params.id;
+  try {
+    const baseCandidate = await candidateService.getById(candidateId);
+    if (!baseCandidate?.id) {
+      return res.status(404).json({ message: 'Candidate not found' });
+    }
+    const resumeUrl = String(baseCandidate.resumeUrl || '').trim();
+    if (!resumeUrl) {
+      return res.status(400).json({ message: 'אין קובץ קורות חיים למועמד זה' });
+    }
+
+    await candidateService.update(candidateId, {
+      ingestPending: true,
+      // Clear previous parse-failure banner so a fresh run can rewrite status.
+      statusExplanation: null,
+    });
+    const pendingView = await candidateService.getById(candidateId);
+
+    void (async () => {
+      let extraText = '';
+      let pdfBuffer = null;
+      let resumeBuffer = null;
+      let resumeMimeType = null;
+      const resumeFileName =
+        path.basename(String(resumeUrl).split('?')[0] || '') || 'resume.pdf';
+      try {
+        const bin = await fetchResumeBinaryForMail(resumeUrl, candidateId);
+        if (bin?.buffer?.length) {
+          resumeBuffer = bin.buffer;
+          resumeMimeType = bin.contentType || null;
+          if (isPdfUploadBuffer(bin.buffer, bin.contentType)) pdfBuffer = bin.buffer;
+          if ((bin.contentType || '').startsWith('image/')) {
+            extraText = await extractTextFromImageBuffer(bin.buffer);
+          } else {
+            extraText = await extractFromBuffer(bin.buffer, bin.contentType);
+          }
+        }
+      } catch (e) {
+        console.warn('[reprocessFromResume] binary extract failed', candidateId, e?.message || e);
+      }
+      if (!String(extraText || '').trim()) {
+        extraText = await fetchResumeText(resumeUrl, candidateId);
+      }
+      console.log('[reprocessFromResume] starting enrich', candidateId, {
+        extraTextLen: String(extraText || '').length,
+        hasPdfBuffer: Boolean(pdfBuffer),
+        unreliableText: isUnreliableResumeTextExtract(extraText),
+        fileName: resumeFileName,
+      });
+      const refreshed = await runAttachMediaResumeEnrichment(
+        candidateId,
+        baseCandidate,
+        {
+          extraText,
+          pdfBuffer,
+          fileName: resumeFileName,
+          fileBuffer: resumeBuffer,
+          mimeType: resumeMimeType,
+        },
+        req,
+      );
+      console.log('[reprocessFromResume] done', candidateId, {
+        status: refreshed?.status || null,
+        experienceCount: Array.isArray(refreshed?.workExperience)
+          ? refreshed.workExperience.length
+          : 0,
+        statusExplanation: refreshed?.statusExplanation || null,
+      });
+    })().catch((err) => {
+      console.error('[reprocessFromResume-bg]', candidateId, err?.message || err);
+      void clearCandidateIngestPending(candidateId);
+    });
+
+    return res.status(202).json({
+      ...pendingView,
+      ingestPending: true,
+      processing: true,
+    });
+  } catch (err) {
+    console.error('[reprocessFromResume]', candidateId, err);
+    void clearCandidateIngestPending(candidateId);
+    return res.status(err.status || 500).json({
+      message: err.message || 'Failed to reprocess candidate',
+    });
   }
 };
 
@@ -3616,13 +4022,43 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
     }
 
     const pdfBuffer = options.pdfBuffer && Buffer.isBuffer(options.pdfBuffer) ? options.pdfBuffer : null;
+    const fileBuffer = Buffer.isBuffer(options.fileBuffer) ? options.fileBuffer : pdfBuffer;
+    const fileMime = options.mimeType || (pdfBuffer ? 'application/pdf' : null);
+    const sendNativeFile = isCvParseSendFileToGeminiEnabled()
+      && Boolean(resolveGeminiCvInlineFile(fileBuffer, fileMime));
     const textGarbled = resumeTextLooksOcrGarbled(workingText);
     const unreliableText = isUnreliableResumeTextExtract(workingText);
     let ai = options.pdfVisionResult && typeof options.pdfVisionResult === 'object'
       ? options.pdfVisionResult
       : null;
 
-    if (!ai && pdfBuffer && (!String(workingText || '').trim() || unreliableText)) {
+    if (sendNativeFile && !ai) {
+      console.log('[cv-parse][enrich] sending native file to Gemini (CV_PARSE_SEND_FILE_TO_GEMINI)', {
+        candidateId: baseCandidate?.id,
+      });
+      ai = await parseResumeWithAi({
+        resumeText: workingText,
+        fileNameHint,
+        fileBuffer,
+        mimeType: fileMime,
+      });
+    }
+    const nativeMissing = findMissingResumeKeys(ai);
+    const nativeMostlyFailed = !ai
+      || typeof ai !== 'object'
+      || nativeMissing.length >= RESUME_REQUIRED_TOP_KEYS.length - 2;
+    const usedNativeFileAsPrimary = Boolean(sendNativeFile && !nativeMostlyFailed);
+
+    if (sendNativeFile && nativeMostlyFailed && pdfBuffer && (!String(workingText || '').trim() || unreliableText)) {
+      console.log('[cv-vision][enrich] native-file parse weak — PDF vision fallback', {
+        candidateId: baseCandidate?.id,
+        missingKeys: nativeMissing.length,
+      });
+      const vision = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+      if (vision) ai = vision;
+    }
+
+    if (!ai && !sendNativeFile && pdfBuffer && (!String(workingText || '').trim() || unreliableText)) {
       console.log('[cv-vision][enrich] running Gemini Vision', {
         candidateId: baseCandidate?.id,
         reason: !String(workingText || '').trim() ? 'empty-text' : textGarbled ? 'ocr-garbled' : 'unreliable-text',
@@ -3631,9 +4067,13 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
       ai = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
     }
 
-    const usedVisionAsPrimary = Boolean(ai && (!String(workingText || '').trim() || unreliableText));
+    const usedVisionAsPrimary = Boolean(
+      ai
+      && !sendNativeFile
+      && (!String(workingText || '').trim() || unreliableText)
+    );
 
-    if (!usedVisionAsPrimary) {
+    if (!usedVisionAsPrimary && !usedNativeFileAsPrimary && !(ai && !String(workingText || '').trim())) {
       const textAi = await parseResumeWithAi({ resumeText: workingText || '', fileNameHint });
       const missingAfterTextAi = findMissingResumeKeys(textAi);
       const textParseMostlyFailed = missingAfterTextAi.length >= RESUME_REQUIRED_TOP_KEYS.length - 2;
@@ -3665,12 +4105,14 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
     if (ai && typeof ai === 'object') {
       try {
         const promptForModel = await getResumePromptTemplate();
-        const configuredModel = resolveGeminiModelName(promptForModel?.model, 'gemini-3-flash-preview');
+        const configuredModel = resolveGeminiModelName(promptForModel?.model, 'gemini-3.8-flash');
         const upgraded = await maybeUpgradeParseWithPro(ai, {
           resumeText: workingText,
           fileNameHint,
           modelUsed: configuredModel,
           parseWithModel: parseResumeWithAi,
+          fileBuffer: sendNativeFile ? fileBuffer : null,
+          mimeType: fileMime,
         });
         if (upgraded?.ai) ai = upgraded.ai;
         enrichParseMeta = {
@@ -3758,7 +4200,8 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
       mergedUpdates = { ...mergedUpdates, ...candidateUpdates };
     } else {
       const fallback = buildParsedUpdates(baseCandidate, extraText);
-      mergedUpdates = { ...mergedUpdates, ...fallback };
+      delete fallback.workExperience;
+      mergedUpdates = { ...mergedUpdates, ...fallback, ...cvParseFailedUpdate(null, extraText) };
     }
 
     const resolvedSearchText = resolveCandidateSearchText(ai, workingText);
@@ -3768,7 +4211,8 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
     }
   } catch (e) {
     const fallback = buildParsedUpdates(baseCandidate, extraText);
-    mergedUpdates = { ...mergedUpdates, ...fallback };
+    delete fallback.workExperience;
+    mergedUpdates = { ...mergedUpdates, ...fallback, ...cvParseFailedUpdate(null, extraText) };
     const resolvedSearchText = resolveCandidateSearchText(null, workingText);
     if (resolvedSearchText.trim()) {
       mergedUpdates.searchText = resolvedSearchText;
@@ -3776,6 +4220,7 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
     }
   }
 
+  mergedUpdates = keepRecruiterProfileFields(mergedUpdates, baseCandidate);
   mergedUpdates = filterPreservedCandidateFields(mergedUpdates, baseCandidate, preserveFields);
   if (options.inbound) {
     const contact = applyInboundContact(
@@ -3845,6 +4290,8 @@ async function runUploadNameRepairEnrichment(candidateId, baseCandidate, ctx, re
     const pdfBuffer = buffer && isPdfUploadBuffer(buffer, mimeType) ? buffer : null;
     const refreshed = await enrichCandidateFromResumeText(baseCandidate, extraText || '', {
       pdfBuffer,
+      fileBuffer: buffer,
+      mimeType,
       fileName,
     });
     await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidateId, req);
@@ -3872,6 +4319,8 @@ const runAttachMediaResumeEnrichment = async (candidateId, baseCandidate, enrich
       enrichCtx.extraText || '',
       {
         pdfBuffer: enrichCtx.pdfBuffer,
+        fileBuffer: enrichCtx.fileBuffer,
+        mimeType: enrichCtx.mimeType,
         fileName: enrichCtx.fileName,
       },
     );
@@ -4066,6 +4515,20 @@ const extractResumeTextFromUpload = async (fileBase64, mimeType) => {
 const fetchResumeText = async (resumeUrl, candidateIdForLog = '') => {
   let extraText = '';
   try {
+    if (parseS3KeyFromStoredUrl(resumeUrl)) {
+      const fromS3 = await getObjectBufferFromStoredUrl(resumeUrl);
+      if (fromS3?.buffer?.length) {
+        const ct = fromS3.contentType || '';
+        if (ct.startsWith('text/') || ct.includes('json') || ct.includes('html') || ct.includes('csv')) {
+          const raw = fromS3.buffer.toString('utf8');
+          extraText = ct.includes('html') ? stripHtml(raw) : raw;
+        } else {
+          extraText = await extractFromBuffer(fromS3.buffer, ct);
+        }
+        return normalizeResumeSearchText(extraText);
+      }
+    }
+
     let fetchUrl = resumeUrl;
     if (fetchUrl.includes('docs.google.com/document/d/')) {
       fetchUrl = rewriteDocsExportTxt(fetchUrl);
@@ -4186,6 +4649,8 @@ const processResumeUploadForCandidate = async (
 
   const enrichOptions = { ...options, fileName: filename || options.fileName || options.filename };
   if (pdfBuffer) enrichOptions.pdfBuffer = pdfBuffer;
+  enrichOptions.fileBuffer = buffer;
+  if (mimeType) enrichOptions.mimeType = mimeType;
 
   const baseCandidate = await candidateService.getById(candidateId);
   const refreshed = await enrichCandidateFromResumeText(baseCandidate, extraText || '', enrichOptions);
@@ -4222,6 +4687,18 @@ const extFromContentType = (ct) => {
 const fetchResumeBinaryForMail = async (resumeUrl, candidateIdForLog = '') => {
   if (!resumeUrl || typeof resumeUrl !== 'string') return null;
   try {
+    if (parseS3KeyFromStoredUrl(resumeUrl)) {
+      const fromS3 = await getObjectBufferFromStoredUrl(resumeUrl);
+      if (fromS3?.buffer?.length) {
+        const ext = extFromContentType(fromS3.contentType);
+        return {
+          buffer: fromS3.buffer,
+          contentType: fromS3.contentType || 'application/octet-stream',
+          filename: `resume.${ext}`,
+        };
+      }
+    }
+
     let fetchUrl = resumeUrl;
     if (fetchUrl.includes('docs.google.com/document/d/')) {
       fetchUrl = rewriteDocsExportTxt(fetchUrl);
@@ -4384,8 +4861,6 @@ const extractStructuredFields = (text) => {
           text: snippet,
         });
       });
-    } else {
-      segments.push({ sy: '2000', ey: '2000', text: block.trim() });
     }
 
     segments.forEach((seg) => {
@@ -4396,8 +4871,8 @@ const extractStructuredFields = (text) => {
         title: seg.text.split('.')[0] || `ניסיון ${sy}${ey ? `-${ey}` : ''}`,
         company: '',
         companyField: '',
-        startDate: `${sy}-01`,
-        endDate: /present|כיום/i.test(ey) ? 'Present' : ey === sy ? `${ey}-12` : `${ey}-12`,
+        startDate: sy,
+        endDate: /present|כיום/i.test(ey) ? 'Present' : ey,
         description: seg.text,
       });
     });
@@ -4418,7 +4893,8 @@ const extractStructuredFields = (text) => {
         ...yearLines.map((l, idx) => {
           const m = l.match(/(20\d{2}|19\d{2}).{0,10}(20\d{2}|19\d{2}|כיום|present)/i);
           const single = l.match(/(20\d{2}|19\d{2})/);
-          const sy = m ? m[1] : single ? single[1] : '2000';
+          const sy = m ? m[1] : single ? single[1] : '';
+          if (!sy) return null;
           const eyRaw = m ? m[2] : sy;
           const ey = /כיום|present/i.test(eyRaw) ? 'Present' : eyRaw;
           return {
@@ -4426,11 +4902,11 @@ const extractStructuredFields = (text) => {
             title: l,
             company: '',
             companyField: '',
-            startDate: `${sy}-01`,
-            endDate: ey === sy ? `${ey}-12` : ey === 'Present' ? 'Present' : `${ey}-12`,
+            startDate: sy,
+            endDate: ey === 'Present' ? 'Present' : ey,
             description: l,
           };
-        }),
+        }).filter(Boolean),
       );
     }
   }
@@ -4448,19 +4924,6 @@ const extractStructuredFields = (text) => {
     }
   }
 
-  // Final fallbacks: ensure at least one card is created so UI shows data
-  if (experienceCards.length === 0 && text && text.trim().length > 30) {
-    const snippet = text.trim().slice(0, 220);
-    experienceCards.push({
-      id: 1,
-      title: snippet.split('.')[0] || 'ניסיון תעסוקתי',
-      company: '',
-      companyField: '',
-      startDate: '2000-01',
-      endDate: '2000-12',
-      description: snippet,
-    });
-  }
   if (educationCards.length === 0) {
     const eduMatch = text.match(/.{0,50}(אוניברסיט|מכללה|college|university|degree|b\.?a|bcom|bsc|msc|m\.a|phd|mba|תואר|לימוד|studies|certif|certificate|תעודה|diploma).{0,80}/i);
     const eduText = eduMatch ? eduMatch[0].trim() : text.trim().slice(0, 150);
@@ -4501,7 +4964,8 @@ const buildParsedUpdates = (candidate, text) => {
           const text = item.trim();
           if (!text) return null;
           const yearMatch = text.match(/(20\d{2}|19\d{2})/);
-          const year = yearMatch ? `${yearMatch[1]}-01` : '2000-01';
+          if (!yearMatch) return null;
+          const year = yearMatch[1];
           return {
             id: idx + 1,
             title: text,
@@ -4516,8 +4980,9 @@ const buildParsedUpdates = (candidate, text) => {
           const title = item.title || item.value || item.description || '';
           const description = item.description || title;
           if (!title && !description) return null;
-          const startDate = item.startDate || '2000-01';
+          const startDate = item.startDate || null;
           const endDate = item.endDate || startDate;
+          if (!startDate || startDate === '2000-01') return null;
           return {
             id: item.id || idx + 1,
             title: title || 'ניסיון תעסוקתי',
@@ -4622,6 +5087,35 @@ const semanticSearch = async (req, res) => {
   }
 };
 
+const parseStageIdsParam = (raw) => {
+  if (Array.isArray(raw)) return raw.map((id) => String(id || '').trim()).filter(Boolean);
+  if (raw == null || raw === '') return [];
+  return String(raw)
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+};
+
+/** One kanban card per job process on the selected candidate pipeline. */
+const listKanbanBoard = async (req, res) => {
+  try {
+    const pipelineId = String(req.query.pipelineId || req.body?.pipelineId || '').trim();
+    const search = String(req.query.search || req.query.q || req.body?.search || '').trim();
+    const stageIds = parseStageIdsParam(req.query.stageIds || req.body?.stageIds);
+    const limit = req.query.limit || req.body?.limit;
+    const rows = await candidateKanbanBoardService.listKanbanBoard({
+      pipelineId,
+      search,
+      limit,
+      stageIds: stageIds.length ? stageIds : null,
+    });
+    res.set('Cache-Control', 'private, no-store');
+    res.json({ data: rows, total: rows.length });
+  } catch (err) {
+    res.status(err.status || 400).json({ message: err.message || 'Failed to load kanban board' });
+  }
+};
+
 // Lightweight free-text search on name / title / source only
 const freeSearch = async (req, res) => {
   try {
@@ -4636,7 +5130,7 @@ const freeSearch = async (req, res) => {
       stageIds: Array.isArray(stageIds) ? stageIds : undefined,
       includeUnassigned: Boolean(includeUnassigned),
     });
-    res.json(results);
+    res.json(await Promise.all(results.map((row) => presignCandidateMediaFields(row))));
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Free search failed' });
   }
@@ -5736,6 +6230,32 @@ const patchPipelineStage = async (req, res) => {
       req?.dbUser?.clientId || null,
     );
 
+    const preferredJobCandidateId =
+      body.jobCandidateId != null && String(body.jobCandidateId).trim()
+        ? String(body.jobCandidateId).trim()
+        : null;
+    if (body.fromStageId != null && String(body.fromStageId).trim()) {
+      fromStageId = String(body.fromStageId).trim();
+    } else if (preferredJobCandidateId && newPipelineId && clientId) {
+      // Process (תהליך) cards: stage comes from job-link status, not candidate.pipelineStageId.
+      try {
+        const jc = await JobCandidate.findByPk(preferredJobCandidateId, {
+          attributes: ['id', 'candidateId', 'status'],
+        });
+        if (jc && String(jc.candidateId) === String(candidateId)) {
+          const pipelines = await candidatePipelineService.listOrSeedByClientId(clientId);
+          const pipeline = pipelines.find((p) => p.id === newPipelineId);
+          const statusName = String(jc.status || '').trim();
+          const byStatus = (pipeline?.stages || []).find(
+            (s) => String(s.name || '').trim() === statusName,
+          );
+          if (byStatus?.id) fromStageId = byStatus.id;
+        }
+      } catch (jcErr) {
+        console.warn('[patchPipelineStage] job-link fromStage resolve failed', jcErr.message || jcErr);
+      }
+    }
+
     if (!fromStageId && newPipelineId && clientId) {
       fromStageId = await pipelineOutcomeService.inferFirstPipelineStageId(clientId, newPipelineId);
     }
@@ -5779,6 +6299,7 @@ const patchPipelineStage = async (req, res) => {
             pipelineId: newPipelineId,
             fromStageId,
             toStageId: newStageId,
+            jobCandidateId: preferredJobCandidateId,
           });
         } catch (outcomeErr) {
           console.error(
@@ -5791,8 +6312,9 @@ const patchPipelineStage = async (req, res) => {
       }
     }
 
+    const presented = await presignCandidateMediaFields(candidate);
     return res.json({
-      ...candidate,
+      ...presented,
       ...(pipelineMove ? { pipelineMove } : {}),
     });
   } catch (err) {
@@ -5802,14 +6324,24 @@ const patchPipelineStage = async (req, res) => {
 
 module.exports = {
   list,
+  listKanbanBoard,
   listPost,
   batchMatchScores,
   listByWorkedAtCompany,
   getByUser,
   listRelatedCandidates,
   listProfileVersions,
+  ensureStaffShadow,
+  pinStaffShadow,
+  getReferralCvProfile,
   shareProfileWithCandidate,
+  acceptLiveSyncField,
+  keepLiveSyncField,
+  proposeStaffProfileEdits,
+  getStaffProfileProposal,
+  resolveStaffProfileProposal,
   get,
+  getFileUrl,
   create,
   createFromAi,
   update,
@@ -5821,6 +6353,7 @@ module.exports = {
   remove,
   createUploadUrl,
   attachMedia,
+  reprocessFromResume,
   rebuildEmbedding,
   rebuildAllEmbeddings,
   semanticSearch,
@@ -5830,6 +6363,7 @@ module.exports = {
   processResumeUploadForCandidate,
   enrichCandidateFromPublicApplyUpload,
   enrichCandidateFromResumeText,
+  resumeExtractLooksUnreliable: isUnreliableResumeTextExtract,
   generateExperienceSummary,
   fetchResumeText,
   extractResumeTextFromUpload,

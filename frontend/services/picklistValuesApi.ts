@@ -1,3 +1,5 @@
+import { authHeaders } from '../utils/authHeaders';
+
 export type PicklistValueRow = {
     id: string;
     label: string;
@@ -51,7 +53,7 @@ export async function fetchPicklistSubcategories(
         const res = await fetch(`${root}/api/picklists/categories/${encodeURIComponent(id)}/subcategories`, {
             credentials: 'include',
             cache: 'no-store',
-            headers: { Accept: 'application/json' },
+            headers: { Accept: 'application/json', ...authHeaders() },
         });
         if (!res.ok) return [];
         const data: unknown = await res.json();
@@ -77,7 +79,7 @@ export async function fetchPicklistCategoryValues(
         const res = await fetch(`${root}/api/picklists/categories/${encodeURIComponent(id)}/values`, {
             credentials: 'include',
             cache: 'no-store',
-            headers: { Accept: 'application/json' },
+            headers: { Accept: 'application/json', ...authHeaders() },
         });
         if (!res.ok) return [];
         const data: unknown = await res.json();
@@ -367,7 +369,11 @@ export async function fetchPicklistValuesByKey(
     const url = `${root}/api/picklists/categories/by-key/${encodeURIComponent(key)}/values`;
     const request = (async () => {
         try {
-            const res = await fetch(url, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
+            const res = await fetch(url, {
+                credentials: 'include',
+                cache: 'no-store',
+                headers: { Accept: 'application/json', ...authHeaders() },
+            });
             if (!res.ok) return [];
             const data: unknown = await res.json();
             if (!Array.isArray(data)) return [];

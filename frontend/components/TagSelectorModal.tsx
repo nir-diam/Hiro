@@ -51,6 +51,10 @@ interface TagSelectorModalProps {
   contextText?: string;
   jobFieldCategory?: string;
   enableRequiredTagToggle?: boolean;
+  /** When set, block selecting more than this many tags (existing selection can be toggled off). */
+  maxSelection?: number;
+  /** Pre-select catalog tags when the modal opens (e.g. work-experience row roles). */
+  initialSelectedTagIds?: string[];
 }
 
 type PrimaryPane = 'all' | 'suggested';
@@ -110,6 +114,8 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         contextText,
         jobFieldCategory,
         enableRequiredTagToggle = false,
+        maxSelection,
+        initialSelectedTagIds = [],
     } = props;
 
     const [searchTerm, setSearchTerm] = useState('');
@@ -146,7 +152,6 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
 
     useEffect(() => {
         if (!isOpen) return;
-        setSelectedTags([]);
         setSearchTerm('');
         setError(null);
         setPrimaryPane('all');
@@ -162,39 +167,59 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
 
         const controller = new AbortController();
 
+        const normalizeTagRow = (tag: Record<string, unknown>): TagOption | null => {
+            if (tag?.status && tag.status !== 'active') return null;
+            const nameHe = String(tag.displayNameHe || tag.tagKey || tag.displayNameEn || tag.id || '');
+            if (!nameHe) return null;
+            const nameEn = String(tag.displayNameEn || tag.tagKey || tag.displayNameHe || tag.id || '');
+            return {
+                id: String(tag.id || `${tag.tagKey || nameHe}-${Math.random().toString(36).slice(2, 8)}`),
+                nameHe,
+                nameEn,
+                category: mapBackendTypeToCategory(String(tag.type || '')),
+                description: String(tag.descriptionHe || tag.descriptionEn || ''),
+                synonyms: Array.isArray(tag.synonyms) ? (tag.synonyms as string[]) : [],
+                rawType: String(tag.type || ''),
+                tagKey: tag.tagKey ? String(tag.tagKey) : undefined,
+                usageCount: Number(tag.usageCount) || 0,
+                verified: tag.qualityState === 'verified',
+                domains: Array.isArray(tag.domains) ? (tag.domains as string[]) : [],
+            };
+        };
+
         const fetchTags = async () => {
             setIsLoading(true);
             try {
-                const res = await fetch(`${apiBase}/api/tags`, {
-                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                    signal: controller.signal,
-                });
-                if (!res.ok) throw new Error('Failed to load tags');
-                const payload = await res.json();
-                if (!Array.isArray(payload.data)) {
-                    setAvailableTags([]);
-                    return;
+                // GET /api/tags defaults to limit=100 (max 500/page). Modal filters client-side
+                // by category, so a single page leaves languages/industry/seniority mostly empty.
+                const PAGE_SIZE = 500;
+                const MAX_PAGES = 40;
+                const normalized: TagOption[] = [];
+                let page = 1;
+                let total = Infinity;
+                while (page <= MAX_PAGES && normalized.length < total) {
+                    const params = new URLSearchParams({
+                        page: String(page),
+                        limit: String(PAGE_SIZE),
+                        statuses: 'active',
+                        sort: 'usageCount',
+                        direction: 'desc',
+                    });
+                    const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, {
+                        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                        signal: controller.signal,
+                    });
+                    if (!res.ok) throw new Error('Failed to load tags');
+                    const payload = await res.json();
+                    const rows = Array.isArray(payload?.data) ? payload.data : [];
+                    total = Number.isFinite(Number(payload?.total)) ? Number(payload.total) : rows.length;
+                    for (const row of rows) {
+                        const tag = normalizeTagRow(row as Record<string, unknown>);
+                        if (tag) normalized.push(tag);
+                    }
+                    if (!rows.length || page * PAGE_SIZE >= total) break;
+                    page += 1;
                 }
-                const normalized = payload.data
-                    .filter((tag: { status?: string }) => tag?.status === 'active')
-                    .map((tag: Record<string, unknown>) => {
-                        const nameHe = String(tag.displayNameHe || tag.tagKey || tag.displayNameEn || tag.id || '');
-                        const nameEn = String(tag.displayNameEn || tag.tagKey || tag.displayNameHe || tag.id || '');
-                        return {
-                            id: String(tag.id || `${tag.tagKey || nameHe}-${Math.random().toString(36).slice(2, 8)}`),
-                            nameHe,
-                            nameEn,
-                            category: mapBackendTypeToCategory(String(tag.type || '')),
-                            description: String(tag.descriptionHe || tag.descriptionEn || ''),
-                            synonyms: Array.isArray(tag.synonyms) ? tag.synonyms as string[] : [],
-                            rawType: String(tag.type || ''),
-                            tagKey: tag.tagKey ? String(tag.tagKey) : undefined,
-                            usageCount: Number(tag.usageCount) || 0,
-                            verified: tag.qualityState === 'verified',
-                            domains: Array.isArray(tag.domains) ? tag.domains as string[] : [],
-                        } as TagOption;
-                    })
-                    .filter((tag) => tag.nameHe);
                 setAvailableTags(normalized);
             } catch (err: unknown) {
                 if (err instanceof Error && err.name === 'AbortError') return;
@@ -339,11 +364,25 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         && !existingNameSet.has(searchTerm.trim()),
     );
 
+    useEffect(() => {
+        if (!isOpen) {
+            setSelectedTags([]);
+            return;
+        }
+        if (!initialSelectedTagIds.length || !availableTags.length) {
+            setSelectedTags([]);
+            return;
+        }
+        const idSet = new Set(initialSelectedTagIds.map((id) => String(id)));
+        setSelectedTags(availableTags.filter((t) => idSet.has(String(t.id))));
+    }, [isOpen, initialSelectedTagIds, availableTags]);
+
     const handleToggleTag = (tag: TagOption) => {
         if (isAssociatedTag(tag, existingNameSet, associatedIdSet)) return;
         setSelectedTags((prev) => {
             const exists = prev.some((item) => item.id === tag.id || item.nameHe === tag.nameHe);
             if (exists) return prev.filter((item) => item.id !== tag.id && item.nameHe !== tag.nameHe);
+            if (maxSelection != null && maxSelection > 0 && prev.length >= maxSelection) return prev;
             return [...prev, { ...tag, saveMode: 'normal' }];
         });
     };
@@ -397,7 +436,18 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         setFocusedIndex(0);
     }, [primaryPane, activeTab, searchTerm, paneTags.length]);
 
+    const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            handleSave();
+        }
+    };
+
     const onListKeyDown = (e: React.KeyboardEvent) => {
+        const target = e.target as HTMLElement;
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) {
+            return;
+        }
         if (!flatRenderableTags.length) {
             if (e.key === 'Enter') handleSave();
             return;
@@ -561,7 +611,7 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
                                         placeholder="חיפוש לפי שם או נרדף..."
                                         value={searchTerm}
                                         onChange={(e) => setSearchTerm(e.target.value)}
-                                        onKeyDown={onListKeyDown}
+                                        onKeyDown={onSearchKeyDown}
                                         className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-shadow shadow-sm"
                                         autoFocus
                                     />

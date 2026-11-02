@@ -12,7 +12,15 @@ export type CitySearchOption = {
     region: string;
 };
 
+import { authHeaders } from './authHeaders';
+
 const API_BASE = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+
+const cityFetchInit = (): RequestInit => ({
+    credentials: 'include',
+    cache: 'no-store',
+    headers: { Accept: 'application/json', ...authHeaders() },
+});
 
 export function cityNameFromRow(row: CitySearchRow): string {
     return (row.cityName || row.city || '').trim();
@@ -60,7 +68,7 @@ export function filterLocationGroups(groups: LocationGroup[], search: string): L
 /** All cities grouped by area (no search query). */
 export async function fetchAllCityGroups(): Promise<LocationGroup[]> {
     const url = `${API_BASE}/api/cities`;
-    const res = await fetch(url);
+    const res = await fetch(url, cityFetchInit());
     if (!res.ok) return [];
     const data = (await res.json()) as CitySearchRow[];
     if (!Array.isArray(data)) return [];
@@ -101,7 +109,7 @@ export async function fetchCitySearchOptions(search: string): Promise<CitySearch
     if (q.length < 2) return [];
 
     const url = `${API_BASE}/api/cities?search=${encodeURIComponent(q)}`;
-    const res = await fetch(url);
+    const res = await fetch(url, cityFetchInit());
     if (!res.ok) return [];
     const data = (await res.json()) as CitySearchRow[];
     if (!Array.isArray(data)) return [];
@@ -125,7 +133,7 @@ export async function resolveExactCityName(name: string): Promise<string | null>
     const q = String(name || '').trim();
     if (!q) return null;
     const url = `${API_BASE}/api/cities/resolve?city=${encodeURIComponent(q)}`;
-    const res = await fetch(url);
+    const res = await fetch(url, cityFetchInit());
     if (res.status === 404) return null;
     if (!res.ok) return null;
     const data = (await res.json()) as { city?: string };
@@ -137,7 +145,7 @@ export async function resolveExactCityName(name: string): Promise<string | null>
 export async function resolveCityById(id: number): Promise<string | null> {
     if (!Number.isFinite(id) || id <= 0) return null;
     const url = `${API_BASE}/api/cities/resolve?id=${encodeURIComponent(String(id))}`;
-    const res = await fetch(url);
+    const res = await fetch(url, cityFetchInit());
     if (res.status === 404) return null;
     if (!res.ok) return null;
     const data = (await res.json()) as { city?: string };
@@ -161,6 +169,76 @@ export type LocationItemLike = {
     radius?: number;
 };
 
+const REGION_ALIASES: ReadonlyArray<readonly [string, readonly string[]]> = [
+    ['מרכז', ['center', 'מרכז', 'גוש דן', 'שרון', 'מרכז, שרון וגוש דן', 'מרכז שרון וגוש דן']],
+    ['צפון', ['north', 'צפון', 'הצפון']],
+    ['דרום', ['south', 'דרום', 'הדרום']],
+    ['שפלה', ['shfela', 'שפלה', 'השפלה']],
+    ['ירושלים', ['jerusalem', 'ירושלים', 'ירושלם']],
+];
+
+function normRegionToken(s: string): string {
+    return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function matchOneRegionAgainstGroups(part: string, groups: LocationGroup[]): string | null {
+    const n = normRegionToken(part);
+    if (!n) return null;
+    const exact = groups.find((g) => normRegionToken(g.region) === n);
+    if (exact) return exact.region;
+
+    const aliasHit = REGION_ALIASES.find(([, aliases]) =>
+        aliases.some((alias) => normRegionToken(alias) === n),
+    );
+    if (!aliasHit) return null;
+    const official = aliasHit[0];
+    const officialHit = groups.find((g) => normRegionToken(g.region) === normRegionToken(official));
+    if (officialHit) return officialHit.region;
+    const aliasGroup = groups.find((g) =>
+        REGION_ALIASES.some(([label, aliases]) =>
+            label === official && aliases.some((alias) => normRegionToken(alias) === normRegionToken(g.region)),
+        ),
+    );
+    return aliasGroup?.region ?? null;
+}
+
+/** Map a free-text region onto city-catalog group names. Unknown values become null. */
+export function resolveRegionAgainstGroups(
+    raw: string | null | undefined,
+    groups: LocationGroup[],
+): string | null {
+    if (!groups.length) return null;
+    const full = String(raw || '').trim();
+    if (!full) return null;
+    const whole = matchOneRegionAgainstGroups(full, groups);
+    if (whole) return whole;
+    const parts = full.split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length <= 1) return null;
+    const resolved: string[] = [];
+    const seen = new Set<string>();
+    for (const part of parts) {
+        const hit = matchOneRegionAgainstGroups(part, groups);
+        if (hit && !seen.has(hit)) {
+            seen.add(hit);
+            resolved.push(hit);
+        }
+    }
+    return resolved.length ? resolved.join(', ') : null;
+}
+
+export function filterLocationsToCatalog(
+    items: LocationItemLike[],
+    groups: LocationGroup[],
+): LocationItemLike[] {
+    if (!groups.length) return items.filter((loc) => loc.type !== 'region');
+    return items.flatMap((loc) => {
+        if (loc.type !== 'region') return [loc];
+        const hit = resolveRegionAgainstGroups(loc.value, groups);
+        if (!hit) return [];
+        return hit.split(',').map((value) => ({ ...loc, value: value.trim() })).filter((row) => row.value);
+    });
+}
+
 /** Expand region/radius/city items into a deduped city name list (for job.location persistence). */
 export function expandLocationItemsToCityNames(
     items: LocationItemLike[],
@@ -175,11 +253,12 @@ export function expandLocationItemsToCityNames(
         if (loc.type === 'city') {
             names.add(value);
         } else if (loc.type === 'region') {
-            const cities = groupByRegion.get(value);
-            if (cities?.length) {
-                for (const c of cities) names.add(c);
-            } else {
-                names.add(value);
+            const resolved = resolveRegionAgainstGroups(value, groups) || value;
+            for (const region of resolved.split(',').map((s) => s.trim()).filter(Boolean)) {
+                const cities = groupByRegion.get(region);
+                if (cities?.length) {
+                    for (const c of cities) names.add(c);
+                }
             }
         } else if (loc.type === 'radius') {
             names.add(value);

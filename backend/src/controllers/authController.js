@@ -13,15 +13,32 @@ const { sequelize } = require('../config/db');
 const { serializeAuthUser } = require('../services/permissionService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
 const userPreferencesService = require('../services/userPreferencesService');
+const { httpStatusForDbError } = require('../utils/dbHttpError');
 
 const serializeAuthUserWithUsage = async (user) => {
   const base = serializeAuthUser(user);
-  const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
-  const clientId = base.clientId || effectiveClientId || null;
-  const autoDisconnect = await clientUsageSettingService.getAutoDisconnectForClient(clientId);
+  let effectiveClientId = base.clientId || null;
+  try {
+    effectiveClientId =
+      (await authService.resolveEffectiveClientIdForUser(user)) || effectiveClientId;
+  } catch (err) {
+    console.warn('[auth] resolveEffectiveClientId failed', err?.message || err);
+  }
+  const clientId = effectiveClientId || null;
+  let autoDisconnect = false;
+  try {
+    autoDisconnect = await clientUsageSettingService.getAutoDisconnectForClient(clientId);
+  } catch (err) {
+    console.warn('[auth] autoDisconnect lookup failed', err?.message || err);
+  }
   let uiPreferences = userPreferencesService.DEFAULT_PREFERENCES;
   try {
-    uiPreferences = await userPreferencesService.getForUser(user.id);
+    const plain = user?.get ? user.get({ plain: true }) : user;
+    if (plain?.uiPreferences != null && typeof plain.uiPreferences === 'object') {
+      uiPreferences = userPreferencesService.sanitizePreferences(plain.uiPreferences);
+    } else {
+      uiPreferences = await userPreferencesService.getForUser(user.id);
+    }
   } catch (err) {
     console.warn('[auth] uiPreferences load failed', err?.message || err);
   }
@@ -156,7 +173,7 @@ const me = async (req, res) => {
     if (!user) return res.status(404).json({ message: 'User not found' });
     return res.json(await serializeAuthUserWithUsage(user));
   } catch (err) {
-    const status = err?.status || 400;
+    const status = httpStatusForDbError(err, { defaultStatus: 500 });
     return res.status(status).json({ message: err.message || 'Failed to load user' });
   }
 };
@@ -208,7 +225,6 @@ const forgotPassword = async (req, res) => {
     }
 
     const activationGuid = crypto.randomUUID();
-    const tempPassword = crypto.randomBytes(32).toString('hex');
 
     let clientName = null;
     const clientId = await authService.resolveEffectiveClientIdForUser(user);
@@ -217,10 +233,7 @@ const forgotPassword = async (req, res) => {
       if (c) clientName = c.displayName || c.name || null;
     }
 
-    await user.update({
-      password: tempPassword,
-      activationGuid,
-    });
+    await user.update({ activationGuid });
 
     const activationUrl = `${publicAppOrigin()}/activation?guid=${activationGuid}`;
     await sendStaffPasswordResetEmail(user, activationUrl, {

@@ -40,6 +40,7 @@ const HelpCenterDrawer: React.FC<HelpCenterDrawerProps> = ({ isOpen, onClose }) 
     const [isLoading, setIsLoading] = useState(false);
 
     useEffect(() => {
+        if (!isOpen) return;
         const loadArticles = async () => {
             if (!apiBase) return;
             setIsLoading(true);
@@ -72,7 +73,7 @@ const HelpCenterDrawer: React.FC<HelpCenterDrawerProps> = ({ isOpen, onClose }) 
         };
 
         loadArticles();
-    }, [apiBase]);
+    }, [apiBase, isOpen]);
 
     const filteredItems = useMemo(() => {
         if (!searchTerm) return articles;

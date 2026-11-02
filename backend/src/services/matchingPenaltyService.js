@@ -125,7 +125,12 @@ function candidateHasMobility(candidate) {
     m === 'נייד' ||
     m === 'כן' ||
     m === 'yes' ||
-    m === 'true'
+    m === 'true' ||
+    m === 'car_owner' ||
+    m === 'mobile_public_transport' ||
+    m === 'בעל רכב' ||
+    m === 'בעל רכב פרטי' ||
+    m === 'בעל/ת רכב'
   ) {
     return true;
   }
@@ -869,6 +874,23 @@ function buildAgePenaltyReasons(ageGapPenaltyPoints, opts = {}) {
   }];
 }
 
+function buildGeoPenaltyReasons(geoPenaltyPoints, geoResult = {}) {
+  if (!(geoPenaltyPoints > 0)) return [];
+  if (geoResult.missing) {
+    return [{ label: 'מיקום חסר', amount: geoPenaltyPoints, key: 'geo', type: 'missing' }];
+  }
+  const km = Number.isFinite(Number(geoResult.distance)) && geoResult.distance != null
+    ? Math.round(Number(geoResult.distance))
+    : null;
+  const maxKm = Number.isFinite(Number(geoResult.maxValidKm)) && geoResult.maxValidKm != null
+    ? Math.round(Number(geoResult.maxValidKm))
+    : null;
+  let label = 'מרחק';
+  if (km != null && maxKm != null) label = `מרחק (${km} ק"מ, סף ${maxKm} ק"מ)`;
+  else if (km != null) label = `מרחק (${km} ק"מ)`;
+  return [{ label, amount: geoPenaltyPoints, key: 'geo', type: 'mismatch' }];
+}
+
 /**
  * Map internal breakdown to API contract (+ keep legacy fields).
  */
@@ -885,6 +907,9 @@ function enrichBreakdownForApi(breakdown) {
     generalPenalties: breakdown.generalPenalties ?? 0,
     salaryPenalty: breakdown.salaryPenalty ?? 0,
     ageGapPenalty: breakdown.ageGapPenalty ?? 0,
+    roleExperiencePenalty: breakdown.roleExperiencePenalty ?? 0,
+    roleLookbackPenalty: breakdown.roleLookbackPenalty ?? 0,
+    geoPenalty: breakdown.geoPenalty ?? 0,
     penaltyReasons,
   };
 }
@@ -898,6 +923,7 @@ module.exports = {
   computeParameterMatches,
   buildSalaryPenaltyReasons,
   buildAgePenaltyReasons,
+  buildGeoPenaltyReasons,
   enrichBreakdownForApi,
   parseCandidateAge,
   jobRequiresGender,

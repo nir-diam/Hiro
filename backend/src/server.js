@@ -1,13 +1,49 @@
 const path = require('path');
+const fs = require('fs');
 const dotenv = require('dotenv');
+
+/** Where REDIS_ENABLED came from — exposed (no secrets) on /health/redis. */
+const envSources = {
+  processEnvRedisEnabled: process.env.REDIS_ENABLED ?? null,
+  files: [],
+};
+const inspectEnvFile = (label, filePath) => {
+  if (!fs.existsSync(filePath)) {
+    envSources.files.push({ file: label, exists: false });
+    return;
+  }
+  try {
+    const parsed = dotenv.parse(fs.readFileSync(filePath));
+    const host = parsed.REDIS_HOST || null;
+    envSources.files.push({
+      file: label,
+      exists: true,
+      redisEnabled: parsed.REDIS_ENABLED ?? null,
+      redisHostIsPlaceholder: host ? /x{3,}/i.test(host) : null,
+      redisAuthTokenIsPlaceholder: parsed.REDIS_AUTH_TOKEN
+        ? /your-|change_me/i.test(parsed.REDIS_AUTH_TOKEN)
+        : null,
+    });
+  } catch (e) {
+    envSources.files.push({ file: label, exists: true, error: e.message });
+  }
+};
+inspectEnvFile('backend/.env', path.resolve(__dirname, '../.env'));
+inspectEnvFile('backend/src/.env', path.resolve(__dirname, '.env'));
+inspectEnvFile('cwd/.env', path.resolve(process.cwd(), '.env'));
+
 // Load env before any other imports that rely on it
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
-dotenv.config({ path: path.resolve(__dirname, '.env') }); // e.g. backend/src/.env
+dotenv.config({ path: path.resolve(__dirname, '.env'), override: true }); // src/.env wins over backend/.env
 dotenv.config(); // fallback to default .env resolution
+envSources.effectiveRedisEnabled = process.env.REDIS_ENABLED ?? null;
+envSources.cwd = process.cwd();
+envSources.startedAt = new Date().toISOString();
 
 const express = require('express');
 const corsMiddleware = require('./middleware/corsMiddleware');
-const { connectDb } = require('./config/db');
+const appCacheMiddleware = require('./middleware/appCacheMiddleware');
+const { connectDb, sequelize } = require('./config/db');
 const {
   connectRedis,
   isRedisAvailable,
@@ -56,6 +92,8 @@ app.use(express.json({ limit: bodyParserLimit }));
 app.use(express.urlencoded({ limit: bodyParserLimit, extended: true }));
 app.use(corsMiddleware());
 app.options('*', corsMiddleware());   // 👈 מאפשר OPTIONS לכל הנתיבים
+app.use(appCacheMiddleware);
+app.use('/api', require('./middleware/httpGetResponseCacheMiddleware').invalidateHttpGetCacheOnWrite);
 
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'hiro-backend' });
@@ -90,8 +128,9 @@ app.get('/health/db', async (_req, res) => {
 
 app.get('/health/redis', async (_req, res) => {
   const started = Date.now();
+  const { getLastRedisError, REDIS_HOST, REDIS_TLS } = require('./config/redis');
   if (!REDIS_ENABLED) {
-    return res.json({ status: 'disabled', enabled: false, ms: Date.now() - started });
+    return res.json({ status: 'disabled', enabled: false, ms: Date.now() - started, envSources });
   }
   try {
     if (!isRedisAvailable()) {
@@ -99,8 +138,13 @@ app.get('/health/redis', async (_req, res) => {
         status: 'unavailable',
         enabled: true,
         readThrough: REDIS_READ_THROUGH,
+        host: REDIS_HOST,
+        tls: REDIS_TLS,
+        authTokenSet: Boolean(process.env.REDIS_PASSWORD || process.env.REDIS_AUTH_TOKEN),
+        lastError: getLastRedisError(),
         ms: Date.now() - started,
         message: 'Redis not connected',
+        envSources,
       });
     }
     const { getRedisClient } = require('./config/redis');
@@ -124,18 +168,22 @@ app.get('/health/redis', async (_req, res) => {
   }
 });
 
-app.use('/api/scripts', require('./routes/scriptRoutes'));
-
 const jobPublicationController = require('./controllers/jobPublicationController');
 // Optional clean share URLs when proxied to the API (same handlers as /api/public/jobs/share/...).
 app.get('/jobs/:clientHint/public/board', jobPublicationController.getBoardSharePreview);
 app.get('/jobs/:clientHint/public/:slug', jobPublicationController.getSharePreview);
 
 app.use('/api/agent/auth', require('./routes/agentAuthRoutes'));
+const { httpGetResponseCacheMiddleware } = require('./middleware/httpGetResponseCacheMiddleware');
+app.use('/api/agent', httpGetResponseCacheMiddleware);
 app.use('/api/agent', require('./routes/agentRoutes'));
 app.use('/api/public/v1', require('./routes/publicJobsApiRoutes'));
+/** Reference catalog — no staff JWT (also listed in apiGlobalAuthMiddleware allowlist). */
+app.use('/api/cities', cityRoutes);
 
 app.use('/api', require('./middleware/rejectAgentTokenMiddleware'));
+app.use('/api', require('./middleware/apiGlobalAuthMiddleware'));
+app.use('/api', require('./middleware/httpGetResponseCacheMiddleware').httpGetResponseCacheMiddleware);
 
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
@@ -158,7 +206,6 @@ app.use('/api/help-center', helpCenterRoutes);
 app.use('/api/admin/candidate-tags', candidateTagRoutes);
 app.use('/api/admin/business-logic', businessLogicRoutes);
 app.use('/api/email-uploads', emailRoutes);
-app.use('/api/cities', cityRoutes);
 app.use('/api/event-types', eventTypeRoutes);
 app.use('/api/system-events', systemEventRoutes);
 app.use('/api/audit-logs', auditLogRoutes);
@@ -175,27 +222,13 @@ app.use('/api/proposals', require('./routes/proposalRoutes'));
 app.use('/api/admin/matching-engine', matchingEngineRoutes);
 app.use('/api/saved-searches', savedSearchRoutes);
 app.use('/api/pipeline-outcomes', require('./routes/pipelineOutcomeRoutes'));
+app.use('/api/scripts', require('./routes/scriptRoutes'));
 
 const start = async () => {
   try {
-    await connectDb();
-    await connectRedis().catch((err) => {
-      console.warn('[server] Redis connection failed (non-fatal):', err.message);
-    });
-    if (REDIS_CACHE_WARMUP && REDIS_ENABLED) {
-      const runWarmup = () => {
-        const { warmupCandidateCache } = require('./services/candidateCacheWarmup');
-        warmupCandidateCache().catch((err) => {
-          console.warn('[server] Redis cache warmup failed (non-fatal):', err.message || err);
-        });
-      };
-      if (REDIS_CACHE_WARMUP_DELAY_MS > 0) {
-        console.log(`[server] Redis cache warmup scheduled in ${REDIS_CACHE_WARMUP_DELAY_MS}ms`);
-        setTimeout(runWarmup, REDIS_CACHE_WARMUP_DELAY_MS);
-      } else {
-        runWarmup();
-      }
-    }
+    await sequelize.authenticate();
+    console.log('[server] PostgreSQL authenticate OK');
+
     app.listen(port, () => {
       const heapMb = Math.round(process.memoryUsage().heapTotal / 1024 / 1024);
       console.log(
@@ -210,6 +243,39 @@ const start = async () => {
         console.warn('[server] vector cache warmup skipped', err.message || err);
       }
     });
+
+    connectDb({ skipAuthenticate: true })
+      .then(() => {
+        console.log('[server] DB startup migrations finished');
+      })
+      .catch((err) => {
+        console.error('[server] DB startup migrations failed (API still up):', err?.message || err);
+      });
+
+    setTimeout(() => {
+      require('./services/cityService').getAll().catch((err) => {
+        console.warn('[server] city catalog preload failed (non-fatal):', err?.message || err);
+      });
+    }, 1500);
+
+    connectRedis().catch((err) => {
+      console.warn('[server] Redis connection failed (non-fatal):', err.message);
+    });
+
+    if (REDIS_CACHE_WARMUP && REDIS_ENABLED) {
+      const runWarmup = () => {
+        const { warmupCandidateCache } = require('./services/candidateCacheWarmup');
+        warmupCandidateCache().catch((err) => {
+          console.warn('[server] Redis cache warmup failed (non-fatal):', err.message || err);
+        });
+      };
+      if (REDIS_CACHE_WARMUP_DELAY_MS > 0) {
+        console.log(`[server] Redis cache warmup scheduled in ${REDIS_CACHE_WARMUP_DELAY_MS}ms`);
+        setTimeout(runWarmup, REDIS_CACHE_WARMUP_DELAY_MS);
+      } else {
+        runWarmup();
+      }
+    }
   } catch (err) {
     console.error('Failed to start server', err);
     process.exit(1);

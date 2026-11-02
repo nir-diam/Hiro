@@ -3,6 +3,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { XMarkIcon, CheckCircleIcon, UserCircleIcon, MagnifyingGlassIcon, BriefcaseIcon } from './Icons';
 import { Job } from './JobsView';
+import { fetchJobsForCompose } from '../services/jobsApi';
 
 interface PurchaseCandidateModalProps {
   isOpen: boolean;
@@ -29,16 +30,14 @@ const PurchaseCandidateModal: React.FC<PurchaseCandidateModalProps> = ({ isOpen,
     }, [isOpen]);
 
     useEffect(() => {
-        if (!apiBase) return;
+        if (!apiBase || !isOpen) return;
         let active = true;
         setLoadingJobs(true);
         (async () => {
             try {
-                const res = await fetch(`${apiBase}/api/jobs`);
-                if (!res.ok) throw new Error('Failed to load jobs');
-                const payload = await res.json();
+                const payload = await fetchJobsForCompose();
                 if (!active) return;
-                setJobs(Array.isArray(payload) ? payload : []);
+                setJobs(payload as unknown as Job[]);
             } catch (err) {
                 console.error('[PurchaseCandidateModal] failed to load jobs', err);
             } finally {
@@ -48,14 +47,14 @@ const PurchaseCandidateModal: React.FC<PurchaseCandidateModalProps> = ({ isOpen,
         return () => {
             active = false;
         };
-    }, [apiBase]);
+    }, [apiBase, isOpen]);
 
     const filteredJobs = useMemo(() => {
         const activeJobs = jobs || [];
         if (!searchTerm) return activeJobs;
         return activeJobs.filter(job => 
-            job.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            job.client.toLowerCase().includes(searchTerm.toLowerCase())
+            String(job.title || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+            String(job.client || '').toLowerCase().includes(searchTerm.toLowerCase())
         );
     }, [searchTerm, jobs]);
 

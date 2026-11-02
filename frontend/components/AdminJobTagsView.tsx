@@ -138,7 +138,7 @@ const AdminJobTagsView: React.FC = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${apiBase}/api/jobs`, { headers: authHeaders() });
+      const res = await fetch(`${apiBase}/api/jobs?view=skills`, { headers: authHeaders() });
       if (!res.ok) throw new Error('Failed to load jobs');
       const jobs: any[] = await res.json();
 

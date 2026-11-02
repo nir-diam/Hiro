@@ -33,7 +33,7 @@ export function buildMissingProfileFieldLabels(
 }
 
 export function resolveProfileDisplayAge(data: ProfileDisplayCandidateSlice): string {
-    const age = String(data.age ?? '').trim();
-    if (age) return age;
-    return computeAgeFromBirth(data.birthYear, data.birthMonth, data.birthDay);
+    const fromBirth = computeAgeFromBirth(data.birthYear, data.birthMonth, data.birthDay);
+    if (fromBirth) return fromBirth;
+    return String(data.age ?? '').trim();
 }

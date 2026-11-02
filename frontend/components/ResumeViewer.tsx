@@ -6,7 +6,9 @@ import IndustryExperienceSummary from './IndustryExperienceSummary';
 import IndustryExperienceModal from './IndustryExperienceModal';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
-import { PrintableResume } from './CandidatePublicProfileView';
+import { PrintableResume, type PrintableResumeAgency } from './PrintableResume';
+import { useAuth } from '../context/AuthContext';
+import { fetchResumeAgencyBranding } from '../services/clientBrandingApi';
 import {
     educationEntryToDisplayLine,
     normalizeDrivingLicensesForPrint,
@@ -15,7 +17,8 @@ import {
     stripResumeHtml,
 } from '../utils/printableResumeFormatting';
 import { downloadPrintableResumeAsPdf, printableResumePdfFilename } from '../utils/printableResumePdfExport';
-import { fetchLoggedInClientLogoForExport } from '../utils/exportImagePayload';
+import { downloadElementAsMultiPagePdf } from '../utils/resumeViewerPdfExport';
+import { exportImageToDataUrl, fetchLoggedInClientLogoForExport } from '../utils/exportImagePayload';
 import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
 import { isRichHtmlContent } from '../utils/parsedSearchTextHtml';
 import { normalizeOriginalTextHistory } from '../utils/parsedTextHistory';
@@ -391,6 +394,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const [uploading, setUploading] = useState(false);
   const [parsedPdfDownloading, setParsedPdfDownloading] = useState(false);
   const filesPdfExporterRef = useRef<CvFilesPdfExporter | null>(null);
+  const aiResumeRef = useRef<HTMLDivElement>(null);
   const [candidateEmails, setCandidateEmails] = useState<EmailUploadRecord[]>([]);
   const [selectedEmailId, setSelectedEmailId] = useState<number | null>(null);
   const [downloadingAttachment, setDownloadingAttachment] = useState(false);
@@ -433,6 +437,25 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
           cancelled = true;
       };
   }, [apiBase]);
+
+  const { user } = useAuth();
+  const agencyClientId = String(user?.clientId || '').trim();
+  const [resumeAgency, setResumeAgency] = useState<PrintableResumeAgency | null>(null);
+  useEffect(() => {
+      if (!agencyClientId) {
+          setResumeAgency(null);
+          return;
+      }
+      let cancelled = false;
+      fetchResumeAgencyBranding(agencyClientId)
+          .then((branding) => {
+              if (!cancelled) setResumeAgency(branding);
+          })
+          .catch(() => {});
+      return () => {
+          cancelled = true;
+      };
+  }, [agencyClientId]);
 
   const effectiveResumeUrl = resumeFileUrl || resumeData?.resumeUrl || '';
   const finalResumeData = resumeData
@@ -617,9 +640,36 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
 
       setParsedPdfDownloading(true);
       try {
-          const baseName = printableResumePdfFilename(finalResumeData.name || 'resume');
+          const root = aiResumeRef.current?.querySelector('.printable-resume-root');
+          if (!(root instanceof HTMLElement)) {
+              alert(t('resume.download_pdf_error'));
+              return;
+          }
+          const logoImg = root.querySelector('.pr-logo img');
+          const previousSrc = logoImg instanceof HTMLImageElement ? logoImg.src : '';
           const clientLogo = await fetchLoggedInClientLogoForExport();
-          await downloadPrintableResumeAsPdf(printablePayload, baseName, { clientLogo });
+          if (logoImg instanceof HTMLImageElement && clientLogo) {
+              logoImg.src = exportImageToDataUrl(clientLogo);
+              try {
+                  await logoImg.decode();
+              } catch {
+                  /* the data URL still paints if decode rejects */
+              }
+          }
+          try {
+              const baseName = printableResumePdfFilename(finalResumeData.name || 'resume');
+              try {
+                  await downloadElementAsMultiPagePdf(root, baseName, {
+                      marginMm: 8,
+                      widthPx: 794,
+                  });
+              } catch (captureErr) {
+                  if (!(captureErr instanceof Error) || captureErr.message !== 'blank_capture') throw captureErr;
+                  await downloadPrintableResumeAsPdf(printablePayload, baseName, { clientLogo });
+              }
+          } finally {
+              if (logoImg instanceof HTMLImageElement && previousSrc) logoImg.src = previousSrc;
+          }
       } catch (e) {
           console.error('[ResumeViewer] parsed PDF export failed', e);
           alert(t('resume.download_pdf_error'));
@@ -946,8 +996,8 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                        >
                           {resumeContentMode === 'resume' && (
                             resumePanelMode === 'ai' ? (
-                                <div className="inline-block w-full min-w-0">
-                                    <PrintableResume data={printablePayload} className="" density="default" />
+                                <div ref={aiResumeRef} className="inline-block w-full min-w-0">
+                                    <PrintableResume data={printablePayload} agency={resumeAgency} className="" density="default" />
                                 </div>
                             ) : (
                                 <CvFilesVersionsPanel

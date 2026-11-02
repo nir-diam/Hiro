@@ -182,23 +182,174 @@ const listByClientId = async (clientId, opts = {}) =>
     order: [['createdAt', 'ASC']],
   });
 
-const listAllWithClient = async ({ clientId = null } = {}) => {
-  const rows = await ClientContact.findAll({
-    where: clientId ? { clientId: String(clientId) } : undefined,
+const likePattern = (q) => `%${String(q || '').replace(/[%_\\]/g, '\\$&')}%`;
+
+const mapContactWithClientRow = (row) => {
+  const j = row.toJSON ? row.toJSON() : row;
+  return {
+    ...j,
+    organizationName: j.organization?.name || j.organization?.nameEn || null,
+    organizationLogo: j.organization?.logo || null,
+  };
+};
+
+const CONTACT_LOOKUP_ATTRIBUTES = [
+  'id',
+  'name',
+  'organizationId',
+  'email',
+  'phone',
+  'mobilePhone',
+  'metadata',
+  'clientId',
+];
+
+const applyContactSearchWhere = (where, q) => {
+  const search = str(q);
+  if (!search) return where;
+  const pattern = likePattern(search);
+  const searchOr = [
+    { name: { [Op.iLike]: pattern } },
+    { firstName: { [Op.iLike]: pattern } },
+    { lastName: { [Op.iLike]: pattern } },
+    { email: { [Op.iLike]: pattern } },
+    { role: { [Op.iLike]: pattern } },
+    { '$organization.name$': { [Op.iLike]: pattern } },
+    { '$organization.nameEn$': { [Op.iLike]: pattern } },
+  ];
+  if (where[Op.or]) {
+    where[Op.and] = [{ [Op.or]: where[Op.or] }, { [Op.or]: searchOr }];
+    delete where[Op.or];
+  } else {
+    where[Op.or] = searchOr;
+  }
+  return where;
+};
+
+const listAllWithClient = async ({
+  clientId = null,
+  paginate = false,
+  limit = 50,
+  offset = 0,
+  q = '',
+  ids = null,
+  lookup = false,
+} = {}) => {
+  const idList = Array.isArray(ids)
+    ? ids.map((id) => str(id)).filter(Boolean).slice(0, 200)
+    : [];
+  const search = String(q || '').trim();
+  if (lookup || idList.length) {
+    const where = clientId ? { clientId: String(clientId) } : {};
+    if (idList.length) where.id = { [Op.in]: idList };
+    applyContactSearchWhere(where, search);
+    const lim = Math.min(100, Math.max(1, Number(limit) || 50));
+    const rows = await ClientContact.findAll({
+      where,
+      attributes: CONTACT_LOOKUP_ATTRIBUTES,
+      include: [
+        CLIENT_INCLUDE,
+        {
+          model: Organization,
+          as: 'organization',
+          required: false,
+          attributes: ['id', 'name', 'nameEn', 'logo'],
+        },
+      ],
+      order: [['name', 'ASC']],
+      limit: idList.length ? undefined : lim,
+      subQuery: false,
+      distinct: true,
+    });
+    return rows.map(mapContactWithClientRow);
+  }
+
+  const where = clientId ? { clientId: String(clientId) } : {};
+  if (search) {
+    const pattern = likePattern(search);
+    where[Op.or] = [
+      { name: { [Op.iLike]: pattern } },
+      { firstName: { [Op.iLike]: pattern } },
+      { lastName: { [Op.iLike]: pattern } },
+      { email: { [Op.iLike]: pattern } },
+      { role: { [Op.iLike]: pattern } },
+      { '$client.name$': { [Op.iLike]: pattern } },
+      { '$client.displayName$': { [Op.iLike]: pattern } },
+      { '$organization.name$': { [Op.iLike]: pattern } },
+      { '$organization.nameEn$': { [Op.iLike]: pattern } },
+    ];
+  }
+
+  const query = {
+    where,
     include: [CLIENT_INCLUDE, ORGANIZATION_INCLUDE],
     order: [['updatedAt', 'DESC']],
-  });
-  return rows.map((row) => {
-    const j = row.toJSON ? row.toJSON() : row;
+    subQuery: false,
+    distinct: true,
+  };
+
+  if (paginate) {
+    const lim = Math.min(100, Math.max(1, Number(limit) || 50));
+    const off = Math.max(0, Number(offset) || 0);
+    const { count, rows } = await ClientContact.findAndCountAll({
+      ...query,
+      limit: lim,
+      offset: off,
+    });
+    const total = typeof count === 'number' ? count : rows.length;
+    const items = rows.map(mapContactWithClientRow);
     return {
-      ...j,
-      organizationName: j.organization?.name || j.organization?.nameEn || null,
-      organizationLogo: j.organization?.logo || null,
+      items,
+      total,
+      offset: off,
+      limit: lim,
+      returned: items.length,
+      hasMore: off + items.length < total,
     };
-  });
+  }
+
+  const rows = await ClientContact.findAll(query);
+  return rows.map(mapContactWithClientRow);
 };
 
 const listByClientIdWithClient = async (clientId, opts = {}) => {
+  const lookup = Boolean(opts.lookup);
+  const ids = Array.isArray(opts.ids)
+    ? opts.ids.map((id) => str(id)).filter(Boolean).slice(0, 200)
+    : [];
+  const q = str(opts.q);
+  const limit = Math.min(100, Math.max(1, Number(opts.limit) || 50));
+
+  if (lookup || ids.length || q) {
+    let where = buildClientContactWhere(clientId, opts);
+    if (ids.length) where.id = { [Op.in]: ids };
+    where = applyContactSearchWhere(where, q);
+    const rows = await ClientContact.findAll({
+      where,
+      attributes: CONTACT_LOOKUP_ATTRIBUTES,
+      include: [
+        {
+          model: Organization,
+          as: 'organization',
+          required: false,
+          attributes: ['id', 'name', 'nameEn', 'logo'],
+        },
+      ],
+      order: [['name', 'ASC']],
+      limit: ids.length ? undefined : limit,
+      subQuery: false,
+      distinct: true,
+    });
+    return rows.map((row) => {
+      const j = row.toJSON ? row.toJSON() : row;
+      return {
+        ...j,
+        organizationName: j.organization?.name || j.organization?.nameEn || null,
+        organizationLogo: j.organization?.logo || null,
+      };
+    });
+  }
+
   const rows = await ClientContact.findAll({
     where: buildClientContactWhere(clientId, opts),
     include: [CLIENT_INCLUDE, ORGANIZATION_INCLUDE],

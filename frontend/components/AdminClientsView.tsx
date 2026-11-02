@@ -2,6 +2,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PlusIcon, MagnifyingGlassIcon, PencilIcon, FunnelIcon, XMarkIcon, ChartBarIcon } from './Icons';
+import { authHeaders } from '../utils/authHeaders';
 
 // --- TYPES ---
 interface Client {
@@ -85,7 +86,11 @@ const AdminClientsView: React.FC = () => {
         let active = true;
         setIsLoading(true);
         setError(null);
-        fetch(`${apiBase}/api/clients`)
+        fetch(`${apiBase}/api/clients?journalCounts=1`, {
+            headers: authHeaders(true),
+            credentials: 'include',
+            cache: 'no-store',
+        })
             .then((r) => {
                 if (!r.ok) throw new Error('Failed to load clients');
                 return r.json();

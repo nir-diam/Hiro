@@ -4,6 +4,8 @@ const Job = require('../models/Job');
 const PORTAL_APPLICATION_SOURCES = new Set(['candidate_portal', 'job_matching']);
 const { Op } = require('sequelize');
 const redis = require('./redisService');
+const { isReadThroughEnabled } = require('../config/redis');
+const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
 
 const APP_LIST_KEY = (candidateId) => `applications:candidate:${candidateId}`;
 const APP_TTL = 5 * 60; // 5 minutes
@@ -17,11 +19,20 @@ const appCacheInvalidate = async (candidateId) => {
 };
 
 const listByCandidate = async (candidateId) => {
-  try {
-    const cached = await redis.get(APP_LIST_KEY(candidateId));
-    if (cached) return cached;
-  } catch (e) {
-    console.warn('[candidateApplicationService] redis get failed (non-fatal):', e.message);
+  if (isReadThroughEnabled()) {
+    try {
+      const cached = await redis.get(APP_LIST_KEY(candidateId));
+      if (cached) {
+        recordHit('applications');
+        return cached;
+      }
+      recordMiss('applications');
+    } catch (e) {
+      console.warn('[candidateApplicationService] redis get failed (non-fatal):', e.message);
+      recordMiss('applications');
+    }
+  } else {
+    recordBypass('applications');
   }
 
   const records = await CandidateApplication.findAll({

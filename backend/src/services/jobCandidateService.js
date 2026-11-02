@@ -1,5 +1,9 @@
 const { Op } = require('sequelize');
 const redis = require('./redisService');
+const readThrough = require('./readThroughCacheService');
+const processMemory = require('./processMemoryCache');
+const { isReadThroughEnabled } = require('../config/redis');
+const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
 const JobCandidate = require('../models/JobCandidate');
 const Candidate = require('../models/Candidate');
 const Job = require('../models/Job');
@@ -11,8 +15,9 @@ const JC_CANDIDATE_KEY = (candidateId) => `jobcandidates:candidate:${candidateId
 const JC_TTL = 5 * 60; // 5 minutes — high-churn data, short TTL
 
 const jcCacheInvalidate = async (jobId, candidateId) => {
+  const keys = [jobId && JC_JOB_KEY(jobId), candidateId && JC_CANDIDATE_KEY(candidateId)].filter(Boolean);
+  if (keys.length) processMemory.del(...keys);
   try {
-    const keys = [jobId && JC_JOB_KEY(jobId), candidateId && JC_CANDIDATE_KEY(candidateId)].filter(Boolean);
     if (keys.length) await redis.del(...keys);
   } catch (e) {
     console.warn('[jobCandidateService] redis del failed (non-fatal):', e.message);
@@ -61,16 +66,7 @@ const buildCandidateView = (record) => {
   };
 };
 
-const listForJob = async (jobId) => {
-  if (!jobId) return [];
-
-  try {
-    const cached = await redis.get(JC_JOB_KEY(jobId));
-    if (cached) return cached;
-  } catch (e) {
-    console.warn('[jobCandidateService] redis get failed (non-fatal):', e.message);
-  }
-
+const listForJobFromDb = async (jobId) => {
   const records = await JobCandidate.findAll({
     where: { jobId },
     order: [['createdAt', 'DESC']],
@@ -83,15 +79,15 @@ const listForJob = async (jobId) => {
       },
     ],
   });
-  const result = records.map(buildCandidateView).filter((payload) => payload.id);
+  return records.map(buildCandidateView).filter((payload) => payload.id);
+};
 
-  try {
-    await redis.set(JC_JOB_KEY(jobId), result, { ttlSeconds: JC_TTL });
-  } catch (e) {
-    console.warn('[jobCandidateService] redis set failed (non-fatal):', e.message);
-  }
-
-  return result;
+const listForJob = async (jobId) => {
+  if (!jobId) return [];
+  return readThrough.getOrLoad(JC_JOB_KEY(jobId), () => listForJobFromDb(jobId), {
+    ttlSeconds: JC_TTL,
+    scope: 'job-candidates',
+  });
 };
 
 const { syntheticJobFromWorkflowMeta } = require('../utils/jobCandidateInterestUtils');
@@ -100,11 +96,20 @@ const { syntheticJobFromWorkflowMeta } = require('../utils/jobCandidateInterestU
 const listForCandidate = async (candidateId) => {
   if (!candidateId) return [];
 
-  try {
-    const cached = await redis.get(JC_CANDIDATE_KEY(candidateId));
-    if (cached) return cached;
-  } catch (e) {
-    console.warn('[jobCandidateService] redis get failed (non-fatal):', e.message);
+  if (isReadThroughEnabled()) {
+    try {
+      const cached = await redis.get(JC_CANDIDATE_KEY(candidateId));
+      if (cached) {
+        recordHit('candidate-jobs');
+        return cached;
+      }
+      recordMiss('candidate-jobs');
+    } catch (e) {
+      console.warn('[jobCandidateService] redis get failed (non-fatal):', e.message);
+      recordMiss('candidate-jobs');
+    }
+  } else {
+    recordBypass('candidate-jobs');
   }
 
   const records = await JobCandidate.findAll({

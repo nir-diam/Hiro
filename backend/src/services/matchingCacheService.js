@@ -17,6 +17,8 @@
  */
 
 const redis = require('./redisService');
+const { isReadThroughEnabled } = require('../config/redis');
+const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
 
 // TTLs
 const MATCHES_TTL = 24 * 60 * 60;       // 24h — sonar results
@@ -72,11 +74,17 @@ const recordJobMatchBulk = async (jobId, results) => {
  * @returns {Promise<Array<{ candidateId: string, matchPct: number }>>}
  */
 const getJobMatches = async (jobId, limit = 50) => {
+  if (!isReadThroughEnabled()) {
+    recordBypass('matching:job-matches');
+    return [];
+  }
   try {
     const raw = await redis.zrevrange(jobMatchesKey(jobId), 0, limit - 1, true);
+    recordHit('matching:job-matches');
     return raw.map(({ member, score }) => ({ candidateId: member, matchPct: score }));
   } catch (e) {
     console.warn('[matchingCacheService] getJobMatches failed (non-fatal):', e.message);
+    recordMiss('matching:job-matches');
     return [];
   }
 };
@@ -242,11 +250,17 @@ const recordCandidateOpportunitiesBulk = async (results) => {
  * @returns {Promise<Array<{ jobId: string, matchPct: number }>>}
  */
 const getCandidateOpportunities = async (candidateId, limit = 20) => {
+  if (!isReadThroughEnabled()) {
+    recordBypass('matching:opportunities');
+    return [];
+  }
   try {
     const raw = await redis.zrevrange(candidateOppsKey(candidateId), 0, limit - 1, true);
+    recordHit('matching:opportunities');
     return raw.map(({ member, score }) => ({ jobId: member, matchPct: score }));
   } catch (e) {
     console.warn('[matchingCacheService] getCandidateOpportunities failed (non-fatal):', e.message);
+    recordMiss('matching:opportunities');
     return [];
   }
 };
@@ -299,15 +313,24 @@ const setJobWeights = async (jobId, weights) => {
  * @returns {Promise<Record<string, number>|null>}
  */
 const getJobWeights = async (jobId) => {
+  if (!isReadThroughEnabled()) {
+    recordBypass('matching:job-weights');
+    return null;
+  }
   try {
     const raw = await redis.hgetall(jobWeightsKey(jobId));
-    if (!raw) return null;
+    if (!raw) {
+      recordMiss('matching:job-weights');
+      return null;
+    }
+    recordHit('matching:job-weights');
     // Cast all values to numbers
     return Object.fromEntries(
       Object.entries(raw).map(([k, v]) => [k, parseFloat(v)]).filter(([, v]) => Number.isFinite(v)),
     );
   } catch (e) {
     console.warn('[matchingCacheService] getJobWeights failed (non-fatal):', e.message);
+    recordMiss('matching:job-weights');
     return null;
   }
 };

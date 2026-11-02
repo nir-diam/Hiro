@@ -1,7 +1,10 @@
 const express = require('express');
 const ctrl = require('../controllers/matchingEngineController');
+const { authMiddleware, requirePagePermission } = require('../middleware/permissionMiddleware');
 
 const router = express.Router();
+
+router.use(authMiddleware, requirePagePermission('page:admin'));
 
 // Global config
 router.get('/config',  ctrl.getConfig);

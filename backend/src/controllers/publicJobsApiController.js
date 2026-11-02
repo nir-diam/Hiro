@@ -103,7 +103,15 @@ const submitApplication = async (req, res) => {
       body,
       { forwardedFor: req.headers['x-forwarded-for'] || req.ip },
     );
-    res.status(201).json({ applicationId: payload.applicationId });
+    const bodyOut = { applicationId: payload.applicationId };
+    if (payload.candidateId) bodyOut.candidateId = payload.candidateId;
+    res.status(201).json(bodyOut);
+    // Same as landing-page apply: CV parse/S3 runs after the response so the site stays fast.
+    if (typeof payload.runEnrichmentAfterResponse === 'function') {
+      res.on('finish', () => {
+        void payload.runEnrichmentAfterResponse();
+      });
+    }
   } catch (err) {
     sendServiceError(res, err);
   }

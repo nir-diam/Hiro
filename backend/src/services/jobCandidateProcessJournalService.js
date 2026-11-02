@@ -442,6 +442,30 @@ async function patchJournalEntry(jobCandidateId, entryId, body, actor) {
 }
 
 /**
+ * Mark the current process-journal card inactive and persist it.
+ * A card shown as initial-{jobCandidateId} often exists only when the journal
+ * is read. Materialize first so close writes that same row.
+ */
+async function closeCurrentJournalEntry(jobCandidateId, { summary, actor } = {}) {
+  const jc = await JobCandidate.findByPk(jobCandidateId);
+  if (!jc) return null;
+  const meta = await materializeStatusJournalForPatch(jc);
+  const journal = Array.isArray(meta.statusJournal) ? [...meta.statusJournal] : [];
+  if (!journal[0]) return null;
+  if (journal[0].isActive !== false) {
+    journal[0] = appendJournalEntryActivity(journal[0], {
+      summary: String(summary || EVENT_CLOSED_SUMMARY).trim() || EVENT_CLOSED_SUMMARY,
+      actor,
+      isActive: false,
+    });
+    meta.statusJournal = journal;
+    await jc.update({ workflowMeta: meta });
+  }
+  jc.workflowMeta = meta;
+  return jc;
+}
+
+/**
  * Keep a pipeline action on the current journal card.
  * The previous stage stays as an older history row instead of a second card.
  */
@@ -583,5 +607,6 @@ module.exports = {
   getProcessJournal,
   patchJournalEntry,
   materializeStatusJournalForPatch,
+  closeCurrentJournalEntry,
   displayNameFromUser,
 };

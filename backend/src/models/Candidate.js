@@ -31,6 +31,14 @@ const Candidate = sequelize.define(
     canonicalCandidateId: { type: DataTypes.UUID, allowNull: true },
     /** Recruiter shadow copy (צור העתק) — hidden from candidate portal profile switcher. */
     staffProfileCopy: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    /** Shadow only: pinned as the default CV sent to clients when "עותק צל" is selected. */
+    staffShadowPinned: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    /** Shadow: { [field]: true } — recruiter owns this field; live sync must not overwrite. */
+    shadowFieldOverrides: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
+    /** Live primary: pending recruiter proposal awaiting candidate approval. */
+    pendingStaffProfileProposal: { type: DataTypes.JSONB, allowNull: true },
+    /** Shadow: { [field]: { liveValue, updatedAt } } awaiting recruiter accept/keep. */
+    pendingLiveSync: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
     employmentType: DataTypes.STRING,
     employmentTypes: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     jobScope: DataTypes.STRING,

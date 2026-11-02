@@ -39,7 +39,8 @@ const JOB_ID_UUID_RE =
  * - Clears unpublishedAt when a source is re-published.
  * - Preserves existing timestamps when status hasn't changed.
  */
-const SELECTION_HISTORY_CAP = 50;
+const SELECTION_HISTORY_CAP = 100;
+const SELECTION_NOTE_MAX_CHARS = 1000;
 
 const actorFromDbUser = (u) => {
   if (!u) return { userId: null, userName: 'מערכת' };
@@ -59,19 +60,40 @@ const normalizeSelectionHistory = (raw) => {
       if (!row || typeof row !== 'object') return null;
       const at = row.at != null ? String(row.at).trim() : '';
       if (!at) return null;
-      return {
+      const base = {
         at,
         userId: row.userId != null ? String(row.userId) : null,
         userName: row.userName != null ? String(row.userName).trim() || 'משתמש' : 'משתמש',
-        selected: Boolean(row.selected),
       };
+      if (row.kind === 'note') {
+        const note = String(row.note ?? '').trim().slice(0, SELECTION_NOTE_MAX_CHARS);
+        return note ? { ...base, kind: 'note', note } : null;
+      }
+      return { ...base, selected: Boolean(row.selected) };
     })
     .filter(Boolean)
     .slice(0, SELECTION_HISTORY_CAP);
 };
 
+const sortHistoryNewestFirst = (rows) =>
+  [...rows].sort((a, b) => String(b.at).localeCompare(String(a.at)));
+
 /**
- * Append checkbox on/off audit rows when `selected` changes (stored on job.recruitmentSources JSONB).
+ * Notes the client added since the last save. Author is always the saving user;
+ * a note already on the server (same at + text) is not added twice.
+ */
+const newNotesFromClient = (incomingHistory, serverHistory, who) => {
+  const known = new Set(
+    serverHistory.filter((r) => r.kind === 'note').map((r) => `${r.at}\u0000${r.note}`),
+  );
+  return normalizeSelectionHistory(incomingHistory)
+    .filter((r) => r.kind === 'note' && !known.has(`${r.at}\u0000${r.note}`))
+    .map((r) => ({ ...r, userId: who.userId, userName: who.userName }));
+};
+
+/**
+ * Append checkbox on/off audit rows when `selected` changes, plus user notes
+ * (stored on job.recruitmentSources JSONB, newest first).
  */
 const applySourceSelectionHistory = (newSources, existingSources, actor) => {
   const now = new Date().toISOString();
@@ -83,18 +105,17 @@ const applySourceSelectionHistory = (newSources, existingSources, actor) => {
     const prev = existingMap[String(src.id)] || {};
     const wasSelected = Boolean(prev.selected);
     const isSelected = Boolean(src.selected);
-    let history = normalizeSelectionHistory(prev.selectionHistory);
+    const serverHistory = normalizeSelectionHistory(prev.selectionHistory);
+    let history = [...serverHistory, ...newNotesFromClient(src.selectionHistory, serverHistory, who)];
     if (wasSelected !== isSelected) {
-      history = [
-        {
-          at: now,
-          userId: who.userId,
-          userName: who.userName,
-          selected: isSelected,
-        },
-        ...history,
-      ].slice(0, SELECTION_HISTORY_CAP);
+      history.push({
+        at: now,
+        userId: who.userId,
+        userName: who.userName,
+        selected: isSelected,
+      });
     }
+    history = sortHistoryNewestFirst(history).slice(0, SELECTION_HISTORY_CAP);
     return { ...src, selectionHistory: history };
   });
 };
@@ -291,7 +312,8 @@ const list = async (req, res) => {
     const tagIdRaw = req.query.tagId ?? req.query.tag_id ?? req.query.tag;
     const tagId =
       tagIdRaw != null && String(tagIdRaw).trim() !== '' ? String(tagIdRaw).trim() : null;
-    const jobs = await jobService.list({ tagId });
+    const view = String(req.query.view || '').trim() || null;
+    const jobs = await jobService.list({ tagId, view });
     res.json(jobs);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
@@ -746,13 +768,8 @@ async function scoreJobCandidateViews(job, jobId, candidates, options = {}) {
     const candPlain = candidateMap.get(String(cView.id));
     if (!candPlain) return;
     const cid = String(cView.id);
-    cView.tagDetails = candPlain.tagDetails;
-    cView.tags = candPlain.tags;
-    cView.skills = candPlain.skills;
-    cView.matchAnalysis = candPlain.matchAnalysis;
-    cView.workExperience = candPlain.workExperience;
-    cView.experience = candPlain.experience;
-    cView.languages = candPlain.languages;
+    // Row payload stays slim: tag/work history (≈70% of the bytes) loads per candidate
+    // via GET /api/candidates/:id when the tag panel opens.
     cView.field = candPlain.field;
     cView.industry = candPlain.industry;
     cView.professionalSummary = candPlain.professionalSummary;
@@ -820,8 +837,10 @@ const getCandidates = async (req, res) => {
     let jobPlain = null;
     let screeningSettings = null;
 
-    // lite=1 is the sidebar/funnel path: status and source only, no engine scoring.
-    if (!lite) {
+    // lite=1 is the sidebar/funnel path. Live engine scoring is opt-in (`score=1`)
+    // so the first 20-row page stays a list query, not 20 match packages.
+    const wantScore = req.query.score === '1' || req.query.score === 'true';
+    if (!lite && wantScore) {
       try {
         const tenantClientId = req.dbUser
           ? await authService.resolveEffectiveClientIdForUser(req.dbUser)
@@ -833,6 +852,8 @@ const getCandidates = async (req, res) => {
       } catch (e) {
         console.warn('[getCandidates] live scoring skipped:', e.message || e);
       }
+    } else if (!lite) {
+      jobPlain = jobService.toPlainJobForMatchScore(job);
     }
 
     const digitalQuestions = Array.isArray(jobPlain?.digitalQuestions)

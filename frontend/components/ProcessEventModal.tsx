@@ -196,7 +196,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     clientName: clientName || '',
     assigneeValues: [defaultAssigneeName],
     priority: 'medium' as 'high' | 'medium' | 'low',
-    slaValue: 3,
+    slaValue: 0,
     slaUnit: 'days' as SlaUnit,
     description: '',
   });
@@ -230,7 +230,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
         return parsed.length > 0 ? parsed : [defaultAssigneeName];
       })(),
       priority: initialData?.priority || 'medium',
-      slaValue: initialData?.slaValue ?? initialData?.slaDays ?? 3,
+      slaValue: initialData?.slaValue ?? initialData?.slaDays ?? 0,
       slaUnit: normalizeSlaUnit(initialData?.slaUnit),
       description: initialData?.description || '',
     });
@@ -534,15 +534,6 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     allPipelines.find((p) => p.id === formData.processId) || allPipelines[0];
   const stages = activePipeline?.stages || [];
 
-  const applyStageSlaDefaults = (stageId: string) => {
-    const stage = stages.find((s) => s.id === stageId);
-    if (!stage) return {};
-    return {
-      slaValue: stage.slaLimit ?? 0,
-      slaUnit: normalizeSlaUnit(stage.slaLimitUnit),
-    };
-  };
-
   const slaUnit = normalizeSlaUnit(formData.slaUnit);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -656,8 +647,6 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                             : defaultEventTitle(newPipeline?.name || ''),
                           stageId: nextStageId,
                           assigneeValues: nextAssigneeValues,
-                          slaValue: stage?.slaLimit ?? formData.slaValue,
-                          slaUnit: normalizeSlaUnit(stage?.slaLimitUnit ?? formData.slaUnit),
                         });
                       }}
                       className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
@@ -679,12 +668,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                     <select
                       value={formData.stageId}
                       onChange={(e) => {
-                        const nextStageId = e.target.value;
-                        setFormData({
-                          ...formData,
-                          stageId: nextStageId,
-                          ...applyStageSlaDefaults(nextStageId),
-                        });
+                        setFormData({ ...formData, stageId: e.target.value });
                       }}
                       className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                       disabled={!stages.length}

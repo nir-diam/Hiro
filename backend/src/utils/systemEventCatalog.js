@@ -38,6 +38,14 @@ const SYSTEM_EVENTS = {
   CANDIDATE_PROFILE_LINKED: { triggerName: 'מועמד', eventName: 'קישור פרופיל' },
   CANDIDATE_PROFILE_UNLINKED: { triggerName: 'מועמד', eventName: 'ניתוק פרופיל' },
   CANDIDATE_IDENTITY_MERGED: { triggerName: 'מועמד', eventName: 'מיזוג מועמד למועמד קיים' },
+  CANDIDATE_STAFF_PROFILE_PROPOSAL: {
+    triggerName: 'מועמד',
+    eventName: 'בקשת אישור עדכון פרופיל מהצוות',
+  },
+  CANDIDATE_STAFF_PROFILE_PROPOSAL_RESOLVED: {
+    triggerName: 'מועמד',
+    eventName: 'אישור/דחיית עדכון פרופיל מהצוות',
+  },
 
   // 5. תקשורת צוות
   TEAM_FEEDBACK:    { triggerName: 'תקשורת צוות', eventName: 'משוב לאחר ראיון' },

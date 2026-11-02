@@ -86,13 +86,52 @@ const mapWorkModel = (value) => {
   return WORK_MODEL_BY_VALUE.get('office');
 };
 
+/**
+ * A stored "office" is the form default, so a posting that says home or hybrid wins.
+ * An explicit hybrid/remote choice is kept.
+ */
+const resolvePublicWorkModel = (stored, texts) => {
+  const token = normalizeToken(stored);
+  if (token === 'hybrid' || token === 'היברידי') return WORK_MODEL_BY_VALUE.get('hybrid');
+  if (token === 'remote' || token === 'מהבית' || token === 'home') return WORK_MODEL_BY_VALUE.get('remote');
+  const parts = (Array.isArray(texts) ? texts : [texts]).filter(Boolean);
+  const title = String(parts[0] || '');
+  const blob = parts.join('\n');
+  const hybrid = /היברידי|\bhybrid\b|יום\s+מהבית|ימי(?:ם)?(?:\s+\S+){0,10}\s+מהבית|א(?:פשרות|ופציה)(?:\s+\S+){0,8}\s*(?:ל)?עבודה\s+מהבית/i.test(blob);
+  const remoteTitle = /(?:^|\s)(?:עבודה\s+)?(?:100%\s*)?מהבית(?:\s|$)|\bremote\b|\bwfh\b|work from home/i.test(title);
+  const remoteBody = /(?:^|[\n.!])\s*(?:100%\s*מהבית|עבודה\s+מהבית\s+מ(?:לאה|לא)|מהבית\s+בלבד)/i.test(blob);
+  if (hybrid) return WORK_MODEL_BY_VALUE.get('hybrid');
+  if (remoteTitle || remoteBody) return WORK_MODEL_BY_VALUE.get('remote');
+  return WORK_MODEL_BY_VALUE.get('office');
+};
+
+/** Public start date: `immediate` or YYYY-MM-DD. Free text (including the emoji picklist) is not returned. */
+const normalizePublicStartDate = (raw) => {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  if (/מיידי|immediate|\basap\b|🟢/i.test(s)) return 'immediate';
+  const iso = s.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (iso && !Number.isNaN(new Date(iso[1]).getTime())) return iso[1];
+  return null;
+};
+
+const resolveRegionSlugStrict = (raw) => {
+  const s = normalizeToken(raw);
+  if (!s) return '';
+  if (REGION_LABELS[s] && s !== 'other') return s;
+  for (const [id, aliases] of REGION_ALIASES) {
+    if (id === 'other') continue;
+    if (aliases.some((alias) => normalizeToken(alias) === s)) return id;
+  }
+  return '';
+};
+
 const resolveRegionSlug = (raw) => {
   const s = normalizeToken(raw);
   if (!s) return '';
+  const exact = resolveRegionSlugStrict(raw);
+  if (exact) return exact;
   if (REGION_LABELS[s]) return s;
-  for (const [id, aliases] of REGION_ALIASES) {
-    if (aliases.some((alias) => normalizeToken(alias) === s)) return id;
-  }
   const ranked = REGION_ALIASES.flatMap(([id, aliases]) =>
     aliases.map((alias) => ({ id, alias: normalizeToken(alias) })),
   )
@@ -162,9 +201,16 @@ const deriveExperience = (text, stored = {}) => {
 const deriveHoursDescription = (text, stored) => {
   const explicit = String(stored || '').trim();
   if (explicit) return explicit;
-  const src = String(text || '');
-  const match = src.match(/(?:שעות עבודה|שעות|משמרות)[^\n.]{0,80}/);
-  return match ? match[0].trim() : null;
+  const src = String(text || '').replace(/\r\n/g, '\n');
+  const lines = src.split('\n').map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (/^(?:שעות(?:\s+עבודה)?|משמרות|ימי\s+עבודה)\s*:/i.test(line)) {
+      return line.replace(/^[^:]+:\s*/, '').trim() || line;
+    }
+  }
+  const sentenceMatch = src.match(/[^.\n]{0,40}(?:שעות(?:\s+עבודה)?|משמרות|ימי\s+עבודה)[^.\n]{0,120}\./i);
+  if (sentenceMatch) return sentenceMatch[0].trim();
+  return null;
 };
 
 const mapQuestionType = (raw) => {
@@ -190,7 +236,10 @@ module.exports = {
   CLOSED_PUBLIC_WINDOW_MS,
   mapEmploymentTypeLabel,
   mapWorkModel,
+  resolvePublicWorkModel,
+  normalizePublicStartDate,
   resolveRegionSlug,
+  resolveRegionSlugStrict,
   regionLabel,
   jobStatusAppearsOnSite,
   deriveSeniority,

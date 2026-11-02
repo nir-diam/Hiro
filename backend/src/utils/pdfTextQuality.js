@@ -3,6 +3,8 @@ const HEBREW_WORD_RE = /[\u0590-\u05FF]{2,}/g;
 const REPLACEMENT_CHAR_RE = /\uFFFD/g;
 const PUA_CHAR_RE = /[\uE000-\uF8FF]/g;
 const MOJIBAKE_RE = /Ã.|Â.|â€™|â€œ|â€|ðŸ/;
+/** Latin "eth" (U+00F0) often appears inside broken Hebrew PDF font maps. */
+const PDF_ETH_CHAR_RE = /\u00F0/g;
 
 const HEBREW_CV_LEXICON = [
   'ניסיון', 'נסיון', 'השכלה', 'ניהול', 'שיווק', 'מכירות', 'עבודה', 'לקוחות',
@@ -30,6 +32,9 @@ const scoreResumeTextExtract = (text) => {
   score -= replacement * 120;
   score -= pua * 120;
   if (MOJIBAKE_RE.test(s)) score -= 800;
+
+  const ethNoise = (s.match(PDF_ETH_CHAR_RE) || []).length;
+  score -= ethNoise * 180;
 
   // OCR often inserts digits into Hebrew words (8→ח/ת, 6→ו) — heavy penalty.
   const hebrewDigitMix = (s.match(/[\u0590-\u05FF]\d|\d[\u0590-\u05FF]/g) || []).length;
@@ -98,9 +103,21 @@ const resumeTextLooksOcrGarbled = (text) => {
   return false;
 };
 
+/** True when pdf-parse returned long text but with PDF font-encoding noise (e.g. embedded ð). */
+const resumeTextHasPdfFontEncodingNoise = (text) => {
+  const s = String(text || '');
+  if (!s.trim()) return false;
+  const hebrew = (s.match(HEBREW_CHAR_RE) || []).length;
+  const eth = (s.match(PDF_ETH_CHAR_RE) || []).length;
+  if (hebrew >= 40 && eth >= 4) return true;
+  if (hebrew >= 15 && eth >= 2) return true;
+  return false;
+};
+
 module.exports = {
   scoreResumeTextExtract,
   pickBestResumeTextExtract,
   resumeTextLooksOcrGarbled,
+  resumeTextHasPdfFontEncodingNoise,
   HEBREW_CV_LEXICON,
 };

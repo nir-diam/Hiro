@@ -7,7 +7,7 @@ const log = async (prompt, action) => {
     name: prompt.name || '',
     description: prompt.description || '',
     template: prompt.template || '',
-    model: prompt.model || 'gemini-3-flash-preview',
+    model: prompt.model || 'gemini-3.8-flash',
     temperature: typeof prompt.temperature === 'number' ? prompt.temperature : 0.5,
     variables: Array.isArray(prompt.variables) ? prompt.variables : [],
     category: prompt.category || 'other',

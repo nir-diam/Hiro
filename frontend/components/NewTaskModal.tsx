@@ -43,6 +43,12 @@ import {
     mapStaffUsersToEmailOptions,
     type StaffEmailOption,
 } from '../services/usersApi';
+import {
+    allocatedDaysFromDueDate,
+    daysFromTodayUntilDue,
+    dueDateAfterTodayOffset,
+    formatDueDaysLabel,
+} from '../utils/taskDueDate';
 
 interface NewTaskModalProps {
   isOpen: boolean;
@@ -186,7 +192,6 @@ type CalendarFormSlice = {
   dueDate: string;
   dueTime: string;
   sla: string;
-  allocatedDays: number;
 };
 
 function parseDueAsLocalRange(dueDate: string, dueTime: string): { start: Date; end: Date } | null {
@@ -210,7 +215,8 @@ function buildCalendarEventMeta(form: CalendarFormSlice, isTaskMode: boolean) {
   lines.push(`קטגוריה: ${form.category || 'כללי'}`);
   if (isTaskMode) {
     lines.push(`דחיפות: ${form.sla}`);
-    lines.push(`ימים מוקצים: ${form.allocatedDays}`);
+    const daysLabel = formatDueDaysLabel(daysFromTodayUntilDue(form.dueDate));
+    if (daysLabel) lines.push(daysLabel);
   }
   const body = lines.join('\n\n');
 
@@ -276,43 +282,12 @@ function openOutlookCalendarFromMeta(meta: ReturnType<typeof buildCalendarEventM
   window.open(`${base}?${q.toString()}`, '_blank', 'noopener,noreferrer');
 }
 
-const SingleRangeSlider: React.FC<{
-    label: string;
-    min: number;
-    max: number;
-    step: number;
-    value: number;
-    onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-    name: string;
-    unit?: string;
-    className?: string;
-}> = ({ label, min, max, step, value, onChange, name, unit = '', className='' }) => {
-    const valuePercent = ((value - min) / (max - min)) * 100;
-    const id = useId();
-
-    return (
-        <div className={className}>
-            <div className="flex justify-between items-center mb-1">
-                <label id={id} className="text-xs font-semibold text-text-muted">{label}</label>
-                <span className="text-xs font-bold text-primary-700 tabular-nums">{value}{unit}</span>
-            </div>
-            <div className="relative h-5 flex items-center px-1">
-                <div className="absolute w-full h-1 bg-bg-subtle rounded-full">
-                    <div
-                        className="absolute h-1 bg-primary-500 rounded-full"
-                        style={{ width: `${valuePercent}%` }}
-                    ></div>
-                </div>
-                <input
-                    type="range" min={min} max={max} step={step} value={value} name={name} onChange={onChange}
-                    aria-labelledby={id}
-                    className="absolute w-full h-1 appearance-none bg-transparent cursor-pointer"
-                />
-            </div>
-        </div>
-    );
-};
-
+const DUE_DATE_QUICK_OFFSETS = [
+    { label: 'מחר', days: 1 },
+    { label: '3 ימים', days: 3 },
+    { label: 'שבוע', days: 7 },
+    { label: 'שבועיים', days: 14 },
+] as const;
 
 type LinkedPanel =
     | { phase: 'none' }
@@ -709,7 +684,6 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
         submissionPopup: false,
         submissionEmail: true,
         sla: 'בינונית' as 'נמוכה' | 'בינונית' | 'גבוהה',
-        allocatedDays: 3,
     });
     const modalRef = useRef<HTMLDivElement>(null);
     const assigneePickerRef = useRef<HTMLDivElement>(null);
@@ -794,7 +768,6 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                 submissionPopup: false,
                 submissionEmail: true,
                 sla: 'בינונית',
-                allocatedDays: 3,
             });
             setIsTaskMode(false);
             setAttachmentFiles([]);
@@ -1587,16 +1560,19 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
         [formData, isTaskMode, linkedPanel],
     );
 
+    const dueDaysUntilLabel = useMemo(
+        () => formatDueDaysLabel(daysFromTodayUntilDue(formData.dueDate)),
+        [formData.dueDate],
+    );
+
+    const applyDueDateOffset = useCallback((dayOffset: number) => {
+        setFormData((prev) => ({ ...prev, dueDate: dueDateAfterTodayOffset(dayOffset) }));
+    }, []);
+
     if (!isOpen) return null;
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value, type } = e.target;
-        
-        if (type === 'range') {
-             setFormData(prev => ({ ...prev, [name]: Number(value) }));
-             return;
-        }
-
         const checked = type === 'checkbox' ? (e.target as HTMLInputElement).checked : undefined;
         setFormData(prev => ({ ...prev, [name]: checked !== undefined ? checked : value }));
     };
@@ -1731,10 +1707,13 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
             }
         }
 
+        const allocatedDays = isTaskMode ? allocatedDaysFromDueDate(formData.dueDate) : null;
+
         const taskPayload = {
             ...formData,
             messageText: fullMessageText,
             isTask: isTaskMode,
+            ...(allocatedDays != null ? { allocatedDays } : {}),
             ...linkFields,
             ...linkLabels,
             attachmentCount: emailAttachments.length,
@@ -1794,7 +1773,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         submissionPopup: formData.submissionPopup,
                         submissionEmail: formData.submissionEmail,
                         sla: isTaskMode ? formData.sla : null,
-                        allocatedDays: isTaskMode ? formData.allocatedDays : null,
+                        allocatedDays: isTaskMode ? allocatedDays : null,
                         taskPayload,
                         appendSystemLinks: formData.submissionEmail,
                         skipSmtp: !formData.submissionEmail,
@@ -2118,6 +2097,21 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                             <CalendarDaysIcon className="w-4 h-4 text-text-muted absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                                             <input type="date" name="dueDate" value={formData.dueDate} onChange={handleChange} className={`${fieldClass} pr-8`} />
                                         </div>
+                                        {formData.dueDate && dueDaysUntilLabel ? (
+                                            <p className="text-xs font-semibold text-primary-700 mt-1 tabular-nums">{dueDaysUntilLabel}</p>
+                                        ) : null}
+                                        <div className="flex flex-wrap gap-1.5 mt-2">
+                                            {DUE_DATE_QUICK_OFFSETS.map(({ label, days }) => (
+                                                <button
+                                                    key={days}
+                                                    type="button"
+                                                    onClick={() => applyDueDateOffset(days)}
+                                                    className="text-[11px] font-bold px-2.5 py-1 rounded-lg border border-border-default bg-bg-card text-text-default hover:bg-primary-50 hover:border-primary-300 hover:text-primary-700 transition-colors"
+                                                >
+                                                    {label}
+                                                </button>
+                                            ))}
+                                        </div>
                                     </div>
                                     <div>
                                         <label className={labelClass}>שעה</label>
@@ -2143,26 +2137,13 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                         <span>{isTaskMode ? 'משימה' : 'הפוך למשימה'}</span>
                                     </button>
                                     {isTaskMode ? (
-                                        <div className="animate-content-fade-in flex flex-wrap items-end gap-2 flex-1 min-w-[12rem]">
-                                            <div className="w-[7.5rem] shrink-0">
-                                                <label className={labelClass}>דחיפות</label>
-                                                <select name="sla" value={formData.sla} onChange={handleChange} className={fieldClass}>
-                                                    <option>נמוכה</option>
-                                                    <option>בינונית</option>
-                                                    <option>גבוהה</option>
-                                                </select>
-                                            </div>
-                                            <SingleRangeSlider
-                                                label="ימים מוקצים"
-                                                min={1}
-                                                max={30}
-                                                step={1}
-                                                value={formData.allocatedDays}
-                                                onChange={handleChange}
-                                                name="allocatedDays"
-                                                unit=" ימים"
-                                                className="flex-1 min-w-[8rem]"
-                                            />
+                                        <div className="animate-content-fade-in w-[7.5rem] shrink-0">
+                                            <label className={labelClass}>דחיפות</label>
+                                            <select name="sla" value={formData.sla} onChange={handleChange} className={fieldClass}>
+                                                <option>נמוכה</option>
+                                                <option>בינונית</option>
+                                                <option>גבוהה</option>
+                                            </select>
                                         </div>
                                     ) : null}
                                 </div>

@@ -12,6 +12,7 @@ const { buildProfileDisplayMissingLabels } = require('../utils/candidateProfileD
 
 const STATUS_INCOMPLETE = 'חסר נתונים';
 const STATUS_ACTIVE = 'פעיל';
+const STATUS_PARSE_FAILED = 'נכשל בעיבוד';
 
 const trim = (v) => (v != null && v !== undefined ? String(v).trim() : '');
 
@@ -89,6 +90,7 @@ async function refreshCandidateDataStatusAfterSave(candidateId, req, options = {
   const plain = instance.get({ plain: true });
   const { ok, missing } = evaluateCandidateDataCompleteness(plain, usage, tagCount);
   const prev = trim(plain.status) || 'חדש';
+  if (prev === STATUS_PARSE_FAILED) return instance;
 
   const prevDisplayMissing = previousRow ? buildProfileDisplayMissingLabels(previousRow) : [];
   const nowDisplayMissing = buildProfileDisplayMissingLabels(plain);
@@ -150,6 +152,7 @@ async function refreshCandidateDataStatusForClient(candidateId, clientId) {
   const plain = instance.get({ plain: true });
   const { ok, missing } = evaluateCandidateDataCompleteness(plain, usage, tagCount);
   const prev = trim(plain.status) || 'חדש';
+  if (prev === STATUS_PARSE_FAILED) return instance;
   if (!ok) {
     const explanation = buildIncompleteStatusExplanation(missing);
     if (prev !== STATUS_INCOMPLETE) {

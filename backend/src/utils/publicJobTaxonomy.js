@@ -1,4 +1,5 @@
-const { slugifySegment } = require('./publicJobSlug');
+const { slugifySegment, normalizeSearchText } = require('./publicJobSlug');
+const { wgs84FromCityRow } = require('./publicJobGeo');
 const {
   EMPLOYMENT_TYPES,
   WORK_MODELS,
@@ -21,14 +22,7 @@ const countBy = (rows, read) => {
   return map;
 };
 
-const cityPoint = (row) => {
-  const lat = row.pointY ?? row.pointy ?? null;
-  const lng = row.pointX ?? row.pointx ?? null;
-  return {
-    lat: lat == null ? null : Number(lat),
-    lng: lng == null ? null : Number(lng),
-  };
-};
+const cityPoint = (row) => wgs84FromCityRow(row);
 
 /**
  * @param {object} input
@@ -116,4 +110,75 @@ const buildTaxonomy = ({ rows, categories, cities, industries, synonymsByCategor
   };
 };
 
-module.exports = { buildTaxonomy };
+const GENERIC_CLUSTER_LABELS = new Set(['כללי', 'כללית', 'אחר', 'אחרים', 'ללא', 'general', 'other']);
+
+const isGenericClusterLabel = (value) => GENERIC_CLUSTER_LABELS.has(normalizeSearchText(value));
+
+const indexJobCatalog = (categories) => {
+  const byCategoryName = new Map();
+  const byClusterName = new Map();
+  const remember = (map, label, node) => {
+    const key = normalizeSearchText(label);
+    if (key && !map.has(key)) map.set(key, node);
+  };
+  for (const category of categories || []) {
+    const parent = {
+      slug: category.publicSlug || slugifySegment(category.name),
+      label: category.name,
+      aliases: Array.isArray(category.slugAliases) ? category.slugAliases : [],
+    };
+    remember(byClusterName, category.name, parent);
+    for (const alias of parent.aliases) remember(byClusterName, alias, parent);
+    for (const cluster of category.clusters || []) {
+      const node = {
+        slug: cluster.publicSlug || slugifySegment(cluster.name),
+        label: cluster.name,
+        aliases: Array.isArray(cluster.slugAliases) ? cluster.slugAliases : [],
+        parent,
+      };
+      remember(byCategoryName, cluster.name, node);
+      for (const alias of node.aliases) remember(byCategoryName, alias, node);
+    }
+  }
+  return { byCategoryName, byClusterName };
+};
+
+const lookupCatalog = (map, raw) => {
+  const key = normalizeSearchText(raw);
+  if (!key) return null;
+  return map.get(key) || null;
+};
+
+/**
+ * Cluster and category slugs must exist in the taxonomy. Free-text "כללי" is not slugified
+ * into a value the filters cannot label.
+ */
+const resolveJobTaxonomy = (catalog, job) => {
+  const empty = { categoryNode: null, clusterNode: null };
+  if (!catalog) return empty;
+  const path = (Array.isArray(job?.jobFields) ? job.jobFields[0] : null) || {};
+  let categoryNode = lookupCatalog(catalog.byCategoryName, path.fieldType)
+    || lookupCatalog(catalog.byCategoryName, job?.field);
+  let clusterNode = categoryNode?.parent || null;
+  if (!clusterNode && path.category && !isGenericClusterLabel(path.category)) {
+    clusterNode = lookupCatalog(catalog.byClusterName, path.category);
+  }
+  if (!clusterNode && job?.field && !categoryNode) {
+    clusterNode = lookupCatalog(catalog.byClusterName, job.field);
+  }
+  if (!clusterNode && isGenericClusterLabel(path.category)) {
+    const seen = new Map();
+    for (const node of catalog.byClusterName.values()) {
+      if (normalizeSearchText(node.label).includes('כללי')) seen.set(node.slug, node);
+    }
+    if (seen.size === 1) clusterNode = [...seen.values()][0];
+  }
+  return { categoryNode, clusterNode };
+};
+
+module.exports = {
+  buildTaxonomy,
+  indexJobCatalog,
+  resolveJobTaxonomy,
+  isGenericClusterLabel,
+};

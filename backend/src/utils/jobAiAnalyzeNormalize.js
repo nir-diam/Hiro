@@ -171,6 +171,114 @@ function normalizeLicenseTypesFromAi(parsed) {
   return out;
 }
 
+const JOB_TAG_YEARS_MAX = 50;
+
+function parseJobTagYearsValue(raw) {
+  if (raw == null || raw === '') return null;
+  const n = Math.round(Number(raw));
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.min(n, JOB_TAG_YEARS_MAX);
+}
+
+function skillEvidenceText(skill) {
+  if (!skill || typeof skill !== 'object') return '';
+  return [skill.quote, skill.tag_reason, skill.tagReason, skill.name, skill.raw_value]
+    .map((v) => String(v ?? '').trim())
+    .filter(Boolean)
+    .join('\n');
+}
+
+function hasExplicitLookbackPhrase(text) {
+  const t = String(text || '');
+  return /(אחרונות|עדכני(?:ות)?|ב[-־]?\d+\s*השנים|last\s+\d+\s+years|in the (?:last|past)\s+\d+)/i.test(t);
+}
+
+/**
+ * Minimum years of experience stated for a tag ("לפחות 5 שנים", "5+ שנים", "שנתיים").
+ * Ignores lookback-only phrasing.
+ */
+function extractExperienceYearsFromText(text) {
+  const t = String(text || '');
+  if (!t.trim()) return null;
+  if (hasExplicitLookbackPhrase(t) && !/(לפחות|מינימום|\+|ניסיון של|years?\s+of\s+experience)/i.test(t)) {
+    return null;
+  }
+  const patterns = [
+    /(?:לפחות|מינימום|minimum|at\s+least)\s*(\d{1,2})\s*(?:\+)?\s*(?:שנ(?:ה|ים|ות)|years?)/i,
+    /(\d{1,2})\s*\+\s*(?:שנ(?:ה|ים|ות)|years?)/i,
+    /(?:ניסיון(?:\s+של)?|experience(?:\s+of)?)\s*(?:לפחות\s*)?(\d{1,2})\s*(?:שנ(?:ה|ים|ות)|years?)/i,
+    /(\d{1,2})\s*[-–—]\s*\d{1,2}\s*(?:שנ(?:ה|ים|ות)|years?)/i,
+    /(\d{1,2})\s*(?:שנ(?:ה|ים|ות)|years?)\s*(?:ניסיון|experience|בתחום|ב(?:תפקיד|מקצוע))?/i,
+  ];
+  for (const re of patterns) {
+    const m = t.match(re);
+    if (m) {
+      const n = parseJobTagYearsValue(m[1]);
+      if (n != null && n > 0) return n;
+    }
+  }
+  if (/(^|[^\d])שנתיים([^\d]|$)/.test(t)) return 2;
+  if (/(^|[^\d])שנה([^\d]|$)/.test(t) && /ניסיון|experience/i.test(t)) return 1;
+  return null;
+}
+
+/**
+ * years_experience = stated minimum tenure.
+ * lookback_years = how recent that experience must be.
+ * Defaults: years>0 → lookback 1 when not stated; years===0 → lookback 0.
+ * Also repairs the common LLM swap (5 years experience → lookback_years=5, years_experience=1).
+ */
+function normalizeJobSkillYears(skill) {
+  if (!skill || typeof skill !== 'object') {
+    return { years_experience: null, lookback_years: null };
+  }
+  let years = parseJobTagYearsValue(skill.years_experience ?? skill.yearsExperience);
+  let lookback = parseJobTagYearsValue(skill.lookback_years ?? skill.lookbackYears);
+  const evidence = skillEvidenceText(skill);
+  const extracted = extractExperienceYearsFromText(evidence);
+  const lookbackPhrase = hasExplicitLookbackPhrase(evidence);
+
+  if (extracted != null) {
+    if (years == null || years !== extracted) {
+      if (lookback === extracted && (years == null || years === 1 || years < extracted)) {
+        years = extracted;
+        if (!lookbackPhrase) lookback = null;
+      } else if (years == null) {
+        years = extracted;
+      }
+    }
+  }
+
+  if (years == null && lookback != null && !lookbackPhrase && extracted == null) {
+    // Lone number with no lookback wording → treat as experience years.
+    years = lookback;
+    lookback = null;
+  }
+
+  if (years === 0) {
+    return { years_experience: 0, lookback_years: 0 };
+  }
+  if (years != null && years > 0) {
+    if (!lookbackPhrase && (lookback == null || lookback === years)) {
+      lookback = 1;
+    } else if (lookback == null) {
+      lookback = 1;
+    }
+    return { years_experience: years, lookback_years: lookback };
+  }
+
+  return { years_experience: null, lookback_years: lookbackPhrase ? lookback : null };
+}
+
+function normalizeSkillsYearsInPlace(skills) {
+  if (!Array.isArray(skills)) return skills;
+  return skills.map((skill) => {
+    if (!skill || typeof skill !== 'object') return skill;
+    const years = normalizeJobSkillYears(skill);
+    return { ...skill, ...years };
+  });
+}
+
 /**
  * @param {Record<string, unknown>} parsed
  */
@@ -193,6 +301,13 @@ function enrichJobAnalyzeResult(parsed) {
     parsed.licenseType = licenseTypes[0];
   }
 
+  if (Array.isArray(parsed.skills)) {
+    parsed.skills = normalizeSkillsYearsInPlace(parsed.skills);
+  }
+  if (Array.isArray(parsed.tags)) {
+    parsed.tags = normalizeSkillsYearsInPlace(parsed.tags);
+  }
+
   return parsed;
 }
 
@@ -205,4 +320,8 @@ module.exports = {
   enrichJobAnalyzeResult,
   inferAgesFromText,
   parseAgeNumber,
+  parseJobTagYearsValue,
+  extractExperienceYearsFromText,
+  normalizeJobSkillYears,
+  normalizeSkillsYearsInPlace,
 };

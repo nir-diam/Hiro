@@ -949,7 +949,7 @@ const normalizeRole = (role: any): JobRole => ({
         Be professional and concise. Answer in Hebrew.`;
 
         const session = ai.chats.create({
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-3.8-flash',
             config: {
                 systemInstruction,
                 tools: [{ functionDeclarations: [addCategoryTool, addClusterTool, addRoleTool] }]

@@ -3,7 +3,11 @@ const MatchingEngineConfig = require('../models/MatchingEngineConfig');
 const { invalidateAllMatchCaches } = require('./matchingCacheService');
 const { DEFAULT_PENALTY_POLICIES } = require('./matchingPenaltyService');
 const redisService = require('./redisService');
-const { isRedisAvailable } = require('../config/redis');
+const readThrough = require('./readThroughCacheService');
+const { isRedisAvailable, isReadThroughEnabled } = require('../config/redis');
+const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
+
+const GLOBAL_CONFIG_REDIS_KEY = 'matching-engine:global-config';
 
 const GLOBAL_KEY = 'global';
 
@@ -14,11 +18,24 @@ const GLOBAL_CONFIG_CACHE_MS = 30_000; // 30 s
 
 // ── Redis cache TTLs ──────────────────────────────────────────────────────────
 const ENGINE_CONFIG_CACHE_TTL = 300;   // 5 min — per-job resolved config
-const engineConfigCacheKey = (jobId, tenantId) =>
-  `engine-config:${jobId}:${tenantId || 'default'}`;
+const engineConfigCacheKey = (jobId, tenantId, ignoreJobPreset = false) =>
+  `engine-config:${jobId}:${tenantId || 'default'}${ignoreJobPreset ? ':company' : ''}`;
+
+/** Drop resolved per-job configs (all jobs, or one job) after a template/assignment change. */
+async function invalidateEngineConfigCache(jobId = null) {
+  if (!isRedisAvailable()) return;
+  try {
+    const pattern = jobId ? `engine-config:${jobId}:*` : 'engine-config:*';
+    const keys = await redisService.keys(pattern);
+    if (Array.isArray(keys) && keys.length) await redisService.del(...keys);
+  } catch (e) {
+    console.warn('[matchingEngineService] engine-config cache invalidation failed (non-fatal):', e.message);
+  }
+}
 
 const DEFAULT_CONFIG = {
-  mainWeights: { vector: 20, tags: 35, geo: 20, experience: 15, intent: 10 },
+  /** Distance is not a weighted layer — it is the `geoRegions` distance penalty. */
+  mainWeights: { vector: 25, tags: 45, geo: 0, experience: 18, intent: 12 },
   intentWeights: { exact: 100, role: 80, cluster: 50, different: 0 },
   tagWeights: {
     role: 100, seniority: 80, skill: 70, tool: 60,
@@ -33,11 +50,21 @@ const DEFAULT_CONFIG = {
     south:     { grace: 30, penaltyPerKm: 1   },
   },
   missingGeoScore:     50,
+  /** Points off the final score when the candidate has no resolvable address. */
+  missingGeoPenalty:   10,
+  /** Max points subtracted for a known commute beyond grace (avoids 100−geoScore knockouts). */
+  maxGeoPenalty:       30,
   missingSalaryScore:  0,
   salaryDiffThreshold: 10,
   salaryPenalty:       5,
   ageGapPenalty:       2,
+  /** Max points off for age outside job range (preference, not a full knockout). */
+  maxAgeGapPenalty:    25,
   missingAgeScore:     6,
+  /** Points off per missing year of required role-tag ניסיון. */
+  roleExperiencePenalty: 2,
+  /** Points off per year that matching role experience sits outside the tag's אחורה window. */
+  roleLookbackPenalty:   2,
   isExperienceEnabled: true,
   /** Includes `availability` (job.availability vs candidates.availability) — see matchingPenaltyService. */
   penaltyPolicies:     DEFAULT_PENALTY_POLICIES,
@@ -51,11 +78,7 @@ function normalizeEngineConfig(cfg) {
   return mergeEngineConfig(DEFAULT_CONFIG, cfg);
 }
 
-async function getConfig() {
-  const now = Date.now();
-  if (_globalConfigCache && now - _globalConfigCacheAt < GLOBAL_CONFIG_CACHE_MS) {
-    return _globalConfigCache;
-  }
+async function loadGlobalConfigFromDb() {
   let row = await MatchingEngineConfig.findOne({ where: { configKey: GLOBAL_KEY } });
   if (!row) {
     row = await MatchingEngineConfig.create({
@@ -64,7 +87,24 @@ async function getConfig() {
       config: DEFAULT_CONFIG,
     });
   }
-  const cfg = normalizeEngineConfig(row.config);
+  return normalizeEngineConfig(row.config);
+}
+
+async function getConfig() {
+  const now = Date.now();
+  if (_globalConfigCache && now - _globalConfigCacheAt < GLOBAL_CONFIG_CACHE_MS) {
+    return _globalConfigCache;
+  }
+  let cfg;
+  if (isReadThroughEnabled()) {
+    cfg = await readThrough.getOrLoad(
+      GLOBAL_CONFIG_REDIS_KEY,
+      loadGlobalConfigFromDb,
+      { ttlSeconds: ENGINE_CONFIG_CACHE_TTL, scope: 'matching-engine:global' },
+    );
+  } else {
+    cfg = await loadGlobalConfigFromDb();
+  }
   _globalConfigCache = cfg;
   _globalConfigCacheAt = now;
   return cfg;
@@ -80,6 +120,8 @@ async function updateConfig(incoming) {
   await row.save();
   // Bust in-process config cache
   _globalConfigCache = null;
+  readThrough.invalidate(GLOBAL_CONFIG_REDIS_KEY).catch(() => {});
+  invalidateEngineConfigCache();
   // All cached match scores are now stale — wipe every job:*:matches and candidate:*:opportunities
   invalidateAllMatchCaches().catch((e) =>
     console.warn('[matchingEngineService] Redis invalidation failed (non-fatal):', e.message),
@@ -142,6 +184,7 @@ async function updatePreset(id, { label, description, clientIds, config } = {}) 
   if (clientIds   !== undefined) row.clientIds   = clientIds;
   if (config      !== undefined) row.config      = config;
   await row.save();
+  invalidateEngineConfigCache();
   // Preset config changed → all clients using this preset have stale scores
   invalidateAllMatchCaches().catch((e) =>
     console.warn('[matchingEngineService] Redis invalidation after updatePreset failed (non-fatal):', e.message),
@@ -154,6 +197,7 @@ async function deletePreset(id) {
     where: { id, type: 'preset' },
   });
   if (deleted > 0) {
+    invalidateEngineConfigCache();
     // Clients that used this preset now fall back to global config → stale scores
     invalidateAllMatchCaches().catch((e) =>
       console.warn('[matchingEngineService] Redis invalidation after deletePreset failed (non-fatal):', e.message),
@@ -284,19 +328,32 @@ async function resolveClientIdFromJobLabel(jobPlain) {
 }
 
 /**
- * Matching preset for scoring.
- * Logged-in tenant (`tenantClientId`) wins — Company Settings preset applies to their list/scores.
- * Otherwise resolve from job.client label.
+ * Company preset for scoring, with where it came from:
+ *   'company' — logged-in tenant's Company Settings
+ *   'owner'   — tenant that owns the job (jobs.client_id)
+ *   'client_label' — legacy: client resolved from the job.client text
+ * `job.client` is usually the end customer, not the tenant, so it is the last resort.
  */
+async function findMatchingPresetForJob(jobPlain, options = {}) {
+  const tried = new Set();
+  const attempt = async (cid, source) => {
+    const id = cid ? String(cid).trim() : '';
+    if (!id || tried.has(id)) return null;
+    tried.add(id);
+    const row = await findPresetRowForClientId(id);
+    return row ? { row, source } : null;
+  };
+
+  const found =
+    (await attempt(options.tenantClientId, 'company'))
+    || (await attempt(options.jobClientId || jobPlain?.clientId || jobPlain?.client_id, 'owner'))
+    || (await attempt(await resolveClientIdFromJobLabel(jobPlain), 'client_label'));
+  return found || null;
+}
+
 async function findMatchingPresetRowForJob(jobPlain, options = {}) {
-  const tenantCid = options.tenantClientId ? String(options.tenantClientId).trim() : '';
-  if (tenantCid) {
-    return findPresetRowForClientId(tenantCid);
-  }
-  const jobCidOpt = options.jobClientId ? String(options.jobClientId).trim() : '';
-  const jobCid = jobCidOpt || (await resolveClientIdFromJobLabel(jobPlain));
-  if (!jobCid) return null;
-  return findPresetRowForClientId(jobCid);
+  const found = await findMatchingPresetForJob(jobPlain, options);
+  return found ? found.row : null;
 }
 
 /**
@@ -308,42 +365,51 @@ function resolveMainWeights(mainWeights, options = {}) {
   if (!mainWeights || typeof mainWeights !== 'object') return { ...def };
   const vW = Number(mainWeights.vector) || 0;
   const tW = Number(mainWeights.tags) || 0;
-  const gW = Number(mainWeights.geo) || 0;
   const eW = Number(mainWeights.experience) || 0;
   const iW = Number(mainWeights.intent) || 0;
-  const total = vW + tW + gW + eW + iW;
+  const total = vW + tW + eW + iW;
   if (total <= 0) return { ...def };
-  const others = tW + gW + eW + iW;
+  const others = tW + eW + iW;
   if (!options.allowVectorOnly && vW >= 99 && others <= 0) {
     console.warn(
-      '[matchingEngine] mainWeights are vector-only (100/0/0/0/0); using default balanced weights for scoring',
+      '[matchingEngine] mainWeights are vector-only (100/0/0/0); using default balanced weights for scoring',
     );
     return { ...def };
   }
-  return { vector: vW, tags: tW, geo: gW, experience: eW, intent: iW };
+  return { vector: vW, tags: tW, geo: 0, experience: eW, intent: iW };
 }
 
 /**
  * Global row + optional preset override + per-job Redis weight sliders.
  * Priority (highest wins):
- *   job-specific Redis weights  >  client preset  >  global config
+ *   job-specific Redis weights  >  job preset  >  company preset  >  global config
+ * `options.ignoreJobPreset` — candidate→jobs matching always uses the company preset.
+ * Result carries `preset: { id, label, source }` (source: job | company | owner | client_label | global).
  */
 async function resolveEngineConfigForJob(jobPlain, options = {}) {
   const jobId = jobPlain?.id != null ? String(jobPlain.id) : '';
   const tenantId = options.tenantClientId ? String(options.tenantClientId).trim() : '';
+  const ignoreJobPreset = options.ignoreJobPreset === true;
 
   // Redis cache — the resolved config rarely changes between requests
-  if (jobId && isRedisAvailable()) {
-    const cacheKey = engineConfigCacheKey(jobId, tenantId);
+  if (jobId && isRedisAvailable() && isReadThroughEnabled()) {
+    const cacheKey = engineConfigCacheKey(jobId, tenantId, ignoreJobPreset);
     const cached = await redisService.get(cacheKey);
-    if (cached && typeof cached === 'object' && cached.mainWeights) return cached;
+    if (cached && typeof cached === 'object' && cached.mainWeights) {
+      recordHit('engine-config');
+      return normalizeEngineConfig(cached);
+    }
+    recordMiss('engine-config');
+  } else if (jobId && !isReadThroughEnabled()) {
+    recordBypass('engine-config');
   }
 
   const globalCfg = normalizeEngineConfig(await getConfig());
   let merged = globalCfg;
   let presetRow = null;
+  let presetSource = 'global';
   try {
-    const jobPresetRaw = jobPlain?.matchingEnginePresetId;
+    const jobPresetRaw = ignoreJobPreset ? null : jobPlain?.matchingEnginePresetId;
     const jobPresetId =
       jobPresetRaw != null && jobPresetRaw !== '' && Number.isFinite(Number(jobPresetRaw))
         ? Number(jobPresetRaw)
@@ -352,14 +418,20 @@ async function resolveEngineConfigForJob(jobPlain, options = {}) {
       presetRow = await MatchingEngineConfig.findOne({
         where: { id: jobPresetId, type: 'preset' },
       });
-      if (!presetRow) {
+      if (presetRow) {
+        presetSource = 'job';
+      } else {
         console.warn(
           `[matchingEngineService] job matchingEnginePresetId=${jobPresetId} not found; falling back to client preset`,
         );
       }
     }
     if (!presetRow) {
-      presetRow = await findMatchingPresetRowForJob(jobPlain, options);
+      const found = await findMatchingPresetForJob(jobPlain, options);
+      if (found) {
+        presetRow = found.row;
+        presetSource = found.source;
+      }
     }
     if (presetRow?.config && typeof presetRow.config === 'object' && Object.keys(presetRow.config).length) {
       merged = mergeEngineConfig(globalCfg, presetRow.config);
@@ -377,7 +449,6 @@ async function resolveEngineConfigForJob(jobPlain, options = {}) {
         const weightPatch = {};
         if (jobWeights.semantic   != null) weightPatch.vector     = jobWeights.semantic;
         if (jobWeights.vector     != null) weightPatch.vector     = jobWeights.vector;
-        if (jobWeights.geo        != null) weightPatch.geo        = jobWeights.geo;
         if (jobWeights.skills     != null) weightPatch.tags       = jobWeights.skills;
         if (jobWeights.tags       != null) weightPatch.tags       = jobWeights.tags;
         if (jobWeights.experience != null) weightPatch.experience = jobWeights.experience;
@@ -395,10 +466,16 @@ async function resolveEngineConfigForJob(jobPlain, options = {}) {
   merged.mainWeights = resolveMainWeights(merged.mainWeights, {
     allowVectorOnly: Boolean(presetRow?.id),
   });
+  merged = {
+    ...merged,
+    preset: presetRow
+      ? { id: Number(presetRow.id), label: presetRow.label || null, source: presetSource }
+      : { id: null, label: null, source: 'global' },
+  };
 
   // Store in Redis for subsequent requests
   if (jobId && isRedisAvailable()) {
-    redisService.set(engineConfigCacheKey(jobId, tenantId), merged, {
+    redisService.set(engineConfigCacheKey(jobId, tenantId, ignoreJobPreset), merged, {
       ttlSeconds: ENGINE_CONFIG_CACHE_TTL,
     }).catch(() => {});
   }
@@ -418,6 +495,7 @@ module.exports = {
   deletePreset,
   resolveEngineConfigForJob,
   findMatchingPresetRowForJob,
+  invalidateEngineConfigCache,
   findPresetRowForClientId,
   resolveClientIdFromJobLabel,
   resolveMainWeights,

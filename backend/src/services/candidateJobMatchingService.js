@@ -372,9 +372,11 @@ async function computeMatchesForCandidateUncached(candidateId, opts = {}) {
     const jid      = String(jobPlain.id);
     const clientLabel     = jobPlain.client || '';
     const screeningDefaults = screeningByClient.get(clientLabel) || {};
-    const configTenant    = staffTenantId || (screeningDefaults.clientId ? String(screeningDefaults.clientId) : '');
     const config          = globalOverrideConfig
-      || (await resolveEngineConfigForJob(jobPlain, { tenantClientId: configTenant || null }));
+      || (await resolveEngineConfigForJob(jobPlain, {
+        tenantClientId: staffTenantId || null,
+        ignoreJobPreset: true,
+      }));
     preJobConfigs.set(jid, { config, screeningDefaults });
   });
   lap(`per-job configs pre-resolved (${uniqueClientLabels.length} unique clients, ${allJobs.length} jobs)`);
@@ -471,6 +473,7 @@ async function computeMatchesForCandidateUncached(candidateId, opts = {}) {
         matchScore:       scoreResult.matchScore,
         scoreBreakdown:   scoreResult.scoreBreakdown,
         parameterMatches: scoreResult.parameterMatches,
+        enginePreset:     config?.preset || null,
         matchType:        linkedInfo ? 'application' : 'ai',
         requirementsMet,
         jobCandidateId:   linkedInfo?.jcId || null,
@@ -641,14 +644,14 @@ async function enrichLinkedJobsRowsWithScores(candidateId, linkedRows, opts = {}
     });
 
     let scoreResult = { matchScore: 0, scoreBreakdown: null, parameterMatches: {} };
+    let enginePreset = null;
     try {
       const jobEmb = await getJobEmbedding(jobPlain);
-      let configTenant = staffTenantId;
-      if (!configTenant) {
-        const screeningDefaults = await clientUsageSettingService.resolveScreeningDefaultsForJob(jobPlain);
-        configTenant = screeningDefaults.clientId ? String(screeningDefaults.clientId) : '';
-      }
-      const config = await resolveEngineConfigForJob(jobPlain, { tenantClientId: configTenant || null });
+      const config = await resolveEngineConfigForJob(jobPlain, {
+        tenantClientId: staffTenantId || null,
+        ignoreJobPreset: true,
+      });
+      enginePreset = config?.preset || null;
       scoreResult = await computeMatchPackage(
         candidate,
         jobPlain,
@@ -666,6 +669,7 @@ async function enrichLinkedJobsRowsWithScores(candidateId, linkedRows, opts = {}
       matchScore: Math.round(Number(scoreResult.matchScore) || 0),
       scoreBreakdown: scoreResult.scoreBreakdown || null,
       parameterMatches: scoreResult.parameterMatches || null,
+      enginePreset,
     });
   }
   return stripLinkedJobEmbeddings(out);

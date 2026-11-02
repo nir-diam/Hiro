@@ -15,7 +15,7 @@ const path = require('path');
 const dotenv = require('dotenv');
 
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
-dotenv.config({ path: path.resolve(__dirname, '../src/.env') });
+dotenv.config({ path: path.resolve(__dirname, '../src/.env'), override: true });
 dotenv.config();
 
 const Redis = require('ioredis');
