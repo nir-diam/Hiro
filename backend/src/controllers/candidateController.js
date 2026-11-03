@@ -2279,6 +2279,17 @@ const parseCandidateListParams = (req) => {
   };
 };
 
+/**
+ * Which profile set the candidate list shows.
+ *
+ * `primary`           → the real candidate rows (the whole database)
+ * `staff_shadow_pinned` → only pinned staff shadow copies ("עותק צל")
+ *
+ * Platform admins see live primaries; tenant managers and other staff see pinned shadow copies
+ * only (`staff_shadow_pinned` in candidateService).
+ */
+const LIST_PRIMARY_ROLES = new Set(['admin', 'super_admin']);
+
 const resolveCandidateListProfileKind = async (req) => {
   let role = String(req?.dbUser?.role || '').trim();
   if (!role && req?.user?.sub) {
@@ -2289,8 +2300,8 @@ const resolveCandidateListProfileKind = async (req) => {
       role = '';
     }
   }
-  if (role === 'admin' || role === 'super_admin') return 'primary';
   if (!role) return 'primary';
+  if (LIST_PRIMARY_ROLES.has(role)) return 'primary';
   return 'staff_shadow_pinned';
 };
 

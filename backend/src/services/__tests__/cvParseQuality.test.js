@@ -102,6 +102,15 @@ describe('applyInboundContact', () => {
     expect(filled.email).toBe('in-cv@example.com');
     expect(filled.phone).toBe('0501234567');
   });
+
+  it('does not fill a portal sender when CV has no email', () => {
+    const filled = applyInboundContact(
+      { phone: '' },
+      { email: 'alljobs@alljob.co.il', phone: '0501234567' },
+    );
+    expect(filled.email).toBeUndefined();
+    expect(filled.phone).toBe('0501234567');
+  });
 });
 
 describe('activeTagCount', () => {

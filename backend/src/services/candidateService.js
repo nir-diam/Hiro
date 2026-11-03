@@ -714,6 +714,19 @@ const enrichCompanyExperiencesArray = async (companyExperiences, linkedOrgs = []
 };
 
 /** Batch-resolve organizations by canonical name or aliases (incl. generic-bucket aliases). */
+/**
+ * Resolve organizations for a batch of company names (list grid enrichment).
+ *
+ * The previous form bound one parameter per name and forked them across
+ * `name IN (...)` plus `EXISTS (unnest(aliases) ... IN (...))`. That plan is quadratic:
+ * measured in production, 200 names took 2.5 s and 400 names took 4.5 s, so a 100-candidate
+ * page (which expands to 400+ lookup keys via `companyLookupKeys`) blew the 20 s
+ * `statement_timeout` and the whole list returned 503.
+ *
+ * Passing the keys as a single array lets Postgres hash both sides: the alias probe becomes one
+ * nested-loop semi join against a materialised key set, and the cost stops scaling with the
+ * number of names.
+ */
 const loadOrganizationsForCompanyNames = async (companyNames) => {
   const keys = new Set();
   for (const n of companyNames || []) {
@@ -722,20 +735,18 @@ const loadOrganizationsForCompanyNames = async (companyNames) => {
   const lowerNames = [...keys];
   if (!lowerNames.length) return new Map();
 
-  const binds = [...lowerNames, ...lowerNames];
-  const ph1 = lowerNames.map((_, i) => `$${i + 1}`).join(', ');
-  const offset = lowerNames.length;
-  const ph2 = lowerNames.map((_, i) => `$${offset + i + 1}`).join(', ');
-
   const rows = await sequelize.query(
-    `SELECT id, name, aliases, "mainField", "subField", "employeeCount", classification
-     FROM organizations
-     WHERE LOWER(TRIM(name)) IN (${ph1})
-        OR EXISTS (
-          SELECT 1 FROM unnest(COALESCE(aliases, ARRAY[]::text[])) a
-          WHERE LOWER(TRIM(a)) IN (${ph2})
-        )`,
-    { bind: binds, type: QueryTypes.SELECT },
+    `WITH lookup(keys) AS (SELECT $1::text[])
+     SELECT o.id, o.name, o.aliases, o."mainField", o."subField", o."employeeCount", o.classification
+       FROM organizations o
+       CROSS JOIN lookup l
+      WHERE LOWER(TRIM(o.name)) = ANY(l.keys)
+         OR EXISTS (
+              SELECT 1
+                FROM unnest(COALESCE(o.aliases, ARRAY[]::text[])) a
+               WHERE LOWER(TRIM(a)) = ANY(l.keys)
+            )`,
+    { bind: [lowerNames], type: QueryTypes.SELECT },
   );
 
   const orgMap = new Map();
@@ -2121,14 +2132,24 @@ const scoreCandidateJobPairs = async (items, opts = {}) => {
   );
 };
 
+/** job_candidates rows are keyed by primary id; staff list rows may be pinned shadows. */
+const jobSubmissionLookupIdForListRow = (row) => {
+  if (!row?.id) return null;
+  const canon =
+    row.canonicalCandidateId != null ? String(row.canonicalCandidateId).trim() : '';
+  return canon || String(row.id);
+};
+
 /**
  * Latest job_candidates link per candidate (by updatedAt/createdAt), with job title + rating-derived match %.
  * Mutates plain candidate objects in `rows` (adds `lastJobSubmission` when a link exists).
  */
 const attachLatestJobSubmissions = async (rows) => {
   if (!Array.isArray(rows) || rows.length === 0) return rows;
-  const ids = [...new Set(rows.map((r) => r?.id).filter(Boolean))];
-  if (!ids.length) return rows;
+  const lookupIds = [
+    ...new Set(rows.map(jobSubmissionLookupIdForListRow).filter(Boolean)),
+  ];
+  if (!lookupIds.length) return rows;
 
   let subs;
   try {
@@ -2145,16 +2166,16 @@ const attachLatestJobSubmissions = async (rows) => {
       WHERE jc."candidateId" = ANY($1::uuid[])
         AND jc."jobId" IS NOT NULL
       ORDER BY jc."candidateId", COALESCE(jc."updatedAt", jc."createdAt") DESC NULLS LAST`,
-      { bind: [ids], type: QueryTypes.SELECT },
+      { bind: [lookupIds], type: QueryTypes.SELECT },
     );
   } catch (err) {
     console.error('[candidateService.attachLatestJobSubmissions]', err.message || err);
     return rows;
   }
 
-  const subById = new Map((subs || []).map((s) => [String(s.candidateId), s]));
+  const subByLookupId = new Map((subs || []).map((s) => [String(s.candidateId), s]));
   for (const row of rows) {
-    const sub = subById.get(String(row.id));
+    const sub = subByLookupId.get(String(jobSubmissionLookupIdForListRow(row)));
     if (!sub || !sub.jobId) continue;
     const rating = Number(sub.jobRating);
     const matchScore =
@@ -2832,6 +2853,10 @@ const ensureStaffShadowAfterReady = async (candidateId, options = {}) => {
   if (row.ingestPending === true && options.force !== true) return null;
 
   const result = await ensureStaffShadowCopy(cid, { req: options.req || null });
+  // Every shadow-creation path funnels through here — make sure the family ends up with a
+  // pinned shadow even when one already existed (bulk backfill / legacy create) and was never
+  // pinned. Without this the profile switcher showed an unpinned "עותק צל".
+  await ensurePinnedStaffShadowSafely(result?.primaryId || cid);
   if (result?.created) {
     try {
       const { bumpGlobalHttpGetCacheVersion } = require('../middleware/httpGetResponseCacheMiddleware');
@@ -2996,7 +3021,6 @@ const ensureStaffShadowCopyInner = async (candidateId, options = {}) => {
   const shadow = shadowId ? await getById(shadowId) : createdRow;
   return { primaryId, shadow, created: true };
 };
-
 const ensureStaffShadowCopy = async (candidateId, options = {}) => {
   const cid = String(candidateId || '').trim();
   if (!cid) {
@@ -3085,6 +3109,30 @@ const ensurePinnedStaffShadowForPrimary = async (primaryId) => {
   const newestId = shadows[0]?.id;
   if (!newestId) return;
   await setStaffShadowPinned(String(newestId), true);
+};
+
+/**
+ * Safety net for every shadow-creation path.
+ *
+ * `ensureStaffShadowCopyInner` pins the row it just created, but shadows also arrive through
+ * bulk backfills and the legacy `create()` route (which strips `staffShadowPinned` from the
+ * payload). Result before this guard: 580 of 679 candidate families had shadows but none pinned,
+ * so the profile switcher showed an unpinned "עותק צל" and never defaulted to it.
+ *
+ * Idempotent and cheap: one query, and it only writes when the family truly has no pinned
+ * shadow. Wrapped in try/catch so a repair failure can never break the caller.
+ */
+const ensurePinnedStaffShadowSafely = async (primaryId) => {
+  try {
+    await ensurePinnedStaffShadowForPrimary(primaryId);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[candidateService] pin staff shadow failed',
+      primaryId,
+      err?.message || err,
+    );
+  }
 };
 
 /** Resolve which profile supplies the CV when referring to a client. */
@@ -3418,7 +3466,7 @@ const prepareCreatePayload = async (payload) => {
   }
   delete cleanPayload.profileName;
 
-  if (cleanPayload.email) {
+  if (Object.prototype.hasOwnProperty.call(cleanPayload, 'email')) {
     const norm = normalizeEmail(cleanPayload.email);
     if (norm) cleanPayload.email = norm;
     else delete cleanPayload.email;
@@ -4306,6 +4354,8 @@ module.exports = {
   ensureStaffShadowAfterReady,
   repairStaffShadowTags,
   setStaffShadowPinned,
+  ensurePinnedStaffShadowForPrimary,
+  ensurePinnedStaffShadowSafely,
   resolveReferralCvSource,
   shareStaffProfileWithCandidate,
   listMergedEventsForCandidate,

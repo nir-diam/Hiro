@@ -5,6 +5,10 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "backfill-staff-shadows": "node scripts/backfill-staff-shadow-copies.js",
+    "backfill-staff-shadows:apply": "node scripts/backfill-staff-shadow-copies.js --apply",
+    "pin-staff-shadows": "node scripts/pin-unpinned-staff-shadows.js",
+    "pin-staff-shadows:apply": "node scripts/pin-unpinned-staff-shadows.js --apply",
     "ingest-worker": "node scripts/email-ingest-worker.js",
     "dev": "nodemon src/server.js",
     "test": "jest"

@@ -1,0 +1,15 @@
+# Copy to `dbhub.toml` and fill in the real password.
+#
+# The `hiro_readonly` role is a real Postgres role with SELECT only and
+# `default_transaction_read_only=on`, so writes fail at the database even if a
+# statement slips past DBHub's own guard.
+[[sources]]
+id = "hiro"
+dsn = "postgres://hiro_readonly:REPLACE_WITH_PASSWORD@herodb.cjauwauq6xes.eu-north-1.rds.amazonaws.com:5432/postgres?sslmode=require"
+
+# Tool-level guard: rejects non-SELECT and caps result size.
+[[tools]]
+name = "execute_sql"
+source = "hiro"
+readonly = true
+max_rows = 500

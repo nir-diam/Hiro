@@ -49,11 +49,16 @@ import {
 } from '../utils/jobTagMatchCategories';
 import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
 import {
-    MATCH_SCORE_POPUP_WIDTH,
+    MatchScorePopup,
     matchScorePopupPositionFromEvent,
     useMatchScorePopupDismiss,
+    type MatchScorePopupPosition,
 } from './MatchScorePopup';
-import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
+import {
+    type MatchScoreBreakdownData,
+    type ParameterMatchesMap,
+} from './MatchScoreBreakdownPanel';
+import { candidateToSonarRecord } from '../utils/sonarMatchBreakdown';
 import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferralEvents';
 import { fetchRecruitmentStatuses } from '../services/recruitmentStatusesApi';
 import { DEFAULT_CV_PROFILE_KIND, type CvProfileKind } from '../utils/cvProfileKind';
@@ -121,9 +126,9 @@ interface ScreeningJob {
   evaluationChecks?: ScreeningEvalCheck[];
   /** Job owner's client UUID when supplied by the screening pool (reserved). */
   screeningClientId?: string | null;
-  /** From GET …/screening-pool — same shape as Job Sonar `scoreBreakdown` (geoDistance, etc.). */
-  scoreBreakdown?: ScreeningPoolScoreBreakdown | null;
-  parameterMatches?: Record<string, 'match' | 'gap' | 'unknown'> | null;
+  /** Full matching-engine breakdown (same as candidates list / Sonar). */
+  scoreBreakdown?: MatchScoreBreakdownData | ScreeningPoolScoreBreakdown | null;
+  parameterMatches?: ParameterMatchesMap | null;
 }
 
 interface ScreeningEvalCheck {
@@ -766,118 +771,158 @@ function screeningMetricValueClass(tone: ScreeningCardMetricTone): string {
   return 'text-text-default';
 }
 
-const MatchScoreExplanation: React.FC<{
+/** Same match-score popup as `/candidates` list (engine breakdown: סמנטי / תגיות / קנסות). */
+const ScreeningMatchScorePopup: React.FC<{
   job: ScreeningJob;
-  position: { x: number; y: number };
-  t: (key: string, opts?: Record<string, string>) => string;
+  position: MatchScorePopupPosition;
+  candidateId: string;
+  candidate: Record<string, unknown> | null | undefined;
+  apiBase: string;
   onClose: () => void;
-  onReanalyze: () => void;
-  analyzing: boolean;
-}> = ({ job, position, t, onClose, onReanalyze, analyzing }) => {
-  const checks = job.evaluationChecks || [];
-  const failed = checks.filter((c) => !c.ok);
-  const summary =
-    failed.length === 0
-      ? 'כל בדיקות הסינון האוטומטי עברו — המשרה כלולה במסלול הסינון.'
-      : `${failed.length} בדיקות דורשות תשומת לב לפני המשך טיפול במועמד.`;
+}> = ({ job, position, candidateId, candidate, apiBase, onClose }) => {
+  const jobId = String(job.id ?? '').trim();
+  const [jobRecord, setJobRecord] = useState<Record<string, unknown> | null>(null);
+  const [fetched, setFetched] = useState<{
+    matchScore: number;
+    scoreBreakdown: MatchScoreBreakdownData | null;
+    parameterMatches: ParameterMatchesMap | null;
+    vectorSimilarity?: number | null;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const popupStyle = useMemo(() => {
-    if (typeof window === 'undefined') {
-      return { top: position.y, left: position.x, transform: 'translate(-50%, calc(-100% - 12px))' as const };
+  const poolBreakdown =
+    job.scoreBreakdown && typeof job.scoreBreakdown === 'object'
+      ? (job.scoreBreakdown as MatchScoreBreakdownData)
+      : null;
+  const scoreBreakdown = fetched?.scoreBreakdown ?? poolBreakdown;
+  const parameterMatches = fetched?.parameterMatches ?? job.parameterMatches ?? null;
+  const displayScore = fetched?.matchScore ?? job.aiMatchScore;
+
+  const candPlain = (candidate ?? {}) as Record<string, unknown>;
+  const sonarCandidate = useMemo(
+    () =>
+      candidateToSonarRecord({
+        backendId: candidateId,
+        gender: candPlain.gender != null ? String(candPlain.gender) : undefined,
+        age: candPlain.age != null ? String(candPlain.age) : undefined,
+        address: candPlain.address != null ? String(candPlain.address) : undefined,
+        location: candPlain.location != null ? String(candPlain.location) : undefined,
+        salaryMin: typeof candPlain.salaryMin === 'number' ? candPlain.salaryMin : null,
+        salaryMax: typeof candPlain.salaryMax === 'number' ? candPlain.salaryMax : null,
+        field: candPlain.field != null ? String(candPlain.field) : undefined,
+        industry: candPlain.industry != null ? String(candPlain.industry) : undefined,
+        mobility:
+          candPlain.mobility != null
+            ? String(candPlain.mobility)
+            : undefined,
+        drivingLicense:
+          candPlain.drivingLicense != null
+            ? String(candPlain.drivingLicense)
+            : Array.isArray(candPlain.drivingLicenses) && candPlain.drivingLicenses.length
+              ? String(candPlain.drivingLicenses[0])
+              : undefined,
+      }),
+    [candidateId, candPlain],
+  );
+
+  useEffect(() => {
+    if (!jobId || !apiBase) {
+      setJobRecord(null);
+      return;
     }
-    const left = clampCenteredPopoverX(position.x, MATCH_SCORE_POPUP_WIDTH);
-    const top = Math.max(12, position.y);
-    return { top, left, transform: 'translate(-50%, calc(-100% - 12px))' as const };
-  }, [position.x, position.y]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: Record<string, string> = { Accept: 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}`, { headers });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const rec = (data.job ?? data) as Record<string, unknown>;
+        if (rec && typeof rec === 'object') setJobRecord(rec);
+      } catch {
+        if (!cancelled) setJobRecord(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, apiBase]);
+
+  useEffect(() => {
+    if (!jobId || !candidateId || !apiBase) {
+      setFetched(null);
+      return;
+    }
+    if (poolBreakdown && typeof job.aiMatchScore === 'number') {
+      setFetched(null);
+      setLoading(false);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setFetched(null);
+      try {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: Record<string, string> = {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+        };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const res = await fetch(`${apiBase}/api/admin/matching-engine/simulate`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ candidateId, jobId }),
+        });
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const bd = (data.scoreBreakdown ?? data.breakdown) as MatchScoreBreakdownData | undefined;
+        setFetched({
+          matchScore:
+            typeof data.matchScore === 'number'
+              ? Math.round(data.matchScore)
+              : typeof data.finalScore === 'number'
+                ? Math.round(data.finalScore)
+                : job.aiMatchScore,
+          scoreBreakdown: bd && typeof bd === 'object' ? bd : null,
+          parameterMatches:
+            data.parameterMatches && typeof data.parameterMatches === 'object'
+              ? (data.parameterMatches as ParameterMatchesMap)
+              : null,
+          vectorSimilarity:
+            typeof data.vectorSimilarity === 'number' ? data.vectorSimilarity : null,
+        });
+      } catch {
+        /* keep pool score */
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [jobId, candidateId, apiBase, poolBreakdown, job.aiMatchScore]);
 
   return (
-    <div
-      className="match-score-popup fixed z-[1000] w-72 max-h-[min(75vh,28rem)] text-right pointer-events-auto animate-fade-in"
-      style={popupStyle}
-      onClick={(e) => e.stopPropagation()}
-      dir="rtl"
-    >
-      <div className="relative overflow-hidden rounded-xl shadow-xl border border-border-default bg-bg-card">
-        <div
-          className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-bg-card border-b border-r border-border-default rotate-45 pointer-events-none z-10"
-          aria-hidden
-        />
-        <div className="relative z-10 bg-bg-card rounded-2xl overflow-hidden max-h-[min(75vh,28rem)] overflow-y-auto custom-scrollbar">
-        <div className="p-3 border-b border-border-default flex items-center justify-between bg-bg-subtle/50">
-          <div className="flex items-center gap-2 min-w-0">
-            <SparklesIcon className="w-5 h-5 text-accent-600 shrink-0" />
-            <h3 className="font-bold text-text-default text-sm truncate">ניתוח התאמת סינון</h3>
-          </div>
-          <button type="button" onClick={onClose} className="p-1 hover:bg-bg-hover rounded-full shrink-0">
-            <XMarkIcon className="w-5 h-5 text-text-muted" />
-          </button>
-        </div>
-
-        <div className="p-3 space-y-3 max-h-[70vh] overflow-y-auto">
-          <div className="flex items-center justify-between bg-accent-50 p-2.5 rounded-xl border border-accent-100">
-            <span className="text-xs font-medium text-accent-900">ציון התאמה (מערכת)</span>
-            <span className="text-lg font-black text-accent-600">{job.aiMatchScore}%</span>
-          </div>
-
-          {checks.length === 0 ? (
-            <p className="text-xs text-text-muted leading-snug">
-              אין רשימת בדיקות מפורטת מהשרת — השתמשו ברשימת הסינון למטה בכרטיס.
-            </p>
-          ) : (
-            <div className="space-y-2">
-              <h4 className="text-[10px] font-bold text-text-muted uppercase tracking-wide">בדיקות</h4>
-              <div className="space-y-1.5">
-                {checks.map((ch, idx) => (
-                  <div key={`${ch.code}-${idx}`} className="flex items-start gap-2 p-2 rounded-lg hover:bg-bg-subtle/80">
-                    <div
-                      className={`mt-0.5 p-0.5 rounded-full shrink-0 ${ch.ok ? 'bg-green-100' : 'bg-red-100'}`}
-                    >
-                      {ch.ok ? (
-                        <CheckCircleIcon className="w-3.5 h-3.5 text-green-600" />
-                      ) : (
-                        <NoSymbolIcon className="w-3.5 h-3.5 text-red-600" />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[11px] font-bold text-text-muted">{screeningMetricLabelHe(ch.code)}</p>
-                      <p className="text-xs text-text-default leading-snug">{formatEvalCheckLabel(t, ch)}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div className="pt-2 border-t border-border-default">
-            <p className="text-xs text-text-muted leading-relaxed italic">&quot;{summary}&quot;</p>
-          </div>
-
-          <div className="pt-1 flex items-center justify-between text-[10px] text-text-muted">
-            <div className="flex items-center gap-1">
-              <ClockIcon className="w-3 h-3" />
-              <span>מבוסס נתוני משרה ומועמד עדכניים</span>
-            </div>
-            <button
-              type="button"
-              disabled={analyzing}
-              onClick={(e) => {
-                e.stopPropagation();
-                onReanalyze();
-              }}
-              className="flex items-center gap-1 text-primary-600 font-bold hover:underline disabled:opacity-50"
-            >
-              {analyzing ? (
-                <span className="w-3 h-3 border-2 border-primary-600 border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <ArrowPathIcon className="w-3 h-3" />
-              )}
-              <span>חוות דעת AI</span>
-            </button>
-          </div>
-        </div>
-        </div>
-      </div>
-    </div>
+    <MatchScorePopup
+      position={position}
+      onClose={onClose}
+      matchScore={displayScore}
+      jobTitle={job.title || null}
+      scoreBreakdown={scoreBreakdown}
+      parameterMatches={parameterMatches}
+      job={jobRecord}
+      candidate={sonarCandidate}
+      vectorSimilarity={fetched?.vectorSimilarity ?? null}
+      loading={loading}
+      candidateName={String(candPlain.fullName || candPlain.name || '') || null}
+      candidateTitle={String(candPlain.title || '') || null}
+      professionalSummary={String(candPlain.professionalSummary || '') || null}
+    />
   );
 };
 
@@ -1285,11 +1330,9 @@ const CandidateScreeningView: React.FC<{
     const [sendAttachSystemPdf, setSendAttachSystemPdf] = useState(false);
     const [sendCvProfileKind, setSendCvProfileKind] = useState<CvProfileKind>(DEFAULT_CV_PROFILE_KIND);
     const [sendCvSourceCandidate, setSendCvSourceCandidate] = useState<Record<string, unknown> | null>(null);
-    const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<{
-      jobId: number | string;
-      x: number;
-      y: number;
-    } | null>(null);
+    const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<
+      ({ jobId: number | string } & MatchScorePopupPosition) | null
+    >(null);
     const [selectedJobForTags, setSelectedJobForTags] = useState<ScreeningJob | null>(null);
     const [tagMatchCandidateSnapshot, setTagMatchCandidateSnapshot] = useState<Record<
       string,
@@ -1532,6 +1575,9 @@ const CandidateScreeningView: React.FC<{
             screeningClientId: clientFromRow(row),
             scoreBreakdown: row.scoreBreakdown ?? null,
             parameterMatches: row.parameterMatches ?? null,
+            ...(typeof row.matchPercentage === 'number'
+              ? { aiMatchScore: row.matchPercentage }
+              : {}),
           }));
           const excludedList = exc.map((row: any) => ({
             ...mapApiJobToScreeningJob(row.job || {}),
@@ -1540,6 +1586,9 @@ const CandidateScreeningView: React.FC<{
             screeningClientId: clientFromRow(row),
             scoreBreakdown: row.scoreBreakdown ?? null,
             parameterMatches: row.parameterMatches ?? null,
+            ...(typeof row.matchPercentage === 'number'
+              ? { aiMatchScore: row.matchPercentage }
+              : {}),
           }));
           setJobs([...includedList, ...excludedList]);
         })
@@ -3436,23 +3485,16 @@ const CandidateScreeningView: React.FC<{
                 document.body
               )}
 
-            {activeMatchScorePopup &&
-              activeJobForMatchPopup &&
-              typeof document !== 'undefined' &&
-              createPortal(
-                <MatchScoreExplanation
-                  job={activeJobForMatchPopup}
-                  position={{ x: activeMatchScorePopup.x, y: activeMatchScorePopup.y }}
-                  t={t}
-                  onClose={() => setActiveMatchScorePopup(null)}
-                  onReanalyze={() => {
-                    void handleGenerateInternalOpinion(activeJobForMatchPopup);
-                    setActiveMatchScorePopup(null);
-                  }}
-                  analyzing={loadingOpinionForJobId === activeJobForMatchPopup.id}
-                />,
-                document.body,
-              )}
+            {activeMatchScorePopup && activeJobForMatchPopup && candidateId ? (
+              <ScreeningMatchScorePopup
+                job={activeJobForMatchPopup}
+                position={activeMatchScorePopup}
+                candidateId={String(candidateId)}
+                candidate={candidateForTagMatch as Record<string, unknown>}
+                apiBase={apiBase}
+                onClose={() => setActiveMatchScorePopup(null)}
+              />
+            ) : null}
         </div>
     );
 };

@@ -74,6 +74,20 @@ const categoryConfig: Record<TagCategory, { label: string; icon: React.ReactNode
 
 const VISIBLE_CATEGORIES: TagCategory[] = ['role', 'skill', 'tool', 'soft_skill', 'industry', 'seniority', 'education', 'certification', 'language'];
 
+/**
+ * True when both selections hold the same tags in the same order.
+ * Lets an effect skip setState for a value React would consider "different" purely by reference,
+ * which is what caused the "Maximum update depth exceeded" loop.
+ */
+const sameTagSelection = (a: TagOption[], b: TagOption[]): boolean => {
+    if (a === b) return true;
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i += 1) {
+        if (a[i]?.id !== b[i]?.id) return false;
+    }
+    return true;
+};
+
 const mapBackendTypeToCategory = (type?: string): TagCategory => {
     if (!type) return 'role';
     const normalized = type.toLowerCase();
@@ -262,12 +276,24 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         return base.filter((name) => name.toLowerCase().includes(q));
     }, [jobFieldCategories, roleDomainSearch]);
 
+    /** Reference-stable proxies: callers pass fresh array literals, so depend on content. */
+    const associatedTagIdsKey = useMemo(
+        () => associatedTagIds.map((id) => String(id)).join('|'),
+        [associatedTagIds],
+    );
+    const selectedTagIdsKey = useMemo(
+        () => selectedTags.map((t) => String(t.id)).join('|'),
+        [selectedTags],
+    );
+
     const seedTagIds = useMemo(() => {
         const ids = new Set<string>();
-        for (const id of associatedTagIds) if (id) ids.add(String(id));
-        for (const tag of selectedTags) if (tag.id && !tag.id.startsWith('custom-')) ids.add(tag.id);
+        for (const id of associatedTagIdsKey.split('|')) if (id) ids.add(id);
+        for (const id of selectedTagIdsKey.split('|')) {
+            if (id && !id.startsWith('custom-')) ids.add(id);
+        }
         return [...ids];
-    }, [associatedTagIds, selectedTags]);
+    }, [associatedTagIdsKey, selectedTagIdsKey]);
 
     const loadSuggestions = useCallback(async () => {
         if (context === 'generic') {
@@ -293,10 +319,13 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
             });
             if (!res.ok) throw new Error('suggestions failed');
             const payload = await res.json();
-            setSuggestedIds(Array.isArray(payload.tagIds) ? payload.tagIds.map(String) : []);
+            const nextIds = Array.isArray(payload.tagIds) ? payload.tagIds.map(String) : [];
+            // Keep the previous array when the content is unchanged — a fresh array on every
+            // poll would re-render forever through the seedTagIds dependency chain.
+            setSuggestedIds((prev) => (prev.join('|') === nextIds.join('|') ? prev : nextIds));
             setSuggestionsHasVector(Boolean(payload.hasVector));
         } catch {
-            setSuggestedIds([]);
+            setSuggestedIds((prev) => (prev.length === 0 ? prev : []));
             setSuggestionsHasVector(false);
         } finally {
             setSuggestionsLoading(false);
@@ -310,8 +339,8 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         contextText,
         jobFieldCategory,
         roleDomainFilter,
-        associatedTagIds,
-        selectedTags,
+        associatedTagIdsKey,
+        selectedTagIdsKey,
     ]);
 
     useEffect(() => {
@@ -319,7 +348,6 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         const timer = window.setTimeout(() => { void loadSuggestions(); }, 180);
         return () => window.clearTimeout(timer);
     }, [isOpen, primaryPane, loadSuggestions, seedTagIds.join('|')]);
-
     const baseFiltered = useMemo(() => {
         const lowerSearch = searchTerm.trim();
         return availableTags.filter((tag) => {
@@ -364,18 +392,30 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         && !existingNameSet.has(searchTerm.trim()),
     );
 
+    /** Content-based key: callers commonly pass a fresh `[]` literal, so the array reference
+     *  changes on every render. Keying on the joined ids (not the array) keeps the effect from
+     *  re-firing on identity churn alone. */
+    const initialSelectedTagIdsKey = useMemo(
+        () => initialSelectedTagIds.map((id) => String(id)).join('|'),
+        [initialSelectedTagIds],
+    );
+
     useEffect(() => {
         if (!isOpen) {
-            setSelectedTags([]);
+            // MUST bail out when already empty: `setSelectedTags([])` allocates a new array,
+            // which is never Object.is-equal to the previous state, so React re-renders on
+            // every pass and throws "Maximum update depth exceeded".
+            setSelectedTags((prev) => (prev.length === 0 ? prev : []));
             return;
         }
-        if (!initialSelectedTagIds.length || !availableTags.length) {
-            setSelectedTags([]);
+        if (!initialSelectedTagIdsKey || !availableTags.length) {
+            setSelectedTags((prev) => (prev.length === 0 ? prev : []));
             return;
         }
-        const idSet = new Set(initialSelectedTagIds.map((id) => String(id)));
-        setSelectedTags(availableTags.filter((t) => idSet.has(String(t.id))));
-    }, [isOpen, initialSelectedTagIds, availableTags]);
+        const idSet = new Set(initialSelectedTagIdsKey.split('|').filter(Boolean));
+        const next = availableTags.filter((t) => idSet.has(String(t.id)));
+        setSelectedTags((prev) => (sameTagSelection(prev, next) ? prev : next));
+    }, [isOpen, initialSelectedTagIdsKey, availableTags]);
 
     const handleToggleTag = (tag: TagOption) => {
         if (isAssociatedTag(tag, existingNameSet, associatedIdSet)) return;
@@ -433,7 +473,7 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
     }, [groupedByCategory, paneTags]);
 
     useEffect(() => {
-        setFocusedIndex(0);
+        setFocusedIndex((prev) => (prev === 0 ? prev : 0));
     }, [primaryPane, activeTab, searchTerm, paneTags.length]);
 
     const onSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {

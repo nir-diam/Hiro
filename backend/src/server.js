@@ -250,12 +250,16 @@ const start = async () => {
       }
     });
 
-    connectDb({ skipAuthenticate: true })
+    // Idempotent DDL in connectDb must not block login/API when ingest/backfill holds candidates locks.
+    void connectDb({ skipAuthenticate: true })
       .then(() => {
         console.log('[server] DB startup migrations finished');
       })
       .catch((err) => {
-        console.error('[server] DB startup migrations failed (API still up):', err?.message || err);
+        console.error(
+          '[server] DB startup migrations failed (API already listening):',
+          err?.message || err,
+        );
       });
 
     setTimeout(() => {

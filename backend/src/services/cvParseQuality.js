@@ -7,7 +7,7 @@ const {
   isPortalLikePersonName,
 } = require('../utils/personName');
 const { experienceDateLooksCorrupt } = require('../utils/experienceDateSanitize');
-const { isSystemEmail } = require('../utils/systemEmailAddresses');
+const { isSystemEmail, toCandidateEmail } = require('../utils/systemEmailAddresses');
 
 /** Panel option "Gemini 3 Pro". Used only when a Flash parse fails the quality check. */
 const CV_PARSE_PRO_MODEL = 'gemini-3.1-pro-preview';
@@ -260,7 +260,10 @@ function extractContactFromInboundMessage({ body, fromEmail, html } = {}) {
 function applyInboundContact(fields, inbound) {
   const out = fields && typeof fields === 'object' ? { ...fields } : {};
   if (!inbound) return out;
-  if (!String(out.email || '').includes('@') && inbound.email) out.email = inbound.email;
+  if (!String(out.email || '').includes('@') && inbound.email) {
+    const ie = toCandidateEmail(inbound.email);
+    if (ie) out.email = ie;
+  }
   if (String(out.phone || '').replace(/\D/g, '').length < 9 && inbound.phone) out.phone = inbound.phone;
   return out;
 }

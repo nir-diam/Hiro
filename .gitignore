@@ -1,0 +1,3 @@
+# Local MCP server config for read-only DB access — contains DB credentials.
+# Never commit. Share `dbhub.toml.example` instead.
+dbhub.toml

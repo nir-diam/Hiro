@@ -185,7 +185,13 @@ async function drainLoop() {
 }
 
 async function start() {
-  await connectDb();
+  await sequelize.authenticate().catch((err) => {
+    console.error('[ingest-worker] DB authenticate failed', err?.message || err);
+    process.exit(1);
+  });
+  void connectDb({ skipAuthenticate: true }).catch((err) => {
+    console.warn('[ingest-worker] startup DDL skipped/failed (non-fatal):', err?.message || err);
+  });
   const poolMax = sequelize.connectionManager?.pool?.max ?? '?';
   const paused = process.env.EMAIL_INGEST_PAUSED === '1';
   console.log('[ingest-worker] started', {

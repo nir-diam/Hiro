@@ -1,10 +1,22 @@
 const { Sequelize } = require('sequelize');
 
-// Set POSTGRES_URI or DATABASE_URL in backend/.env. Do not rely on repo defaults for production.
-const sequelize = new Sequelize(
+// Set POSTGRES_URI or DATABASE_URL in backend/.env (see backend/src/.env).
+// Unit tests do not touch a real database, so they get a harmless placeholder instead of
+// crashing at import time on a missing URI.
+const isTestEnv = process.env.NODE_ENV === 'test' || process.env.JEST_WORKER_ID != null;
+const connectionString = String(
   process.env.POSTGRES_URI
-    || process.env.DATABASE_URL
-    || 'postgres://postgres:qwe123ZZZ@herodb.cjauwauq6xes.eu-north-1.rds.amazonaws.com:5432/postgres',
+  || process.env.DATABASE_URL
+  || (isTestEnv ? 'postgres://test:test@127.0.0.1:5432/test' : ''),
+).trim();
+if (!connectionString) {
+  throw new Error(
+    'Missing database connection string. Set POSTGRES_URI (or DATABASE_URL) in backend/src/.env.',
+  );
+}
+
+const sequelize = new Sequelize(
+  connectionString,
   {
     logging: false,
     dialectOptions: {
@@ -204,7 +216,29 @@ const connectDb = async ({ skipAuthenticate = false } = {}) => {
     CREATE INDEX IF NOT EXISTS public_site_keys_client_id ON public_site_keys (client_id);
   `).catch(() => {});
 
-  await sequelize.sync();
+  const runSequelizeSync =
+    process.env.DB_SEQUELIZE_SYNC === '1'
+    || String(process.env.DB_SEQUELIZE_SYNC || '').toLowerCase() === 'true';
+  if (runSequelizeSync) {
+    await sequelize.sync();
+  } else {
+    console.log('[db] sequelize.sync skipped (set DB_SEQUELIZE_SYNC=1 to run model sync on startup)');
+  }
+
+  // Avoid hanging for minutes on ALTER candidates while ingest/backfill holds row locks.
+  const startupLockTimeoutMs = Math.max(
+    1000,
+    Math.min(
+      120_000,
+      Number.parseInt(process.env.DB_STARTUP_LOCK_TIMEOUT_MS || '8000', 10) || 8000,
+    ),
+  );
+  try {
+    await sequelize.query(`SET lock_timeout = ${startupLockTimeoutMs}`);
+    console.log(`[db] startup DDL lock_timeout=${startupLockTimeoutMs}ms`);
+  } catch (e) {
+    console.warn('[db] startup lock_timeout not set:', e?.message || e);
+  }
 
   // users table has legacy is_active + duplicate "isActive" from sync — keep them aligned (false wins).
   await sequelize.query(`
@@ -408,6 +442,17 @@ const connectDb = async ({ skipAuthenticate = false } = {}) => {
     ALTER TABLE organizations
       ADD COLUMN IF NOT EXISTS "publicSlug" VARCHAR(120),
       ADD COLUMN IF NOT EXISTS "slugLocked" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+
+  // candidateService.loadOrganizationsForCompanyNames (list grid) — without these, every page
+  // seq-scans ~4k organizations and unnest(aliases) per row.
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_organizations_name_lower_trim
+      ON organizations (LOWER(TRIM(name)));
+  `).catch(() => {});
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_organizations_aliases_gin
+      ON organizations USING GIN (aliases);
   `).catch(() => {});
 
   await sequelize.query(`
@@ -1083,6 +1128,8 @@ const connectDb = async ({ skipAuthenticate = false } = {}) => {
       console.log('[startup] cleared stale ingestPending on', clearedIds.length, 'candidate(s)');
     }
   } catch (_) { /* non-fatal */ }
+
+  await sequelize.query('SET lock_timeout = 0').catch(() => {});
 
   console.log('PostgreSQL connected & models synced');
 };

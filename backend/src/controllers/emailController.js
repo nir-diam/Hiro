@@ -533,6 +533,14 @@ const candidateRowEmail = (row) => {
   return raw && String(raw).includes('@') ? toCandidateEmail(raw) : null;
 };
 
+/** Never persist portal / job-board / Hiro inbox addresses on `candidates.email`. */
+const assignStoredCandidateEmail = (fields, raw) => {
+  if (!fields || typeof fields !== 'object') return;
+  const norm = raw != null && String(raw).includes('@') ? toCandidateEmail(raw) : null;
+  if (norm) fields.email = norm;
+  else delete fields.email;
+};
+
 const normalizeIngestEmail = (raw) => {
   const e = String(raw || '').trim().toLowerCase();
   return e && e.includes('@') ? e : null;
@@ -667,13 +675,7 @@ const reuploadResumeAttachmentsForCandidate = async (
 /** CV body contact email (never the envelope From). */
 const extractCvContactEmail = (text, fallbackFromFirstCv = null) => {
   const fromText = extractFirstEmailFromCvText(text);
-  if (fromText && String(fromText).includes('@')) {
-    return String(fromText).trim().toLowerCase();
-  }
-  if (fallbackFromFirstCv && String(fallbackFromFirstCv).includes('@')) {
-    return String(fallbackFromFirstCv).trim().toLowerCase();
-  }
-  return null;
+  return toCandidateEmail(fromText) || toCandidateEmail(fallbackFromFirstCv) || null;
 };
 
 /** Persist CV contact email on the candidate when the row has none yet. */
@@ -685,7 +687,7 @@ const ensureCandidateEmailFromCvText = async (candidateId, cvText, fallbackFromF
   if (!extracted) return { row, email: null };
   await ingestCandidateUpdate(candidateId, { email: extracted });
   const updated = await candidateService.getById(candidateId, { forIngest: true });
-  return { row: updated, email: extracted };
+  return { row: updated, email: toCandidateEmail(extracted) };
 };
 
 const inferNameFromCvTextForEmail = (text, email) => {
@@ -1650,19 +1652,16 @@ const processEmailUpload = async (record, req = null) => {
           });
           safeAi = stripped.fields;
         }
-        if (safeAi.email && String(safeAi.email).includes('@')) {
-          safeAi.email = String(safeAi.email).trim().toLowerCase();
-        } else {
-          delete safeAi.email;
+        assignStoredCandidateEmail(safeAi, safeAi.email);
+        if (!safeAi.email) {
           const cvMail = extractCvContactEmail(combinedText || '', emailInFirstCv);
           const fromNorm = String(fromEmail || '').trim().toLowerCase();
           if (cvMail && cvMail !== fromNorm) {
-            safeAi.email = cvMail;
-          } else if (inboundContact.email) {
-            safeAi.email = inboundContact.email;
+            assignStoredCandidateEmail(safeAi, cvMail);
+          } else {
+            assignStoredCandidateEmail(safeAi, inboundContact.email);
           }
         }
-        if (safeAi.email === null) delete safeAi.email;
         if (!safeAi.phone && inboundContact.phone) safeAi.phone = inboundContact.phone;
         const profileSafe = keepRecruiterProfileFields(safeAi, candidate);
         Object.assign(safeAi, profileSafe);
@@ -1966,7 +1965,8 @@ const processEmailUpload = async (record, req = null) => {
         });
         return;
       }
-      const k = toEmail;
+      const k = toCandidateEmail(toEmail);
+      if (!k) return;
       if (welcomeOnce.has(k)) {
         console.log('[email] welcome skipped (dedupe, same address as earlier in this ingest)', k);
         return;
@@ -2126,14 +2126,13 @@ const processEmailUpload = async (record, req = null) => {
             });
             safeS = splitStripped.fields;
           }
-          if (safeS.email && String(safeS.email).includes('@')) {
-            safeS.email = String(safeS.email).trim().toLowerCase();
-          } else if (norm && norm !== fromEmail) {
-            safeS.email = norm;
-          } else if (inboundContact.email) {
-            safeS.email = inboundContact.email;
-          } else {
-            delete safeS.email;
+          assignStoredCandidateEmail(safeS, safeS.email);
+          if (!safeS.email) {
+            if (norm && norm !== fromEmail) {
+              assignStoredCandidateEmail(safeS, norm);
+            } else {
+              assignStoredCandidateEmail(safeS, inboundContact.email);
+            }
           }
           if (!safeS.phone && inboundContact.phone) safeS.phone = inboundContact.phone;
           const profileSafe = keepRecruiterProfileFields(safeS, splitCand);
@@ -2317,6 +2316,24 @@ const processEmailUpload = async (record, req = null) => {
       textLength: String(combinedText || '').trim().length,
       aiParsed: Boolean(stampedCandidateId),
     });
+
+    // The worker performs this check itself (see claimNextPendingUpload), but the inline
+    // dispatch path never did. A run that reached the end without linking a candidate used
+    // to exit silently: the mail got its 202, left no cv_parsing log, and no candidate row.
+    // Reload and treat "finished but unlinked" as a failure so it is always traceable.
+    try {
+      await record.reload();
+      if (!record.candidateId) {
+        console.error('[email] ingest finished without a candidate link', {
+          recordId: record.id,
+          fileKey: record.fileKey,
+          subject,
+        });
+        await markEmailUploadIngestFailed(record, 'ingest finished without candidate link');
+      }
+    } catch (linkCheckErr) {
+      console.warn('[email] could not verify candidate link after ingest', record?.id, linkCheckErr?.message || linkCheckErr);
+    }
   } catch (error) {
     console.error('[email][processEmailUpload]', {
       message: error?.message || error,

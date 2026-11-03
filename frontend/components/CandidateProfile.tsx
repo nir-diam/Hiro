@@ -4,6 +4,7 @@ import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, Lin
 import { MessageMode, type MessageModalConfig } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 import { SmartTagType, SmartTagData, SmartTagTooltipPanel, SmartTagMode } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
@@ -24,6 +25,7 @@ import {
     isNonPrimaryCandidateProfile,
     isCanonicalPrimaryCandidateProfile,
     originalPrimaryCandidateProfileCardClass,
+    resolveStaffShadowProfile,
     buildProfileDuplicatePayload,
     sanitizeProfileDuplicatePayload,
     shouldSaveCandidateProfileDirectly,
@@ -830,6 +832,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   approveCorrectionsLoading = false,
 }) => {
   const { t } = useLanguage();
+  const { user } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const summaryId = useId();
@@ -1817,6 +1820,41 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     setSwitcherOpen(false);
     onSwitchProfile?.(profile.id);
   };
+
+  /**
+   * Open the pinned shadow ("עותק צל") by default.
+   *
+   * Staff work on the shadow, so landing on the raw live row means every edit goes through the
+   * wrong path (and the switcher showed the shadow as inactive). `?view=live` is the explicit
+   * escape hatch for inspecting the original candidate profile.
+   *
+   * Runs once per (candidate, profile list) so it never fights a manual switch.
+   */
+  const defaultProfileKeyRef = useRef('');
+  useEffect(() => {
+    if (!onSwitchProfile || profileList.length === 0) return;
+    const wantsLive = new URLSearchParams(location.search || '').get('view') === 'live';
+    if (wantsLive) return;
+    const role = String(user?.role || '').trim();
+    if (role === 'admin' || role === 'super_admin') return;
+
+    const currentId = String(candidateData.backendId || candidateData.id || '').trim();
+    if (!currentId) return;
+    // Already on a shadow — nothing to do.
+    if (isStaffDuplicateProfile(candidateData as Record<string, unknown>)) return;
+
+    const pinnedShadow = resolveStaffShadowProfile(
+      profileList as Array<Record<string, unknown>>,
+      candidateData as Record<string, unknown>,
+    );
+    const shadowId = String(pinnedShadow?.id ?? pinnedShadow?.backendId ?? '').trim();
+    if (!shadowId || shadowId === currentId) return;
+
+    const key = `${currentId}->${shadowId}`;
+    if (defaultProfileKeyRef.current === key) return;
+    defaultProfileKeyRef.current = key;
+    onSwitchProfile(shadowId);
+  }, [candidateData, location.search, onSwitchProfile, profileList, user?.role]);
 
   const handleToggleShadowPin = async (event: React.MouseEvent, profile: MultiProfileOption) => {
     event.stopPropagation();
