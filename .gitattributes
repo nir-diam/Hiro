@@ -1,0 +1,2 @@
+.github/workflows/* text eol=lf
+scripts/deploy-on-server.sh text eol=lf
