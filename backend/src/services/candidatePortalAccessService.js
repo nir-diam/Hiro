@@ -1,7 +1,9 @@
 const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
+const { Op } = require('sequelize');
 const Candidate = require('../models/Candidate');
 const User = require('../models/User');
+const emailService = require('./emailService');
 
 const PORTAL_TOKEN_TTL_MS = Number(process.env.CANDIDATE_PORTAL_MAGIC_TTL_MS) || 7 * 24 * 60 * 60 * 1000;
 
@@ -108,6 +110,68 @@ const createMagicLinkForCandidate = async (candidate) => {
   return `${publicAppOrigin()}/candidate-portal/set-password?magic=${encodeURIComponent(token)}`;
 };
 
+const sendCandidatePasswordResetEmail = async (user, setupUrl) => {
+  const subject = 'איפוס סיסמה בפורטל המועמדים Hiro';
+  const html = `<p>שלום${user.name ? ` ${user.name}` : ''},</p>
+<p>התקבלה בקשה לאיפוס הסיסמה שלכם בפורטל המועמדים של Hiro. לחצו על הקישור להגדרת סיסמה חדשה:</p>
+<p><a href="${setupUrl}">${setupUrl}</a></p>
+<p>הקישור תקף לזמן מוגבל ולפעם אחת. אם לא ביקשתם איפוס, התעלמו מהודעה זו.</p>`;
+  const text = `לאיפוס סיסמה בפורטל המועמדים Hiro: ${setupUrl}`;
+  await emailService.sendEmail({
+    toEmail: user.email,
+    subject,
+    text,
+    html,
+    userRole: 'admin',
+    clientName: null,
+    senderEmail: null,
+  });
+};
+
+/** Resolve portal candidate + user for self-service forgot-password (most recently updated row). */
+const resolveCandidateAccountForEmail = async (rawEmail) => {
+  const emailNorm = normalizeEmail(rawEmail);
+  if (!emailNorm || !emailNorm.includes('@')) return null;
+
+  let user = await User.findOne({
+    where: { email: { [Op.iLike]: emailNorm }, role: 'candidate' },
+  });
+
+  let candidate = null;
+  if (user) {
+    candidate = await Candidate.findOne({
+      where: { userId: user.id },
+      order: [['updatedAt', 'DESC']],
+    });
+  }
+  if (!candidate) {
+    candidate = await Candidate.findOne({
+      where: { email: { [Op.iLike]: emailNorm } },
+      order: [['updatedAt', 'DESC']],
+    });
+  }
+  if (!candidate) return null;
+
+  const portalUser = await ensurePortalUserForCandidate(candidate);
+  if (!portalUser) return null;
+  return { candidate, user: portalUser };
+};
+
+/**
+ * Candidate branch of POST /api/auth/forgot-password — magic link to set-password page.
+ * @returns {Promise<boolean>} true when reset mail was sent
+ */
+const sendForgotPasswordForCandidateEmail = async (rawEmail) => {
+  const resolved = await resolveCandidateAccountForEmail(rawEmail);
+  if (!resolved) return false;
+
+  const setupUrl = await createMagicLinkForCandidate(resolved.candidate);
+  if (!setupUrl) return false;
+
+  await sendCandidatePasswordResetEmail(resolved.user, setupUrl);
+  return true;
+};
+
 /**
  * Validate a portal magic link without consuming it (for the set-password page).
  */
@@ -199,6 +263,9 @@ module.exports = {
   publicAppOrigin,
   ensurePortalUserForCandidate,
   createMagicLinkForCandidate,
+  resolveCandidateAccountForEmail,
+  sendForgotPasswordForCandidateEmail,
+  sendCandidatePasswordResetEmail,
   inspectMagicToken,
   setupPortalPasswordFromMagicToken,
   redeemMagicToken,

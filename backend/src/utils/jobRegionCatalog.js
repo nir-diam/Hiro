@@ -37,11 +37,16 @@ function matchOneRegion(part, catalog, byNorm) {
 
 /** Map a free-text region onto catalog names. Unknown values become null — never "אחר". */
 function resolveRegionAgainstCatalog(raw, catalogNames) {
-  const catalog = Array.isArray(catalogNames) ? catalogNames.filter(Boolean) : [];
-  if (!catalog.length) return null;
-  const byNorm = new Map(catalog.map((n) => [normRegionToken(n), n]));
   const full = String(raw || '').trim();
   if (!full) return null;
+  const catalog = Array.isArray(catalogNames) ? catalogNames.filter(Boolean) : [];
+  // City groups not loaded yet: keep a known alias (השפלה → שפלה) or the raw text.
+  if (!catalog.length) {
+    const slug = resolveRegionSlugStrict(full);
+    if (slug && slug !== 'other') return regionLabel(slug);
+    return full;
+  }
+  const byNorm = new Map(catalog.map((n) => [normRegionToken(n), n]));
 
   const whole = matchOneRegion(full, catalog, byNorm);
   if (whole) return whole;

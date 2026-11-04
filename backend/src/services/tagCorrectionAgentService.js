@@ -17,6 +17,18 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const PROMPT_ID = 'tag_correction_agent';
 
+const ROLE_MERGE_BLOCKED_WITH = new Set(['skill', 'certification', 'degree']);
+
+/** Role must not merge into a skill, certification, or degree (either direction). */
+const blocksRoleCrossTypeMerge = (typeA, typeB) => {
+  const left = String(typeA || '').toLowerCase().trim();
+  const right = String(typeB || '').toLowerCase().trim();
+  if (!left || !right || left === right) return false;
+  if (left === 'role' && ROLE_MERGE_BLOCKED_WITH.has(right)) return true;
+  if (right === 'role' && ROLE_MERGE_BLOCKED_WITH.has(left)) return true;
+  return false;
+};
+
 /** Compact JSON schema — gemini-3.8-flash thinking tokens otherwise consume maxOutputTokens. */
 const TAG_AGENT_RESPONSE_SCHEMA = {
   type: 'object',
@@ -233,12 +245,25 @@ const normalizeAgentDecision = (parsed, candidateNames) => {
 };
 
 /** Resolve an active catalog tag id for auto-merge (name lookup, then hybrid snapshot). */
+const rejectRoleCrossTypeTarget = async (tagId, incomingType) => {
+  if (!tagId) return null;
+  const row = await Tag.findByPk(tagId, { attributes: ['id', 'type', 'status'] });
+  if (!row || String(row.status).toLowerCase() !== 'active') return null;
+  if (blocksRoleCrossTypeMerge(incomingType, row.type)) {
+    console.warn(
+      `[tagCorrectionAgent] refusing merge across types ${incomingType} → ${row.type} (${row.id})`,
+    );
+    return null;
+  }
+  return String(row.id);
+};
+
 const resolveMergeTargetTagId = async (suggestedName, tagType, hybrid = []) => {
   const byName = await tagHybridSearchService.resolveTargetTagIdByName(
     suggestedName,
     { tagType },
   );
-  if (byName) return byName;
+  if (byName) return rejectRoleCrossTypeTarget(byName, tagType);
 
   const targetLower = String(suggestedName || '').trim().toLowerCase();
   if (!targetLower) return null;
@@ -249,9 +274,7 @@ const resolveMergeTargetTagId = async (suggestedName, tagType, hybrid = []) => {
   );
   if (!hit?.tagId) return null;
 
-  const targetTag = await Tag.findByPk(hit.tagId);
-  if (!targetTag || String(targetTag.status).toLowerCase() !== 'active') return null;
-  return hit.tagId;
+  return rejectRoleCrossTypeTarget(hit.tagId, tagType);
 };
 
 /**
@@ -299,6 +322,13 @@ const autoMergeExactIdentityDuplicate = async (pendingTag) => {
     // Most-used tag wins so the surviving identity is the well-established one.
     .sort((a, b) => (Number(b.usageCount) || 0) - (Number(a.usageCount) || 0))[0];
   if (!canonical) return false;
+  if (blocksRoleCrossTypeMerge(pendingTag.type, canonical.type)) {
+    console.warn(
+      `[tagCorrectionAgent] not auto-merging "${pendingTag.displayNameHe || pendingTag.tagKey}" `
+      + `(${pendingTag.type}) into ${canonical.displayNameHe || canonical.tagKey} (${canonical.type})`,
+    );
+    return false;
+  }
 
   try {
     // Lazy require to avoid circular dependency (tagController ← tagCorrectionAgentService)
@@ -1129,6 +1159,7 @@ module.exports = {
   schedulePendingIfNeeded,
   runDecisionForPendingTag,
   autoMergeExactIdentityDuplicate,
+  blocksRoleCrossTypeMerge,
   listDecisions,
   backfillPendingWithoutDecisions,
   refreshHybridSnapshots,

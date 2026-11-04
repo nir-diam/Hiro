@@ -967,6 +967,7 @@ const normalizeJobSkillEntry = (skill) => {
     tagKey,
     catalogTagId,
     raw_type: skill.tagType || skill.tag_type || skill.type || 'skill',
+    source: String(skill.source || '').toLowerCase() === 'ai' ? 'ai' : 'manual',
     mode,
     tag_reason: typeof skill.tag_reason === 'string' ? skill.tag_reason.trim() : null,
     quote:
@@ -982,12 +983,106 @@ const normalizeJobSkillEntry = (skill) => {
   };
 };
 
+const JOB_TYPES_KEEP_INCOMING = new Set(['language', 'degree']);
+const JOB_TYPES_DO_NOT_ADOPT = new Set(['skill', 'certification']);
+
+/** language/degree must not be stored as a skill or certification just because an alias hit. */
+const jobSkillCrossTypeShouldSplit = (incomingType, catalogType) => {
+  const incoming = normalizeJobTagType(incomingType);
+  const catalog = normalizeJobTagType(catalogType);
+  if (!incoming || !catalog || catalogTypesEquivalent(incoming, catalog)) return false;
+  return JOB_TYPES_KEEP_INCOMING.has(incoming) && JOB_TYPES_DO_NOT_ADOPT.has(catalog);
+};
+
+const findSameTypeCatalogTag = async (payload, incomingType) => {
+  const names = [payload?.name, payload?.tagKey]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+  for (const name of names) {
+    const rows = await Tag.findAll({
+      where: {
+        type: incomingType,
+        status: { [Op.notIn]: ['deprecated', 'archived'] },
+        [Op.or]: [
+          { displayNameHe: { [Op.iLike]: name } },
+          { displayNameEn: { [Op.iLike]: name } },
+          { tagKey: { [Op.iLike]: name } },
+        ],
+      },
+      limit: 8,
+    });
+    const wanted = name.toLowerCase();
+    const exact = rows.find((row) =>
+      [row.displayNameHe, row.displayNameEn, row.tagKey].some(
+        (value) => String(value || '').trim().toLowerCase() === wanted,
+      ),
+    );
+    if (exact) return exact;
+  }
+  return null;
+};
+
+const createPendingJobTag = async (payload, incomingType) => {
+  const tag = await Tag.create({
+    tagKey: payload.tagKey,
+    displayNameHe: payload.name,
+    displayNameEn: payload.name,
+    type: incomingType,
+    source: 'ai',
+    status: 'pending',
+  });
+  try {
+    const tagCorrectionAgentService = require('./tagCorrectionAgentService');
+    tagCorrectionAgentService.scheduleDecisionForPendingTag(tag.id, payload.quote || payload.tag_reason || '', {});
+  } catch (err) {
+    console.warn('[createPendingJobTag] tag correction schedule failed', err?.message || err);
+  }
+  return tag;
+};
+
+const modeStrength = (mode) => {
+  if (mode === 'mandatory') return 3;
+  if (mode === 'negative') return 2;
+  return 1;
+};
+
+const finiteScore = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+};
+
+/** Same catalog tag: keep mandatory, the higher score, and any non-null years. */
+const mergeJobSkillPayloads = (current, incoming) => {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  const scoreA = finiteScore(current.confidence_score);
+  const scoreB = finiteScore(incoming.confidence_score);
+  const score = scoreA == null ? scoreB : scoreB == null ? scoreA : Math.max(scoreA, scoreB);
+  const winner = scoreB != null && (scoreA == null || scoreB > scoreA) ? incoming : current;
+  const years = current.years_experience != null ? current.years_experience : incoming.years_experience;
+  const lookback = current.lookback_years != null ? current.lookback_years : incoming.lookback_years;
+  const bothYears = current.years_experience != null && incoming.years_experience != null
+    ? Math.max(current.years_experience, incoming.years_experience)
+    : years;
+  return {
+    ...winner,
+    mode: modeStrength(current.mode) >= modeStrength(incoming.mode) ? current.mode : incoming.mode,
+    confidence_score: score,
+    years_experience: bothYears ?? null,
+    lookback_years: lookback ?? null,
+    source: current.source === 'ai' && incoming.source === 'ai' ? 'ai' : 'manual',
+    quote: winner.quote || current.quote || incoming.quote || null,
+    tag_reason: winner.tag_reason || current.tag_reason || incoming.tag_reason || null,
+  };
+};
+
 const resolveCatalogTagForJobSkill = async (payload) => {
+  const incomingType = normalizeJobTagType(payload.raw_type);
   const catalogId = payload?.catalogTagId ? String(payload.catalogTagId).trim() : '';
   if (catalogId && isPersistedTagDetailId(catalogId)) {
     const byId = await Tag.findByPk(catalogId);
     const status = String(byId?.status || '').toLowerCase();
-    if (byId && status !== 'deprecated') {
+    if (byId && status !== 'deprecated' && !jobSkillCrossTypeShouldSplit(incomingType, byId.type)) {
       return { tag: byId, created: false, payload };
     }
   }
@@ -995,11 +1090,18 @@ const resolveCatalogTagForJobSkill = async (payload) => {
   const ensured = await ensureTagRecord(payload.tagKey, {
     displayNameHe: payload.name,
     displayNameEn: payload.name,
-    type: normalizeJobTagType(payload.raw_type),
+    type: incomingType,
     source: 'job',
   });
   if (!ensured?.tag) return null;
-  return { tag: ensured.tag, created: ensured.created, payload };
+  if (!jobSkillCrossTypeShouldSplit(incomingType, ensured.tag.type)) {
+    return { tag: ensured.tag, created: ensured.created, payload };
+  }
+
+  const sameType = await findSameTypeCatalogTag(payload, incomingType);
+  if (sameType) return { tag: sameType, created: false, payload };
+  const tag = await createPendingJobTag(payload, incomingType);
+  return { tag, created: true, payload };
 };
 
 const mapSystemTagsToJobSkills = (rows = []) =>
@@ -1007,8 +1109,8 @@ const mapSystemTagsToJobSkills = (rows = []) =>
     const plain = row.get ? row.get({ plain: true }) : row;
     const tag = plain.tag || row.tag;
     const tagPlain = tag?.get ? tag.get({ plain: true }) : tag;
-    const tagSource = String(tagPlain?.source || '').toLowerCase();
-    const uiSource = tagSource === 'ai' ? 'ai' : 'manual';
+    const linkSource = String(plain.skill_source || '').toLowerCase();
+    const uiSource = linkSource === 'ai' ? 'ai' : 'manual';
     return {
       id: tagPlain?.id || plain.tag_id,
       name: tagPlain?.displayNameHe || tagPlain?.displayNameEn || tagPlain?.tagKey || '',
@@ -1171,7 +1273,7 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
     .filter(Boolean)
     .reduce((acc, curr) => {
       const key = curr.tagKey.toLowerCase();
-      if (!acc.has(key)) acc.set(key, curr);
+      acc.set(key, mergeJobSkillPayloads(acc.get(key), curr));
       return acc;
     }, new Map());
   const payloads = Array.from(entries.values());
@@ -1185,7 +1287,16 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
 
   const byTagId = new Map();
   resolved.filter(Boolean).forEach((r) => {
-    if (!byTagId.has(r.tag.id)) byTagId.set(r.tag.id, r);
+    const prev = byTagId.get(r.tag.id);
+    if (!prev) {
+      byTagId.set(r.tag.id, r);
+      return;
+    }
+    byTagId.set(r.tag.id, {
+      tag: prev.tag,
+      created: prev.created && r.created,
+      payload: mergeJobSkillPayloads(prev.payload, r.payload),
+    });
   });
 
   await Promise.all(
@@ -1193,8 +1304,8 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
       const score = tagScoringEngine.scoreTag(payload);
       const isActive = systemTagIsActiveForCatalogTag(tag, { created });
       const rawType =
-        normalizeJobTagType(tag.type) ||
         normalizeJobTagType(payload.raw_type) ||
+        normalizeJobTagType(tag.type) ||
         'skill';
       await SystemTag.create({
         type: SYSTEM_TAG_TYPE_JOB,
@@ -1202,6 +1313,7 @@ const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
         tag_id: tag.id,
         mode: payload.mode,
         raw_type: rawType,
+        skill_source: payload.source === 'ai' ? 'ai' : 'manual',
         tag_reason: payload.tag_reason,
         quote: payload.quote,
         confidence_score: payload.confidence_score,
@@ -1512,6 +1624,7 @@ module.exports = {
   isSameCatalogIdentity,
   findTagByNameOrAlias,
   mapSystemTagsToJobSkills,
+  mergeJobSkillPayloads,
   listJobTags,
   listJobTagsByJobIds,
   hydrateJobSkills,

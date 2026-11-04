@@ -198,6 +198,11 @@ async function computeMatchesForCandidateUncached(candidateId, opts = {}) {
   }
   candidate.embedding = candidateEmb; // inject normalised version so computeFullMatchScore uses it
 
+  if (Array.isArray(opts.candidateTagDetails) && opts.candidateTagDetails.length) {
+    candidate = { ...candidate, tagDetails: opts.candidateTagDetails };
+    lap(`candidate tagDetails scan override (${opts.candidateTagDetails.length} tags)`);
+  }
+
   const hasCandidateTagFilters = candidateHasTagFilters(candidate);
   const needsAliasIndex = hasCandidateTagFilters || hardFilters.includes('mandatory_skill') || hardFilters.includes('negative_skill');
   const candidateTagFilterAliasIndex = needsAliasIndex ? await loadTagAliasIndex() : null;

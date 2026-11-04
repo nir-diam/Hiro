@@ -63,6 +63,15 @@ import { dispatchScreeningCvReferralsUpdated } from '../utils/screeningCvReferra
 import { fetchRecruitmentStatuses } from '../services/recruitmentStatusesApi';
 import { DEFAULT_CV_PROFILE_KIND, type CvProfileKind } from '../utils/cvProfileKind';
 import CvProfileKindPicker from './CvProfileKindPicker';
+import JobDetailsDrawer from './JobDetailsDrawer';
+import OrganizationPreviewDrawer, {
+  type OrganizationPreviewDrawerTarget,
+} from './OrganizationPreviewDrawer';
+import {
+  mapApiRecordToJobDetailsDrawerJob,
+  type JobDetailsDrawerJob,
+} from '../utils/jobDetailsDrawerUtils';
+import { authHeaders } from '../utils/authHeaders';
 
 export { buildResumeDataFromCandidate };
 export type { ScreeningJobSkillRow, ScreeningJobLanguageRow };
@@ -126,6 +135,7 @@ interface ScreeningJob {
   evaluationChecks?: ScreeningEvalCheck[];
   /** Job owner's client UUID when supplied by the screening pool (reserved). */
   screeningClientId?: string | null;
+  organizationId?: string;
   /** Full matching-engine breakdown (same as candidates list / Sonar). */
   scoreBreakdown?: MatchScoreBreakdownData | ScreeningPoolScoreBreakdown | null;
   parameterMatches?: ParameterMatchesMap | null;
@@ -1055,6 +1065,10 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
     contactsFromJob,
     filterPosition: fp || undefined,
     filterNotes: fn || undefined,
+    organizationId:
+      raw.organizationId != null && String(raw.organizationId).trim()
+        ? String(raw.organizationId).trim()
+        : undefined,
   };
 }
 
@@ -1355,6 +1369,10 @@ const CandidateScreeningView: React.FC<{
     const [screeningCollisionAgg, setScreeningCollisionAgg] = useState<ScreeningWarningAgg[]>([]);
     const pendingFilterRef = useRef<{ jobIds: string[]; options?: JobFilterSaveOptions } | null>(null);
     const [poolReloadToken, setPoolReloadToken] = useState(0);
+    const [drawerJob, setDrawerJob] = useState<JobDetailsDrawerJob | null>(null);
+    const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
+    const [orgDrawerTarget, setOrgDrawerTarget] = useState<OrganizationPreviewDrawerTarget | null>(null);
+    const [isOrgDrawerOpen, setIsOrgDrawerOpen] = useState(false);
     const candidateResumeData = useMemo(
       () => buildResumeDataFromCandidate(candidate as any, candidateId),
       [candidate, candidateId]
@@ -2469,6 +2487,81 @@ const CandidateScreeningView: React.FC<{
 
     const getInitials = (name: string) => name.split(' ').map(n => n[0]).join('').slice(0, 2);
 
+    const openJobDetailsDrawer = useCallback(
+      async (job: ScreeningJob) => {
+        const jobId = String(job.id || '').trim();
+        if (!jobId) return;
+        setDrawerJob(
+          mapApiRecordToJobDetailsDrawerJob(
+            {
+              id: jobId,
+              title: job.title,
+              client: job.company,
+              location: job.location,
+              city: job.city,
+              jobType: job.jobType,
+              description: job.description,
+              requirements: job.requirements,
+              salaryMin: job.salaryMin,
+              salaryMax: job.salaryMax,
+            } as Record<string, unknown>,
+            { jobId, jobTitle: job.title, client: job.company },
+          ),
+        );
+        setIsJobDrawerOpen(true);
+        if (!apiBase) return;
+        try {
+          const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}`, {
+            headers: authHeaders(true),
+            cache: 'no-store',
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+          const raw = (data?.job ?? data) as Record<string, unknown>;
+          if (raw && typeof raw === 'object') {
+            setDrawerJob(
+              mapApiRecordToJobDetailsDrawerJob(raw, {
+                jobId,
+                jobTitle: job.title,
+                client: job.company,
+              }),
+            );
+          }
+        } catch {
+          /* keep row stub */
+        }
+      },
+      [apiBase],
+    );
+
+    const openOrganizationDrawerForJob = useCallback(
+      async (job: ScreeningJob) => {
+        let orgId = String(job.organizationId || '').trim();
+        let name = String(job.company || '').trim();
+        const jobId = String(job.id || '').trim();
+        if (!orgId && jobId && apiBase) {
+          try {
+            const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}`, {
+              headers: authHeaders(true),
+              cache: 'no-store',
+            });
+            if (res.ok) {
+              const data = await res.json();
+              const raw = (data?.job ?? data) as Record<string, unknown>;
+              orgId = String(raw.organizationId || '').trim();
+              if (!name) name = String(raw.client || raw.company || '').trim();
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        if (!orgId) return;
+        setOrgDrawerTarget({ organizationId: orgId, name: name || 'ארגון' });
+        setIsOrgDrawerOpen(true);
+      },
+      [apiBase],
+    );
+
     const opinionEditorCandidateLabel = candidateResumeData.name;
 
     return (
@@ -2648,7 +2741,16 @@ const CandidateScreeningView: React.FC<{
                                         <div className="flex justify-between items-start mb-1 gap-2">
                                              <div className="min-w-0 flex-1">
                                                 <p className="font-bold text-text-default text-base leading-tight flex flex-wrap items-center gap-2">
-                                                    {job.title}
+                                                    <button
+                                                      type="button"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        void openJobDetailsDrawer(job);
+                                                      }}
+                                                      className="text-primary-700 hover:text-primary-800 hover:underline text-right"
+                                                    >
+                                                      {job.title}
+                                                    </button>
                                                     {job.screeningPath === 2 ? (
                                                         <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-200">
                                                             {t('screening.path_badge_2')}
@@ -2663,7 +2765,18 @@ const CandidateScreeningView: React.FC<{
                                                         </span>
                                                     ) : null}
                                                 </p>
-                                                <p className="text-sm text-text-muted">{job.company}</p>
+                                                {job.company ? (
+                                                  <button
+                                                    type="button"
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      void openOrganizationDrawerForJob(job);
+                                                    }}
+                                                    className="text-sm text-primary-700 font-medium hover:underline text-right"
+                                                  >
+                                                    {job.company}
+                                                  </button>
+                                                ) : null}
                                               
                                                 {(job.filterPosition || job.filterNotes) ? (
                                                     <div className="mt-2 rounded-lg border border-amber-200/90 bg-amber-50/70 px-2.5 py-1.5 text-[11px] leading-snug text-text-default space-y-1">
@@ -3495,6 +3608,26 @@ const CandidateScreeningView: React.FC<{
                 onClose={() => setActiveMatchScorePopup(null)}
               />
             ) : null}
+
+            <JobDetailsDrawer
+              job={drawerJob}
+              isOpen={isJobDrawerOpen}
+              onClose={() => {
+                setIsJobDrawerOpen(false);
+                setDrawerJob(null);
+              }}
+              overlayZIndexClass="z-[80]"
+            />
+            <OrganizationPreviewDrawer
+              target={orgDrawerTarget}
+              isOpen={isOrgDrawerOpen && Boolean(orgDrawerTarget?.organizationId)}
+              onClose={() => {
+                setIsOrgDrawerOpen(false);
+                setOrgDrawerTarget(null);
+              }}
+              tenantClientId={user?.clientId ? String(user.clientId) : null}
+              overlayZIndexClass="z-[80]"
+            />
         </div>
     );
 };

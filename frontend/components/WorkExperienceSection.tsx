@@ -511,6 +511,7 @@ const ExperienceForm: React.FC<{
                 onSave={handleRoleTagsSave}
                 existingTags={[]}
                 initialCategory="role"
+                allowedCategories={['role']}
                 context="candidate"
                 candidateId={candidateId}
                 maxSelection={MAX_ROLE_TAGS_PER_ROW}

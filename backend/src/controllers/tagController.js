@@ -1,4 +1,4 @@
-const { Op } = require('sequelize');
+const { Op, fn, col, where } = require('sequelize');
 const tagService = require('../services/tagService');
 const Tag = require('../models/Tag');
 const TagHistory = require('../models/TagHistory');
@@ -776,9 +776,30 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId, aliasPriority
       }
 
       if (action === 'link' && targetTag) {
+        const aliasName = suggestedName.trim().toLowerCase();
+        const aliasCollides = aliasName
+          ? await Tag.findOne({
+            where: {
+              id: { [Op.ne]: targetTag.id },
+              [Op.or]: [
+                where(fn('lower', col('tag_key')), aliasName),
+                where(fn('lower', col('display_name_he')), aliasName),
+                where(fn('lower', col('display_name_en')), aliasName),
+              ],
+            },
+            attributes: ['id', 'tagKey', 'displayNameHe'],
+          })
+          : null;
+        if (aliasCollides) {
+          console.warn(
+            `[resolvePendingTags] skipped alias "${suggestedName}" — it is already tag `
+            + `${aliasCollides.displayNameHe || aliasCollides.tagKey} (${aliasCollides.id})`,
+          );
+        }
+
         // ── aliases (string array) ─────────────────────────────────────────
         const existingAliases = Array.isArray(targetTag.aliases) ? [...targetTag.aliases] : [];
-        if (suggestedName && !existingAliases.includes(suggestedName)) {
+        if (suggestedName && !aliasCollides && !existingAliases.includes(suggestedName)) {
           existingAliases.push(suggestedName);
           targetTag.aliases = existingAliases;
         }
@@ -788,10 +809,10 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId, aliasPriority
         const alreadyInSynonyms = existingSynonyms.some(
           (s) => (typeof s === 'string' ? s : s?.name)?.toLowerCase() === suggestedName?.toLowerCase()
         );
-        if (suggestedName && !alreadyInSynonyms) {
+        if (suggestedName && !aliasCollides && !alreadyInSynonyms) {
           existingSynonyms.push({ name: suggestedName, priority: aliasPriority, type: 'alias', source: 'merge' });
           targetTag.synonyms = existingSynonyms;
-        } else if (suggestedName && alreadyInSynonyms) {
+        } else if (suggestedName && !aliasCollides && alreadyInSynonyms) {
           // Update priority if entry already exists
           targetTag.synonyms = existingSynonyms.map((s) => {
             if ((typeof s === 'string' ? s : s?.name)?.toLowerCase() === suggestedName?.toLowerCase()) {

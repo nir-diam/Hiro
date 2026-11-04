@@ -65,7 +65,7 @@ import { formatJobTagRelevanceScoreOnTenHe } from '../utils/tagWeightDisplay';
 // --- TYPES ---
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
 type TagMode = 'normal' | 'mandatory' | 'negative';
-type TagSource = 'global' | 'company' | 'manual';
+type TagSource = 'global' | 'company' | 'manual' | 'ai';
 type PublicationStatus = 'draft' | 'published';
 type QuestionType = 'text' | 'yes_no' | 'multiple_choice' | 'video';
 
@@ -309,8 +309,55 @@ function jobMobilityBooleanToFormValue(mobility: unknown, rows: PicklistValueRow
     return neutralRow?.value ?? '';
 }
 
+const AI_LICENSE_CODE: Record<string, string> = {
+    a: 'A',
+    a_motorcycle: 'A',
+    motorcycle: 'A',
+    a1: 'A1',
+    a2: 'A2',
+    b: 'B',
+    b_private_car: 'B',
+    private_car: 'B',
+    c: 'C',
+    c_truck: 'C',
+    truck: 'C',
+    c1: 'C1',
+    d: 'D',
+    d_bus: 'D',
+    bus: 'D',
+    d1: 'D1',
+    e: 'E',
+    e_trailer: 'E',
+    trailer: 'E',
+    '1': '1',
+    '1_tractor': '1',
+    tractor: '1',
+};
+
+function licenseCodeFromAiToken(raw: string): string | null {
+    const key = String(raw || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+    if (!key) return null;
+    if (AI_LICENSE_CODE[key]) return AI_LICENSE_CODE[key];
+    const head = key.split('_')[0];
+    if (/^(a1|a2|c1|d1)$/.test(head)) return head.toUpperCase();
+    if (/^[a-e]$/.test(head)) return head.toUpperCase();
+    if (head === '1') return '1';
+    return null;
+}
+
 function remapDrivingLicenseFormValue(current: string, rows: PicklistValueRow[]): string {
-    if (!rows.length) return current;
+    const code = licenseCodeFromAiToken(current);
+    if (code && rows.length) {
+        const byValue = rows.find((r) => String(r.value || '').trim().toUpperCase() === code);
+        if (byValue) return byValue.value;
+        const byLabel = rows.find((r) => {
+            const label = picklistRowLabel(r).toUpperCase();
+            return label === code || label.startsWith(`${code} `) || label.startsWith(`${code}(`);
+        });
+        if (byLabel) return byLabel.value;
+        return code;
+    }
+    if (!rows.length) return code || current;
     const valid = new Set(rows.map((r) => r.value));
     if (valid.has(current)) return current;
     const lt = current === 'לא חשוב' ? '' : current;
@@ -1416,7 +1463,7 @@ function mapApiSkillRowToJobSkill(s: any, index: number): JobSkill {
         tagType: (() => {
             const t = String(s?.tagType || s?.tag_type || s?.raw_type || 'skill');
             if (t === 'soft_skill') return 'soft';
-            if (t === 'degree' || t === 'education') return 'certification';
+            if (t === 'education') return 'degree';
             return t;
         })() as SmartTagType | undefined,
         tag_reason: typeof s?.tag_reason === 'string' ? s.tag_reason : undefined,
@@ -1444,63 +1491,47 @@ function parseJobTagYears(raw: unknown): number | null {
     return Math.min(n, JOB_TAG_YEARS_MAX);
 }
 
-function hasExplicitLookbackPhrase(text: string): boolean {
-    return /(אחרונות|עדכני(?:ות)?|ב[-־]?\d+\s*השנים|last\s+\d+\s+years|in the (?:last|past)\s+\d+)/i.test(text);
-}
+const AI_SKILL_YEARS_TYPES = new Set(['role', 'skill', 'industry']);
 
-/** Pull "לפחות 5 שנים" / "ניסיון של 5 שנים" out of the AI quote/reason. */
-function extractExperienceYearsFromText(text: string): number | null {
-    const t = String(text || '');
-    if (!t.trim()) return null;
-    const patterns = [
-        /(?:לפחות|מינימום|minimum|at\s+least)\s*(\d{1,2})\s*(?:\+)?\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-        /(\d{1,2})\s*\+\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-        /(?:ניסיון(?:\s+של)?|experience(?:\s+of)?)\s*(?:לפחות\s*)?(\d{1,2})\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-        /(\d{1,2})\s*[-–—]\s*\d{1,2}\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-        /(\d{1,2})\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-    ];
-    for (const re of patterns) {
-        const m = t.match(re);
-        if (m) {
-            const n = parseJobTagYears(m[1]);
-            if (n != null && n > 0) return n;
-        }
-    }
-    return null;
-}
-
-/** Tenure → years_experience; lookback defaults to 1 when tenure > 0 and not stated. */
+/** Keep the model's years. Lookback stays empty unless the model set it. Non role/skill/industry → null. */
 function normalizeAiSkillYears(input: {
     years_experience?: unknown;
     yearsExperience?: unknown;
     lookback_years?: unknown;
     lookbackYears?: unknown;
-    quote?: string;
-    tag_reason?: string;
+    tagType?: string;
 }): { years_experience: number | null; lookback_years: number | null } {
-    let years = parseJobTagYears(input.years_experience ?? input.yearsExperience);
-    let lookback = parseJobTagYears(input.lookback_years ?? input.lookbackYears);
-    const evidence = `${input.quote || ''} ${input.tag_reason || ''}`;
-    const extracted = extractExperienceYearsFromText(evidence);
-    const lookbackPhrase = hasExplicitLookbackPhrase(evidence);
-
-    if (extracted != null) {
-        if (years == null || (lookback === extracted && years !== extracted)) {
-            years = extracted;
-            if (!lookbackPhrase) lookback = null;
-        }
-    } else if (years == null && lookback != null && !lookbackPhrase) {
-        years = lookback;
-        lookback = null;
+    const type = String(input.tagType || '').toLowerCase();
+    if (type && !AI_SKILL_YEARS_TYPES.has(type)) {
+        return { years_experience: null, lookback_years: null };
     }
-
+    const years = parseJobTagYears(input.years_experience ?? input.yearsExperience);
+    const lookback = parseJobTagYears(input.lookback_years ?? input.lookbackYears);
     if (years === 0) return { years_experience: 0, lookback_years: 0 };
-    if (years != null && years > 0) {
-        if (!lookbackPhrase && (lookback == null || lookback === years)) lookback = 1;
-        else if (lookback == null) lookback = 1;
-        return { years_experience: years, lookback_years: lookback };
+    return { years_experience: years, lookback_years: lookback };
+}
+
+function normalizePriorityFromAi(raw: unknown): Priority | null {
+    const s = String(raw ?? '').trim();
+    if (!s) return null;
+    if (s === 'רגילה' || s === 'רגיל') return 'רגילה';
+    if (s === 'דחופה' || s === 'דחוף') return 'דחופה';
+    if (s === 'קריטית' || s === 'קריטי') return 'קריטית';
+    return null;
+}
+
+function mobilityBoolFromAi(raw: unknown): boolean | null {
+    if (typeof raw === 'boolean') return raw;
+    if (raw == null || raw === '') return null;
+    const s = String(raw).trim();
+    const lower = s.toLowerCase().replace(/[\s-]+/g, '_');
+    if (['yes', 'true', '1', 'כן', 'יש', 'mobile', 'נייד', 'car_owner', 'חובה'].includes(lower) || s === 'בעל/ת רכב') {
+        return true;
     }
-    return { years_experience: null, lookback_years: lookbackPhrase ? lookback : null };
+    if (['no', 'false', '0', 'לא', 'אין', 'לא_נייד', 'not_mobile', 'לא_חשוב'].includes(lower) || s === 'לא חשוב' || s === 'לא נייד') {
+        return false;
+    }
+    return null;
 }
 
 const CATALOG_TAG_ID_RE =
@@ -3694,7 +3725,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 filled.add('drivingLicenses');
                 filledList.push('רישיון נהיגה');
             } else missingList.push('רישיון נהיגה');
-            if (typeof extractedData.mobility === 'boolean') {
+            if (mobilityBoolFromAi(extractedData.mobility) != null) {
                 filled.add('mobility');
                 filledList.push('דרישות ניידות');
             } else {
@@ -3743,7 +3774,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 if (r.includes('role')) return 'role';
                 if (r.includes('seniority') || r.includes('level')) return 'seniority';
                 if (r.includes('industry')) return 'industry';
-                if (r.includes('certification') || r.includes('degree') || r.includes('education')) return 'certification';
+                if (r.includes('degree') || r.includes('education')) return 'degree';
+                if (r.includes('certification')) return 'certification';
                 if (r.includes('language')) return 'language';
                 if (r.includes('tool')) return 'tool';
                 if (r.includes('soft')) return 'soft';
@@ -3788,8 +3820,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                         yearsExperience: t.yearsExperience,
                         lookback_years: t.lookback_years,
                         lookbackYears: t.lookbackYears,
-                        quote: tagQuote,
-                        tag_reason: tagReason,
+                        tagType: baseTagType,
                     });
 
                     return {
@@ -3797,7 +3828,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                         name: baseName,
                         key: explicitKey || derivedKey,
                         mode,
-                        source: (t.source as TagSource) || 'manual',
+                        source: 'ai',
                         tagType: baseTagType,
                         tag_reason: tagReason,
                         quote: tagQuote,
@@ -3817,12 +3848,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                   ? String(extractedData.requirements)
                   : undefined;
 
+            const mobilityBool = mobilityBoolFromAi(extractedData.mobility);
             const mobilityFromAi =
-                typeof extractedData.mobility === 'boolean'
-                    ? extractedData.mobility
-                        ? 'חובה'
-                        : 'לא חשוב'
-                    : null;
+                mobilityBool == null ? null : mobilityBool ? 'חובה' : 'לא חשוב';
+            const priorityFromAi = normalizePriorityFromAi(extractedData.priority);
 
             setFormData(prev => {
                 const nextAiField =
@@ -3915,6 +3944,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                     const trimmed = fromAi.map((v: string) => String(v).trim()).filter(Boolean);
                     return trimmed.length ? trimmed : prev.availabilityOptions;
                 })(),
+                priority: priorityFromAi ?? prev.priority,
                 mobility: mobilityFromAi ?? prev.mobility,
                 gender: genderSelection.length ? genderSelection : prev.gender,
                 skills: apiTags.length ? apiTags : prev.skills,
@@ -4065,7 +4095,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
                 const nextMode: TagMode =
                     current === 'normal' ? 'mandatory' :
                     current === 'mandatory' ? 'negative' : 'normal';
-                return { ...tag, mode: nextMode };
+                return { ...tag, mode: nextMode, source: 'manual' };
             })
         }));
     };
@@ -4073,7 +4103,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({
     const handleSmartTagYearsChange = (id: string, field: JobTagYearsField, value: number | null) => {
         setFormData(prev => ({
             ...prev,
-            skills: prev.skills.map(tag => (String(tag.id) === String(id) ? { ...tag, [field]: value } : tag)),
+            skills: prev.skills.map(tag => (String(tag.id) === String(id) ? { ...tag, [field]: value, source: 'manual' } : tag)),
         }));
     };
 

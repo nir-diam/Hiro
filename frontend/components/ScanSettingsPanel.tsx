@@ -1,6 +1,9 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ChevronDownIcon, FunnelIcon, MagnifyingGlassIcon, SparklesIcon } from './Icons';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowPathIcon, ChevronDownIcon, FunnelIcon, MagnifyingGlassIcon, SparklesIcon, TagIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import ScanSkillTagsEditor from './ScanSkillTagsEditor';
+import TagSelectorModal, { type TagOption, type TagSelectorContext } from './TagSelectorModal';
+import { mergeScanTags, tagOptionToScanSkillTag, type ScanSkillTag } from '../utils/scanSkillTags';
 
 export const SCAN_FILTER_KEYS = [
   'scope',
@@ -50,6 +53,15 @@ type ScanSettingsPanelProps = {
   searchLabel?: string;
   onSearch?: () => void;
   searchDisabled?: boolean;
+  scanTags?: ScanSkillTag[];
+  onScanTagsChange?: (tags: ScanSkillTag[]) => void;
+  onLoadTags?: () => void | Promise<void>;
+  loadTagsLoading?: boolean;
+  /** Opens catalog modal — job sonar vs candidate matching context for suggestions. */
+  tagPickerContext?: TagSelectorContext;
+  tagPickerJobId?: string;
+  tagPickerCandidateId?: string;
+  tagPickerJobField?: string;
 };
 
 const ScanSettingsPanel: React.FC<ScanSettingsPanelProps> = ({
@@ -68,8 +80,17 @@ const ScanSettingsPanel: React.FC<ScanSettingsPanelProps> = ({
   searchLabel,
   onSearch,
   searchDisabled,
+  scanTags = [],
+  onScanTagsChange,
+  onLoadTags,
+  loadTagsLoading = false,
+  tagPickerContext = 'generic',
+  tagPickerJobId,
+  tagPickerCandidateId,
+  tagPickerJobField,
 }) => {
   const { t } = useLanguage();
+  const [tagCatalogOpen, setTagCatalogOpen] = useState(false);
   const [affinityOpen, setAffinityOpen] = useState(false);
   const affinityWrapRef = useRef<HTMLDivElement | null>(null);
   const affinityActive = affinityLevel !== 'none';
@@ -93,13 +114,73 @@ const ScanSettingsPanel: React.FC<ScanSettingsPanelProps> = ({
     };
   }, [affinityOpen]);
 
+  const catalogExistingTags = useMemo(
+    () =>
+      scanTags.flatMap((tag) => {
+        const bits = [tag.name, tag.key].map((x) => String(x || '').trim()).filter(Boolean);
+        return [...new Set(bits)];
+      }),
+    [scanTags],
+  );
+
+  const handleCatalogSave = useCallback(
+    (selected: TagOption[]) => {
+      if (!onScanTagsChange || !selected.length) return;
+      const added = selected.map(tagOptionToScanSkillTag);
+      onScanTagsChange(mergeScanTags(scanTags, added));
+    },
+    [onScanTagsChange, scanTags],
+  );
+
+  const showTagCatalog = Boolean(onScanTagsChange);
+
   return (
     <>
-      <div className="flex items-center gap-2 text-text-default font-black text-sm border-b border-border-default pb-3">
-        <FunnelIcon className="w-4 h-4 text-primary-500 shrink-0" />
-        {t('job.sonar.settings')}
+      <div className="flex items-center justify-between gap-2 text-text-default font-black text-sm border-b border-border-default pb-3">
+        <div className="flex items-center gap-2 min-w-0">
+          <FunnelIcon className="w-4 h-4 text-primary-500 shrink-0" />
+          <span className="truncate">{t('job.sonar.settings')}</span>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          {showTagCatalog ? (
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => setTagCatalogOpen(true)}
+              className="inline-flex items-center gap-1 text-[10px] font-bold text-primary-600 border border-primary-200 rounded-lg px-2 py-1 hover:bg-primary-50 disabled:opacity-50 transition-colors"
+              title={t('job.sonar.add_tags')}
+            >
+              <TagIcon className="w-3.5 h-3.5" />
+              {t('job.sonar.add_tags')}
+            </button>
+          ) : null}
+          {onLoadTags ? (
+            <button
+              type="button"
+              disabled={loading || loadTagsLoading}
+              onClick={() => void onLoadTags()}
+              className="inline-flex items-center gap-1 text-[10px] font-bold text-primary-600 border border-primary-200 rounded-lg px-2 py-1 hover:bg-primary-50 disabled:opacity-50 transition-colors"
+            >
+              <ArrowPathIcon className={`w-3.5 h-3.5 ${loadTagsLoading ? 'animate-spin' : ''}`} />
+              {t('job.sonar.load_tags')}
+            </button>
+          ) : null}
+        </div>
       </div>
       <div className="space-y-5">
+        {onScanTagsChange ? (
+          <div className="space-y-2">
+            <p className="text-[10px] font-bold text-text-muted uppercase tracking-wide">
+              {t('job.sonar.scan_tags_heading')}
+            </p>
+            {scanTags.length > 0 ? (
+              <ScanSkillTagsEditor tags={scanTags} onChange={onScanTagsChange} disabled={loading} />
+            ) : (
+              <p className="text-[10px] text-text-muted leading-snug">{t('job.sonar.scan_tags_empty')}</p>
+            )}
+            <p className="text-[10px] text-text-muted leading-snug">{t('job.sonar.scan_tags_hint')}</p>
+          </div>
+        ) : null}
         <div className="space-y-3">
           <div className="flex justify-between items-center text-[11px] font-bold gap-2">
             <span className="text-text-muted">{t('job.sonar.batch')}</span>
@@ -250,6 +331,18 @@ const ScanSettingsPanel: React.FC<ScanSettingsPanelProps> = ({
           </button>
         ) : null}
       </div>
+      {showTagCatalog ? (
+        <TagSelectorModal
+          isOpen={tagCatalogOpen}
+          onClose={() => setTagCatalogOpen(false)}
+          onSave={handleCatalogSave}
+          existingTags={catalogExistingTags}
+          context={tagPickerContext}
+          jobId={tagPickerJobId}
+          candidateId={tagPickerCandidateId}
+          jobFieldCategory={tagPickerJobField}
+        />
+      ) : null}
     </>
   );
 };

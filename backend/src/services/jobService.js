@@ -340,6 +340,16 @@ const JOB_ANALYZE_SKILL_QUOTE_APPENDIX = `
   * "quote" is REQUIRED on every skill object and is in ADDITION to "tag_reason".
 `;
 
+/** The form already stores the paste. Asking the model to echo it only lengthens the answer. */
+const JOB_ANALYZE_OMIT_RAW_APPENDIX = `
+--- Do not return aiRawDescription ---
+Omit "aiRawDescription" entirely. Do not copy the original posting back into the JSON.
+The application stores the pasted text itself.
+`;
+
+const stripAiRawDescriptionFromPrompt = (template) =>
+  String(template || '').replace(/\s*"aiRawDescription"\s*:\s*"DataTypes\.TEXT"\s*,?/g, '');
+
 const JOB_ANALYZE_SKILL_YEARS_APPENDIX = `
 --- years_experience vs lookback_years on skills (role / skill / industry only) ---
 - years_experience = minimum tenure stated for THAT tag. "לפחות 5 שנים" / "5+ שנים" / "ניסיון של 5 שנים" → 5.
@@ -348,7 +358,8 @@ const JOB_ANALYZE_SKILL_YEARS_APPENDIX = `
 - NEVER put the tenure number into lookback_years. Example:
   "ניסיון של לפחות 5 שנים בתחום הנהלת החשבונות - חובה"
   → years_experience: 5, lookback_years: null
-  (the product will default lookback to 1 when years_experience > 0 and lookback was not stated).
+- Leave lookback_years null when the posting does not limit how recent the experience must be.
+- Do not put years_experience or lookback_years on seniority, or on any type other than role, skill, and industry.
 - If years_experience is 0, lookback_years must be 0.
 `;
 
@@ -1363,7 +1374,7 @@ const analyzeRawDescription = async (rawText, options = {}) => {
     err.status = 500;
     throw err;
   }
-  const systemPrompt = `${promptRow.template.trim()}\n${JOB_ANALYZE_FIELDS_APPENDIX}\n${JOB_ANALYZE_PREFERRED_HOURS_APPENDIX}\n${JOB_ANALYZE_SKILL_QUOTE_APPENDIX}\n${JOB_ANALYZE_SKILL_YEARS_APPENDIX}`;
+  const systemPrompt = `${stripAiRawDescriptionFromPrompt(promptRow.template).trim()}\n${JOB_ANALYZE_FIELDS_APPENDIX}\n${JOB_ANALYZE_PREFERRED_HOURS_APPENDIX}\n${JOB_ANALYZE_SKILL_QUOTE_APPENDIX}\n${JOB_ANALYZE_SKILL_YEARS_APPENDIX}\n${JOB_ANALYZE_OMIT_RAW_APPENDIX}`;
 
   // eslint-disable-next-line no-console
   console.log('[jobService.analyzeRawDescription] calling sendChat with prompt length', systemPrompt.length);
@@ -1437,6 +1448,7 @@ const analyzeRawDescription = async (rawText, options = {}) => {
     const pwhRaw = pickPreferredWorkingHoursRawFromParsed(parsed);
     const coerced = coercePreferredWorkingHoursFromJobAi(pwhRaw);
     parsed.preferredWorkingHours = coerced;
+    delete parsed.aiRawDescription;
   } catch (e) {
     const cause = e?.cause || e;
     const positionMatch = String(cause?.message || '').match(/position\s+(\d+)/i);
@@ -1464,6 +1476,8 @@ const analyzeRawDescription = async (rawText, options = {}) => {
     const elapsedMs = Date.now() - analyzeStartedAt;
     const taxonomy = await classifyJobTaxonomyForAnalyze(parsed, rawText, {
       skipLlm: elapsedMs > 38000,
+      aiSuggestedField,
+      aiSuggestedRole,
     });
     Object.assign(parsed, taxonomy);
     if (aiSuggestedField || aiSuggestedRole) {

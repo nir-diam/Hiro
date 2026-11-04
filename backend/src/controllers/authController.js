@@ -206,7 +206,7 @@ const forgotPasswordResponse = {
   message: 'אם קיים חשבון עם כתובת זו, נשלח אליכם קישור לאיפוס סיסמה.',
 };
 
-/** Self-service staff password reset — always returns the same message (no email enumeration). */
+/** Self-service password reset (staff + candidate portal) — same response (no email enumeration). */
 const forgotPassword = async (req, res) => {
   const email = String(req.body?.email || '').trim();
   if (!email || !email.includes('@')) {
@@ -214,33 +214,53 @@ const forgotPassword = async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({
+    const staffUser = await User.findOne({
       where: {
         email: { [Op.iLike]: email },
         role: { [Op.in]: FORGOT_PASSWORD_ROLES },
       },
     });
-    if (!user) {
-      return res.json(forgotPasswordResponse);
+
+    if (staffUser) {
+      const activationGuid = crypto.randomUUID();
+
+      let clientName = null;
+      const clientId = await authService.resolveEffectiveClientIdForUser(staffUser);
+      if (clientId) {
+        const c = await Client.findByPk(clientId, { attributes: ['displayName', 'name'] });
+        if (c) clientName = c.displayName || c.name || null;
+      }
+
+      await staffUser.update({ activationGuid });
+
+      const activationUrl = `${publicAppOrigin()}/activation?guid=${activationGuid}`;
+      await sendStaffPasswordResetEmail(staffUser, activationUrl, {
+        userRole: 'admin',
+        clientName,
+        senderEmail: null,
+      });
+    } else {
+      const sentCandidate =
+        await candidatePortalAccessService.sendForgotPasswordForCandidateEmail(email);
+      if (!sentCandidate) {
+        const candidateUser = await User.findOne({
+          where: {
+            email: { [Op.iLike]: email },
+            role: 'candidate',
+          },
+        });
+        if (candidateUser) {
+          const activationGuid = crypto.randomUUID();
+          await candidateUser.update({ activationGuid });
+          const activationUrl = `${publicAppOrigin()}/activation?guid=${activationGuid}`;
+          await sendStaffPasswordResetEmail(candidateUser, activationUrl, {
+            userRole: 'admin',
+            clientName: null,
+            senderEmail: null,
+          });
+        }
+      }
     }
-
-    const activationGuid = crypto.randomUUID();
-
-    let clientName = null;
-    const clientId = await authService.resolveEffectiveClientIdForUser(user);
-    if (clientId) {
-      const c = await Client.findByPk(clientId, { attributes: ['displayName', 'name'] });
-      if (c) clientName = c.displayName || c.name || null;
-    }
-
-    await user.update({ activationGuid });
-
-    const activationUrl = `${publicAppOrigin()}/activation?guid=${activationGuid}`;
-    await sendStaffPasswordResetEmail(user, activationUrl, {
-      userRole: 'admin',
-      clientName,
-      senderEmail: null,
-    });
   } catch (err) {
     console.warn('[auth] forgot-password email failed', err?.message || err);
   }

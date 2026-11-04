@@ -200,6 +200,7 @@ const candidateTagService = require('../services/candidateTagService');
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const mammoth = require('mammoth');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
+const { extractLegacyDocText: readLegacyDocText } = require('../utils/legacyDocText');
 const { extractWithPdftotextVariants } = require('../utils/pdftotextExtract');
 const {
   pickBestResumeTextExtract,
@@ -4411,10 +4412,8 @@ const stripHtml = (html) => {
 
 const extractLegacyDocText = async (buffer) => {
   try {
-    const WordExtractor = require('word-extractor');
-    const doc = await new WordExtractor().extract(buffer);
-    const body = doc?.getBody?.() || '';
-    if (body && String(body).trim()) return normalizeResumeSearchText(body);
+    const raw = await readLegacyDocText(buffer);
+    if (raw && String(raw).trim()) return normalizeResumeSearchText(raw);
   } catch (e) {
     if (e?.code === 'MODULE_NOT_FOUND') {
       console.warn('[embed-parse-doc-legacy-error] word-extractor not installed — run npm install in backend');
@@ -6036,6 +6035,7 @@ const getJobMatches = async (req, res) => {
       useVector: body.useVector,
       hardFilters: body.hardFilters,
       affinityLevel: body.affinityLevel,
+      candidateTagDetails: body.candidateTagDetails,
       tenantClientId,
     });
     res.set('Cache-Control', 'private, no-store');

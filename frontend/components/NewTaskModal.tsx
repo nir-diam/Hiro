@@ -1810,17 +1810,18 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
     const labelClass = 'block text-xs font-bold text-text-default mb-1';
 
     return (
-        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-3 sm:p-4 backdrop-blur-sm">
+        <div className="fixed inset-0 bg-black/60 z-[100] overflow-y-auto overscroll-contain p-3 sm:p-4 backdrop-blur-sm">
+            <div className="flex min-h-full items-start sm:items-center justify-center py-1 sm:py-2">
             <div
                 ref={modalRef}
                 role="dialog"
                 aria-modal="true"
                 aria-labelledby={titleId}
-                className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-5xl max-h-[min(92vh,900px)] flex flex-col overflow-hidden border border-border-default/50"
+                className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-5xl max-h-[min(calc(100dvh-1.5rem),900px)] flex flex-col min-h-0 overflow-hidden border border-border-default/50 my-auto"
                 onClick={e => e.stopPropagation()}
                 style={{ animation: 'modalFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1)' }}
             >
-                <form onSubmit={handleSubmit} className="flex flex-col overflow-visible">
+                <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0 overflow-hidden">
                     <header className="flex items-center justify-between px-5 py-4 border-b border-border-default/50 bg-bg-subtle/30 flex-shrink-0">
                         <div>
                             <h2 id={titleId} className="text-xl font-black text-text-default tracking-tight leading-tight">
@@ -2243,7 +2244,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                                             ? 'rtl'
                                             : 'ltr'
                                     }
-                                    className={`w-full min-h-[180px] bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3 transition-all shadow-sm resize-y leading-relaxed ${
+                                    className={`w-full min-h-[100px] sm:min-h-[140px] lg:min-h-[180px] max-h-[min(40dvh,280px)] bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3 transition-all shadow-sm resize-y leading-relaxed ${
                                         formData.messageText.trim() && !containsHebrewWord(formData.messageText)
                                             ? 'text-left'
                                             : 'text-right'
@@ -2298,14 +2299,14 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         </div>
                     </main>
 
-                    <footer className="relative z-10 flex justify-end items-center px-5 py-4 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 gap-2">
-                        <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-default hover:bg-bg-hover rounded-lg transition-colors">
+                    <footer className="relative z-10 flex flex-col-reverse sm:flex-row sm:justify-end items-stretch sm:items-center gap-2 px-4 sm:px-5 py-3 sm:py-4 bg-bg-subtle/50 border-t border-border-default/50 flex-shrink-0 shadow-[0_-4px_12px_rgba(0,0,0,0.04)]">
+                        <button type="button" onClick={onClose} className="px-4 py-2.5 text-sm font-bold text-text-default hover:bg-bg-hover rounded-lg transition-colors">
                             ביטול
                         </button>
                         <button
                             type="submit"
                             disabled={isSubmitting}
-                            className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 transition-all shadow-sm text-sm disabled:opacity-60 disabled:cursor-not-allowed"
+                            className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition-all shadow-sm text-sm disabled:opacity-60 disabled:cursor-not-allowed"
                         >
                             {isSubmitting ? 'שולח…' : isTaskMode ? 'צור משימה' : 'שליחה'}
                         </button>
@@ -2336,6 +2337,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({
                         cursor: pointer;
                     }
                 `}</style>
+            </div>
             </div>
         </div>
     );

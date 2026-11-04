@@ -10,7 +10,8 @@ const TOP_K_CATEGORIES = 5;
 /** Cap paths in the LLM prompt so input + output stay within token limits. */
 const MAX_PATHS_FOR_LLM = 48;
 const GENERAL_LABEL = 'כללי';
-const CONFIDENCE_THRESHOLD = 0.5;
+/** Below this, keep Gemini's field/role and flag the job for review. */
+const CONFIDENCE_THRESHOLD = 0.75;
 
 const resolveGeminiApiKey = () =>
   process.env.GEMINI_API_KEY ||
@@ -141,6 +142,22 @@ async function getTopKCategories(queryText, k = TOP_K_CATEGORIES) {
  * @param {string[]} categoryIds
  * @param {Awaited<ReturnType<typeof loadTaxonomyIndex>>} index
  */
+function plainRoleTags(role) {
+  return (role?.tags || [])
+    .map((tag) => {
+      const plain = tag?.get ? tag.get({ plain: true }) : tag;
+      if (!plain || typeof plain !== 'object') return null;
+      const name = String(plain.displayNameHe || plain.displayNameEn || plain.tagKey || '').trim();
+      const key = String(plain.tagKey || '').trim();
+      const aliases = Array.isArray(plain.aliases)
+        ? plain.aliases.map((alias) => String(alias || '').trim()).filter(Boolean)
+        : [];
+      if (!name && !key) return null;
+      return { name, key, aliases };
+    })
+    .filter(Boolean);
+}
+
 function buildAvailablePaths(categoryIds, index) {
   const idSet = new Set(categoryIds.map(String));
   const paths = [];
@@ -160,12 +177,72 @@ function buildAvailablePaths(categoryIds, index) {
           categoryId: String(catPlain.id),
           clusterId: String(cluster.id),
           roleId: String(role.id),
+          tags: plainRoleTags(role),
         });
       }
     }
   }
 
   return paths;
+}
+
+function collectJobTagNeedles(parsed) {
+  const needles = new Set();
+  const add = (value) => {
+    const n = norm(value);
+    if (n.length >= 2) needles.add(n);
+  };
+  add(parsed?.jobTitle || parsed?.title);
+  add(parsed?.aiSuggestedRole);
+  add(parsed?.role);
+  const skills = Array.isArray(parsed?.skills)
+    ? parsed.skills
+    : Array.isArray(parsed?.tags)
+      ? parsed.tags
+      : [];
+  for (const skill of skills) {
+    add(skill?.name);
+    add(skill?.raw_value || skill?.rawValue);
+    add(skill?.key);
+  }
+  return needles;
+}
+
+function pathMatchesNeedles(path, needles) {
+  if (!needles?.size || !path) return false;
+  const names = [path.role, path.cluster, path.industry];
+  for (const tag of path.tags || []) {
+    names.push(tag.name, tag.key, ...(tag.aliases || []));
+  }
+  return names.some((name) => needles.has(norm(name)));
+}
+
+/** Categories whose role tags or aliases match the job, even if vector rank missed them. */
+function categoryIdsMatchingJobTags(parsed, index) {
+  const needles = collectJobTagNeedles(parsed);
+  if (!needles.size) return [];
+  const ids = [];
+  for (const cat of index.categories || []) {
+    const plain = cat.get ? cat.get({ plain: true }) : cat;
+    let hit = false;
+    for (const cluster of plain.clusters || []) {
+      for (const role of cluster.roles || []) {
+        const probe = {
+          role: role.value,
+          cluster: cluster.name,
+          industry: plain.name,
+          tags: plainRoleTags(role),
+        };
+        if (pathMatchesNeedles(probe, needles)) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit) break;
+    }
+    if (hit && plain.id != null) ids.push(String(plain.id));
+  }
+  return ids;
 }
 
 function isGeneralPathRef(pathRef) {
@@ -243,7 +320,32 @@ function buildFallbackResult(reason) {
   };
 }
 
-function applyMappingDecision(mappingDecision, availablePaths) {
+function keepAiSuggestion(aiSuggestion, mappingDecision, reason) {
+  const field = String(aiSuggestion?.field || '').trim();
+  const role = String(aiSuggestion?.role || '').trim();
+  if (!field || !role || norm(field) === norm(GENERAL_LABEL) || norm(role) === norm(GENERAL_LABEL)) {
+    return null;
+  }
+  return {
+    field,
+    role,
+    jobField: {
+      category: field,
+      fieldType: '',
+      role,
+    },
+    secondaryJobField: null,
+    taxonomyMapping: {
+      mapping_decision: mappingDecision || null,
+      low_confidence: true,
+      kept_ai_suggestion: true,
+    },
+    requiresManualReview: true,
+    reviewReason: reason || 'מיפוי הטקסונומיה מתחת לסף הביטחון — נשמרה הצעת המודל',
+  };
+}
+
+function applyMappingDecision(mappingDecision, availablePaths, aiSuggestion = null) {
   const primaryRef = mappingDecision?.primary_path;
   const secondaryRef = mappingDecision?.secondary_path;
   const fallbackApplied = Boolean(mappingDecision?.fallback_applied);
@@ -259,11 +361,19 @@ function applyMappingDecision(mappingDecision, availablePaths) {
     !primaryRef;
 
   if (needsFallback) {
+    const kept = keepAiSuggestion(aiSuggestion, mappingDecision, primaryRef?.reasoning);
+    if (kept) return kept;
     return buildFallbackResult(primaryRef?.reasoning);
   }
 
   const primaryPath = resolvePathInAvailable(primaryRef, availablePaths);
   if (!primaryPath) {
+    const kept = keepAiSuggestion(
+      aiSuggestion,
+      mappingDecision,
+      'הנתיב שנבחר על ידי המודל אינו ברשימה הסגורה',
+    );
+    if (kept) return kept;
     return buildFallbackResult('הנתיב שנבחר על ידי המודל אינו ברשימה הסגורה');
   }
 
@@ -298,15 +408,27 @@ function applyMappingDecision(mappingDecision, availablePaths) {
  * @param {string} [rawText]
  */
 async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {}) {
+  const aiSuggestion = {
+    field: options.aiSuggestedField,
+    role: options.aiSuggestedRole,
+  };
   const queryText = buildClassificationQuery(parsed, rawText);
   if (!queryText.trim()) {
+    const kept = keepAiSuggestion(aiSuggestion, null, 'חסרה כותרת או תוכן לסיווג');
+    if (kept) return kept;
     return buildFallbackResult('חסרה כותרת או תוכן לסיווג');
   }
 
   const index = await loadTaxonomyIndex();
   const topCategories = await getTopKCategories(queryText, TOP_K_CATEGORIES);
 
-  let categoryIds = topCategories.map((c) => c.categoryId).filter(Boolean);
+  const matchedCategoryIds = categoryIdsMatchingJobTags(parsed, index);
+  let categoryIds = [
+    ...new Set([
+      ...matchedCategoryIds,
+      ...topCategories.map((c) => c.categoryId).filter(Boolean),
+    ]),
+  ];
   if (!categoryIds.length) {
     const allCats = (index.categories || []).map((c) => {
       const plain = c.get ? c.get({ plain: true }) : c;
@@ -315,8 +437,12 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {})
     categoryIds = allCats.slice(0, TOP_K_CATEGORIES);
   }
 
+  const needles = collectJobTagNeedles(parsed);
   let availablePaths = buildAvailablePaths(categoryIds, index);
+  availablePaths.sort((a, b) => Number(pathMatchesNeedles(b, needles)) - Number(pathMatchesNeedles(a, needles)));
   if (!availablePaths.length) {
+    const kept = keepAiSuggestion(aiSuggestion, null, 'לא נמצאו נתיבים זמינים בטקסונומיה');
+    if (kept) return kept;
     return buildFallbackResult('לא נמצאו נתיבים זמינים בטקסונומיה');
   }
   if (availablePaths.length > MAX_PATHS_FOR_LLM) {
@@ -331,6 +457,8 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {})
         ? '[jobTaxonomyClassification] skipping second model call — using vector top match'
         : '[jobTaxonomyClassification] prompt missing — using vector top match only',
     );
+    const kept = keepAiSuggestion(aiSuggestion, null, 'סיווג הטקסונומיה דולג');
+    if (kept) return kept;
     const best = availablePaths[0];
     if (!best) return buildFallbackResult('פרומפט סיווג חסר');
     const jobField = pathToJobField(best);
@@ -358,6 +486,8 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {})
 
   const apiKey = resolveGeminiApiKey();
   if (!apiKey) {
+    const kept = keepAiSuggestion(aiSuggestion, null, 'מפתח Gemini לא מוגדר');
+    if (kept) return kept;
     return buildFallbackResult('מפתח Gemini לא מוגדר');
   }
 
@@ -366,7 +496,7 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {})
       apiKey,
       systemPrompt,
       history: [],
-      message: 'Classify the job using only paths from Available Paths. Return JSON only.',
+      message: 'Classify the job using only paths from Available Paths. Each path includes tags (name, key, aliases) linked to that role. Prefer a path whose tags match the job title or skills. Return JSON only.',
       responseMimeType: 'application/json',
       generationConfig: {
         temperature: promptRow.temperature ?? 0.1,
@@ -389,7 +519,7 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {})
       parsedResponse?.mappingDecision ||
       parsedResponse;
 
-    return applyMappingDecision(mappingDecision, availablePaths);
+    return applyMappingDecision(mappingDecision, availablePaths, aiSuggestion);
   } catch (e) {
     const truncated =
       e?.code === 'LLM_JSON_TRUNCATED' ||
@@ -400,6 +530,8 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {})
     } else {
       console.error('[jobTaxonomyClassification] LLM classification failed:', e.message);
     }
+    const kept = keepAiSuggestion(aiSuggestion, null, 'שגיאה בסיווג אוטומטי — נדרש אישור ידני');
+    if (kept) return kept;
     return buildFallbackResult('שגיאה בסיווג אוטומטי — נדרש אישור ידני');
   }
 }
@@ -407,9 +539,11 @@ async function classifyJobTaxonomyForAnalyze(parsed, rawText = '', options = {})
 module.exports = {
   PROMPT_ID,
   TOP_K_CATEGORIES,
+  CONFIDENCE_THRESHOLD,
   buildClassificationQuery,
   getTopKCategories,
   buildAvailablePaths,
+  categoryIdsMatchingJobTags,
   classifyJobTaxonomyForAnalyze,
   applyMappingDecision,
 };

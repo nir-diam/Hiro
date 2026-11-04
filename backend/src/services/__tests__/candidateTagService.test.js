@@ -22,6 +22,7 @@ const {
   findTagByNameOrAlias,
   resolveIncomingTagType,
   normalizeCandidateTagType,
+  mergeJobSkillPayloads,
 } = require('../candidateTagService');
 
 describe('resolveIncomingTagType', () => {
@@ -98,6 +99,33 @@ describe('findTagByNameOrAlias', () => {
     mockQuery.mockResolvedValue([]);
     await findTagByNameOrAlias('excel', { status: 'active' });
     expect(String(mockQuery.mock.calls[0][0])).toContain('status::text');
+  });
+});
+
+describe('mergeJobSkillPayloads', () => {
+  it('keeps mandatory, the higher score, and non-null years from either row', () => {
+    const merged = mergeJobSkillPayloads(
+      {
+        tagKey: 'drafter',
+        mode: 'normal',
+        confidence_score: 0.8,
+        years_experience: null,
+        lookback_years: null,
+        source: 'ai',
+      },
+      {
+        tagKey: 'drafter',
+        mode: 'mandatory',
+        confidence_score: 1,
+        years_experience: 3,
+        lookback_years: null,
+        source: 'ai',
+      },
+    );
+    expect(merged.mode).toBe('mandatory');
+    expect(merged.confidence_score).toBe(1);
+    expect(merged.years_experience).toBe(3);
+    expect(merged.lookback_years).toBeNull();
   });
 });
 

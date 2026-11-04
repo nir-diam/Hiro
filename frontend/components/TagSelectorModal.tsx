@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import {
     XMarkIcon, MagnifyingGlassIcon, CheckCircleIcon, BriefcaseIcon,
     SparklesIcon, WrenchScrewdriverIcon, LanguageIcon, BuildingOffice2Icon,
@@ -55,6 +56,8 @@ interface TagSelectorModalProps {
   maxSelection?: number;
   /** Pre-select catalog tags when the modal opens (e.g. work-experience row roles). */
   initialSelectedTagIds?: string[];
+  /** Limit sidebar to these categories only (no «הכל»). Used e.g. work-experience role tags. */
+  allowedCategories?: Exclude<TagCategory, 'all'>[];
 }
 
 type PrimaryPane = 'all' | 'suggested';
@@ -99,7 +102,23 @@ const mapBackendTypeToCategory = (type?: string): TagCategory => {
     if (normalized === 'education' || normalized === 'degree') return 'education';
     if (normalized === 'certification') return 'certification';
     if (normalized === 'seniority') return 'seniority';
+    if (normalized === 'role') return 'role';
     return 'role';
+};
+
+/** UI category for filtering — prefer normalized `category` from catalog ingest. */
+const getTagUiCategory = (tag: Pick<TagOption, 'category' | 'rawType'>): Exclude<TagCategory, 'all'> => {
+    if (tag.category && tag.category !== 'all') return tag.category;
+    return mapBackendTypeToCategory(tag.rawType);
+};
+
+const resolveTagCategory = (tag: Pick<TagOption, 'category' | 'rawType'>): TagCategory =>
+    getTagUiCategory(tag);
+
+const uiCategoryToBackendTypes = (tab: TagCategory): string[] => {
+    if (tab === 'all') return [];
+    if (tab === 'education') return ['degree', 'education'];
+    return [tab];
 };
 
 const HighlightedName: React.FC<{ text: string; searchTerm: string; className?: string }> = ({ text, searchTerm, className }) => (
@@ -130,6 +149,7 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         enableRequiredTagToggle = false,
         maxSelection,
         initialSelectedTagIds = [],
+        allowedCategories,
     } = props;
 
     const [searchTerm, setSearchTerm] = useState('');
@@ -148,6 +168,20 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
     const [jobFieldCategories, setJobFieldCategories] = useState<string[]>([]);
     const [focusedIndex, setFocusedIndex] = useState(0);
     const listRef = useRef<HTMLDivElement>(null);
+    const wasOpenRef = useRef(false);
+    const initialCategoryRef = useRef(initialCategory);
+    initialCategoryRef.current = initialCategory;
+    const allowedCategoriesRef = useRef(allowedCategories);
+    allowedCategoriesRef.current = allowedCategories;
+
+    const sidebarCategoryKeys = useMemo((): TagCategory[] => {
+        if (allowedCategories?.length) {
+            return allowedCategories.filter((c) => VISIBLE_CATEGORIES.includes(c) || c in categoryConfig);
+        }
+        return (Object.keys(categoryConfig) as TagCategory[]).filter(
+            (key) => key === 'all' || VISIBLE_CATEGORIES.includes(key),
+        );
+    }, [allowedCategories]);
 
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const authHeaders = () => {
@@ -165,19 +199,53 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         context === 'job' ? 'מוצע למשרה הזו' : context === 'candidate' ? 'מוצע לפרופיל הזה' : 'מוצע';
 
     useEffect(() => {
+        if (!isOpen) {
+            wasOpenRef.current = false;
+            return;
+        }
+        const justOpened = !wasOpenRef.current;
+        wasOpenRef.current = true;
+
+        if (justOpened) {
+            setSearchTerm('');
+            setError(null);
+            setPrimaryPane('all');
+            setSortMode('usage');
+            setSuggestedIds([]);
+            setFocusedIndex(0);
+            setRoleDomainSearch('');
+            const cat = initialCategoryRef.current;
+            const allowed = allowedCategoriesRef.current;
+            let nextTab: TagCategory;
+            if (allowed?.length) {
+                nextTab =
+                    cat !== 'all' && allowed.includes(cat as Exclude<TagCategory, 'all'>)
+                        ? cat
+                        : allowed[0];
+            } else {
+                nextTab =
+                    cat !== 'all' && !VISIBLE_CATEGORIES.includes(cat)
+                        ? 'all'
+                        : cat;
+            }
+            setActiveTab(nextTab);
+        }
+    }, [isOpen]);
+
+    useEffect(() => {
+        if (!isOpen || !allowedCategories?.length) return;
+        if (activeTab === 'all' || !allowedCategories.includes(activeTab as Exclude<TagCategory, 'all'>)) {
+            setActiveTab(allowedCategories[0]);
+        }
+    }, [isOpen, allowedCategories, activeTab]);
+
+    useEffect(() => {
         if (!isOpen) return;
-        setSearchTerm('');
-        setError(null);
-        setPrimaryPane('all');
-        setSortMode('usage');
-        setSuggestedIds([]);
-        setFocusedIndex(0);
         setRoleDomainFilter(jobFieldCategory?.trim() || '');
-        setRoleDomainSearch('');
-        setActiveTab((prev) => {
-            if (initialCategory !== 'all' && !VISIBLE_CATEGORIES.includes(initialCategory)) return 'all';
-            return initialCategory;
-        });
+    }, [isOpen, jobFieldCategory]);
+
+    useEffect(() => {
+        if (!isOpen) return;
 
         const controller = new AbortController();
 
@@ -186,14 +254,15 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
             const nameHe = String(tag.displayNameHe || tag.tagKey || tag.displayNameEn || tag.id || '');
             if (!nameHe) return null;
             const nameEn = String(tag.displayNameEn || tag.tagKey || tag.displayNameHe || tag.id || '');
+            const catalogType = String(tag.type || tag.raw_type || tag.rawType || '');
             return {
                 id: String(tag.id || `${tag.tagKey || nameHe}-${Math.random().toString(36).slice(2, 8)}`),
                 nameHe,
                 nameEn,
-                category: mapBackendTypeToCategory(String(tag.type || '')),
+                category: mapBackendTypeToCategory(catalogType),
                 description: String(tag.descriptionHe || tag.descriptionEn || ''),
                 synonyms: Array.isArray(tag.synonyms) ? (tag.synonyms as string[]) : [],
-                rawType: String(tag.type || ''),
+                rawType: catalogType,
                 tagKey: tag.tagKey ? String(tag.tagKey) : undefined,
                 usageCount: Number(tag.usageCount) || 0,
                 verified: tag.qualityState === 'verified',
@@ -209,9 +278,10 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
                 const PAGE_SIZE = 500;
                 const MAX_PAGES = 40;
                 const normalized: TagOption[] = [];
+                const seenIds = new Set<string>();
                 let page = 1;
                 let total = Infinity;
-                while (page <= MAX_PAGES && normalized.length < total) {
+                while (page <= MAX_PAGES && (page - 1) * PAGE_SIZE < total) {
                     const params = new URLSearchParams({
                         page: String(page),
                         limit: String(PAGE_SIZE),
@@ -222,16 +292,21 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
                     const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, {
                         headers: { 'Content-Type': 'application/json', ...authHeaders() },
                         signal: controller.signal,
+                        cache: 'no-store',
                     });
                     if (!res.ok) throw new Error('Failed to load tags');
                     const payload = await res.json();
                     const rows = Array.isArray(payload?.data) ? payload.data : [];
                     total = Number.isFinite(Number(payload?.total)) ? Number(payload.total) : rows.length;
+                    let addedThisPage = 0;
                     for (const row of rows) {
                         const tag = normalizeTagRow(row as Record<string, unknown>);
-                        if (tag) normalized.push(tag);
+                        if (!tag || seenIds.has(tag.id)) continue;
+                        seenIds.add(tag.id);
+                        normalized.push(tag);
+                        addedThisPage += 1;
                     }
-                    if (!rows.length || page * PAGE_SIZE >= total) break;
+                    if (!rows.length || addedThisPage === 0 || rows.length < PAGE_SIZE) break;
                     page += 1;
                 }
                 setAvailableTags(normalized);
@@ -246,7 +321,7 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
 
         fetchTags();
         return () => controller.abort();
-    }, [isOpen, apiBase, initialCategory, jobFieldCategory]);
+    }, [isOpen, apiBase]);
 
     useEffect(() => {
         if (!isOpen || activeTab !== 'role') return;
@@ -350,8 +425,13 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
     }, [isOpen, primaryPane, loadSuggestions, seedTagIds.join('|')]);
     const baseFiltered = useMemo(() => {
         const lowerSearch = searchTerm.trim();
+        const backendTypes = uiCategoryToBackendTypes(activeTab);
         return availableTags.filter((tag) => {
-            const matchesCategory = activeTab === 'all' || tag.category === activeTab;
+            const uiCat = getTagUiCategory(tag);
+            const matchesCategory =
+                activeTab === 'all'
+                || uiCat === activeTab
+                || (backendTypes.length > 0 && backendTypes.includes(String(tag.rawType || '').toLowerCase()));
             const matchesSearch = !lowerSearch || tagMatchesSearch(tag, lowerSearch);
             const domainOk =
                 activeTab !== 'role' || !roleDomainFilter
@@ -379,7 +459,7 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
         if (!(searchTerm.trim() && activeTab === 'all' && primaryPane === 'all')) return null;
         const groups: Partial<Record<TagCategory, TagOption[]>> = {};
         for (const tag of paneTags) {
-            const cat = tag.category || 'role';
+            const cat = resolveTagCategory(tag);
             if (!groups[cat]) groups[cat] = [];
             groups[cat]!.push(tag);
         }
@@ -571,8 +651,12 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
 
     if (!isOpen) return null;
 
-    return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
+    const modal = (
+        <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[9999] flex items-center justify-center p-4"
+            role="dialog"
+            aria-modal="true"
+        >
             <div
                 className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-6xl flex flex-col h-[92vh] overflow-hidden border border-border-default animate-fade-in"
                 onClick={(e) => e.stopPropagation()}
@@ -612,15 +696,17 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
 
                 <div className="flex flex-1 overflow-hidden flex-col md:flex-row">
                     <nav className="w-full md:w-64 bg-bg-card border-b md:border-b-0 md:border-l border-border-default flex-shrink-0 overflow-x-auto md:overflow-y-auto custom-scrollbar flex md:flex-col p-2 gap-1 z-10">
-                        {(Object.entries(categoryConfig) as [TagCategory, { label: string; icon: React.ReactNode }][])
-                            .filter(([key]) => key === 'all' || VISIBLE_CATEGORIES.includes(key))
-                            .map(([key, config]) => {
+                        {sidebarCategoryKeys.map((key) => {
+                                const config = categoryConfig[key];
                                 const count = categoryCounts[key];
                                 return (
                                     <button
                                         key={key}
                                         type="button"
-                                        onClick={() => setActiveTab(key)}
+                                        onClick={() => {
+                                            setActiveTab(key);
+                                            setFocusedIndex(0);
+                                        }}
                                         className={`flex items-center justify-between gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all whitespace-nowrap md:whitespace-normal ${
                                             activeTab === key
                                                 ? 'bg-primary-50 text-primary-700 shadow-sm border border-primary-100'
@@ -821,6 +907,8 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
             `}</style>
         </div>
     );
+
+    return typeof document !== 'undefined' ? createPortal(modal, document.body) : modal;
 };
 
 export default TagSelectorModal;

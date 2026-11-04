@@ -4,6 +4,9 @@ const {
   normalizeAvailabilityOptionsFromAi,
   enrichJobAnalyzeResult,
   normalizeJobSkillYears,
+  coerceJobMobility,
+  normalizeJobPriority,
+  normalizeLicenseTypesFromAi,
 } = require('../jobAiAnalyzeNormalize');
 
 describe('jobAiAnalyzeNormalize', () => {
@@ -48,21 +51,41 @@ describe('jobAiAnalyzeNormalize', () => {
     expect(out.availabilityOptions[0]).toBe('🟡 חודש הודעה (עובד, מחפש אקטיבית).');
   });
 
-  it('puts tenure years on years_experience and defaults lookback to 1', () => {
+  it('keeps the model years and leaves lookback null when the model left it null', () => {
     const fixed = normalizeJobSkillYears({
-      name: 'מנהל/ת חשבונות',
-      years_experience: 1,
-      lookback_years: 5,
-      quote: 'ניסיון של לפחות 5 שנים בתחום הנהלת החשבונות - חובה.',
-      tag_reason: 'מקצוע הבסיס הנדרש עם ניסיון של 5 שנים',
+      name: 'שרטט/ת',
+      tagType: 'role',
+      years_experience: 3,
+      lookback_years: null,
+      quote: 'חובה ניסיון של 3 שנים',
     });
-    expect(fixed.years_experience).toBe(5);
-    expect(fixed.lookback_years).toBe(1);
+    expect(fixed.years_experience).toBe(3);
+    expect(fixed.lookback_years).toBeNull();
   });
 
-  it('keeps explicit lookback when the text limits how recent experience must be', () => {
+  it('does not copy years out of the quote onto a tag the model left empty', () => {
+    const fixed = normalizeJobSkillYears({
+      name: 'מנוסה',
+      tagType: 'seniority',
+      years_experience: null,
+      lookback_years: null,
+      quote: 'ניסיון של 3 שנים',
+    });
+    expect(fixed).toEqual({ years_experience: null, lookback_years: null });
+  });
+
+  it('clears years on types other than role, skill, and industry', () => {
+    expect(normalizeJobSkillYears({
+      tagType: 'language',
+      years_experience: 4,
+      lookback_years: 2,
+    })).toEqual({ years_experience: null, lookback_years: null });
+  });
+
+  it('keeps an explicit lookback the model set', () => {
     const fixed = normalizeJobSkillYears({
       name: 'קניין/ית רכש',
+      tagType: 'role',
       years_experience: 3,
       lookback_years: 2,
       quote: 'ניסיון של 3 שנים בתפקיד דומה ב-2 השנים האחרונות',
@@ -71,8 +94,15 @@ describe('jobAiAnalyzeNormalize', () => {
     expect(fixed.lookback_years).toBe(2);
   });
 
+  it('maps Yes mobility, urgent priority, and b_private_car', () => {
+    expect(coerceJobMobility('Yes')).toBe(true);
+    expect(coerceJobMobility('No')).toBe(false);
+    expect(normalizeJobPriority('דחוף')).toBe('דחופה');
+    expect(normalizeLicenseTypesFromAi({ drivingLicenses: ['b_private_car'] })).toEqual(['B']);
+  });
+
   it('sets lookback to 0 when years_experience is 0', () => {
-    expect(normalizeJobSkillYears({ years_experience: 0, lookback_years: 5 })).toEqual({
+    expect(normalizeJobSkillYears({ tagType: 'role', years_experience: 0, lookback_years: 5 })).toEqual({
       years_experience: 0,
       lookback_years: 0,
     });

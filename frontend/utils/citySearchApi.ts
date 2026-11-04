@@ -202,14 +202,28 @@ function matchOneRegionAgainstGroups(part: string, groups: LocationGroup[]): str
     return aliasGroup?.region ?? null;
 }
 
+function aliasRegionLabel(raw: string): string | null {
+    const n = normRegionToken(raw);
+    if (!n) return null;
+    const aliasHit = REGION_ALIASES.find(([, aliases]) =>
+        aliases.some((alias) => normRegionToken(alias) === n),
+    );
+    return aliasHit ? aliasHit[0] : null;
+}
+
 /** Map a free-text region onto city-catalog group names. Unknown values become null. */
 export function resolveRegionAgainstGroups(
     raw: string | null | undefined,
     groups: LocationGroup[],
 ): string | null {
-    if (!groups.length) return null;
     const full = String(raw || '').trim();
     if (!full) return null;
+    // Groups still loading: keep a known alias (השפלה → שפלה) or the text Gemini returned.
+    if (!groups.length) {
+        const parts = full.split(',').map((s) => s.trim()).filter(Boolean);
+        const resolved = parts.map((part) => aliasRegionLabel(part) || part);
+        return resolved.length ? resolved.join(', ') : full;
+    }
     const whole = matchOneRegionAgainstGroups(full, groups);
     if (whole) return whole;
     const parts = full.split(',').map((s) => s.trim()).filter(Boolean);
@@ -230,7 +244,14 @@ export function filterLocationsToCatalog(
     items: LocationItemLike[],
     groups: LocationGroup[],
 ): LocationItemLike[] {
-    if (!groups.length) return items.filter((loc) => loc.type !== 'region');
+    if (!groups.length) {
+        return items.flatMap((loc) => {
+            if (loc.type !== 'region') return [loc];
+            const hit = resolveRegionAgainstGroups(loc.value, groups);
+            if (!hit) return [];
+            return hit.split(',').map((value) => ({ ...loc, value: value.trim() })).filter((row) => row.value);
+        });
+    }
     return items.flatMap((loc) => {
         if (loc.type !== 'region') return [loc];
         const hit = resolveRegionAgainstGroups(loc.value, groups);

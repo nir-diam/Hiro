@@ -95,6 +95,8 @@ export interface MatchQuery {
   hardFilters?: string[];
   /** none | exact | same_cluster | same_category — omit or none = rank only */
   affinityLevel?: 'none' | 'exact' | 'same_cluster' | 'same_category';
+  /** Ephemeral tag modes for this scan (from Load tags in scan settings). */
+  candidateTagDetails?: Record<string, unknown>[];
 }
 
 const apiBase = () => (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');

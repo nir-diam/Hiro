@@ -17,12 +17,17 @@ import {
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import ScanSettingsPanel, {
-    DEFAULT_AFFINITY_LEVEL,
-    DEFAULT_SCAN_BATCH_SIZE,
-    DEFAULT_SCAN_THRESHOLD,
-    type AffinityLevel,
-    toScanHardFilters,
+  DEFAULT_AFFINITY_LEVEL,
+  DEFAULT_SCAN_BATCH_SIZE,
+  DEFAULT_SCAN_THRESHOLD,
+  type AffinityLevel,
+  toScanHardFilters,
 } from './ScanSettingsPanel';
+import {
+  jobSkillsToScanTags,
+  scanTagsToJobSkills,
+  type ScanSkillTag,
+} from '../utils/scanSkillTags';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import {
     buildJobTagMatchCategories,
@@ -943,6 +948,8 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
     const [vectorSimilarity, setVectorSimilarity] = useState(true);
     const [activeFilters, setActiveFilters] = useState<Set<string>>(() => new Set());
     const [affinityLevel, setAffinityLevel] = useState<AffinityLevel>(DEFAULT_AFFINITY_LEVEL);
+    const [scanTags, setScanTags] = useState<ScanSkillTag[]>([]);
+    const [loadTagsLoading, setLoadTagsLoading] = useState(false);
 
     const [rows, setRows] = useState<SonarScanRow[]>([]);
     const [distanceScope, setDistanceScope] = useState<{ region: string; km: number } | null>(null);
@@ -1102,6 +1109,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                     useVector: vectorSimilarity,
                     hardFilters: toScanHardFilters(activeFilters),
                     affinityLevel,
+                    ...(scanTags.length ? { jobSkills: scanTagsToJobSkills(scanTags) } : {}),
                 }),
             });
             if (!res.ok) {
@@ -1126,7 +1134,30 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
         } finally {
             setLoading(false);
         }
-    }, [jobId, batchSize, threshold, vectorSimilarity, activeFilters, affinityLevel, t]);
+    }, [jobId, batchSize, threshold, vectorSimilarity, activeFilters, affinityLevel, scanTags, t]);
+
+    const loadTagsFromJob = useCallback(async () => {
+        setLoadTagsLoading(true);
+        try {
+            const base = apiBase();
+            const jid = jobId != null ? String(jobId).trim() : '';
+            let skills: unknown[] = Array.isArray(job?.skills) ? (job.skills as unknown[]) : [];
+            if (base && jid && !skills.length) {
+                const res = await fetch(`${base}/api/jobs/${encodeURIComponent(jid)}`, {
+                    headers: authHeaders(),
+                    cache: 'no-store',
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    const rec = (data.job ?? data) as Record<string, unknown>;
+                    if (Array.isArray(rec.skills)) skills = rec.skills;
+                }
+            }
+            setScanTags(jobSkillsToScanTags(skills));
+        } finally {
+            setLoadTagsLoading(false);
+        }
+    }, [job, jobId]);
 
     const enrichCandidateForTags = useCallback(
         async (c: Record<string, unknown>): Promise<Record<string, unknown>> => {
@@ -1399,6 +1430,19 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                         onAffinityLevelChange={setAffinityLevel}
                         loading={loading}
                         batchCountLabel={t('job.sonar.batch_display', { count: batchSize })}
+                        scanTags={scanTags}
+                        onScanTagsChange={setScanTags}
+                        onLoadTags={loadTagsFromJob}
+                        loadTagsLoading={loadTagsLoading}
+                        tagPickerContext="job"
+                        tagPickerJobId={jobId != null ? String(jobId) : undefined}
+                        tagPickerJobField={
+                            typeof job?.field === 'string'
+                                ? job.field
+                                : typeof job?.role === 'string'
+                                  ? job.role
+                                  : undefined
+                        }
                     />
                 </div>
             </div>

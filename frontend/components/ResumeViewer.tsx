@@ -26,6 +26,7 @@ import {
     waitForCandidateEnrichment,
     isCandidateEnrichmentPending,
 } from '../utils/candidateIngestPoll';
+import { resolveProfileFamilyPrimaryId } from '../utils/candidateProfileDuplicate';
 import {
     DRIVING_LICENSE_FALLBACK,
     DRIVING_LICENSE_PICKLIST_KEY,
@@ -507,6 +508,15 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
           : null;
 
   const candidateIdentifier = candidateIdProp || resumeData.candidateId || null;
+  /** Ingested mail is stored on the canonical profile; staff shadows / linked versions share it. */
+  const emailUploadCandidateId = useMemo(() => {
+    if (!candidateIdentifier) return null;
+    if (fullData && typeof fullData === 'object') {
+      const primaryId = resolveProfileFamilyPrimaryId(fullData as Record<string, unknown>);
+      if (primaryId) return primaryId;
+    }
+    return candidateIdentifier;
+  }, [candidateIdentifier, fullData]);
 
   const getAuthHeaders = () => {
     if (typeof window === 'undefined') return {};
@@ -573,13 +583,13 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   };
 
   const fetchLatestEmail = useCallback(async () => {
-    if (!candidateIdentifier) {
+    if (!emailUploadCandidateId) {
       setCandidateEmails([]);
       setSelectedEmailId(null);
       return;
     }
     try {
-      const res = await fetch(`${apiBase}/api/email-uploads/candidate/${candidateIdentifier}`, {
+      const res = await fetch(`${apiBase}/api/email-uploads/candidate/${emailUploadCandidateId}`, {
         headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
       });
       if (!res.ok) throw new Error('Failed to load email');
@@ -595,7 +605,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
       setCandidateEmails([]);
       setSelectedEmailId(null);
     }
-  }, [apiBase, candidateIdentifier]);
+  }, [apiBase, emailUploadCandidateId]);
 
   useEffect(() => {
     if (activeTab !== 'email') return;

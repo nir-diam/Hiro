@@ -1093,6 +1093,41 @@ const addSynonyms = async (tagId, synonymsInput, options = {}) => {
  * Remove catalog tag synonyms by stable synonym id (not phrase text).
  * Fails with 404 if any requested id is missing on the tag.
  */
+/**
+ * Remove phrases from Tag.aliases (case-insensitive). Does not touch synonyms.
+ */
+const removeAliases = async (tagId, aliases, options = {}) => {
+  const tag = await getById(tagId);
+  const requested = [
+    ...new Set(
+      (Array.isArray(aliases) ? aliases : [])
+        .map((alias) => String(alias || '').trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (!requested.length) {
+    const err = new Error('aliases array is required');
+    err.status = 400;
+    throw err;
+  }
+  const drop = new Set(requested.map((alias) => alias.toLowerCase()));
+  const existing = Array.isArray(tag.aliases) ? tag.aliases : [];
+  const removed = existing.filter((alias) => drop.has(String(alias || '').trim().toLowerCase()));
+  if (!removed.length) {
+    const err = new Error('No matching aliases on tag');
+    err.status = 404;
+    err.code = 'ALIAS_NOT_FOUND';
+    throw err;
+  }
+  const remaining = existing.filter((alias) => !drop.has(String(alias || '').trim().toLowerCase()));
+  const updated = await update(
+    tagId,
+    { aliases: remaining },
+    { ...options, actingUser: options.actingUser || 'agent' },
+  );
+  return { tag: updated, removed };
+};
+
 const removeSynonymsByIds = async (tagId, synonymIds, options = {}) => {
   const tag = await getById(tagId);
   const requested = [
@@ -1264,6 +1299,7 @@ module.exports = {
   remove,
   addSynonyms,
   removeSynonymsByIds,
+  removeAliases,
   mergeCatalogTags,
   mergeCatalogTagIntoTarget,
   enrichSuggestions,

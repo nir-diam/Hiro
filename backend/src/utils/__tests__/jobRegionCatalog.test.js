@@ -15,6 +15,15 @@ describe('jobRegionCatalog', () => {
     expect(resolveRegionAgainstCatalog('מרכז, שרון וגוש דן', CATALOG)).toBe('מרכז');
   });
 
+  it('keeps a known alias when the city catalog is not loaded yet', () => {
+    expect(resolveRegionAgainstCatalog('השפלה', [])).toBe('שפלה');
+    expect(resolveRegionAgainstCatalog('הצפון', [])).toBe('צפון');
+  });
+
+  it('keeps unrecognized text when the city catalog is not loaded yet', () => {
+    expect(resolveRegionAgainstCatalog('איזור פלמחים', [])).toBe('איזור פלמחים');
+  });
+
   it('drops unknown regions instead of falling back to אחר', () => {
     expect(resolveRegionAgainstCatalog('איזור פלמחים', CATALOG)).toBeNull();
     expect(resolveRegionAgainstCatalog('אחר', CATALOG)).toBeNull();

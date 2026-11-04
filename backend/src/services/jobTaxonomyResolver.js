@@ -8,7 +8,7 @@ const { isReadThroughEnabled } = require('../config/redis');
 const { recordHit, recordMiss, recordBypass } = require('../utils/appCacheContext');
 
 const OPEN_JOB_STATUSES = ['פתוחה', 'מוקפאת'];
-const TAXONOMY_REDIS_KEY = 'taxonomy:index';
+const TAXONOMY_REDIS_KEY = 'taxonomy:index:v2';
 const TAXONOMY_TTL = 24 * 60 * 60; // 24 hours — taxonomy changes rarely
 
 let taxonomyCache = null;
@@ -87,6 +87,12 @@ async function loadTaxonomyIndex() {
         model: JobRole,
         as: 'roles',
         attributes: { exclude: ['embedding'] },
+        include: [{
+          model: require('../models/Tag'),
+          as: 'tags',
+          attributes: ['id', 'tagKey', 'displayNameHe', 'displayNameEn', 'aliases', 'type'],
+          through: { attributes: [] },
+        }],
       }],
     }],
   });

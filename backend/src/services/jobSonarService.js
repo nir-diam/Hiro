@@ -20,6 +20,7 @@ const {
   computeParameterMatches,
   jobHasMandatorySkills,
   jobHasNegativeSkills,
+  normalizeJobSkillMode,
 } = require('./matchingPenaltyService');
 const { loadTagAliasIndex } = require('./tagAliasIndexService');
 const { evaluateRoleExperience, jobRoleExperienceRequirements } = require('./roleExperienceRequirementService');
@@ -87,6 +88,38 @@ function splitHardFilters(filterKeys) {
   const tagDependent = all.filter((k) => TAG_DEPENDENT_HARD_FILTERS.has(k));
   const slimSafe = all.filter((k) => !TAG_DEPENDENT_HARD_FILTERS.has(k));
   return { slimSafe, tagDependent, all };
+}
+
+function parseHardFilterKeys(body) {
+  const raw = Array.isArray(body?.hardFilters) ? body.hardFilters : [];
+  return raw.map((x) => String(x).trim()).filter((x) => x && x !== 'affinity');
+}
+
+/** Scan-settings tag editor sends jobSkills — normalize modes and replace job.skills for this run only. */
+function applyScanJobSkillsOverride(jobPlain, body) {
+  if (!Array.isArray(body?.jobSkills) || !body.jobSkills.length) {
+    return { jobPlain, scanSkillsApplied: false };
+  }
+  const skills = body.jobSkills.map((s) => {
+    if (!s || typeof s !== 'object') return s;
+    return { ...s, mode: normalizeJobSkillMode(s.mode) };
+  });
+  return {
+    jobPlain: { ...jobPlain, skills },
+    scanSkillsApplied: true,
+  };
+}
+
+/** Green/red scan tags should filter candidates even when the hard-filter chip is off. */
+function expandHardFiltersForScanSkills(filterKeys, jobPlain, scanSkillsApplied) {
+  if (!scanSkillsApplied) return filterKeys;
+  const keys = [...filterKeys];
+  const add = (k) => {
+    if (!keys.includes(k)) keys.push(k);
+  };
+  if (jobHasMandatorySkills(jobPlain)) add('mandatory_skill');
+  if (jobHasNegativeSkills(jobPlain)) add('negative_skill');
+  return keys;
 }
 
 /**
@@ -218,11 +251,7 @@ async function runSonarScan(jobId, body = {}, options = {}) {
     ? Math.min(Math.max(parsedMin, 0), 100)
     : 70;
   const useVector = body.useVector !== false;
-  const filterKeys = Array.isArray(body.hardFilters)
-    ? body.hardFilters.map((x) => String(x).trim()).filter((x) => x && x !== 'affinity')
-    : [];
   const affinityLevel = normalizeAffinityLevel(body.affinityLevel);
-  const { slimSafe: slimHardFilters, all: allHardFilters } = splitHardFilters(filterKeys);
   const SCORE_CONCURRENCY = 12;
 
   console.log(`\n[sonar ▶] START jobId=${jobId} limit=${limit} minPct=${minPct} affinity=${affinityLevel} vector=${useVector}`);
@@ -236,7 +265,26 @@ async function runSonarScan(jobId, body = {}, options = {}) {
     throw err;
   }
   await jobService.hydrateJobSkills(job);
-  const jobPlain = jobService.toPlainJobForMatchScore(job);
+  let jobPlain = jobService.toPlainJobForMatchScore(job);
+  const { jobPlain: scanJobPlain, scanSkillsApplied } = applyScanJobSkillsOverride(jobPlain, body);
+  jobPlain = scanJobPlain;
+  let filterKeys = expandHardFiltersForScanSkills(
+    parseHardFilterKeys(body),
+    jobPlain,
+    scanSkillsApplied,
+  );
+  const { slimSafe: slimHardFilters, all: allHardFilters } = splitHardFilters(filterKeys);
+  if (scanSkillsApplied) {
+    const mandatoryN = (jobPlain.skills || []).filter(
+      (s) => s && normalizeJobSkillMode(s.mode) === 'mandatory',
+    ).length;
+    const negativeN = (jobPlain.skills || []).filter(
+      (s) => s && normalizeJobSkillMode(s.mode) === 'negative',
+    ).length;
+    console.log(
+      `[sonar] scan jobSkills override (${jobPlain.skills.length} tags, mandatory=${mandatoryN}, negative=${negativeN}, hardFilters=${filterKeys.join(',') || 'none'})`,
+    );
+  }
   lap('job loaded + skills hydrated');
 
   const tenantClientId = options.tenantClientId ? String(options.tenantClientId).trim() : '';
@@ -280,6 +328,7 @@ async function runSonarScan(jobId, body = {}, options = {}) {
         {
           ...intentOpts,
           skipRemoteGeocode: true,
+          aliasIndex,
           ...(Number.isFinite(Number(intentOpts.vectorScore))
             ? { vectorScore: Number(intentOpts.vectorScore) }
             : {}),
@@ -516,6 +565,19 @@ async function runSonarScan(jobId, body = {}, options = {}) {
           isExperienceEnabled: engineConfig.isExperienceEnabled !== false,
           geoMaxKm: geoScope?.maxValidKm ?? null,
           geoRegion: geoScope?.regionLabel || null,
+        }
+      : null,
+    scanMeta: scanSkillsApplied
+      ? {
+          skillsOverride: true,
+          skillCount: Array.isArray(jobPlain.skills) ? jobPlain.skills.length : 0,
+          mandatoryCount: (jobPlain.skills || []).filter(
+            (s) => s && normalizeJobSkillMode(s.mode) === 'mandatory',
+          ).length,
+          negativeCount: (jobPlain.skills || []).filter(
+            (s) => s && normalizeJobSkillMode(s.mode) === 'negative',
+          ).length,
+          effectiveHardFilters: filterKeys,
         }
       : null,
     rows,

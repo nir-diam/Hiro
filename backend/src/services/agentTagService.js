@@ -183,7 +183,12 @@ const mergeTags = async (body, req) => {
   return result;
 };
 
-const TAG_EXECUTE_OPERATIONS = new Set(['add_synonyms', 'remove_synonyms', 'update_status']);
+const TAG_EXECUTE_OPERATIONS = new Set([
+  'add_synonyms',
+  'remove_synonyms',
+  'remove_aliases',
+  'update_status',
+]);
 
 const TAG_EXECUTE_STATUSES = new Set(['active', 'draft']);
 const TAG_EXECUTE_QUALITY_STATES = new Set(['verified', 'needs_review']);
@@ -414,6 +419,43 @@ const executeTag = async (tagId, body, req) => {
     return {
       operation: 'update_status',
       ...updates,
+      data: toPublicTagDto(after),
+    };
+  }
+
+  if (operation === 'remove_aliases') {
+    const aliases = body?.aliases;
+    if (!Array.isArray(aliases) || !aliases.length) {
+      const err = new Error('aliases array is required');
+      err.status = 400;
+      throw err;
+    }
+
+    const result = await tagService.removeAliases(safeId, aliases, {
+      actingUser: req?.agent?.username || 'agent',
+    });
+    const after = result.tag;
+    const tagName =
+      after.displayNameHe || after.displayNameEn || after.tagKey || safeId;
+
+    await agentEntityAuditService.recordAgentEntityAudit(req, {
+      action: 'update',
+      entityType: 'Tag',
+      entityId: safeId,
+      entityName: tagName,
+      description: `Agent removed ${result.removed.length} alias(es) from "${tagName}"`,
+      before,
+      after,
+      trackedFields: ['aliases', 'source'],
+      metadata: {
+        operation: 'remove_aliases',
+        removedAliases: result.removed,
+      },
+    });
+
+    return {
+      operation: 'remove_aliases',
+      removedAliases: result.removed,
       data: toPublicTagDto(after),
     };
   }

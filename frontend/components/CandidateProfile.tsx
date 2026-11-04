@@ -20,6 +20,14 @@ import {
 } from '../utils/candidateIngestPoll';
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 import {
+    DRIVING_LICENSE_FALLBACK,
+    DRIVING_LICENSE_PICKLIST_KEY,
+    drivingLicenseDisplayLabel,
+    fetchPicklistValuesByKey,
+    isNeutralDrivingLicenseStored,
+    type PicklistValueRow,
+} from '../services/picklistValuesApi';
+import {
     isStaffDuplicateProfile,
     stripDuplicateProfileNameSuffix,
     isNonPrimaryCandidateProfile,
@@ -312,8 +320,9 @@ const buildExperienceDistributionFromWork = (workExperience?: any[]): Experience
 
 const ExperienceBar: React.FC<{ 
     data?: ExperienceSlice[];
-    smartTags?: { domains: string[], orgDNA?: { label: string, subLabel: string, icon?: any } }
-}> = ({ data = [], smartTags }) => {
+    smartTags?: { domains: string[], orgDNA?: { label: string, subLabel: string, icon?: any } };
+    headerActions?: React.ReactNode;
+}> = ({ data = [], smartTags, headerActions }) => {
     const { t } = useLanguage();
     const yearsLabel =  'שנים';
     const computedData = (data || []).map((item) => ({ ...item }));
@@ -325,16 +334,27 @@ const ExperienceBar: React.FC<{
     const domainList = smartTags?.domains?.length ? smartTags.domains : [];
     const hasInsights = Boolean(smartTags?.orgDNA) || domainList.length > 0;
 
-    if (!hasBar && !hasInsights) return null;
+    if (!hasBar && !hasInsights && !headerActions) return null;
+
+    const showIndustryTitle = hasBar || hasInsights;
 
     return (
         <div className="w-full mt-2 mb-4">
-            <div className="flex justify-between items-center mb-2">
-                <h4 className="text-sm font-bold text-text-default flex items-center gap-2">
+            {(showIndustryTitle || headerActions) && (
+            <div className="flex items-center gap-3 mb-2 w-full flex-wrap">
+                {headerActions ? (
+                    <div className="flex flex-wrap items-center justify-end gap-3 shrink-0 max-w-full">
+                        {headerActions}
+                    </div>
+                ) : null}
+                {showIndustryTitle ? (
+                <h4 className={`text-sm font-bold text-text-default flex items-center gap-2 ${headerActions ? 'ms-auto' : ''}`}>
                     <BriefcaseIcon className="w-4 h-4 text-primary-500"/>
                     <span>{t('profile.industry_profile')}</span>
                 </h4>
+                ) : null}
             </div>
+            )}
             
             {hasBar && (
                 <>
@@ -1014,6 +1034,40 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           cancelled = true;
       };
   }, []);
+
+  const [drivingLicenseRows, setDrivingLicenseRows] = useState<PicklistValueRow[]>(DRIVING_LICENSE_FALLBACK);
+  useEffect(() => {
+      if (!apiBase) return;
+      let cancelled = false;
+      void fetchPicklistValuesByKey(apiBase, DRIVING_LICENSE_PICKLIST_KEY).then((rows) => {
+          if (!cancelled && rows.length > 0) setDrivingLicenseRows(rows);
+      });
+      return () => {
+          cancelled = true;
+      };
+  }, [apiBase]);
+
+  const selectedLicenseLabels = useMemo(() => {
+      const listed = Array.isArray(candidateData.drivingLicenses)
+          ? candidateData.drivingLicenses.map((v: unknown) => String(v ?? '').trim()).filter(Boolean)
+          : [];
+      const stored =
+          listed.length > 0
+              ? listed
+              : candidateData.drivingLicense != null && String(candidateData.drivingLicense).trim()
+                ? [String(candidateData.drivingLicense).trim()]
+                : [];
+      const seen = new Set<string>();
+      const labels: string[] = [];
+      for (const raw of stored) {
+          if (isNeutralDrivingLicenseStored(raw, drivingLicenseRows)) continue;
+          const label = drivingLicenseDisplayLabel(raw, drivingLicenseRows) || raw;
+          if (!label || seen.has(label)) continue;
+          seen.add(label);
+          labels.push(label);
+      }
+      return labels;
+  }, [candidateData.drivingLicenses, candidateData.drivingLicense, drivingLicenseRows]);
 
   useLayoutEffect(() => {
       if (!rsComboOpen) {
@@ -1957,14 +2011,22 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             isDeleted: Boolean(profile.isDeleted),
         }));
     return (
-      <div ref={switcherRef} className="relative z-30 flex flex-wrap items-center gap-3 w-fit max-w-full">
+      <div
+        ref={switcherRef}
+        className={`relative flex flex-wrap items-center gap-3 w-fit max-w-full ${isSwitcherOpen ? 'z-[1100]' : 'z-30'}`}
+      >
         {showProfileSwitcher ? (
-        <>
         <button
           type="button"
           onClick={() => setSwitcherOpen((prev) => !prev)}
           className="group flex items-center gap-2 px-3 py-1.5 rounded-full transition-all text-xs font-semibold border backdrop-blur-sm shadow-sm bg-white/80 text-text-subtle border-border-default hover:text-primary-600 hover:border-primary-200"
         >
+          <span
+            className="inline-flex min-w-[1.25rem] items-center justify-center rounded-full border border-primary-200 bg-primary-50 px-1.5 py-0.5 text-[11px] font-bold text-primary-700 tabular-nums shadow-sm shrink-0"
+            title={`${profileVersionCount} פרופילים קיימים`}
+          >
+            {profileVersionCount}
+          </span>
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="w-3.5 h-3.5 text-primary-500">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
@@ -1981,13 +2043,6 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
           </svg>
         </button>
-        <span
-          className="inline-flex items-center rounded-full border border-primary-200 bg-primary-50 px-2.5 py-1 text-[11px] font-bold text-primary-700 tabular-nums shadow-sm"
-          title={`${profileVersionCount} פרופילים קיימים`}
-        >
-          {profileVersionCount} {profileVersionCount === 1 ? 'פרופיל' : 'פרופילים'}
-        </span>
-        </>
         ) : null}
         {onAddProfile ? (
         <button
@@ -2002,7 +2057,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         {renderShareWithCandidateButton(true)}
 
         {showProfileSwitcher && isSwitcherOpen && (
-          <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-border-default z-50 overflow-hidden animate-fade-in origin-top-left">
+          <div className="absolute top-full left-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-border-default z-[1100] overflow-hidden animate-fade-in origin-top-left">
             <div className="p-2.5 bg-bg-subtle/50 border-b border-border-default flex justify-between items-center">
               <p className="text-[10px] font-bold text-text-muted uppercase tracking-wider">היסטוריית גרסאות</p>
               <span className="text-[10px] text-primary-600 bg-primary-50 px-1.5 py-0.5 rounded border border-primary-100">{profileVersionCount} גרסאות</span>
@@ -2375,8 +2430,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             <ChevronLeftIcon className="w-4 h-4" />
           </button>
       </div>
-      <div className="w-full mb-3 clear-both">
-        <div className="float-left max-w-full">{renderProfileSwitcher()}</div>
+      <div className="w-full mb-3 flex justify-end lg:hidden">
+        {renderProfileSwitcher()}
       </div>
 
       <div
@@ -2502,6 +2557,22 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                       readOnly={fieldsReadOnly}
                                   />
                               </div>
+                              {selectedLicenseLabels.length > 0 && (
+                                  <div
+                                      className="flex flex-wrap items-center justify-center sm:justify-start gap-1.5"
+                                      dir="rtl"
+                                  >
+                                      <span className="text-xs font-bold text-text-muted shrink-0">רשיון</span>
+                                      {selectedLicenseLabels.map((label) => (
+                                          <span
+                                              key={label}
+                                              className="text-xs font-semibold px-2 py-1 rounded-md inline-flex items-center border bg-primary-50 text-primary-700 border-primary-100"
+                                          >
+                                              {label}
+                                          </span>
+                                      ))}
+                                  </div>
+                              )}
                           </div>
                         
                       </div>
@@ -2883,6 +2954,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
               <ExperienceBar 
                  data={experienceDistribution} 
                  smartTags={candidateData.industryAnalysis?.smartTags}
+                 headerActions={renderProfileSwitcher()}
               />
 
               <div className="mt-6 relative z-[1000] hidden lg:block">

@@ -41,6 +41,11 @@ import ScanSettingsPanel, {
   toScanHardFilters,
 } from './ScanSettingsPanel';
 import {
+  candidateTagDetailsToScanTags,
+  scanTagsToCandidateTagDetails,
+  type ScanSkillTag,
+} from '../utils/scanSkillTags';
+import {
   mapApiRecordToJobDetailsDrawerJob,
   type JobDetailsDrawerJob,
 } from '../utils/jobDetailsDrawerUtils';
@@ -110,6 +115,8 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const [vectorSimilarity, setVectorSimilarity] = useState(true);
   const [activeFilters, setActiveFilters] = useState<Set<string>>(() => new Set());
   const [affinityLevel, setAffinityLevel] = useState<AffinityLevel>(DEFAULT_AFFINITY_LEVEL);
+  const [scanTags, setScanTags] = useState<ScanSkillTag[]>([]);
+  const [loadTagsLoading, setLoadTagsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [clientOptions, setClientOptions] = useState<string[]>([]);
   const [cityGroups, setCityGroups] = useState<LocationGroup[]>([]);
@@ -265,6 +272,9 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         useVector: vectorSimilarity,
         hardFilters: toScanHardFilters(activeFilters),
         affinityLevel,
+        ...(scanTags.length
+          ? { candidateTagDetails: scanTagsToCandidateTagDetails(scanTags) }
+          : {}),
       });
       nextOffsetRef.current = page.nextOffset;
       setMatchCursor({ nextOffset: page.nextOffset, hasMore: page.hasMore, total: page.total });
@@ -293,7 +303,21 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       matchesInFlightRef.current = false;
       setLoading(false);
     }
-  }, [candidateId, batchSize, threshold, vectorSimilarity, activeFilters, affinityLevel]);
+  }, [candidateId, batchSize, threshold, vectorSimilarity, activeFilters, affinityLevel, scanTags]);
+
+  const loadTagsFromCandidate = useCallback(async () => {
+    if (!candidateId) return;
+    setLoadTagsLoading(true);
+    try {
+      const c = await fetchCandidate(candidateId);
+      const details = Array.isArray((c as { tagDetails?: unknown }).tagDetails)
+        ? ((c as { tagDetails: unknown[] }).tagDetails)
+        : [];
+      setScanTags(candidateTagDetailsToScanTags(details));
+    } finally {
+      setLoadTagsLoading(false);
+    }
+  }, [candidateId]);
 
   const refreshJobs = useCallback(() => {
     void loadJobsCore();
@@ -1409,6 +1433,12 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           searchLabel={t('job.matching.search')}
           onSearch={() => void loadJobsCore()}
           searchDisabled={!candidateId}
+          scanTags={scanTags}
+          onScanTagsChange={setScanTags}
+          onLoadTags={loadTagsFromCandidate}
+          loadTagsLoading={loadTagsLoading}
+          tagPickerContext="candidate"
+          tagPickerCandidateId={candidateId != null ? String(candidateId) : undefined}
         />
       </aside>
       </div>

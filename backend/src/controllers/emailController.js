@@ -2426,9 +2426,30 @@ function dedupeEmailUploadRows(records) {
   });
 }
 
+async function expandCandidateIdsForEmailUploads(candidateIds) {
+  const ids = new Set(candidateIds.map((id) => String(id || '').trim()).filter(Boolean));
+  if (!ids.size) return [];
+  try {
+    const rows = await Candidate.findAll({
+      where: { id: { [Op.in]: [...ids] } },
+      attributes: ['id', 'canonicalCandidateId'],
+    });
+    for (const row of rows) {
+      const canonical = String(row.canonicalCandidateId || '').trim();
+      if (canonical && canonical !== String(row.id)) {
+        ids.add(canonical);
+      }
+    }
+  } catch (err) {
+    console.warn('[email][expandCandidateIdsForEmailUploads]', err?.message || err);
+  }
+  return [...ids];
+}
+
 async function fetchEmailUploadsForCandidates(candidateIds) {
-  const ids = [...new Set(candidateIds.map((id) => String(id || '').trim()).filter(Boolean))];
-  if (!ids.length) return [];
+  const requested = [...new Set(candidateIds.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!requested.length) return [];
+  const ids = await expandCandidateIdsForEmailUploads(requested);
 
   const records = dedupeEmailUploadRows(await EmailUpload.findAll({
     where: { candidateId: { [Op.in]: ids } },

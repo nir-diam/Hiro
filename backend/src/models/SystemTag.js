@@ -84,6 +84,11 @@ const SystemTag = sequelize.define(
       type: DataTypes.SMALLINT,
       allowNull: true,
     },
+    /** Job skill origin: ai until a person edits the tag, then manual. */
+    skill_source: {
+      type: DataTypes.STRING(20),
+      allowNull: true,
+    },
     is_active: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

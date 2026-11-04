@@ -952,4 +952,5 @@ module.exports = {
   collectCandidateFilterTags,
   candidateHasTagFilters,
   candidateTagFiltersMatch,
+  normalizeJobSkillMode,
 };

@@ -261,7 +261,8 @@ const connectDb = async ({ skipAuthenticate = false } = {}) => {
   await sequelize.query(`
     ALTER TABLE system_tags
       ADD COLUMN IF NOT EXISTS years_experience SMALLINT NULL,
-      ADD COLUMN IF NOT EXISTS lookback_years SMALLINT NULL;
+      ADD COLUMN IF NOT EXISTS lookback_years SMALLINT NULL,
+      ADD COLUMN IF NOT EXISTS skill_source VARCHAR(20) NULL;
   `).catch(() => {});
 
   await sequelize.query(`

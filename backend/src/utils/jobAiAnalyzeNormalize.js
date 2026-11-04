@@ -162,10 +162,12 @@ function normalizeLicenseTypesFromAi(parsed) {
   for (const item of rawList) {
     const v = String(item ?? '').trim();
     if (!v || neutral.has(v.toLowerCase()) || neutral.has(norm(v))) continue;
-    const key = norm(v);
+    const code = licenseCodeForJob(v);
+    const stored = code || v;
+    const key = norm(stored);
     if (!seen.has(key)) {
       seen.add(key);
-      out.push(v);
+      out.push(stored);
     }
   }
   return out;
@@ -180,94 +182,117 @@ function parseJobTagYearsValue(raw) {
   return Math.min(n, JOB_TAG_YEARS_MAX);
 }
 
-function skillEvidenceText(skill) {
-  if (!skill || typeof skill !== 'object') return '';
-  return [skill.quote, skill.tag_reason, skill.tagReason, skill.name, skill.raw_value]
-    .map((v) => String(v ?? '').trim())
-    .filter(Boolean)
-    .join('\n');
+/** Years are stored only on role, skill, and industry. Seniority and every other type stay empty. */
+const JOB_SKILL_YEARS_TYPES = new Set(['role', 'skill', 'industry']);
+
+function jobSkillYearsType(skill) {
+  const raw = String(
+    skill?.tagType || skill?.tag_type || skill?.raw_type || skill?.type || '',
+  )
+    .toLowerCase()
+    .trim();
+  if (!raw) return '';
+  if (raw === 'soft') return 'soft_skill';
+  if (raw === 'education') return 'degree';
+  return raw;
 }
 
-function hasExplicitLookbackPhrase(text) {
-  const t = String(text || '');
-  return /(אחרונות|עדכני(?:ות)?|ב[-־]?\d+\s*השנים|last\s+\d+\s+years|in the (?:last|past)\s+\d+)/i.test(t);
-}
+const LICENSE_CODE = {
+  a: 'A',
+  a_motorcycle: 'A',
+  motorcycle: 'A',
+  a1: 'A1',
+  a2: 'A2',
+  b: 'B',
+  b_private_car: 'B',
+  private_car: 'B',
+  private: 'B',
+  car: 'B',
+  c: 'C',
+  c_truck: 'C',
+  truck: 'C',
+  c1: 'C1',
+  d: 'D',
+  d_bus: 'D',
+  bus: 'D',
+  d1: 'D1',
+  e: 'E',
+  e_trailer: 'E',
+  trailer: 'E',
+  1: '1',
+  '1_tractor': '1',
+  tractor: '1',
+};
 
-/**
- * Minimum years of experience stated for a tag ("לפחות 5 שנים", "5+ שנים", "שנתיים").
- * Ignores lookback-only phrasing.
- */
-function extractExperienceYearsFromText(text) {
-  const t = String(text || '');
-  if (!t.trim()) return null;
-  if (hasExplicitLookbackPhrase(t) && !/(לפחות|מינימום|\+|ניסיון של|years?\s+of\s+experience)/i.test(t)) {
-    return null;
-  }
-  const patterns = [
-    /(?:לפחות|מינימום|minimum|at\s+least)\s*(\d{1,2})\s*(?:\+)?\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-    /(\d{1,2})\s*\+\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-    /(?:ניסיון(?:\s+של)?|experience(?:\s+of)?)\s*(?:לפחות\s*)?(\d{1,2})\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-    /(\d{1,2})\s*[-–—]\s*\d{1,2}\s*(?:שנ(?:ה|ים|ות)|years?)/i,
-    /(\d{1,2})\s*(?:שנ(?:ה|ים|ות)|years?)\s*(?:ניסיון|experience|בתחום|ב(?:תפקיד|מקצוע))?/i,
-  ];
-  for (const re of patterns) {
-    const m = t.match(re);
-    if (m) {
-      const n = parseJobTagYearsValue(m[1]);
-      if (n != null && n > 0) return n;
-    }
-  }
-  if (/(^|[^\d])שנתיים([^\d]|$)/.test(t)) return 2;
-  if (/(^|[^\d])שנה([^\d]|$)/.test(t) && /ניסיון|experience/i.test(t)) return 1;
+function licenseCodeForJob(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  const key = s.toLowerCase().replace(/[\s-]+/g, '_');
+  if (LICENSE_CODE[key]) return LICENSE_CODE[key];
+  const head = key.split('_')[0];
+  if (/^(a1|a2|c1|d1)$/.test(head)) return head.toUpperCase();
+  if (/^[a-e]$/.test(head)) return head.toUpperCase();
+  if (head === '1') return '1';
   return null;
 }
 
 /**
- * years_experience = stated minimum tenure.
- * lookback_years = how recent that experience must be.
- * Defaults: years>0 → lookback 1 when not stated; years===0 → lookback 0.
- * Also repairs the common LLM swap (5 years experience → lookback_years=5, years_experience=1).
+ * Job mobility is a boolean. Gemini often sends "Yes" / "No" (same tokens as CV parse).
+ * @returns {boolean|null}
+ */
+function coerceJobMobility(raw) {
+  if (raw === true) return true;
+  if (raw === false) return false;
+  if (raw == null || raw === '') return null;
+  const s = String(raw).trim();
+  if (!s || s === '-') return null;
+  const lower = s.toLowerCase().replace(/[\s-]+/g, '_');
+  if (
+    ['yes', 'true', '1', 'כן', 'יש', 'mobile', 'נייד', 'בעל_רכב', 'car_owner', 'חובה'].includes(lower)
+    || s === 'בעל/ת רכב'
+    || s === 'בעל רכב פרטי'
+  ) {
+    return true;
+  }
+  if (
+    ['no', 'false', '0', 'לא', 'אין', 'לא_נייד', 'not_mobile', 'לא_חשוב'].includes(lower)
+    || s === 'לא נייד'
+    || s === 'לא חשוב'
+  ) {
+    return false;
+  }
+  return null;
+}
+
+/** Map דחוף / דחופה onto the job priority picklist. Unknown text stays null. */
+function normalizeJobPriority(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return null;
+  if (s === 'רגילה' || s === 'רגיל' || /^normal$/i.test(s)) return 'רגילה';
+  if (s === 'דחופה' || s === 'דחוף' || /^urgent$/i.test(s)) return 'דחופה';
+  if (s === 'קריטית' || s === 'קריטי' || /^critical$/i.test(s)) return 'קריטית';
+  return null;
+}
+
+/**
+ * years_experience and lookback_years are kept as the model sent them.
+ * lookback stays null unless the model set it. years === 0 forces lookback 0.
+ * Seniority and any type other than role / skill / industry are always null.
  */
 function normalizeJobSkillYears(skill) {
   if (!skill || typeof skill !== 'object') {
     return { years_experience: null, lookback_years: null };
   }
-  let years = parseJobTagYearsValue(skill.years_experience ?? skill.yearsExperience);
-  let lookback = parseJobTagYearsValue(skill.lookback_years ?? skill.lookbackYears);
-  const evidence = skillEvidenceText(skill);
-  const extracted = extractExperienceYearsFromText(evidence);
-  const lookbackPhrase = hasExplicitLookbackPhrase(evidence);
-
-  if (extracted != null) {
-    if (years == null || years !== extracted) {
-      if (lookback === extracted && (years == null || years === 1 || years < extracted)) {
-        years = extracted;
-        if (!lookbackPhrase) lookback = null;
-      } else if (years == null) {
-        years = extracted;
-      }
-    }
+  const type = jobSkillYearsType(skill);
+  if (type && !JOB_SKILL_YEARS_TYPES.has(type)) {
+    return { years_experience: null, lookback_years: null };
   }
-
-  if (years == null && lookback != null && !lookbackPhrase && extracted == null) {
-    // Lone number with no lookback wording → treat as experience years.
-    years = lookback;
-    lookback = null;
-  }
-
+  const years = parseJobTagYearsValue(skill.years_experience ?? skill.yearsExperience);
+  const lookback = parseJobTagYearsValue(skill.lookback_years ?? skill.lookbackYears);
   if (years === 0) {
     return { years_experience: 0, lookback_years: 0 };
   }
-  if (years != null && years > 0) {
-    if (!lookbackPhrase && (lookback == null || lookback === years)) {
-      lookback = 1;
-    } else if (lookback == null) {
-      lookback = 1;
-    }
-    return { years_experience: years, lookback_years: lookback };
-  }
-
-  return { years_experience: null, lookback_years: lookbackPhrase ? lookback : null };
+  return { years_experience: years, lookback_years: lookback };
 }
 
 function normalizeSkillsYearsInPlace(skills) {
@@ -308,6 +333,13 @@ function enrichJobAnalyzeResult(parsed) {
     parsed.tags = normalizeSkillsYearsInPlace(parsed.tags);
   }
 
+  if (Object.prototype.hasOwnProperty.call(parsed, 'mobility')) {
+    parsed.mobility = coerceJobMobility(parsed.mobility);
+  }
+
+  const priority = normalizeJobPriority(parsed.priority);
+  if (priority) parsed.priority = priority;
+
   return parsed;
 }
 
@@ -321,7 +353,10 @@ module.exports = {
   inferAgesFromText,
   parseAgeNumber,
   parseJobTagYearsValue,
-  extractExperienceYearsFromText,
+  licenseCodeForJob,
+  coerceJobMobility,
+  normalizeJobPriority,
   normalizeJobSkillYears,
   normalizeSkillsYearsInPlace,
+  JOB_SKILL_YEARS_TYPES,
 };

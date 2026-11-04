@@ -1526,7 +1526,11 @@ async function computeMatchPackage(candidate, job, jobEmb, config, linkedInfo = 
     linkedInfo,
     options,
   );
-  const parameterMatches = computeParameterMatches(candidate, job);
+  const parameterMatches = computeParameterMatches(
+    candidate,
+    job,
+    options.aliasIndex ?? null,
+  );
   return {
     matchScore: finalScore,
     scoreBreakdown: breakdown,
