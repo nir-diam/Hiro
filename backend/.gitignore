@@ -1,9 +1,0 @@
-node_modules
-.env
-.cache/
-npm-debug.log*
-package-lock.json
-jwt-private.pem
-jwt-public.pem
-jwt-keys.json
-

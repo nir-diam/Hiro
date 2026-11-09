@@ -1,2 +1,0 @@
-ALTER TABLE candidates
-  ADD COLUMN IF NOT EXISTS "consentToJobOffers" BOOLEAN NOT NULL DEFAULT false;

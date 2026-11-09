@@ -1,2 +1,0 @@
-ALTER TABLE email_uploads
-  ADD COLUMN IF NOT EXISTS user_notes TEXT NULL;

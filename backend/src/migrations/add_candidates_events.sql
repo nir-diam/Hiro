@@ -1,2 +1,0 @@
-ALTER TABLE candidates
-  ADD COLUMN IF NOT EXISTS events JSONB NOT NULL DEFAULT '[]'::jsonb;
