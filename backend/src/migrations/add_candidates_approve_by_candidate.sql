@@ -1,2 +1,0 @@
-ALTER TABLE candidates
-  ADD COLUMN IF NOT EXISTS "approveByCandidate" BOOLEAN NOT NULL DEFAULT false;
